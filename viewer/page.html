@@ -133,6 +133,11 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g,
 // 消えてしまい使い物にならないため。
 const opened = new Set();
 let lastBoard = null;
+// 直前に描いた盤の中身。**変わっていなければ画面に触らない**。
+// 5 秒ごとに作り直すと、見ている最中に点滅して読めなくなる (2026-09-09 の指摘)。
+let lastBoardJSON = "";
+// 開いた詳細の中身を覚えておく。画面を作り直したときに取り直さず戻せるようにする。
+const detailCache = new Map();
 
 function ago(iso) {
   if (!iso) return "";
@@ -193,7 +198,14 @@ async function loadDetail(id) {
   const box = document.getElementById("d-" + id);
   if (!box) return;
   box.hidden = false;
-  if (!box.dataset.loaded) box.innerHTML = `<p class="loading">読み込み中…</p>`;
+  // 一度読んだものは覚えてあるので、まずそれを戻す。画面を作り直した直後でも
+  // 「読み込み中…」を挟まずに済み、点滅しない。
+  if (detailCache.has(id)) {
+    box.innerHTML = detailCache.get(id);
+    box.dataset.loaded = "1";
+    return;
+  }
+  box.innerHTML = `<p class="loading">読み込み中…</p>`;
   try {
     const r = await fetch("/api/target/" + encodeURIComponent(id));
     const d = await r.json();
@@ -206,9 +218,11 @@ async function loadDetail(id) {
           <div>${esc(i.description)}</div>
           <div class="kind">${esc(i.type)} · ${esc(i.status)}</div>
         </div>` + (i.children || []).map(c => row(c, depth + 1)).join("");
-    box.innerHTML = items.length
+    const html = items.length
       ? items.map(i => row(i, 0)).join("")
       : `<p class="empty">記録はありません。</p>`;
+    detailCache.set(id, html);
+    box.innerHTML = html;
     box.dataset.loaded = "1";
   } catch (e) {
     box.innerHTML = `<p class="err">詳細を読めませんでした: ${esc(e)}</p>`;
@@ -225,7 +239,13 @@ function wireRows() {
     };
   }
   // 更新をまたいでも、開いていた詳細は開いたままにする。
-  for (const id of opened) loadDetail(id);
+  // ただし **中身が変わっていない限り取り直さない**。毎回取り直すと、読んでいる
+  // 最中に「読み込み中…」へ戻って点滅する (2026-09-09 の指摘)。
+  for (const id of opened) {
+    const box = document.getElementById("d-" + id);
+    if (box) box.hidden = false;
+    if (!box || !box.dataset.loaded) loadDetail(id);
+  }
 }
 
 function render(board) {
@@ -289,15 +309,96 @@ function render(board) {
   wireRows();
 }
 
+// --- プロジェクトがまだ決まっていないとき ---------------------------------
+// 「見つかりません」で終わらせず、その場で選べるようにする。実行ファイルを配って
+// もらった人にとって、起動場所に .beacon が無いのは異常ではなく普通のこと。
+function renderPicker(state) {
+  const cloud = state.cloud_available
+    ? `<button id="cloud">クラウドから選ぶ</button>`
+    : `<p class="empty">${esc(state.cloud_reason || "クラウドはまだ使えません")}</p>`;
+  document.getElementById("app").innerHTML = `
+    <header>
+      <h1>Beacon 盤</h1>
+      <div class="objective">見るプロジェクトを選んでください。</div>
+      <div class="meta">探した場所: ${esc(state.cwd || "")}${
+        ""} — ここと、その上のフォルダに Beacon のデータがありませんでした。</div>
+    </header>
+    <div class="band">
+      <div class="band-title">フォルダから開く</div>
+      <p class="empty">Beacon プロジェクトの場所 (.beacon があるフォルダ、
+        またはそれを含むフォルダ) を貼り付けてください。</p>
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <input id="path" type="text" style="flex:1; padding:7px 10px; font:inherit;
+          border:1px solid var(--line); border-radius:6px; background:transparent;
+          color:inherit;" placeholder="C:\\Users\\… \\my-project">
+        <button id="open" style="padding:7px 16px; font:inherit; cursor:pointer;
+          border:1px solid var(--line); border-radius:6px; background:transparent;
+          color:inherit;">開く</button>
+      </div>
+      <p id="msg" class="err" style="margin-top:8px;"></p>
+    </div>
+    <div class="band">
+      <div class="band-title">クラウドから開く</div>
+      ${cloud}
+    </div>`;
+
+  const input = document.getElementById("path");
+  const msg = document.getElementById("msg");
+  const submit = async () => {
+    const path = input.value.trim();
+    if (!path) return;
+    msg.textContent = "開いています…";
+    try {
+      const r = await fetch("/api/open", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({path}),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) { msg.textContent = d.error || "開けませんでした"; return; }
+      // 開けたら盤へ。以後は通常の更新に乗る。
+      lastBoardJSON = "";
+      detailCache.clear();
+      opened.clear();
+      refresh();
+    } catch (e) {
+      msg.textContent = "開けませんでした: " + e;
+    }
+  };
+  document.getElementById("open").onclick = submit;
+  input.onkeydown = e => { if (e.key === "Enter") submit(); };
+  input.focus();
+}
+
 async function refresh() {
   try {
     const r = await fetch("/api/board");
     const b = await r.json();
+    if (r.status === 404 || (b.error && !lastBoard)) {
+      // まだプロジェクトが決まっていない。選ぶ画面を出す (一度だけ組み立てる)。
+      if (!document.getElementById("path")) {
+        const st = await (await fetch("/api/state")).json();
+        renderPicker(st);
+      }
+      return;
+    }
     if (b.error) {
       document.getElementById("app").innerHTML =
         `<p class="err">盤を読めませんでした: ${esc(b.error)}</p>`;
       return;
     }
+    // 中身が前と同じなら画面に触らない。ここが点滅を止める要。
+    const json = JSON.stringify(b);
+    if (json === lastBoardJSON) return;
+    // 内容が変わった対象だけ、詳細の覚えを捨てる (次に開いたとき取り直す)。
+    if (lastBoard) {
+      const before = {};
+      for (const t of lastBoard.targets || []) before[t.id] = JSON.stringify(t);
+      for (const t of b.targets || []) {
+        if (before[t.id] !== JSON.stringify(t)) detailCache.delete(t.id);
+      }
+    }
+    lastBoardJSON = json;
     render(b);
   } catch (e) {
     // 一時的に取れなくても、前の盤は消さない (読んでいる最中に消えると困る)。

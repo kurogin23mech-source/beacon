@@ -209,3 +209,113 @@ def test_missing_project_explains_what_to_do():
         assert "--path" in msg, "次に何をすればよいかが書かれていない"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --- プロジェクトが決まっていない状態 (2026-09-09 の要望) -------------------
+
+@needs_go
+def test_starts_and_offers_a_choice_when_no_project_is_found():
+    """データが無い場所で起動しても、止まらずに選ばせること。
+
+    実行ファイルを配ってもらった人にとって、起動場所に .beacon が無いのは異常では
+    なく普通のこと。「見つかりません」で終わるのではなく、その場で場所を選べる
+    状態にする。
+    """
+    import socket
+    import time
+    import urllib.error
+    import urllib.request
+
+    tmp = tempfile.mkdtemp()
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    proc = subprocess.Popen(
+        [BINARY, "--path", tmp, "--no-open", "--port", str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):  # 立ち上がるのを待つ
+            try:
+                urllib.request.urlopen(base + "/api/state", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        state = json.loads(
+            urllib.request.urlopen(base + "/api/state", timeout=5).read())
+        assert state["has_project"] is False
+        assert state["cwd"], "どこを探したのかが伝わらない"
+        # 使えない入口を黙って並べない。まだなら、まだと言う。
+        assert state["cloud_available"] is False
+        assert state["cloud_reason"], "使えない理由が伝わらない"
+
+        # 盤はまだ出せないが、理由は返す。
+        try:
+            urllib.request.urlopen(base + "/api/board", timeout=5)
+            raise AssertionError("プロジェクト未選択なのに盤が返っている")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+            assert "選ばれていません" in e.read().decode("utf-8")
+
+        # 場所を渡すと、起動し直さずに開けること。
+        body = json.dumps({"path": os.path.abspath(REPO)}).encode("utf-8")
+        req = urllib.request.Request(
+            base + "/api/open", data=body,
+            headers={"Content-Type": "application/json"})
+        assert json.loads(urllib.request.urlopen(req, timeout=10).read())["ok"]
+
+        board = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=10).read())
+        assert board["targets"], "開いた後も盤が空のまま"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@needs_go
+def test_bad_path_is_refused_with_a_reason():
+    """開けない場所を渡されたら、理由を返して元の状態を壊さないこと。"""
+    import socket
+    import time
+    import urllib.error
+    import urllib.request
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    proc = subprocess.Popen(
+        [BINARY, "--path", REPO, "--no-open", "--port", str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(base + "/api/board", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        body = json.dumps({"path": "Z:/存在しない場所"}).encode("utf-8")
+        req = urllib.request.Request(
+            base + "/api/open", data=body,
+            headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("開けない場所が受け入れられている")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+            assert "見つかりません" in e.read().decode("utf-8")
+
+        # 元のプロジェクトは差し替わっていない。
+        board = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=10).read())
+        assert board["targets"], "失敗した切り替えで元の盤が壊れている"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

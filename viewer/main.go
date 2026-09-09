@@ -26,12 +26,15 @@ func main() {
 		path = &args[0]
 	}
 
-	src, err := OpenLocal(*path)
-	if err != nil {
-		fail(err)
-	}
+	// プロジェクトが見つからなくても止めない。画面から場所を選んでもらう
+	// (実行ファイルを配ってもらった人には、起動場所に .beacon が無いのが普通)。
+	src, openErr := OpenLocal(*path)
 
 	if *asJSON {
+		// 中身をそのまま出す用途では選ばせる相手が居ないので、その場で断る。
+		if openErr != nil {
+			fail(openErr)
+		}
 		p, err := src.Load()
 		if err != nil {
 			fail(err)
@@ -44,11 +47,17 @@ func main() {
 		return
 	}
 
-	// 立ち上げる前に一度読んでおく。読めない場所を渡されたとき、ブラウザを開いて
-	// から気づくのではなく、その場で理由を伝えるため。
-	p, err := src.Load()
-	if err != nil {
-		fail(err)
+	// 立ち上げる前に一度読んでおく。壊れた場所を渡されたとき、ブラウザを開いてから
+	// 気づくのではなく、その場で理由を伝えるため。
+	var loaded *Project
+	if openErr != nil {
+		src = nil
+	} else {
+		var err error
+		loaded, err = src.Load()
+		if err != nil {
+			fail(err)
+		}
 	}
 
 	srv, err := NewServer(src, *host, *port, *expose)
@@ -57,8 +66,13 @@ func main() {
 	}
 
 	fmt.Printf("盤を開きました: %s\n", srv.URL)
-	fmt.Printf("  読んだ先: %s (%s)\n", src.BeaconDir, src.Kind)
-	fmt.Printf("  対象 %d 件\n", len(BuildBoard(p, SourceLocal, "", nil, nil).Targets))
+	if src != nil {
+		fmt.Printf("  読んだ先: %s (%s)\n", src.BeaconDir, src.Kind)
+		fmt.Printf("  対象 %d 件\n",
+			len(BuildBoard(loaded, SourceLocal, "", nil, nil).Targets))
+	} else {
+		fmt.Println("  この場所に Beacon のデータが無いので、画面から場所を選んでください。")
+	}
 	if !isLoopback(srv.Host) {
 		fmt.Println("  [警告] この盤は自分の機械の外にも開いています。" +
 			"認証は無いので、この口に届く全員が読めます。")
