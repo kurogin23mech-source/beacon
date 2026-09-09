@@ -338,7 +338,14 @@ func (s *Server) buildBoard() (*Board, error) {
 		docs, _ := s.cloud.Documents()
 		board = BuildBoard(p, SourceCloud, s.cloud.ProjectID, docs, sessions)
 	} else {
-		board = BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir), nil)
+		// ローカルで開いていても、クラウドに結び付いていてログイン済みなら、
+		// 名乗っているセッションの名簿は取れる。盤の中身は手元から読んでいるので
+		// 取得元はローカルのまま。
+		//
+		// ここを取りに行かないと「クラウドのセッションが出ない」ように見える
+		// (2026-09-10 の指摘)。名簿の在り処は取得元とは別の話。
+		board = BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir),
+			s.rosterForLocal())
 	}
 
 	// このマシンで動いているセッションは **どちらの取得元でも添える**。
@@ -351,6 +358,27 @@ func (s *Server) buildBoard() (*Board, error) {
 		board.LocalSessions = LocalSessions(root, 24*time.Hour, time.Now())
 	}
 	return board, nil
+}
+
+// rosterForLocal は、ローカルで開いているプロジェクトの名簿をクラウドから取る。
+//
+// 結び付いていない / 未ログイン / 繋がらない、のいずれでも空を返す。名簿が
+// 取れなくても盤は出す (見えないことより出ないことのほうが困る)。
+func (s *Server) rosterForLocal() []SessionRow {
+	pid := s.src.CloudProjectID()
+	if pid == "" {
+		return nil
+	}
+	creds := LoadCredentials()
+	if creds == nil || creds.Expired(time.Now()) {
+		return nil
+	}
+	rows, err := (&CloudSource{
+		API: DefaultAPI, Token: creds.Token, ProjectID: pid}).Sessions()
+	if err != nil {
+		return nil
+	}
+	return rows
 }
 
 // localRoot は、このマシンのセッションを探す起点。

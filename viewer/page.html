@@ -386,10 +386,11 @@ function render(board) {
       <div class="band-title">Beacon に名乗っているセッション ${sessions.length}</div>
       ${sessions.length
         ? `<div class="sessions">${sessions.map(sessionCard).join("")}</div>`
-        : `<p class="empty">名簿が取れていません。
-             ローカルのデータだけを読んでいるため、誰がどの対象を進めているかは分かりません
-             (どのマシンの分も見えるこの名簿は、クラウドに繋いだときに出ます)。
-             <br>このため、下の一覧でも担当の有無は表示していません。</p>`}
+        : `<p class="empty">名乗っているセッションがありません。
+             このプロジェクトがクラウドに結び付いていないか、ログインしていないか、
+             いま誰も Beacon に名乗って作業していないかのいずれかです。
+             <br>このため、下の一覧でも担当の有無は表示していません
+             (「誰も居ない」と「見えていない」を区別できないため)。</p>`}
     </div>
 
     ${local.length ? `<div class="band">

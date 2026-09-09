@@ -161,8 +161,26 @@ func hasProjectData(dir string) bool {
 // Beacon 本体はこの有無だけでローカルかクラウドかを決めている (lib/store.py)。
 // ビューワーも同じ判定に従い、独自の規則を作らない。
 func (s *LocalSource) IsCloudLinked() bool {
-	_, err := os.Stat(filepath.Join(s.BeaconDir, "cloud.json"))
-	return err == nil
+	return s.CloudProjectID() != ""
+}
+
+// CloudProjectID は、このフォルダが結び付いているクラウドのプロジェクト識別子。
+// 結び付いていなければ空。
+//
+// **ローカルで開いていてもクラウドに結び付いていることがある。** その場合、盤の
+// 中身は手元から読みつつ、名乗っているセッションの名簿だけはクラウドから取れる。
+func (s *LocalSource) CloudProjectID() string {
+	raw, err := os.ReadFile(filepath.Join(s.BeaconDir, "cloud.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return ""
+	}
+	return cfg.ProjectID
 }
 
 // Load はプロジェクトを読み込む。SQLite を先に見て、無ければ旧い JSON を読む。

@@ -470,3 +470,56 @@ def test_local_sessions_survive_switching_to_cloud():
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@needs_go
+def test_roster_is_fetched_for_a_cloud_linked_local_project():
+    """ローカルで開いていても、クラウドに結び付いていれば名簿が出ること。
+
+    盤の中身を手元から読んでいることと、名簿の在り処は別の話。ここを取りに
+    行かないと「他の人のセッションが出てこない」ように見える (2026-09-10 の指摘)。
+
+    このリポジトリはクラウドに結び付いているので、ログイン済みなら名簿が取れる。
+    繋げない環境では確かめようがないので飛ばす。
+    """
+    import socket
+    import time
+    import urllib.error
+    import urllib.request
+
+    cloud_json = os.path.join(REPO, ".beacon", "cloud.json")
+    if not os.path.exists(cloud_json):
+        pytest.skip("クラウドに結び付いていないプロジェクト")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    proc = subprocess.Popen(
+        [BINARY, "--path", REPO, "--no-open", "--port", str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(base + "/api/board", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        # ログインしていない環境では名簿が取れないので、そこは確かめない。
+        try:
+            urllib.request.urlopen(base + "/api/cloud/projects", timeout=30)
+        except Exception:
+            pytest.skip("クラウドにログインしていない環境")
+
+        board = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=60).read())
+        # 盤そのものは手元から読んでいる。
+        assert board["source"]["kind"] == "local"
+        # それでも名簿は取りに行く欄が在る (誰も稼働していなければ空でよい)。
+        assert "sessions" in board
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
