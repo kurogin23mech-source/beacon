@@ -91,16 +91,27 @@ func OpenLocal(path string) (*LocalSource, error) {
 		return nil, err
 	}
 	// .beacon そのものを渡された場合と、それを含むフォルダを渡された場合の両対応。
-	candidates := []string{abs, filepath.Join(abs, ".beacon")}
-	for _, dir := range candidates {
-		if st, err := os.Stat(dir); err == nil && st.IsDir() {
-			if hasProjectData(dir) {
-				return &LocalSource{BeaconDir: dir}, nil
-			}
+	// さらに、そこから上へ順にさかのぼって探す。プロジェクトの奥のフォルダで実行しても、
+	// また実行ファイルを置いた場所から起動しても、その上に .beacon があれば見つかる。
+	// (エクスプローラーからダブルクリックすると起動場所が実行ファイルの場所になるため、
+	//  上へ探さないと「見つかりません」で終わってしまう)
+	for dir := abs; ; {
+		if hasProjectData(dir) {
+			return &LocalSource{BeaconDir: dir}, nil
 		}
+		beacon := filepath.Join(dir, ".beacon")
+		if st, err := os.Stat(beacon); err == nil && st.IsDir() && hasProjectData(beacon) {
+			return &LocalSource{BeaconDir: beacon}, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // 根まで来た
+		}
+		dir = parent
 	}
-	return nil, fmt.Errorf("%s に Beacon のデータが見つかりません "+
-		"(.beacon フォルダ、またはそれを含むフォルダを指定してください)", path)
+	return nil, fmt.Errorf("%s とその上のフォルダに Beacon のデータが見つかりません。\n"+
+		"  Beacon プロジェクトの場所を指定してください:\n"+
+		"    viewer --path <.beacon があるフォルダ>", abs)
 }
 
 func hasProjectData(dir string) bool {

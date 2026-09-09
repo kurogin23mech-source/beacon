@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -71,9 +72,25 @@ func main() {
 	if err := srv.Serve(); err != nil {
 		fail(err)
 	}
+	waitIfWindowWillClose()
 }
 
+// fail は理由を伝えて終わる。
+//
+// エクスプローラーからダブルクリックで起動された場合は、**そのまま終わると窓が
+// 閉じてメッセージが読めない**ので、読んでもらってから閉じる。シェルから実行された
+// 場合は窓が残るので待たない (待つと自動処理の邪魔になる)。
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "Error:", err)
+	waitIfWindowWillClose()
 	os.Exit(1)
+}
+
+func waitIfWindowWillClose() {
+	if !ownsConsole() {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Enter キーを押すと閉じます。")
+	bufio.NewReader(os.Stdin).ReadString('\n')
 }

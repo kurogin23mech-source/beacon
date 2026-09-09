@@ -178,3 +178,34 @@ def test_viewer_does_not_modify_the_data():
         assert before, "確かめる対象のデータが無い (試験の前提が崩れている)"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --- 受け取った人が「置いて実行するだけ」で動くか (e-6363 の実地修正) -------
+
+@needs_go
+def test_finds_beacon_from_a_subdirectory():
+    """プロジェクトの奥のフォルダで実行しても、上にさかのぼって見つけること。
+
+    エクスプローラーからダブルクリックすると、起動場所が実行ファイルの置き場所に
+    なる。上へ探さないと「見つかりません」で終わり、しかも窓が即座に閉じるので
+    利用者は理由すら読めない (2026-09-09 に実際に起きた)。
+    """
+    proc = subprocess.run([BINARY, "--json"], cwd=VIEWER_DIR, capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    board = json.loads(proc.stdout.decode("utf-8"))
+    assert board["targets"], "上にさかのぼって .beacon を見つけられていない"
+
+
+@needs_go
+def test_missing_project_explains_what_to_do():
+    """見つからないときは、何をすればよいかまで伝えること。"""
+    tmp = tempfile.mkdtemp()
+    try:
+        proc = subprocess.run([BINARY, "--path", tmp, "--json"],
+                              capture_output=True)
+        assert proc.returncode != 0, "見つからないのに成功として終わっている"
+        msg = proc.stderr.decode("utf-8", "replace")
+        assert "見つかりません" in msg
+        assert "--path" in msg, "次に何をすればよいかが書かれていない"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
