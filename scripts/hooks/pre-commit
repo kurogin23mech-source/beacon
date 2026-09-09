@@ -251,4 +251,20 @@ if [ -f scripts/check-verb-ledger.py ]; then
   fi
 fi
 
+# ms-169 e-6305 follow-up: forbid hardcoded absolute `at=` timestamps in
+# untrusted_turn.arm() test calls. Such a fixed past time self-prunes via
+# _STALE_HOURS (24h) and turns the test RED once the wall clock passes it
+# (observed 2026-09-09). Only runs when staged test files change; --strict so a
+# reintroduced date-bomb fails fast at commit instead of ~10min into CI.
+if echo "$STAGED" | grep -qE "^tests/.*\.py$"; then
+  if [ -f scripts/check-arm-fixed-timestamp.py ]; then
+    STAGED_TESTS=$(echo "$STAGED" | grep -E "^tests/.*\.py$")
+    python3 scripts/check-arm-fixed-timestamp.py --strict $STAGED_TESTS 2>&1 | sed 's/^/[pre-commit] /'
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+      echo "[pre-commit] ERROR: arm() に固定絶対時刻の date-bomb があります (ms-169 e-6305)。" >&2
+      exit 1
+    fi
+  fi
+fi
+
 exit 0

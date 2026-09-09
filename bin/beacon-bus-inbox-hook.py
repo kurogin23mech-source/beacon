@@ -71,6 +71,21 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# Shared hook bootstrap lives next to this script (bin/hook_bootstrap.py); reach
+# it via THIS file's own directory so there is no lib-search convention to
+# duplicate just to import it (ms-169 e-6296). It owns beacon-root discovery,
+# stdin parsing, and the lib-import convention shared with the gate / vet hooks.
+#
+# Guard the import: if the sibling bootstrap is absent (e.g. a stale install
+# where only the hook scripts were copied), fail SAFE (hb=None → main no-ops)
+# rather than let an ImportError escape into the harness — the harness must never
+# block on the bus (ms-169 e-6296 review, maintainability finding).
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import hook_bootstrap as hb  # noqa: E402
+except Exception:
+    hb = None
+
 
 # ---------------------------------------------------------------------------
 # Lazy lib/stop_signal import (ms-55 e-1721 receive-side halt protocol)
@@ -94,20 +109,8 @@ def _import_stop_signal():
     silent — the receive-side halt is a layer over the existing inject,
     and the user still sees the stop event as a regular bus event.
     """
-    candidates = []
-    here = Path(__file__).resolve().parent
-    candidates.append(here.parent / "lib")
-    candidates.append(here.parent.parent / "lib")
-    for lib_dir in candidates:
-        candidate = lib_dir / "stop_signal.py"
-        if candidate.exists():
-            sys.path.insert(0, str(lib_dir))
-            try:
-                import stop_signal as _stop  # type: ignore[import-not-found]
-            except Exception:
-                return None
-            return _stop
-    return None
+    libs = hb.import_lib("stop_signal")
+    return libs["stop_signal"] if libs else None
 
 
 # ms-160 e-5803: the auto-execute downgrade + operation-trigger imperative logic
@@ -125,17 +128,9 @@ def _import_bus_delivery():
     if _BUS_DELIVERY_TRIED:
         return _BUS_DELIVERY_CACHE
     _BUS_DELIVERY_TRIED = True
-    here = Path(__file__).resolve().parent
-    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
-        if (lib_dir / "bus_delivery.py").exists():
-            sys.path.insert(0, str(lib_dir))
-            try:
-                import bus_delivery as _bd  # type: ignore[import-not-found]
-            except Exception:
-                return None
-            _BUS_DELIVERY_CACHE = _bd
-            return _bd
-    return None
+    libs = hb.import_lib("bus_delivery")
+    _BUS_DELIVERY_CACHE = libs["bus_delivery"] if libs else None
+    return _BUS_DELIVERY_CACHE
 
 
 _UNTRUSTED_FRAME_CACHE: "object | None" = None
@@ -153,17 +148,9 @@ def _import_untrusted_frame():
     if _UNTRUSTED_FRAME_TRIED:
         return _UNTRUSTED_FRAME_CACHE
     _UNTRUSTED_FRAME_TRIED = True
-    here = Path(__file__).resolve().parent
-    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
-        if (lib_dir / "untrusted_frame.py").exists():
-            sys.path.insert(0, str(lib_dir))
-            try:
-                import untrusted_frame as _uf  # type: ignore[import-not-found]
-            except Exception:
-                return None
-            _UNTRUSTED_FRAME_CACHE = _uf
-            return _uf
-    return None
+    libs = hb.import_lib("untrusted_frame")
+    _UNTRUSTED_FRAME_CACHE = libs["untrusted_frame"] if libs else None
+    return _UNTRUSTED_FRAME_CACHE
 
 
 _UNTRUSTED_TURN_CACHE: "object | None" = None
@@ -181,17 +168,9 @@ def _import_untrusted_turn():
     if _UNTRUSTED_TURN_TRIED:
         return _UNTRUSTED_TURN_CACHE
     _UNTRUSTED_TURN_TRIED = True
-    here = Path(__file__).resolve().parent
-    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
-        if (lib_dir / "untrusted_turn.py").exists():
-            sys.path.insert(0, str(lib_dir))
-            try:
-                import untrusted_turn as _ut  # type: ignore[import-not-found]
-            except Exception:
-                return None
-            _UNTRUSTED_TURN_CACHE = _ut
-            return _ut
-    return None
+    libs = hb.import_lib("untrusted_turn")
+    _UNTRUSTED_TURN_CACHE = libs["untrusted_turn"] if libs else None
+    return _UNTRUSTED_TURN_CACHE
 
 
 _DM_UNTRUSTED_CACHE: "object | None" = None
@@ -208,17 +187,9 @@ def _import_dm_untrusted():
     if _DM_UNTRUSTED_TRIED:
         return _DM_UNTRUSTED_CACHE
     _DM_UNTRUSTED_TRIED = True
-    here = Path(__file__).resolve().parent
-    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
-        if (lib_dir / "dm_untrusted.py").exists():
-            sys.path.insert(0, str(lib_dir))
-            try:
-                import dm_untrusted as _du  # type: ignore[import-not-found]
-            except Exception:
-                return None
-            _DM_UNTRUSTED_CACHE = _du
-            return _du
-    return None
+    libs = hb.import_lib("dm_untrusted")
+    _DM_UNTRUSTED_CACHE = libs["dm_untrusted"] if libs else None
+    return _DM_UNTRUSTED_CACHE
 
 
 def _partition_cross_user(root: Path, inject: list) -> dict:
@@ -247,6 +218,31 @@ def _partition_cross_user(root: Path, inject: list) -> dict:
     return notices
 
 
+def _is_human_driven_turn(hook_input: dict) -> bool:
+    """True when THIS turn was initiated by a fresh human prompt — a
+    ``UserPromptSubmit`` carrying non-empty human text — as opposed to a
+    DM-arrival / ``SessionStart`` / autonomous wake (ms-169 e-6305).
+
+    The A gate must fire when an untrusted DM *drives* a turn's side-effect, NOT
+    merely because an unread untrusted DM sits in the inbox while a human drives
+    an unrelated action (the observed over-gating: a same-user #735 merge DM made
+    the human's own approve/comment re-confirm). When a human prompt drives the
+    turn, authority anchors to the human — who sees the untrusted framing (e-6235)
+    and is accountable — so we do NOT arm from DMs merely surfaced this turn.
+
+    This anchors on the human TURN, never on sender machine / user identity: a
+    same-machine or same-user exemption would open a relay hole (a trusted sender
+    can still relay untrusted content — taint doesn't clear at transport), and
+    ``is_untrusted_event`` stays content-provenance based. A turn with no human
+    prompt (SessionStart injection, autonomous idle-wake) is NOT human-driven, so
+    the direct-injection path stays gated exactly as before."""
+    if not isinstance(hook_input, dict):
+        return False
+    if hook_input.get("hook_event_name", "UserPromptSubmit") != "UserPromptSubmit":
+        return False  # SessionStart / other event = not a human prompt turn
+    return bool(str(hook_input.get("prompt") or "").strip())
+
+
 def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list,
                         skip_ids: "set | None" = None) -> None:
     """Arm the untrusted-turn state (for the PreToolUse gate) when ``inject``
@@ -270,6 +266,15 @@ def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list,
     du = _import_dm_untrusted()
     if uf is None or ut is None:
         return
+    # ms-169 e-6305: authority anchors to the human turn. If a fresh human prompt
+    # is driving THIS turn, an untrusted DM surfaced now is not "driving" the AI's
+    # side-effects — the human is. Arming here would re-confirm the human's own
+    # action (the over-gating bug), so skip it. The untrusted framing (e-6235)
+    # still warns the AI, and ms-70 delivery-trust is untouched. A DM-arrival /
+    # SessionStart / autonomous turn (no human prompt) still arms below, so the
+    # direct-injection path stays closed.
+    if _is_human_driven_turn(hook_input):
+        return
     skip = skip_ids or set()
     my_uid = ""
     if du is not None:
@@ -291,7 +296,10 @@ def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list,
             if du is not None:
                 sources.append(du.build_source(ev))
             else:
-                sources.append({"event_id": eid, "sender": "", "preview": ""})
+                # dm_untrusted unavailable → build the bare shape through the
+                # canonical constructor so this fallback can't drift from the
+                # {event_id, sender, preview} definition (ms-169 e-6297).
+                sources.append(ut.make_source(event_id=eid))
         if sources:
             ut.arm(
                 root,
@@ -322,17 +330,6 @@ def _classify_delivery(ev: dict, allowlist) -> tuple:
 # ---------------------------------------------------------------------------
 # Project + session discovery
 # ---------------------------------------------------------------------------
-
-def _find_beacon_root(start: Path) -> Path | None:
-    """Walk up from `start` looking for a .beacon/project.json marker."""
-    cur = start.resolve()
-    while True:
-        if (cur / ".beacon" / "project.json").exists():
-            return cur
-        if cur == cur.parent:
-            return None
-        cur = cur.parent
-
 
 def _read_json(path: Path) -> dict:
     try:
@@ -1232,19 +1229,19 @@ def _append_to_inbox_log(root: Path, events: list[dict]) -> None:
 
 def main() -> None:
     # Never let an exception escape — the harness must not block on the bus.
-    try:
-        raw = sys.stdin.read()
-    except Exception:
-        return
-    try:
-        hook_input = json.loads(raw) if raw.strip() else {}
-    except Exception:
+    if hb is None:
+        return  # bootstrap missing → fail-safe no-op
+    # Lenient by design: an unreadable / malformed payload degrades to {} and the
+    # hook proceeds (cwd falls back to os.getcwd()), unlike the gate/vet hooks
+    # which return on a missing payload.
+    hook_input = hb.read_hook_input()
+    if hook_input is None:
         hook_input = {}
 
     hook_event_name = hook_input.get("hook_event_name", "UserPromptSubmit")
 
     cwd = Path(hook_input.get("cwd") or os.getcwd())
-    root = _find_beacon_root(cwd)
+    root = hb.find_beacon_root(cwd)
     if root is None:
         return  # not a beacon project — silent no-op
 
@@ -1253,10 +1250,14 @@ def main() -> None:
         return
 
     # ms-169 e-6237: a human UserPromptSubmit is a turn boundary — the human has
-    # retaken the turn, so clear any untrusted-turn armed by a prior DM. If this
-    # same round injects new untrusted content, it re-arms below. Done before the
-    # cloud-config early returns so a human prompt clears stale state even when
-    # the bus is briefly unreachable. Best-effort: never blocks the hook.
+    # retaken the turn, so clear any untrusted-turn armed by a prior DM. Done
+    # before the cloud-config early returns so a human prompt clears stale state
+    # even when the bus is briefly unreachable. Best-effort: never blocks the hook.
+    #
+    # e-6305: this turn no longer re-arms from DMs it surfaces when a human prompt
+    # is driving it — _arm_untrusted_turn skips arming on a human-driven turn
+    # (authority anchored to the human), so the human's own action isn't gated.
+    # A DM-arrival / SessionStart / autonomous turn (no human prompt) still arms.
     if hook_event_name == "UserPromptSubmit":
         _ut = _import_untrusted_turn()
         if _ut is not None:

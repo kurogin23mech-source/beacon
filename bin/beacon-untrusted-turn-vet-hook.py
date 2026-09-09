@@ -33,56 +33,31 @@ always the safe direction.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
-_LIB_CACHE = None
-_LIB_TRIED = False
-
-
-def _import_lib():
-    """Import lib/untrusted_turn + lib/tool_effect lazily. Returns (ut, te) or
-    (None, None) if unavailable (→ caller stays silent = fail-safe)."""
-    global _LIB_CACHE, _LIB_TRIED
-    if _LIB_TRIED:
-        return _LIB_CACHE
-    _LIB_TRIED = True
-    here = Path(__file__).resolve().parent
-    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
-        if (lib_dir / "untrusted_turn.py").exists() and (lib_dir / "tool_effect.py").exists():
-            sys.path.insert(0, str(lib_dir))
-            try:
-                import untrusted_turn as ut  # type: ignore[import-not-found]
-                import tool_effect as te  # type: ignore[import-not-found]
-            except Exception:
-                _LIB_CACHE = (None, None)
-                return _LIB_CACHE
-            _LIB_CACHE = (ut, te)
-            return _LIB_CACHE
-    _LIB_CACHE = (None, None)
-    return _LIB_CACHE
-
-
-def _find_beacon_root(start: Path) -> "Path | None":
-    """Walk up from `start` looking for a .beacon/project.json marker."""
-    cur = start.resolve()
-    for cand in (cur, *cur.parents):
-        if (cand / ".beacon" / "project.json").exists():
-            return cand
-    return None
+# Shared hook bootstrap lives next to this script (bin/hook_bootstrap.py); reach
+# it via THIS file's own directory so there is no lib-search convention to
+# duplicate just to import it (ms-169 e-6296). It owns beacon-root discovery,
+# stdin parsing, and the lib-import convention for all three hook scripts.
+#
+# Guard the import: if the sibling bootstrap is absent (e.g. a stale install
+# where only the hook scripts were copied), fail SAFE (hb=None → this hook
+# no-ops, leaving state unchanged) rather than let an ImportError escape into the
+# harness. This hook only ever RELAXES gating, so a silent no-op is always safe
+# (ms-169 e-6296 review, maintainability finding).
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import hook_bootstrap as hb  # noqa: E402
+except Exception:
+    hb = None
 
 
 def main() -> None:
-    try:
-        raw = sys.stdin.read()
-    except Exception:
-        return
-    try:
-        hook_input = json.loads(raw) if raw.strip() else {}
-    except Exception:
-        return
-    if not isinstance(hook_input, dict):
+    if hb is None:
+        return  # bootstrap missing → fail-safe (state unchanged)
+    hook_input = hb.read_hook_input()
+    if hook_input is None:
         return
 
     # Only meaningful on PostToolUse; be lenient if the field is absent.
@@ -90,9 +65,10 @@ def main() -> None:
     if event and event != "PostToolUse":
         return
 
-    ut, te = _import_lib()
-    if ut is None or te is None:
+    libs = hb.import_lib("untrusted_turn", "tool_effect")
+    if libs is None:
         return  # fail-safe: can't classify → do nothing
+    ut, te = libs["untrusted_turn"], libs["tool_effect"]
 
     try:
         tool_name = hook_input.get("tool_name") or ""
@@ -100,7 +76,7 @@ def main() -> None:
         if not te.is_side_effect(tool_name, tool_input):
             return  # read-only completion → never vets
         cwd = Path(hook_input.get("cwd") or ".")
-        root = _find_beacon_root(cwd)
+        root = hb.find_beacon_root(cwd)
         if root is None:
             return  # not a beacon project
         session_key = ut.resolve_session_key(root, hook_input)

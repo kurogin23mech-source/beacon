@@ -7028,18 +7028,26 @@ def cmd_dm_show():
     # e-6280 per-context (corrected from per-session in the #738 review): each
     # fetched DM arms its own context; a prior approval never suppresses this. The
     # body is shown framed as untrusted regardless.
+    # e-6298: arm() returns a status (armed / noop_no_session_key / write_failed)
+    # so a silent write failure — or a missing session key — reports its OWN cause
+    # instead of collapsing into a bare False the caller can't interpret.
+    # The sentinel for "arm() never ran" (an exception in build_source /
+    # resolve_session_key before arm returned) is None, kept DISTINCT from
+    # ARM_WRITE_FAILED — else a non-write exception would falsely claim the state
+    # write failed (ms-169 e-6298 review, maintainability finding).
     session_key = ut.resolve_session_key(root)
-    armed = False
+    arm_status = None
     try:
-        armed = bool(ut.arm(root, session_key, sources=[du.build_source(event)]))
+        arm_status = ut.arm(root, session_key, sources=[du.build_source(event)])
     except Exception:
-        armed = False  # best-effort; the body is still shown (framing warns)
+        arm_status = None  # arm never ran; body still shown (framing warns)
+    armed = ut.arm_succeeded(arm_status)
 
     if want_json:
         print(json.dumps({
             "event_id": event_id, "sender_user_id": sender,
             "channel": channel, "created_at": when, "body": body,
-            "armed": armed,
+            "armed": armed, "arm_status": arm_status if arm_status is not None else "error",
         }, ensure_ascii=False))
         return
 
@@ -7051,9 +7059,17 @@ def cmd_dm_show():
     if armed:
         print("  この取得により副作用ツールの人間承認ゲートが有効化されました "
               "(この untrusted 文脈を一度承認するまで)。")
-    else:
+    elif arm_status == ut.ARM_NOOP_NO_SESSION_KEY:
+        print("  ⚠ 承認ゲートを有効化できませんでした (このセッションの識別子を"
+              "解決できず、ゲートに紐付ける先がありません)。"
+              "副作用ツールを実行する前に手動で人間確認を取ってください。")
+    elif arm_status == ut.ARM_WRITE_FAILED:
         print("  ⚠ 承認ゲートの有効化に失敗しました (untrusted-turn state を書けず)。"
               "副作用ツールを実行する前に手動で人間確認を取ってください。")
+    else:
+        print("  ⚠ 承認ゲートを有効化できませんでした (内部エラーで arm 処理に到達"
+              "できませんでした)。副作用ツールを実行する前に手動で人間確認を取って"
+              "ください。")
 
 
 def cmd_dm_log():

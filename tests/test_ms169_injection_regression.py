@@ -78,6 +78,19 @@ def _attack_dm(*, envelope=None) -> dict:
     return ev
 
 
+def _plain_untrusted_dm() -> dict:
+    """An untrusted DM with NO sender_user_id — so it is neither cross-user (not
+    body-isolated) nor proven-same-user, meaning _arm_untrusted_turn arms from it.
+    Used by the e-6305 tests to exercise the arm path directly."""
+    return {
+        "event_id": "e-plain-1",
+        "channel": "dm",
+        "delivery": "propose-to-ai",
+        "created_at": "2026-09-07T07:00:00Z",
+        "payload": {"text": "just a status note, no command"},
+    }
+
+
 def _gate(cwd: Path, tool_name: str, tool_input=None) -> str:
     proc = subprocess.run(
         [sys.executable, str(GATE)],
@@ -181,3 +194,49 @@ def test_ac4_signed_dm_body_still_isolated_and_gated(tmp_path, inbox_hook, monke
     assert "beacon dm show e-poc-1" in ctx
     _dm_show(root)                            # explicit fetch arms the turn
     assert _gate(root, "Write", {"file_path": "ocean.txt"}) == "ask"
+
+
+# ---------------------------------------------------------------------------
+# e-6305 — authority anchors to the human turn (not to sender identity):
+# an unread untrusted DM must not gate the human's OWN driven action, but a
+# DM-arrival / autonomous turn (no human prompt) stays gated.
+# ---------------------------------------------------------------------------
+
+def test_e6305_dm_arrival_turn_still_arms_and_gates(tmp_path, inbox_hook, monkeypatch):
+    """DoneC3: a turn with NO human prompt (SessionStart injection / autonomous)
+    still arms, so a DM-driven side-effect is gated exactly as before — e-6305
+    must not weaken the direct-injection path."""
+    monkeypatch.setenv("BEACON_USER_ID", VICTIM)
+    root = _project(tmp_path)
+    inbox_hook._arm_untrusted_turn(
+        root, {"session_id": SESSION, "hook_event_name": "SessionStart"},
+        [_plain_untrusted_dm()])
+    assert ut.is_armed(root, SESSION) is not None
+    assert _gate(root, "Write", {"file_path": "x", "content": "y"}) == "ask"
+
+
+def test_e6305_human_driven_turn_suppresses_arm(tmp_path, inbox_hook, monkeypatch):
+    """DoneC1/C4: a fresh human prompt drives the turn → the unread untrusted DM
+    does NOT arm, so the human's own side-effect (e.g. approving a PR) is not
+    re-confirmed. This is the observed over-gating, fixed."""
+    monkeypatch.setenv("BEACON_USER_ID", VICTIM)
+    root = _project(tmp_path)
+    inbox_hook._arm_untrusted_turn(
+        root,
+        {"session_id": SESSION, "hook_event_name": "UserPromptSubmit",
+         "prompt": "approve the PR #740"},
+        [_plain_untrusted_dm()])
+    assert ut.is_armed(root, SESSION) is None
+    assert _gate(root, "Write", {"file_path": "x", "content": "y"}) == ""
+
+
+def test_e6305_is_human_driven_turn_classifier(inbox_hook):
+    """The turn-authority classifier: human-driven iff a UserPromptSubmit carries
+    non-empty human text. Never keys on sender machine/user (relay-hole safe)."""
+    f = inbox_hook._is_human_driven_turn
+    assert f({"hook_event_name": "UserPromptSubmit", "prompt": "approve"}) is True
+    assert f({"prompt": "hi"}) is True                                  # default event = UPS
+    assert f({"hook_event_name": "UserPromptSubmit", "prompt": "   "}) is False   # blank prompt
+    assert f({"hook_event_name": "UserPromptSubmit"}) is False           # no prompt at all
+    assert f({"hook_event_name": "SessionStart", "prompt": "x"}) is False  # not a prompt turn
+    assert f(None) is False

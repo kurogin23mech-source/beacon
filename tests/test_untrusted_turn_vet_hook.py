@@ -138,5 +138,5 @@ def test_one_approval_clears_context_but_new_dm_rearms(tmp_path):
     assert _gate_decision(root, "sv-1", "Bash", {"command": "b"}) == ""
     assert _gate_decision(root, "sv-1", "Write", {"file_path": "c"}) == ""
     # A brand-new untrusted DM RE-ARMS (per-context) → the gate asks again for it.
-    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is True
+    assert ut.arm(root, "sv-1", event_ids=["e-2"]) == ut.ARM_OK
     assert _gate_decision(root, "sv-1", "Bash", {"command": "d"}) == "ask"

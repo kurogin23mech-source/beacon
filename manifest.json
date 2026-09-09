@@ -34,6 +34,11 @@
         "linux": "~/.local/bin/beacon-bus-inbox-hook.py",
         "windows": "~/.local/bin/beacon-bus-inbox-hook.py"
       },
+      "bin/hook_bootstrap.py": {
+        "darwin": "~/.local/bin/hook_bootstrap.py",
+        "linux": "~/.local/bin/hook_bootstrap.py",
+        "windows": "~/.local/bin/hook_bootstrap.py"
+      },
       "bin/beacon-post-commit-hook.sh": {
         "darwin": "~/.local/bin/beacon-post-commit-hook.sh",
         "linux": "~/.local/bin/beacon-post-commit-hook.sh",
