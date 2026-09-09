@@ -216,3 +216,72 @@ def test_sessions_can_be_injected_so_the_board_does_not_reach_the_network():
     }]
     view = cmd_view.build_view(_FakeStore(cloud=True), sessions=given)
     assert [s["id"] for s in view["sessions"]] == ["sv-1"]
+
+
+# --- サーバ設置 (e-6345) ---------------------------------------------------
+
+def test_default_stays_loopback_without_host():
+    """既定は今まで通り自分の機械の中だけ。設置機能を足しても変わらない。"""
+    server, url = cmd_view.serve(
+        port=0, open_browser=False, store=_FakeStore(), forever=False,
+        sessions=[])
+    try:
+        assert server.server_address[0] == "127.0.0.1"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_exposing_without_acknowledgement_is_refused():
+    """外に開くには明示が要る。盤は認証を持たないので黙って公開させない。"""
+    try:
+        cmd_view.serve(port=0, open_browser=False, store=_FakeStore(),
+                       forever=False, sessions=[], host="0.0.0.0")
+    except ValueError as e:
+        # 何が起きるかと、どうすればよいかが文面に出ていること。
+        assert "全員が盤を読めます" in str(e)
+        assert "--expose" in str(e)
+    else:
+        raise AssertionError("外に開く指定が素通りした")
+
+
+def test_exposing_with_acknowledgement_binds_to_the_given_host():
+    server, url = cmd_view.serve(
+        port=0, open_browser=False, store=_FakeStore(), forever=False,
+        sessions=[], host="0.0.0.0", expose=True)
+    try:
+        assert server.server_address[0] == "0.0.0.0"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_localhost_is_treated_as_loopback():
+    """名前で書いても自分の機械の中なら明示は要らない。"""
+    server, url = cmd_view.serve(
+        port=0, open_browser=False, store=_FakeStore(), forever=False,
+        sessions=[], host="localhost")
+    try:
+        assert url.startswith("http://localhost:")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_server_install_serves_the_identical_page():
+    """設置モードでも表示層は同一。ここが違ったら『同じ画面』が嘘になる。"""
+    local, _ = cmd_view.serve(port=0, open_browser=False, store=_FakeStore(),
+                              forever=False, sessions=[])
+    exposed, _ = cmd_view.serve(port=0, open_browser=False,
+                                store=_FakeStore(cloud=True), forever=False,
+                                sessions=[], host="0.0.0.0", expose=True)
+    try:
+        a = urllib.request.urlopen(
+            f"http://127.0.0.1:{local.server_address[1]}/").read()
+        b = urllib.request.urlopen(
+            f"http://127.0.0.1:{exposed.server_address[1]}/").read()
+        assert a == b  # 1 バイトも違わない
+    finally:
+        for s in (local, exposed):
+            s.shutdown()
+            s.server_close()

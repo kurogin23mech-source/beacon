@@ -1,9 +1,17 @@
 """`beacon view` — 手元で盤を立ち上げて、自分のブラウザで見る (ms-170 e-6344)。
 
 親 SPEC ``KIGmqQTIanqUypbtmrTs`` の設計方針 3 を実装する: **手元起動とサーバ設置は
-同じものの起動モードの違い**。ここは手元起動側で、127.0.0.1 に小さな受け口を立てて
-利用者自身のブラウザに出す。サーバ設置 (e-6345) は同じ表示層のまま、データの取得元を
-クラウドに向けるだけになる。
+同じものの起動モードの違い**。既定は手元起動で、127.0.0.1 に小さな受け口を立てて
+利用者自身のブラウザに出す。``--host`` を明示するとサーバ設置になり、**表示層も
+変換層もそのまま**でデータの取得元だけが設定 (``.beacon/cloud.json``) で決まる。
+
+サーバ設置と安全について
+------------------------
+盤にはそのプロジェクトの全体像が載るが、この受け口は **認証を持たない**。したがって
+ループバック以外に開くことは「その口に届く全員に盤を見せる」ことと同じである。事故を
+黙って起こさないため、``--host`` でループバック以外を指定するときは ``--expose`` の
+明示を必須にしてある (指定が無ければ起動を断る)。社外に出す場合は、認証を持つ前段
+(reverse proxy 等) の後ろに置くこと。
 
 この層が持たない責務
 --------------------
@@ -33,6 +41,11 @@ import view_model
 DEFAULT_PORT = 7377
 # 待ち受けは常に自分の機械の中だけ。手元起動でネットワークに開かない。
 LOOPBACK = "127.0.0.1"
+
+
+def _is_loopback(host: str) -> bool:
+    """その待ち受け先が自分の機械の中だけかどうか。"""
+    return host in ("127.0.0.1", "::1", "localhost")
 
 
 def _pick_port(preferred: int, host: str = LOOPBACK) -> int:
@@ -127,22 +140,38 @@ def _handler_class(store, sessions=None):
 
 
 def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
-          store=None, forever: bool = True, sessions=None):
-    """盤を手元に立ち上げる。``forever=False`` なら立てるだけで返る (試験用)。"""
+          store=None, forever: bool = True, sessions=None,
+          host: str = LOOPBACK, expose: bool = False):
+    """盤を立ち上げる。``forever=False`` なら立てるだけで返る (試験用)。
+
+    ``host`` の既定は自分の機械の中だけ。それ以外に開くとき (= サーバ設置) は
+    ``expose=True`` の明示が要る。認証が無いので、黙って外に開かせない。
+    """
+    if not _is_loopback(host) and not expose:
+        raise ValueError(
+            f"{host} に開くと、その口に届く全員が盤を読めます "
+            "(このビューワーは認証を持ちません)。"
+            "意図した設置なら --expose を付けてください。"
+            "社外に出す場合は認証を持つ前段の後ろに置いてください。")
     store = store or store_mod.get_store()
-    chosen = _pick_port(port)
+    chosen = _pick_port(port, host)
     server = http.server.HTTPServer(
-        (LOOPBACK, chosen), _handler_class(store, sessions))
-    url = f"http://{LOOPBACK}:{chosen}/"
+        (host, chosen), _handler_class(store, sessions))
+    # 表示用の住所。外に開いた場合は実際の到達先が違いうるので、その旨は下で伝える。
+    url = f"http://{host}:{chosen}/"
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     print(f"盤を開きました: {url}")
     print(f"  取得元: {'クラウド' if store.is_cloud() else 'ローカル'}")
+    if not _is_loopback(host):
+        print("  ⚠ この盤は自分の機械の外にも開いています。認証は無いので、"
+              "この口に届く全員が読めます。")
     print("  終了: Ctrl+C")
 
-    if open_browser:
+    # 外に開いた設置ではブラウザを立ち上げても意味がない (画面のある機械ではない)。
+    if open_browser and _is_loopback(host):
         try:
             webbrowser.open(url)
         except Exception:
@@ -166,11 +195,16 @@ def cmd_view() -> None:
     """CLI 入口。環境変数は他の commands.py の verb と同じ渡し方に揃える。"""
     port = int(os.environ.get("BEACON_VIEW_PORT") or DEFAULT_PORT)
     no_open = os.environ.get("BEACON_VIEW_NO_OPEN") == "1"
+    host = os.environ.get("BEACON_VIEW_HOST") or LOOPBACK
+    expose = os.environ.get("BEACON_VIEW_EXPOSE") == "1"
     if os.environ.get("BEACON_JSON") == "1":
         # 画面を立てずに、いまの盤をそのまま出す (別の道具に渡したいとき用)。
         print(json.dumps(build_view(), ensure_ascii=False))
         return
-    serve(port, open_browser=not no_open)
+    try:
+        serve(port, open_browser=not no_open, host=host, expose=expose)
+    except ValueError as e:
+        raise SystemExit(f"Error: {e}")
 
 
 # --- 画面 -------------------------------------------------------------------
