@@ -72,7 +72,7 @@
   .row {
     border-bottom: 1px solid var(--line);
     padding: 9px 4px;
-    display: grid; grid-template-columns: 74px 1fr 128px 96px;
+    display: grid; grid-template-columns: 72px 1fr 108px 72px 96px;
     gap: 12px; align-items: center;
     cursor: pointer;
   }
@@ -99,7 +99,43 @@
     display: block; height: 100%; border-radius: 3px;
     background: currentColor; opacity: .45;
   }
-  .count { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  /* 数値は右揃え + 等幅数字。桁が揃わないと行をまたいだ比較ができない。 */
+  .count {
+    font-size: 11px; color: var(--dim);
+    font-variant-numeric: tabular-nums; text-align: right;
+  }
+
+  /* 状態の札。色は補助で、語が主。色だけに意味を持たせない。 */
+  .badge {
+    display: inline-block; font-size: 11px; padding: 1px 7px;
+    border-radius: 4px; white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .badge.s-in_progress { background: color-mix(in srgb, var(--active) 18%, transparent); }
+  .badge.s-open        { background: color-mix(in srgb, var(--live) 18%, transparent); }
+  .badge.s-todo        { border-color: var(--line); }
+  .badge.s-waiting     { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+  .badge.s-observing   { background: color-mix(in srgb, currentColor 10%, transparent); }
+  .badge.s-done, .badge.s-closed, .badge.s-cancelled,
+  .badge.s-merged, .badge.s-approved { opacity: .55; border-color: var(--line); }
+  .badge.s-in_review   { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+
+  /* 詳細のうち、済んだ分は畳んでおく。 */
+  .donebox { margin-top: 8px; }
+  .donebox > summary {
+    cursor: pointer; color: var(--dim); font-size: 11.5px;
+    list-style: none; padding: 4px 0;
+  }
+  .donebox > summary::-webkit-details-marker { display: none; }
+  .donebox > summary::before { content: "▶ "; font-size: 9px; }
+  .donebox[open] > summary::before { content: "▼ "; }
+
+  /* 絞り込み欄。対象が数百件あるときに目的の行へ辿り着くため。 */
+  .filter {
+    padding: 5px 10px; font: inherit; font-size: 12px;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: transparent; color: inherit; width: 240px;
+  }
 
   /* --- 詳細 --- */
   .detail { padding: 4px 4px 14px 74px; border-bottom: 1px solid var(--line); }
@@ -162,6 +198,8 @@ let viewerState = {};
 // 選ぶ画面を開いている間は自動更新を止める。止めないと、入力している最中に
 // 盤へ戻されてしまう。
 let pickerOpen = false;
+// 絞り込みの語。画面を作り直しても打ち直さずに済むよう覚えておく。
+let lastFilter = "";
 // 開いている組 (未着手 / 完了 / ドキュメント)。**画面を作り直しても開いたままにする。**
 // ローカルセッションの最終活動時刻は数秒ごとに変わるため盤は頻繁に更新される。
 // 状態を引き継がないと、読んでいる最中に組が閉じてしまう (2026-09-09 の指摘)。
@@ -173,6 +211,26 @@ function updateTimes() {
     el.textContent = ago(el.dataset.ts);
   }
 }
+
+// 状態は生の文字列ではなく、色の付いた札で出す (走査が速い)。
+// **色だけに頼らず必ず語も添える** — 色を見分けにくい人にも伝わるように。
+const STATUS_LABEL = {
+  in_progress: "進行中", todo: "未着手", done: "完了",
+  observing: "観察中", waiting: "待機", cancelled: "取消",
+  open: "稼働中", closed: "終了",
+  approved: "承認済", merged: "取込済", in_review: "レビュー中",
+};
+function statusBadge(status) {
+  if (!status) return "";
+  const label = STATUS_LABEL[status] || status;
+  return `<span class="badge s-${esc(status)}">${esc(label)}</span>`;
+}
+
+const TYPE_LABEL = {
+  task: "タスク", commit: "コミット", pr: "PR", save: "記録",
+  incident: "障害", decision: "判断",
+};
+function typeLabel(t) { return esc(TYPE_LABEL[t] || t || ""); }
 
 function ago(iso) {
   if (!iso) return "";
@@ -257,7 +315,8 @@ function targetRow(t, owners, rosterKnown, guessed) {
       <div class="id">${esc(t.id)}</div>
       <div class="label" title="${esc(t.label)}">${esc(t.label)}</div>
       <div><div class="bar"><span style="width:${pct}%"></span></div>
-           <div class="count">${w.done}/${w.total} · ${esc(t.status)}</div></div>
+           <div class="count">${w.done}/${w.total}</div></div>
+      <div>${statusBadge(t.status)}</div>
       <div>${who}</div>
     </div>
     <div class="detail" id="d-${esc(t.id)}" hidden></div>`;
@@ -285,11 +344,22 @@ async function loadDetail(id) {
     const row = (i, depth) => `<div class="item ${i.is_done ? "done" : ""}">
           <div class="iid" style="padding-left:${depth * 12}px">${esc(i.id)}</div>
           <div>${esc(i.description)}</div>
-          <div class="kind">${esc(i.type)} · ${esc(i.status)}</div>
+          <div class="kind">${typeLabel(i.type)} ${statusBadge(i.status)}</div>
         </div>` + (i.children || []).map(c => row(c, depth + 1)).join("");
-    const html = items.length
-      ? items.map(i => row(i, 0)).join("")
-      : `<p class="empty">記録はありません。</p>`;
+
+    // 終わった記録は既定で隠す。残っているものを読みに来ているのに、済んだ分に
+    // 埋もれては意味がない (2026-09-10 の指摘)。見たい人は押して開ける。
+    const openItems = items.filter(i => !i.is_done);
+    const doneItems = items.filter(i => i.is_done);
+    const html = !items.length
+      ? `<p class="empty">記録はありません。</p>`
+      : (openItems.length
+          ? openItems.map(i => row(i, 0)).join("")
+          : `<p class="empty">残っている記録はありません。</p>`) +
+        (doneItems.length
+          ? `<details class="donebox"><summary>完了済み ${doneItems.length} 件</summary>
+               ${doneItems.map(i => row(i, 0)).join("")}</details>`
+          : "");
     detailCache.set(id, html);
     box.innerHTML = html;
     box.dataset.loaded = "1";
@@ -436,7 +506,11 @@ function render(board) {
         監視や定期実行は終わりません。両方を見ないと、いま何が動いているかは分かりません。</p>
     </div>` : ""}
 
-    <div class="section-title">進行中 / 担当あり (${focus.length})</div>
+    <div class="section-title" style="display:flex; align-items:center;
+         justify-content:space-between; gap:12px;">
+      <span id="focus-title">進行中 / 担当あり (${focus.length})</span>
+      <input id="filter" class="filter" type="text" placeholder="絞り込み (ID / 内容)">
+    </div>
     <div class="rows" id="g-focus">${focus.length ? "" :
       `<p class="empty">進行中の対象はありません。</p>`}</div>
 
@@ -475,6 +549,34 @@ function render(board) {
   `;
   wireRows();
   document.getElementById("switch").onclick = openPicker;
+
+  // 絞り込み。打つたびに、当てはまらない行を隠す。
+  // 開いている詳細は隠れた行と一緒に畳む (中身だけ浮くのを防ぐ)。
+  const filterInput = document.getElementById("filter");
+  if (filterInput) {
+    filterInput.value = lastFilter;
+    const apply = () => {
+      lastFilter = filterInput.value.trim().toLowerCase();
+      let shown = 0, total = 0;
+      for (const row of document.querySelectorAll(".row[data-id]")) {
+        total++;
+        const hit = !lastFilter || row.textContent.toLowerCase().includes(lastFilter);
+        row.hidden = !hit;
+        const box = document.getElementById("d-" + row.dataset.id);
+        if (box && !hit) box.hidden = true;
+        else if (box && opened.has(row.dataset.id)) box.hidden = false;
+        if (hit) shown++;
+      }
+      const title = document.getElementById("focus-title");
+      if (title) {
+        title.textContent = lastFilter
+          ? `絞り込み: ${shown} / ${total} 件`
+          : `進行中 / 担当あり (${focus.length})`;
+      }
+    };
+    filterInput.oninput = apply;
+    if (lastFilter) apply();
+  }
 
   // 進行中の組は既定で開いているので、その場で描く (多ければ分割して足す)。
   if (focus.length) fillGroup("focus", focus, owners, rosterKnown, guessed);
