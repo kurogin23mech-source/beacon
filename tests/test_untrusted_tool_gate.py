@@ -49,7 +49,12 @@ def test_arm_then_is_armed_then_disarm(tmp_path):
     root = _beacon_root(tmp_path)
     key = "sv-abc"
     assert ut.is_armed(root, key) is None
-    ut.arm(root, key, event_ids=["e-1", "e-2"], at="2026-09-07T07:00:00Z")
+    # Do NOT hard-code `at=`: _write_all prunes entries older than _STALE_HOURS
+    # (24h) against the REAL now(), so a fixed past timestamp turns this into a
+    # time-bomb (green when written, red once wall-clock passes at+24h). This test
+    # exercises the arm→is_armed→disarm roundtrip, not staleness, so let `at`
+    # default to now() like every other arm() call in this file.
+    ut.arm(root, key, event_ids=["e-1", "e-2"])
     state = ut.is_armed(root, key)
     assert state and state["event_ids"] == ["e-1", "e-2"]
     ut.disarm(root, key)
