@@ -218,6 +218,31 @@ def _partition_cross_user(root: Path, inject: list) -> dict:
     return notices
 
 
+def _is_human_driven_turn(hook_input: dict) -> bool:
+    """True when THIS turn was initiated by a fresh human prompt — a
+    ``UserPromptSubmit`` carrying non-empty human text — as opposed to a
+    DM-arrival / ``SessionStart`` / autonomous wake (ms-169 e-6305).
+
+    The A gate must fire when an untrusted DM *drives* a turn's side-effect, NOT
+    merely because an unread untrusted DM sits in the inbox while a human drives
+    an unrelated action (the observed over-gating: a same-user #735 merge DM made
+    the human's own approve/comment re-confirm). When a human prompt drives the
+    turn, authority anchors to the human — who sees the untrusted framing (e-6235)
+    and is accountable — so we do NOT arm from DMs merely surfaced this turn.
+
+    This anchors on the human TURN, never on sender machine / user identity: a
+    same-machine or same-user exemption would open a relay hole (a trusted sender
+    can still relay untrusted content — taint doesn't clear at transport), and
+    ``is_untrusted_event`` stays content-provenance based. A turn with no human
+    prompt (SessionStart injection, autonomous idle-wake) is NOT human-driven, so
+    the direct-injection path stays gated exactly as before."""
+    if not isinstance(hook_input, dict):
+        return False
+    if hook_input.get("hook_event_name", "UserPromptSubmit") != "UserPromptSubmit":
+        return False  # SessionStart / other event = not a human prompt turn
+    return bool(str(hook_input.get("prompt") or "").strip())
+
+
 def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list,
                         skip_ids: "set | None" = None) -> None:
     """Arm the untrusted-turn state (for the PreToolUse gate) when ``inject``
@@ -240,6 +265,15 @@ def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list,
     ut = _import_untrusted_turn()
     du = _import_dm_untrusted()
     if uf is None or ut is None:
+        return
+    # ms-169 e-6305: authority anchors to the human turn. If a fresh human prompt
+    # is driving THIS turn, an untrusted DM surfaced now is not "driving" the AI's
+    # side-effects — the human is. Arming here would re-confirm the human's own
+    # action (the over-gating bug), so skip it. The untrusted framing (e-6235)
+    # still warns the AI, and ms-70 delivery-trust is untouched. A DM-arrival /
+    # SessionStart / autonomous turn (no human prompt) still arms below, so the
+    # direct-injection path stays closed.
+    if _is_human_driven_turn(hook_input):
         return
     skip = skip_ids or set()
     my_uid = ""
@@ -1216,10 +1250,14 @@ def main() -> None:
         return
 
     # ms-169 e-6237: a human UserPromptSubmit is a turn boundary — the human has
-    # retaken the turn, so clear any untrusted-turn armed by a prior DM. If this
-    # same round injects new untrusted content, it re-arms below. Done before the
-    # cloud-config early returns so a human prompt clears stale state even when
-    # the bus is briefly unreachable. Best-effort: never blocks the hook.
+    # retaken the turn, so clear any untrusted-turn armed by a prior DM. Done
+    # before the cloud-config early returns so a human prompt clears stale state
+    # even when the bus is briefly unreachable. Best-effort: never blocks the hook.
+    #
+    # e-6305: this turn no longer re-arms from DMs it surfaces when a human prompt
+    # is driving it — _arm_untrusted_turn skips arming on a human-driven turn
+    # (authority anchored to the human), so the human's own action isn't gated.
+    # A DM-arrival / SessionStart / autonomous turn (no human prompt) still arms.
     if hook_event_name == "UserPromptSubmit":
         _ut = _import_untrusted_turn()
         if _ut is not None:
