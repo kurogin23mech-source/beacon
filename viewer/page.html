@@ -196,11 +196,20 @@ function sessionCard(s) {
 // このマシンで拾ったセッションの札。Beacon の名簿とは見分けが付く形にする
 // (届く範囲が違うので、同じ見た目にしてはいけない)。
 function localCard(s) {
+  // 呼び名が分かるものは呼び名を主役にする (どのセッションかを人が識別できる)。
+  const head = s.name || s.tool;
+  const sub = s.name ? s.tool : "";
+  // 状態は道具が申告しているものをそのまま出す (作業中 / 待機)。
+  const state = s.state === "busy" ? "作業中"
+              : s.state === "idle" ? "待機中"
+              : s.running ? "起動中" : "停止";
   return `<div class="session local">
-    <div class="who"><span class="dot ${s.running ? "on" : ""}"></span>${esc(s.tool)}</div>
+    <div class="who"><span class="dot ${
+      s.state === "busy" ? "on" : s.running ? "on" : ""}"></span>${esc(head)}</div>
+    ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
     ${s.title ? `<div class="sub">${esc(s.title)}</div>` : ""}
     <div class="commit" title="${esc(s.directory)}">${esc(s.directory)}</div>
-    <div class="sub">${s.running ? "この道具は起動中" : "停止"}${s.last_active
+    <div class="sub">${esc(state)}${s.last_active
       ? ` · <span data-ts="${esc(s.last_active)}">${ago(s.last_active)}</span>`
       : ""}</div>
   </div>`;

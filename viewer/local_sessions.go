@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,8 +42,12 @@ type LocalSessionRow struct {
 	Title string `json:"title"`
 	// LastActive は最後に動いた時刻。
 	LastActive string `json:"last_active"`
-	// Running は、いまその道具のプロセスが動いているか (道具単位の判定)。
+	// Running は、いまその道具のプロセスが動いているか。
 	Running bool `json:"running"`
+	// Name はセッションの呼び名 (分かる場合)。Claude Code は台帳に持っている。
+	Name string `json:"name"`
+	// State は busy / idle など、その道具が申告している状態 (分かる場合)。
+	State string `json:"state"`
 }
 
 // LocalSessions は、与えられたプロジェクトのフォルダで動いていたセッションを集める。
@@ -110,6 +115,85 @@ func underRoot(dir, root string) bool {
 // 残る。ファイルの更新時刻が最後に動いた時刻になる。
 
 func claudeSessions(home string) []LocalSessionRow {
+	// まず台帳を読む。名前と状態 (busy / idle) まで分かるので、こちらが本命。
+	if rows := claudeFromRegistry(home); len(rows) > 0 {
+		return rows
+	}
+	// 台帳が無い版では、会話の記録の更新時刻から推し量る。
+	return claudeFromTranscripts(home)
+}
+
+// claudeFromRegistry は Claude Code が持つセッション台帳を読む。
+//
+// `~/.claude/sessions/<pid>.json` に、そのセッションの呼び名・状態・作業フォルダが
+// 入っている。更新時刻から推し量るより正確で、**何をしているか (busy/idle) まで**
+// 分かる。
+//
+// ここに載るのは **このマシンの端末で動いているもの だけ**。クラウドで動いている
+// セッションは手元に記録を持たないので、この経路では見えない (2026-09-09 に確認)。
+func claudeFromRegistry(home string) []LocalSessionRow {
+	dir := filepath.Join(home, ".claude", "sessions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var rows []LocalSessionRow
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var rec struct {
+			SessionID string `json:"sessionId"`
+			Name      string `json:"name"`
+			Cwd       string `json:"cwd"`
+			Status    string `json:"status"`
+			Kind      string `json:"kind"`
+			PID       int    `json:"pid"`
+			UpdatedAt any    `json:"updatedAt"`
+		}
+		if err := json.Unmarshal(raw, &rec); err != nil || rec.Cwd == "" {
+			continue
+		}
+		rows = append(rows, LocalSessionRow{
+			Tool:       "claude-code",
+			Directory:  rec.Cwd,
+			Name:       rec.Name,
+			State:      rec.Status,
+			LastActive: msToTime(rec.UpdatedAt),
+			// 台帳に載っていて、そのプロセスが生きていれば動いている。
+			Running: processAlive(rec.PID),
+		})
+	}
+	return rows
+}
+
+// msToTime はミリ秒の時刻 (文字列でも数値でも来る) を揃える。
+func msToTime(v any) string {
+	var ms int64
+	switch t := v.(type) {
+	case float64:
+		ms = int64(t)
+	case string:
+		n, err := strconv.ParseInt(t, 10, 64)
+		if err != nil {
+			return ""
+		}
+		ms = n
+	default:
+		return ""
+	}
+	if ms <= 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
+}
+
+// claudeFromTranscripts は台帳が無い版のための控え。会話の記録の更新時刻を使う。
+func claudeFromTranscripts(home string) []LocalSessionRow {
 	base := filepath.Join(home, ".claude", "projects")
 	entries, err := os.ReadDir(base)
 	if err != nil {

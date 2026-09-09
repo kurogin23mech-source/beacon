@@ -73,3 +73,29 @@ func TestLocalSessionsNewestFirst(t *testing.T) {
 		t.Errorf("新しい順になっていない: %+v", kept)
 	}
 }
+
+// ミリ秒の時刻は、文字列でも数値でも読めること。
+// 台帳の書き手が型を変えたときに黙って空になるのを防ぐ。
+func TestMsToTime(t *testing.T) {
+	// 時刻はどこで見ても同じになるよう UTC に揃える (現地時間ではない)。
+	want := "2026-09-09T11:52:06Z"
+	ms := int64(1788954726000)
+	if got := msToTime(float64(ms)); got != want {
+		t.Errorf("数値: %q, want %q", got, want)
+	}
+	if got := msToTime("1788954726000"); got != want {
+		t.Errorf("文字列: %q, want %q", got, want)
+	}
+	for _, bad := range []any{nil, "", "abc", float64(0), int64(5)} {
+		if got := msToTime(bad); got != "" {
+			t.Errorf("読めない値 %v から %q が出た", bad, got)
+		}
+	}
+}
+
+// 生きていない番号を「動作中」と言わないこと。
+func TestProcessAliveRejectsInvalidPid(t *testing.T) {
+	if processAlive(0) || processAlive(-1) {
+		t.Error("無効な番号を動作中と判定している")
+	}
+}

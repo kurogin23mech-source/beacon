@@ -3,9 +3,11 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -38,3 +40,16 @@ var (
 	procCache  map[string]bool
 	procCached time.Time
 )
+
+// processAlive は、その番号のプロセスが動いているかを返す。
+// 合図 0 を送ると、存在するかどうかだけを確かめられる。
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+}

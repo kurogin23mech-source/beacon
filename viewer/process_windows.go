@@ -4,6 +4,7 @@ package main
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,3 +51,39 @@ func runningProcessNames() map[string]bool {
 	procCached = time.Now()
 	return out
 }
+
+// processAlive は、その番号のプロセスが動いているかを返す。
+//
+// 台帳に載っているセッションが本当に生きているかを見る。台帳は終了時に必ず
+// 消えるとは限らないので、載っていることだけを根拠にすると「もう居ないもの」を
+// 動作中として並べてしまう。
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	alivePidsMu.Lock()
+	defer alivePidsMu.Unlock()
+	if alivePids == nil || time.Since(alivePidsAt) >= 5*time.Second {
+		alivePids = map[int]bool{}
+		raw, err := exec.Command("tasklist", "/fo", "csv", "/nh").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(raw), "\n") {
+				parts := strings.Split(strings.TrimSpace(line), `","`)
+				if len(parts) < 2 {
+					continue
+				}
+				if n, err := strconv.Atoi(strings.Trim(parts[1], `"`)); err == nil {
+					alivePids[n] = true
+				}
+			}
+		}
+		alivePidsAt = time.Now()
+	}
+	return alivePids[pid]
+}
+
+var (
+	alivePidsMu sync.Mutex
+	alivePids   map[int]bool
+	alivePidsAt time.Time
+)
