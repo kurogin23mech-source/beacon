@@ -1744,8 +1744,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_attention.add_argument("--all-projects", dest="all_projects", action="store_true")
     p_attention.add_argument("--attention-only", dest="attention_only",
                              action="store_true")
-    p_attention.add_argument("--scope", dest="scope", default="")
-    p_attention.add_argument("--target", dest="root_target", default="")
+    # #739 AX high: choices rejects `--scope all`/typo at parse time so it can't
+    # silently escalate to team (over-share). --root (not --target) disambiguates
+    # from `session working --target <kind:id>`.
+    p_attention.add_argument("--scope", dest="scope", default="",
+                             choices=["", "self", "team"])
+    p_attention.add_argument("--root", dest="root_target", default="")
     p_attention.add_argument("--json", action="store_true")
 
     # ---- monitor (ms-44 e-854) ----
@@ -5224,17 +5228,18 @@ def _handle_attention(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help:
         print("Usage: beacon attention [--all-projects] [--attention-only] "
-              "[--scope self|team] [--target <root>] [--json]\n"
+              "[--scope self|team] [--root <id>] [--json]\n"
               "  Default: roster of your sessions grouped by root target "
               "(作業 target / 状態 / activity / 待機, oldest-waiting first within a group).\n"
               "  --attention-only: only 要対応 (awaiting_human / blocked / terminated:failed).\n"
-              "  --scope team: include other members' sessions (default: just yours).")
+              "  --scope team: include other members' sessions (default: just yours).\n"
+              "  --root <id>: filter to one root target (project).")
         return 0
     return _run_commands_py(root, "attention", {
         "BEACON_ATTENTION_ALL_PROJECTS": "1" if getattr(args, "all_projects", False) else "",
         "BEACON_ATTENTION_ATTENTION_ONLY": "1" if getattr(args, "attention_only", False) else "",
         "BEACON_ATTENTION_SCOPE": getattr(args, "scope", "") or "",
-        "BEACON_ATTENTION_TARGET": getattr(args, "root_target", "") or "",
+        "BEACON_ATTENTION_ROOT": getattr(args, "root_target", "") or "",
         "BEACON_JSON": "1" if getattr(args, "json", False) else "",
     })
 

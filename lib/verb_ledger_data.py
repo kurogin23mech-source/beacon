@@ -64,7 +64,7 @@ VERB_LEDGER = {
     "account_rename": {"cls": "R", "secondary": [], "note": ""},
 
     # --- attention (post-memo, ms-159 e-6246) ---
-    "attention": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-159] read-only: セッション名簿(root target ごとに 作業target/状態/activity/待機 を投影)。--attention-only で要対応(awaiting_human/blocked/failed)に絞る。session_attention (--set の記録=R) と別物の一覧(Q)"},
+    "attention": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-159] read-only: セッション名簿(root target ごとに 作業target/状態/activity/待機 を投影)。--attention-only で要対応(awaiting_human/blocked/failed)、--scope self|team、--root <id> で root 絞り。session_attention (--set の記録=R) と別物の一覧(Q)"},
 
     # --- acquisition (post-memo, ms-115 target-class) ---
     "acquisition_add": {"cls": "R", "secondary": [], "note": "[post-memo] 獲得ターゲット起票=台帳追記(R)、milestone add と同型"},

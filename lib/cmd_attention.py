@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import sys
 
 import attention
 from commands_shared import (
@@ -98,7 +99,16 @@ def cmd_attention():
     # scope=self (既定) shows only my sessions; scope=team shows everyone in the
     # project (器: 方針3 — multi-user model, self-default view).
     scope = os.environ.get("BEACON_ATTENTION_SCOPE", "").strip().lower() or "self"
-    root_filter = os.environ.get("BEACON_ATTENTION_TARGET", "").strip()
+    # ms-159 review #739 (AX high): reject an out-of-vocab --scope instead of
+    # letting it fall through to "team" — otherwise `--scope all` (or a typo)
+    # silently ESCALATES scope (shows everyone), a silent no-op/over-share.
+    if scope not in ("self", "team"):
+        print(f"Error: --scope must be 'self' or 'team' (got '{scope}')",
+              file=sys.stderr)
+        sys.exit(2)
+    # root filter (= which root target / project). Named --root (not --target) to
+    # disambiguate from `session working --target <kind:id>` — see #739 AX.
+    root_filter = os.environ.get("BEACON_ATTENTION_ROOT", "").strip()
 
     client, config = _get_api_client()
     _uid, my_email = _read_credentials_for_identity()

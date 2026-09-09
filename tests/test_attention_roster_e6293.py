@@ -174,7 +174,7 @@ class TestCmdAttentionRoster:
         monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "")
         monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "")
         monkeypatch.setenv("BEACON_ATTENTION_SCOPE", "")
-        monkeypatch.setenv("BEACON_ATTENTION_TARGET", "")
+        monkeypatch.setenv("BEACON_ATTENTION_ROOT", "")
         monkeypatch.setenv("BEACON_JSON", "")
         wired.cmd_attention()
         out = capsys.readouterr().out
@@ -189,7 +189,7 @@ class TestCmdAttentionRoster:
         monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "")
         monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "")
         monkeypatch.setenv("BEACON_ATTENTION_SCOPE", "team")
-        monkeypatch.setenv("BEACON_ATTENTION_TARGET", "")
+        monkeypatch.setenv("BEACON_ATTENTION_ROOT", "")
         monkeypatch.setenv("BEACON_JSON", "")
         wired.cmd_attention()
         out = capsys.readouterr().out
@@ -199,7 +199,7 @@ class TestCmdAttentionRoster:
         monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "")
         monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "1")
         monkeypatch.setenv("BEACON_ATTENTION_SCOPE", "")
-        monkeypatch.setenv("BEACON_ATTENTION_TARGET", "")
+        monkeypatch.setenv("BEACON_ATTENTION_ROOT", "")
         monkeypatch.setenv("BEACON_JSON", "")
         wired.cmd_attention()
         out = capsys.readouterr().out
@@ -238,11 +238,63 @@ class TestDispatchParity:
         from beacon_cli import main as main_mod
         rc = main_mod.main([
             "attention", "--attention-only", "--scope", "team",
-            "--target", "ms-159", "--json"])
+            "--root", "proj-1", "--json"])
         assert rc == 0
         env = captured["env"]
         assert env["BEACON_ATTENTION_ATTENTION_ONLY"] == "1"
         assert env["BEACON_ATTENTION_SCOPE"] == "team"
-        assert env["BEACON_ATTENTION_TARGET"] == "ms-159"
+        assert env["BEACON_ATTENTION_ROOT"] == "proj-1"
         assert env["BEACON_JSON"] == "1"
         assert captured["cmd"][-1] == "attention"
+
+    def test_invalid_scope_rejected_at_parse(self, captured, project_dir, no_bash):
+        # #739 AX high: argparse choices rejects `--scope all` (would else
+        # silently escalate to team). main() returns non-zero and never dispatches.
+        from beacon_cli import main as main_mod
+        rc = main_mod.main(["attention", "--scope", "all"])
+        assert rc != 0
+        assert captured.get("cmd") is None  # never reached commands.py
+
+
+class TestScopeValidation:
+    """#739 AX high: an out-of-vocab --scope must be rejected, not silently
+    treated as team (over-share). Pinned at the commands.py layer (the backstop
+    behind both frontends)."""
+
+    @pytest.fixture
+    def wired(self, monkeypatch):
+        import cmd_attention
+
+        class FakeClient:
+            def list_user_sessions(self, **k):
+                return []
+
+            def list_sessions(self, pid, **k):
+                return []
+
+        monkeypatch.setattr(cmd_attention, "_get_api_client", lambda: (FakeClient(), {}))
+        monkeypatch.setattr(cmd_attention, "_resolve_bus_project_id", lambda cfg: "proj")
+        monkeypatch.setattr(cmd_attention, "_read_credentials_for_identity",
+                            lambda: ("", "me"))
+        return cmd_attention
+
+    def test_invalid_scope_exits(self, wired, monkeypatch):
+        # (SELF/TEAM are normalized via .lower() → valid; those aren't "invalid".)
+        for bad in ("all", "everyone", "mine", "you"):
+            monkeypatch.setenv("BEACON_ATTENTION_SCOPE", bad)
+            monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "")
+            monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "")
+            monkeypatch.setenv("BEACON_ATTENTION_ROOT", "")
+            monkeypatch.setenv("BEACON_JSON", "")
+            with pytest.raises(SystemExit) as ei:
+                wired.cmd_attention()
+            assert ei.value.code == 2
+
+    def test_valid_scopes_ok(self, wired, monkeypatch, capsys):
+        for good in ("", "self", "team"):
+            monkeypatch.setenv("BEACON_ATTENTION_SCOPE", good)
+            monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "")
+            monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "")
+            monkeypatch.setenv("BEACON_ATTENTION_ROOT", "")
+            monkeypatch.setenv("BEACON_JSON", "")
+            wired.cmd_attention()  # no raise
