@@ -1107,6 +1107,9 @@ _NOUN_SCOPE = {
     # L2 — class-abstraction: operate on a Target via the abstraction.
     "claim": "L2", "doc": "L2", "review": "L2", "status": "L2",
     "summary": "L2", "target": "L2",
+    # ms-170 e-6344 — 盤の閲覧。status と同じく occupation の投影越しに
+    # Target を読むだけで、職種固有のコレクションを直読みしない。
+    "view": "L2",
     # deliverable: the produced-value projection of adopted target-classes via the
     # abstraction (occupation.project_deliverables + deliverable_resolve); rule is
     # profession-shared — dev surfaces milestone→機能, sales would surface

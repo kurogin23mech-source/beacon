@@ -390,6 +390,9 @@ from cmd_deploy import (  # noqa: F401
 
 # ms-127 e-4849: milestone family moved to lib/cmd_milestone.py. Re-imported
 # here so dispatch + external `commands.cmd_milestone_*` keep resolving. Family-
+# ms-170 e-6344 — `beacon view` (手元で盤を立ち上げてブラウザで見る)。
+from cmd_view import cmd_view  # noqa: F401
+
 # private helpers/constants stay canonical in cmd_milestone (patch there per the
 # e-4320 rule).
 from cmd_milestone import (  # noqa: F401
@@ -10914,6 +10917,7 @@ if __name__ == "__main__":
         "help_json": cmd_help_json,
         "help_render": cmd_help_render,
         "doctor": cmd_doctor,
+        "view": cmd_view,
     }
     fn = commands.get(cmd)
     # ms-54 e-1319: the CLI-side heartbeat (formerly bumped here, ms-57 e-1035)

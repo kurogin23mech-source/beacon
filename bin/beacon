@@ -4649,6 +4649,22 @@ EOF
     doctor)
         python3 "$COMMANDS_PY" doctor "${@:2}"
         ;;
+    view)
+        # ms-170 e-6344 — 手元で盤を立ち上げてブラウザで見る。ローカル /
+        # クラウドのどちらでも同じ画面 (取得元は変換層が吸収済)。
+        ensure_project
+        shift
+        _view_port=""; _view_no_open=""; _view_json=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --port) _view_port="$2"; shift 2 ;;
+                --no-open) _view_no_open="1"; shift ;;
+                --json) _view_json="1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        BEACON_VIEW_PORT="$_view_port"             BEACON_VIEW_NO_OPEN="$_view_no_open"             BEACON_JSON="$_view_json"             python3 "$COMMANDS_PY" view
+        ;;
     cycle)
         ensure_project
         shift

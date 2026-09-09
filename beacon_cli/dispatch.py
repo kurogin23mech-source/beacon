@@ -1413,6 +1413,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
+    # `beacon view` — 手元で盤を立ち上げてブラウザで見る (ms-170 e-6344)。
+    # bash 側と同時に足すこと: 片方だけだと Windows で使えない (e-5381 の家族)。
+    p_view = sub.add_parser("view", add_help=False)
+    p_view.add_argument("--port", default="")
+    p_view.add_argument("--no-open", dest="view_no_open", action="store_true")
+    p_view.add_argument("--json", action="store_true")
     p_project = sub.add_parser("project", add_help=False)
     p_project.add_argument("--help", "-h", action="store_true", dest="show_help")
     project_sub = p_project.add_subparsers(dest="project_cmd", metavar="<subcmd>")
@@ -4260,6 +4266,15 @@ def _handle_doctor(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "doctor", {})
 
 
+def _handle_view(root: Path, args: argparse.Namespace) -> int:
+    """`beacon view` (ms-170 e-6344) — bash 側と同じ環境変数の渡し方に揃える。"""
+    return _run_commands_py(root, "view", {
+        "BEACON_VIEW_PORT": getattr(args, "port", "") or "",
+        "BEACON_VIEW_NO_OPEN": "1" if getattr(args, "view_no_open", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
 def _handle_pr(root: Path, args: argparse.Namespace) -> int:
     """Mirror of bash cmd_pr (10 subcommands).
 
@@ -5782,6 +5797,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "trek": _handle_trek,
     "project": _handle_project,
     "doctor": _handle_doctor,
+    "view": _handle_view,
     "skill": _handle_skill,
     "auth": _handle_auth,
     "cloud": _handle_cloud,
