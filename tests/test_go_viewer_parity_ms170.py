@@ -407,3 +407,66 @@ def test_can_switch_projects_while_one_is_open():
         proc.terminate()
         proc.wait(timeout=10)
         shutil.rmtree(other, ignore_errors=True)
+
+
+@needs_go
+def test_local_sessions_survive_switching_to_cloud():
+    """クラウドに切り替えても、このマシンのセッションが消えないこと。
+
+    名乗っているセッションの名簿と、このマシンで動いているセッションは別物で、
+    後者は取得元と関係なく「この機械で何が動いているか」を表す。切り替えた瞬間に
+    消えると「自分のセッションが居なくなった」ように見える (2026-09-10 の指摘)。
+
+    クラウドに繋げない環境では確かめようがないので、その場合は飛ばす。
+    """
+    import socket
+    import time
+    import urllib.error
+    import urllib.request
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    proc = subprocess.Popen(
+        [BINARY, "--path", REPO, "--no-open", "--port", str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(base + "/api/board", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        local = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=30).read())
+        if not local.get("local_sessions"):
+            pytest.skip("このマシンで観測できるセッションが無い環境")
+
+        # クラウドに繋げるか (未ログイン / 不通なら確かめようがない)。
+        try:
+            projects = json.loads(urllib.request.urlopen(
+                base + "/api/cloud/projects", timeout=30).read())
+        except urllib.error.HTTPError:
+            pytest.skip("クラウドにログインしていない環境")
+        except Exception:
+            pytest.skip("クラウドに繋げない環境")
+        if not projects:
+            pytest.skip("参加しているクラウドのプロジェクトが無い")
+
+        body = json.dumps({"project_id": projects[0]["id"]}).encode("utf-8")
+        req = urllib.request.Request(
+            base + "/api/cloud/open", data=body,
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=120)
+
+        cloud = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=120).read())
+        assert cloud["source"]["kind"] == "cloud"
+        assert cloud.get("local_sessions"),             "クラウドに切り替えたら、このマシンのセッションが消えた"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

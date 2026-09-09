@@ -329,19 +329,39 @@ func (s *Server) buildBoard() (*Board, error) {
 	if err != nil {
 		return nil, err
 	}
+	var board *Board
 	if s.cloud != nil {
 		// クラウドに繋いだときだけ、Beacon に名乗っているセッションの名簿が取れる。
 		// 名簿もドキュメントも、取れなくても盤は出す (見えないことより出ないことの
 		// ほうが困る)。
 		sessions, _ := s.cloud.Sessions()
 		docs, _ := s.cloud.Documents()
-		return BuildBoard(p, SourceCloud, s.cloud.ProjectID, docs, sessions), nil
+		board = BuildBoard(p, SourceCloud, s.cloud.ProjectID, docs, sessions)
+	} else {
+		board = BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir), nil)
 	}
-	board := BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir), nil)
-	// このマシンで動いているセッションを添える (ms-171)。取れなくても盤は出す。
-	board.LocalSessions = LocalSessions(
-		filepath.Dir(s.src.BeaconDir), 24*time.Hour, time.Now())
+
+	// このマシンで動いているセッションは **どちらの取得元でも添える**。
+	//
+	// クラウドに切り替えた瞬間にこれが消えると、「自分のセッションが居なくなった」
+	// ように見える (2026-09-10 の指摘)。名乗っているセッションの名簿とは別物で、
+	// 取得元とは関係なく「この機械で何が動いているか」を表すもの。
+	// 取れなくても盤は出す。
+	if root := s.localRoot(); root != "" {
+		board.LocalSessions = LocalSessions(root, 24*time.Hour, time.Now())
+	}
 	return board, nil
+}
+
+// localRoot は、このマシンのセッションを探す起点。
+//
+// ローカルを開いていればその場所、クラウドを見ているときは **起動した場所** を使う。
+// クラウドの盤を見ていても、手元で動いているセッションは起動した場所のものだから。
+func (s *Server) localRoot() string {
+	if s.src != nil {
+		return filepath.Dir(s.src.BeaconDir)
+	}
+	return s.startDir
 }
 
 // cloudEmail は保存済みの認証情報の持ち主を返す。未ログインなら空。
