@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 //go:embed page.html
@@ -116,7 +118,29 @@ func (s *Server) handler() http.Handler {
 			// (使えない入口を並べておくと、押しても何も起きない状態になる)。
 			"cloud_available": false,
 			"cloud_reason":    "クラウドへの接続はこの版では未対応です (次の段階で対応します)",
+			// 選択ダイアログは **このビューワーが動いている機械** に開く。
+			// サーバに設置した場合、見ている人の手元ではなくサーバ側に出てしまい
+			// 何も起きないように見えるので、その場合は入口ごと出さない。
+			"picker_available": isLoopback(s.Host),
 		})
+	})
+
+	// フォルダ選択ダイアログを出して、選ばれた場所を返す。
+	mux.HandleFunc("/api/pick-folder", func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopback(s.Host) {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "この盤はサーバで動いているため、ダイアログはお使いの機械に出せません",
+			})
+			return
+		}
+		path, err := PickFolder(s.beaconDir())
+		if err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		// 選ばずに閉じた場合は空。これは失敗ではないので、そのまま返す。
+		writeJSON(w, map[string]string{"path": path})
 	})
 
 	// 場所を渡してプロジェクトを開き直す。起動し直さずに切り替えられるようにする。
@@ -164,7 +188,11 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 		// 盤は開くたびに読み直す。自動更新で最新が出るようにするため。
-		writeJSON(w, BuildBoard(p, SourceLocal, "", nil, nil))
+		board := BuildBoard(p, SourceLocal, "", nil, nil)
+		// このマシンで動いているセッションを添える (ms-171)。取れなくても盤は出す。
+		board.LocalSessions = LocalSessions(
+			filepath.Dir(s.src.BeaconDir), 24*time.Hour, time.Now())
+		writeJSON(w, board)
 	})
 
 	mux.HandleFunc("/api/target/", func(w http.ResponseWriter, r *http.Request) {

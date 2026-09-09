@@ -10,6 +10,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 )
 
 func main() {
@@ -39,9 +41,14 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
+		board := BuildBoard(p, SourceLocal, "", nil, nil)
+		// 画面経由と同じ中身にする。ここを揃えないと、目で見たものと道具に渡した
+		// ものが食い違う。
+		board.LocalSessions = LocalSessions(
+			filepath.Dir(src.BeaconDir), 24*time.Hour, time.Now())
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetEscapeHTML(false)
-		if err := enc.Encode(BuildBoard(p, SourceLocal, "", nil, nil)); err != nil {
+		if err := enc.Encode(board); err != nil {
 			fail(err)
 		}
 		return

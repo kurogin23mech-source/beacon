@@ -48,6 +48,15 @@ type Board struct {
 	Sessions      []SessionRow   `json:"sessions"`
 	Source        Source         `json:"source"`
 	Unsupported   *Unsupported   `json:"unsupported,omitempty"`
+
+	// LocalSessions は **このマシンの上で観測できた** 作業セッション (ms-171)。
+	//
+	// Beacon の名簿 (Sessions) とは届く範囲が根本的に違うので、別の欄にしてある。
+	// Sessions はどのマシンからでも見えるが、こちらはこの機械の上だけ。混ぜると
+	// 「相手のマシンの分も見えているはず」と誤解させる。
+	//
+	// Python 版はこの観測を行わないため、この欄は Go 版だけが持つ。
+	LocalSessions []LocalSessionRow `json:"local_sessions,omitempty"`
 }
 
 type BoardProject struct {

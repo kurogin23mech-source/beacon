@@ -80,6 +80,8 @@
     background: color-mix(in srgb, var(--active) 18%, transparent);
     white-space: nowrap;
   }
+  /* このマシンで拾ったセッションは、Beacon の名簿と見分けが付くようにする。 */
+  .session.local { border-style: dashed; }
   .nobody { font-size: 11px; color: var(--dim); }
   .bar { height: 5px; border-radius: 3px; background: var(--faint); position: relative; }
   .bar span {
@@ -170,6 +172,18 @@ function sessionCard(s) {
     ${s.target ? `<div class="target">${esc(s.target)}</div>` : ""}
     ${commit}
     <div class="sub">${s.live ? "稼働中" : "停止"}${
+      s.last_active ? " · " + ago(s.last_active) : ""}</div>
+  </div>`;
+}
+
+// このマシンで拾ったセッションの札。Beacon の名簿とは見分けが付く形にする
+// (届く範囲が違うので、同じ見た目にしてはいけない)。
+function localCard(s) {
+  return `<div class="session local">
+    <div class="who"><span class="dot ${s.running ? "on" : ""}"></span>${esc(s.tool)}</div>
+    ${s.title ? `<div class="sub">${esc(s.title)}</div>` : ""}
+    <div class="commit" title="${esc(s.directory)}">${esc(s.directory)}</div>
+    <div class="sub">${s.running ? "この道具は起動中" : "停止"}${
       s.last_active ? " · " + ago(s.last_active) : ""}</div>
   </div>`;
 }
@@ -272,6 +286,7 @@ function render(board) {
   const closed = targets.filter(t => !t.is_open);
 
   const sessions = board.sessions || [];
+  const local = board.local_sessions || [];
   // 1 件でも名簿が取れていれば「誰も付いていない対象」は本当に無人と言える。
   // 1 件も無いときは、名簿そのものが取れていないだけの可能性が高い。
   const rosterKnown = sessions.length > 0;
@@ -297,14 +312,22 @@ function render(board) {
     ${notice}
 
     <div class="band">
-      <div class="band-title">稼働中のセッション ${sessions.length}</div>
+      <div class="band-title">Beacon に名乗っているセッション ${sessions.length}</div>
       ${sessions.length
         ? `<div class="sessions">${sessions.map(sessionCard).join("")}</div>`
-        : `<p class="empty">セッションの名簿が取れていません。
+        : `<p class="empty">名簿が取れていません。
              ローカルのデータだけを読んでいるため、誰がどの対象を進めているかは分かりません
-             (稼働状況はクラウドに繋いだときに出ます)。
+             (どのマシンの分も見えるこの名簿は、クラウドに繋いだときに出ます)。
              <br>このため、下の一覧でも担当の有無は表示していません。</p>`}
     </div>
+
+    ${local.length ? `<div class="band">
+      <div class="band-title">このマシンで動いているセッション ${local.length}</div>
+      <div class="sessions">${local.map(localCard).join("")}</div>
+      <p class="empty" style="margin-top:8px;">Beacon に名乗っていないセッションを、
+        このマシンの記録から拾ったものです。<b>他のマシンの分は見えません</b>
+        (何も送っていないため、届く経路がありません)。</p>
+    </div>` : ""}
 
     <div class="section-title">進行中 / 担当あり (${focus.length})</div>
     <div class="rows">${focus.map(t => targetRow(t, owners[t.id] || [], rosterKnown)).join("")
@@ -347,11 +370,15 @@ function renderPicker(state) {
     <div class="band">
       <div class="band-title">フォルダから開く</div>
       <p class="empty">Beacon プロジェクトの場所 (.beacon があるフォルダ、
-        またはそれを含むフォルダ) を貼り付けてください。</p>
+        またはそれを含むフォルダ) を選ぶか、貼り付けてください。</p>
       <div style="display:flex; gap:8px; margin-top:8px;">
         <input id="path" type="text" style="flex:1; padding:7px 10px; font:inherit;
           border:1px solid var(--line); border-radius:6px; background:transparent;
           color:inherit;" placeholder="C:\\Users\\… \\my-project">
+        ${state.picker_available !== false ? `<button id="browse"
+          style="padding:7px 14px; font:inherit; cursor:pointer;
+          border:1px solid var(--line); border-radius:6px; background:transparent;
+          color:inherit;">選ぶ…</button>` : ""}
         <button id="open" style="padding:7px 16px; font:inherit; cursor:pointer;
           border:1px solid var(--line); border-radius:6px; background:transparent;
           color:inherit;">開く</button>
@@ -385,6 +412,20 @@ function renderPicker(state) {
       refresh();
     } catch (e) {
       msg.textContent = "開けませんでした: " + e;
+    }
+  };
+  const browse = document.getElementById("browse");
+  if (browse) browse.onclick = async () => {
+    msg.textContent = "選択ダイアログを開いています…";
+    try {
+      const r = await fetch("/api/pick-folder");
+      const d = await r.json();
+      if (d.error) { msg.textContent = d.error; return; }
+      msg.textContent = "";
+      // 選ばずに閉じた場合は空。何も起きなかったことにする。
+      if (d.path) { input.value = d.path; submit(); }
+    } catch (e) {
+      msg.textContent = "選択ダイアログを開けませんでした: " + e;
     }
   };
   document.getElementById("open").onclick = submit;

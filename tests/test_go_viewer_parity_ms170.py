@@ -62,9 +62,14 @@ def _go_board(path):
                           capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
     board = json.loads(proc.stdout.decode("utf-8"))
-    # ``unsupported`` は Go 版だけが持つ「投影できなかったもの」の通知欄。
-    # Python 版には無いので、突き合わせからは外す (存在自体は別の試験で確かめる)。
+    # 以下は Go 版だけが持つ欄なので、突き合わせからは外す
+    # (それぞれの中身は専用の試験で確かめている)。
+    #
+    # unsupported    … 投影できなかった対象クラスの通知
+    # local_sessions … このマシンで観測したセッション (ms-171)。Python 版は
+    #                  この観測を行わないため、盤の共有契約には含めない。
     board.pop("unsupported", None)
+    board.pop("local_sessions", None)
     return board
 
 
