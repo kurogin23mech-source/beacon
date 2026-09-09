@@ -319,3 +319,83 @@ def test_bad_path_is_refused_with_a_reason():
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@needs_go
+def test_can_switch_projects_while_one_is_open():
+    """開いている最中でも、別のプロジェクトに切り替えられること。
+
+    最初に見た場所に縛られると、複数のプロジェクトを見たい人が起動し直すことに
+    なる (2026-09-09 の要望)。
+    """
+    import socket
+    import time
+    import urllib.request
+
+    import store_local
+    import store_sqlite
+
+    # 切り替え先として、別の場所に小さなプロジェクトを 1 つ作る。
+    other = tempfile.mkdtemp()
+    beacon_dir = os.path.join(other, ".beacon")
+    os.makedirs(beacon_dir)
+    with open(os.path.join(beacon_dir, "project.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "name": "別のプロジェクト", "objective": "切り替えの確認",
+            "profession": "dev",
+            "milestones": [{"id": "ms-1", "label": "最初の一歩",
+                            "status": "in_progress", "entries": []}],
+        }, f, ensure_ascii=False)
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    proc = subprocess.Popen(
+        [BINARY, "--path", REPO, "--no-open", "--port", str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(base + "/api/board", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        first = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=10).read())
+        assert first["project"]["name"] == "Beacon"
+
+        # いま何を開いているかが分かること (切り替え画面で見せるのに要る)。
+        state = json.loads(
+            urllib.request.urlopen(base + "/api/state", timeout=5).read())
+        assert state["has_project"] is True
+        assert state["path"], "開いている場所が分からない"
+
+        # 切り替える。
+        body = json.dumps({"path": other}).encode("utf-8")
+        req = urllib.request.Request(
+            base + "/api/open", data=body,
+            headers={"Content-Type": "application/json"})
+        assert json.loads(urllib.request.urlopen(req, timeout=10).read())["ok"]
+
+        second = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=10).read())
+        assert second["project"]["name"] == "別のプロジェクト"
+        assert [t["id"] for t in second["targets"]] == ["ms-1"]
+
+        # 元へも戻せること (行き止まりにしない)。
+        body = json.dumps({"path": os.path.abspath(REPO)}).encode("utf-8")
+        req = urllib.request.Request(
+            base + "/api/open", data=body,
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+        back = json.loads(
+            urllib.request.urlopen(base + "/api/board", timeout=10).read())
+        assert back["project"]["name"] == "Beacon"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        shutil.rmtree(other, ignore_errors=True)

@@ -115,6 +115,12 @@
     border-radius: 8px; padding: 9px 12px; margin: 14px 0;
     font-size: 12.5px;
   }
+  .linkish {
+    font: inherit; font-size: 11px; color: inherit; opacity: .8;
+    background: transparent; border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 8px; cursor: pointer;
+  }
+  .linkish:hover { opacity: 1; background: var(--faint); }
   .err { color: #f85149; }
   .empty { color: var(--dim); font-size: 12.5px; padding: 4px 0; }
   .section-title {
@@ -138,6 +144,11 @@ let lastBoard = null;
 let lastBoardJSON = "";
 // 開いた詳細の中身を覚えておく。画面を作り直したときに取り直さず戻せるようにする。
 const detailCache = new Map();
+// いま何を読んでいるか (盤の形には含めない情報なので、別に持つ)。
+let viewerState = {};
+// 選ぶ画面を開いている間は自動更新を止める。止めないと、入力している最中に
+// 盤へ戻されてしまう。
+let pickerOpen = false;
 
 function ago(iso) {
   if (!iso) return "";
@@ -279,6 +290,7 @@ function render(board) {
         &nbsp;·&nbsp; 取得元: ${esc(src.kind)}${
           src.project_id ? " / " + esc(src.project_id) : ""}
         &nbsp;·&nbsp; 職種: ${esc(p.profession)}
+        &nbsp;·&nbsp; <button id="switch" class="linkish">別のプロジェクトを開く</button>
       </div>
     </header>
 
@@ -307,6 +319,7 @@ function render(board) {
     </details>` : ""}
   `;
   wireRows();
+  document.getElementById("switch").onclick = openPicker;
 }
 
 // --- プロジェクトがまだ決まっていないとき ---------------------------------
@@ -316,12 +329,20 @@ function renderPicker(state) {
   const cloud = state.cloud_available
     ? `<button id="cloud">クラウドから選ぶ</button>`
     : `<p class="empty">${esc(state.cloud_reason || "クラウドはまだ使えません")}</p>`;
+  // 既に何かを開いているなら、やめて戻れるようにする。切り替えるつもりで押した人を
+  // 行き止まりにしない。
+  const back = state.has_project
+    ? `<button id="back" class="linkish">やめて戻る</button>`
+    : "";
+  const where = state.has_project
+    ? `いま開いているのは ${esc(state.path || "")} です。`
+    : `探した場所: ${esc(state.cwd || "")} — ここと、その上のフォルダに
+       Beacon のデータがありませんでした。`;
   document.getElementById("app").innerHTML = `
     <header>
       <h1>Beacon 盤</h1>
-      <div class="objective">見るプロジェクトを選んでください。</div>
-      <div class="meta">探した場所: ${esc(state.cwd || "")}${
-        ""} — ここと、その上のフォルダに Beacon のデータがありませんでした。</div>
+      <div class="objective">見るプロジェクトを選んでください。 ${back}</div>
+      <div class="meta">${where}</div>
     </header>
     <div class="band">
       <div class="band-title">フォルダから開く</div>
@@ -357,6 +378,7 @@ function renderPicker(state) {
       const d = await r.json();
       if (!r.ok || d.error) { msg.textContent = d.error || "開けませんでした"; return; }
       // 開けたら盤へ。以後は通常の更新に乗る。
+      pickerOpen = false;
       lastBoardJSON = "";
       detailCache.clear();
       opened.clear();
@@ -367,18 +389,36 @@ function renderPicker(state) {
   };
   document.getElementById("open").onclick = submit;
   input.onkeydown = e => { if (e.key === "Enter") submit(); };
+  if (state.has_project) input.value = state.path || "";
   input.focus();
+
+  const backBtn = document.getElementById("back");
+  if (backBtn) backBtn.onclick = () => {
+    pickerOpen = false; lastBoardJSON = ""; refresh();
+  };
+}
+
+// 盤を見ている状態から、選ぶ画面へ移る。
+async function openPicker() {
+  pickerOpen = true;
+  try {
+    viewerState = await (await fetch("/api/state")).json();
+  } catch (e) { /* 取れなくても選ぶ画面自体は出す */ }
+  renderPicker(viewerState);
 }
 
 async function refresh() {
+  // 選んでいる最中は触らない。
+  if (pickerOpen) return;
   try {
     const r = await fetch("/api/board");
     const b = await r.json();
     if (r.status === 404 || (b.error && !lastBoard)) {
       // まだプロジェクトが決まっていない。選ぶ画面を出す (一度だけ組み立てる)。
       if (!document.getElementById("path")) {
-        const st = await (await fetch("/api/state")).json();
-        renderPicker(st);
+        viewerState = await (await fetch("/api/state")).json();
+        pickerOpen = true;
+        renderPicker(viewerState);
       }
       return;
     }
