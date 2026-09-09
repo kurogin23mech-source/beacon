@@ -42,6 +42,10 @@ import work_model
 # 互換を壊す変更 (フィールドの削除 / 意味の変更) をしたら上げる。追加は上げない。
 SCHEMA_VERSION = 1
 
+# 出荷や配置は何百件と溜まるので、盤には直近だけを出す。全部並べると、
+# 「今どうなっているか」を読むための面が履歴で埋まってしまう。
+RECENT_LIMIT = 10
+
 # 取得元ラベルの許容値。表示のためだけに存在し、他のフィールドに影響しない。
 SOURCE_LOCAL = "local"
 SOURCE_CLOUD = "cloud"
@@ -75,6 +79,43 @@ def _target_row(row: dict) -> dict:
         "is_done": work_model.is_done(row),
         "is_open": work_model.is_open(row),
         "detail": dict(row.get("detail") or {}),
+    }
+
+
+def _operation_row(op: dict) -> dict:
+    """終わりなく回り続ける仕事 (監視 / 定期実行) 1 件を表示層の形にする。
+
+    盤に出す理由: マイルストーンは「いつか終わるもの」だが、監視や定期実行は
+    終わらない。両方を見ないと「今このプロジェクトで何が動いているか」は分からない。
+    """
+    schedule = op.get("schedule") or {}
+    return {
+        "id": op.get("id", ""),
+        "title": op.get("title", ""),
+        "status": op.get("status", ""),
+        # どれくらいの間隔で回るか (毎日 / 毎週 など)。空なら不定期。
+        "frequency": schedule.get("frequency", "") if isinstance(schedule, dict) else "",
+        "opened_at": op.get("opened_at", ""),
+    }
+
+
+def _release_row(rel: dict) -> dict:
+    """出荷 1 件。"""
+    return {
+        "id": rel.get("id", ""),
+        "version": rel.get("semver", ""),
+        "date": rel.get("date", ""),
+        "description": rel.get("description", ""),
+    }
+
+
+def _deployment_row(dep: dict) -> dict:
+    """配置 1 件 (どこに出したか)。"""
+    return {
+        "id": dep.get("id", ""),
+        "date": dep.get("date", ""),
+        "environment": dep.get("environment", ""),
+        "description": dep.get("description", ""),
     }
 
 
@@ -163,6 +204,14 @@ def build_board_view(
             "open": int(counts.get("open") or 0),
         },
         "targets": [_target_row(r) for r in projection.get("targets") or []],
+        # 終わらない仕事 (監視 / 定期実行)。マイルストーンだけでは
+        # 「今このプロジェクトで何が動いているか」が分からないため添える。
+        "operations": [_operation_row(o) for o in data.get("operations") or []],
+        # 出荷と配置。直近だけを出す (全部並べると盤が読めなくなる)。
+        "releases": [_release_row(r)
+                     for r in (data.get("releases") or [])[-RECENT_LIMIT:]],
+        "deployments": [_deployment_row(d)
+                        for d in (data.get("deployments") or [])[-RECENT_LIMIT:]],
         # 生み出した価値 (deliverable) の投影。採用している Target クラスが
         # 増えれば自動で寄与が増えるので、ここで列挙し直さない。
         "deliverables": list(projection.get("deliverables") or []),

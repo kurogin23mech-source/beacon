@@ -19,6 +19,10 @@ const (
 	SourceCloud = "cloud"
 )
 
+// 出荷や配置は何百件と溜まるので、盤には直近だけを出す。Python 側の
+// RECENT_LIMIT と同じ数にすること (違うと盤の中身がずれる)。
+const recentLimit = 10
+
 // 記録の状態。Python 側 (work_model) と同じ値を使う。
 const (
 	statusDone      = "done"
@@ -43,6 +47,9 @@ type Board struct {
 	Project       BoardProject   `json:"project"`
 	Progress      Counts         `json:"progress"`
 	Targets       []TargetRow    `json:"targets"`
+	Operations    []OperationRow `json:"operations"`
+	Releases      []ReleaseRow   `json:"releases"`
+	Deployments   []DeployRow    `json:"deployments"`
 	Deliverables  []any          `json:"deliverables"`
 	Documents     []DocumentRow  `json:"documents"`
 	Sessions      []SessionRow   `json:"sessions"`
@@ -87,6 +94,31 @@ type TargetRow struct {
 	IsDone    bool           `json:"is_done"`
 	IsOpen    bool           `json:"is_open"`
 	Detail    map[string]any `json:"detail"`
+}
+
+// OperationRow は終わらない仕事 1 件。
+type OperationRow struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	Frequency string `json:"frequency"`
+	OpenedAt  string `json:"opened_at"`
+}
+
+// ReleaseRow は出荷 1 件。
+type ReleaseRow struct {
+	ID          string `json:"id"`
+	Version     string `json:"version"`
+	Date        string `json:"date"`
+	Description string `json:"description"`
+}
+
+// DeployRow は配置 1 件。
+type DeployRow struct {
+	ID          string `json:"id"`
+	Date        string `json:"date"`
+	Environment string `json:"environment"`
+	Description string `json:"description"`
 }
 
 type DocumentRow struct {
@@ -280,6 +312,9 @@ func BuildBoard(p *Project, source, projectID string,
 		},
 		Progress:     counts,
 		Targets:      rows,
+		Operations:   operationRows(p.Operations),
+		Releases:     releaseRows(p.Releases),
+		Deployments:  deployRows(p.Deployments),
 		Deliverables: deliverablesFor(profession),
 		Documents:    documents,
 		Sessions:     sessions,
@@ -291,6 +326,48 @@ func BuildBoard(p *Project, source, projectID string,
 // derefOrNil は文字列の有無をそのまま保つ。値が無ければ null として出す。
 // deliverablesFor は職種に応じた「生み出した価値」の投影を返す。
 // 移植したのは開発職種だけ。他の職種は空で返し、盤の形は保つ。
+func operationRows(ops []Operation) []OperationRow {
+	rows := make([]OperationRow, 0, len(ops))
+	for _, o := range ops {
+		rows = append(rows, OperationRow{
+			ID: o.ID, Title: o.Title, Status: o.Status,
+			Frequency: o.Schedule.Frequency, OpenedAt: o.OpenedAt,
+		})
+	}
+	return rows
+}
+
+// tail は直近のものだけを取り出す。
+func tail[T any](xs []T, n int) []T {
+	if len(xs) > n {
+		return xs[len(xs)-n:]
+	}
+	return xs
+}
+
+func releaseRows(rels []Release) []ReleaseRow {
+	rels = tail(rels, recentLimit)
+	rows := make([]ReleaseRow, 0, len(rels))
+	for _, r := range rels {
+		rows = append(rows, ReleaseRow{
+			ID: r.ID, Version: r.Semver, Date: r.Date, Description: r.Description,
+		})
+	}
+	return rows
+}
+
+func deployRows(deps []Deployment) []DeployRow {
+	deps = tail(deps, recentLimit)
+	rows := make([]DeployRow, 0, len(deps))
+	for _, d := range deps {
+		rows = append(rows, DeployRow{
+			ID: d.ID, Date: d.Date, Environment: d.Environment,
+			Description: d.Description,
+		})
+	}
+	return rows
+}
+
 func deliverablesFor(profession string) []any {
 	if profession == "dev" {
 		return devDeliverables()

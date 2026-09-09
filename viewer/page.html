@@ -343,6 +343,11 @@ function render(board) {
   const sessions = board.sessions || [];
   const local = board.local_sessions || [];
   const docs = board.documents || [];
+  const ops = board.operations || [];
+  const rels = board.releases || [];
+  const deps = board.deployments || [];
+  // 終わらない仕事のうち、いま回っているものだけを表に出す (閉じたものは畳む)。
+  const opsOpen = ops.filter(o => o.status === "open" || o.status === "in_progress");
   // 1 件でも名簿が取れていれば「誰も付いていない対象」は本当に無人と言える。
   // 1 件も無いときは、名簿そのものが取れていないだけの可能性が高い。
   const rosterKnown = sessions.length > 0;
@@ -386,6 +391,17 @@ function render(board) {
         (何も送っていないため、届く経路がありません)。</p>
     </div>` : ""}
 
+    ${opsOpen.length ? `<div class="band">
+      <div class="band-title">回り続けている仕事 ${opsOpen.length}</div>
+      <div class="sessions">${opsOpen.map(o => `<div class="session">
+        <div class="who">${esc(o.title)}</div>
+        <div class="sub">${esc(o.id)}${o.frequency ? " · " + esc(o.frequency) : ""}</div>
+        <div class="sub">${esc(o.status)}</div>
+      </div>`).join("")}</div>
+      <p class="empty" style="margin-top:8px;">マイルストーンは「いつか終わるもの」ですが、
+        監視や定期実行は終わりません。両方を見ないと、いま何が動いているかは分かりません。</p>
+    </div>` : ""}
+
     <div class="section-title">進行中 / 担当あり (${focus.length})</div>
     <div class="rows" id="g-focus">${focus.length ? "" :
       `<p class="empty">進行中の対象はありません。</p>`}</div>
@@ -394,6 +410,30 @@ function render(board) {
       openGroups.has("docs") ? " open" : ""}>
       <summary>ドキュメント (${docs.length})</summary>
       <div class="rows" id="g-docs"></div>
+    </details>` : ""}
+
+    ${rels.length ? `<details class="group" data-group="rels"${
+      openGroups.has("rels") ? " open" : ""}>
+      <summary>直近の出荷 (${rels.length})</summary>
+      <div class="rows">${rels.slice().reverse().map(r => `<div class="row"
+          style="cursor:default">
+          <div class="id">${esc(r.version)}</div>
+          <div class="label" title="${esc(r.description)}">${esc(r.description)}</div>
+          <div class="count">${esc((r.date || "").slice(0, 10))}</div>
+          <div></div>
+        </div>`).join("")}</div>
+    </details>` : ""}
+
+    ${deps.length ? `<details class="group" data-group="deps"${
+      openGroups.has("deps") ? " open" : ""}>
+      <summary>直近の配置 (${deps.length})</summary>
+      <div class="rows">${deps.slice().reverse().map(d => `<div class="row"
+          style="cursor:default">
+          <div class="id">${esc(d.environment)}</div>
+          <div class="label" title="${esc(d.description)}">${esc(d.description)}</div>
+          <div class="count">${esc((d.date || "").slice(0, 10))}</div>
+          <div></div>
+        </div>`).join("")}</div>
     </details>` : ""}
 
     ${group("todo", "未着手", todo)}
@@ -439,6 +479,15 @@ function render(board) {
       else openGroups.delete("docs");
     };
     if (docsEl.open) fillDocs();
+  }
+
+  // 出荷・配置は件数が少ないので、その場で描いてある。開閉だけ覚える。
+  for (const key of ["rels", "deps"]) {
+    const el = document.querySelector(`[data-group="${key}"]`);
+    if (!el) continue;
+    el.ontoggle = () => {
+      if (el.open) openGroups.add(key); else openGroups.delete(key);
+    };
   }
 
   for (const [key, rows] of [["todo", todo], ["closed", closed]]) {

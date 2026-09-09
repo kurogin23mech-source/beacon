@@ -162,6 +162,9 @@ def test_top_level_shape_is_pinned():
         _dev_project(), source=view_model.SOURCE_LOCAL)
     assert set(view) == {
         "schema_version", "project", "progress", "targets",
+        # 終わらない仕事と、出荷・配置。マイルストーンだけでは「今このプロジェクト
+        # で何が動いているか」が分からないため、盤に載せている。
+        "operations", "releases", "deployments",
         "deliverables", "documents", "sessions", "source",
     }
     assert view["schema_version"] == view_model.SCHEMA_VERSION
@@ -271,3 +274,49 @@ def test_empty_project_still_produces_a_full_shape():
         _dev_project(), source=view_model.SOURCE_LOCAL)
     assert view["targets"] == []
     assert view["progress"] == {"total": 0, "done": 0, "open": 0}
+
+
+# --- 終わらない仕事と、出荷・配置 (e-6346) ---------------------------------
+
+def test_operations_are_projected():
+    """監視や定期実行も盤に載ること。
+
+    マイルストーンは「いつか終わるもの」だが、監視や定期実行は終わらない。
+    両方を見ないと「今このプロジェクトで何が動いているか」は分からない。
+    """
+    data = _dev_project()
+    data["operations"] = [{
+        "id": "op-1", "title": "本番の様子を見る", "status": "open",
+        "schedule": {"frequency": "daily"}, "opened_at": "2026-09-01T00:00:00Z",
+    }]
+    view = view_model.build_board_view(data, source=view_model.SOURCE_LOCAL)
+    assert view["operations"] == [{
+        "id": "op-1", "title": "本番の様子を見る", "status": "open",
+        "frequency": "daily", "opened_at": "2026-09-01T00:00:00Z",
+    }]
+
+
+def test_only_recent_releases_and_deployments_are_kept():
+    """出荷と配置は直近だけを出すこと。
+
+    何百件と溜まるので全部並べると、「今どうなっているか」を読むための面が
+    履歴で埋まってしまう。
+    """
+    data = _dev_project()
+    data["releases"] = [{"id": f"r{i}", "semver": f"v0.{i}.0"} for i in range(30)]
+    data["deployments"] = [{"id": f"d{i}", "environment": "prod"} for i in range(30)]
+    view = view_model.build_board_view(data, source=view_model.SOURCE_LOCAL)
+    assert len(view["releases"]) == view_model.RECENT_LIMIT
+    assert len(view["deployments"]) == view_model.RECENT_LIMIT
+    # 残すのは新しい側 (末尾)。
+    assert view["releases"][-1]["id"] == "r29"
+    assert view["deployments"][-1]["id"] == "d29"
+
+
+def test_absent_operations_are_empty_not_missing():
+    """これらを持たないプロジェクトでも、空の一覧で渡すこと。"""
+    view = view_model.build_board_view(
+        _dev_project(), source=view_model.SOURCE_LOCAL)
+    assert view["operations"] == []
+    assert view["releases"] == []
+    assert view["deployments"] == []

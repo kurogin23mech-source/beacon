@@ -30,6 +30,12 @@ type Project struct {
 	Profession string      `json:"profession"`
 	Milestones []Milestone `json:"milestones"`
 
+	// 終わらない仕事と、出荷・配置の記録。マイルストーンだけでは
+	// 「今このプロジェクトで何が動いているか」が分からないため読む。
+	Operations  []Operation  `json:"operations"`
+	Releases    []Release    `json:"releases"`
+	Deployments []Deployment `json:"deployments"`
+
 	// 記述子で定義された対象クラス。Go 版は投影しないが、**在ることは把握する**
 	// (黙って省略しないため。doc lM9gHMOAm8VK2xZGKfEe)。
 	TargetClasses []TargetClass `json:"target_classes"`
@@ -40,6 +46,33 @@ type Project struct {
 type TargetClass struct {
 	Kind  string `json:"kind"`
 	Label string `json:"label"`
+}
+
+// Operation は終わりなく回り続ける仕事 (監視 / 定期実行)。
+type Operation struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Status   string `json:"status"`
+	OpenedAt string `json:"opened_at"`
+	Schedule struct {
+		Frequency string `json:"frequency"`
+	} `json:"schedule"`
+}
+
+// Release は出荷 1 件。
+type Release struct {
+	ID          string `json:"id"`
+	Semver      string `json:"semver"`
+	Date        string `json:"date"`
+	Description string `json:"description"`
+}
+
+// Deployment は配置 1 件 (どこに出したか)。
+type Deployment struct {
+	ID          string `json:"id"`
+	Date        string `json:"date"`
+	Environment string `json:"environment"`
+	Description string `json:"description"`
 }
 
 // Milestone は開発職種の対象 1 件。
