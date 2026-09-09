@@ -48,6 +48,14 @@ type LocalSessionRow struct {
 	Name string `json:"name"`
 	// State は busy / idle など、その道具が申告している状態 (分かる場合)。
 	State string `json:"state"`
+	// Branch は作業フォルダが乗っているブランチ (分かる場合)。
+	Branch string `json:"branch"`
+	// Target はブランチ名から **推測した** 担当の対象。
+	//
+	// 名乗っていないセッションには担当が付かない (担当はサーバ側で決まる) が、
+	// ブランチ名が対象を含む慣習があるので推し量れる。**推測なので、画面では
+	// 推測と分かる形で出すこと。** 人が自由に名前を付けられる以上、外れる。
+	Target string `json:"target_guess"`
 }
 
 // LocalSessions は、与えられたプロジェクトのフォルダで動いていたセッションを集める。
@@ -65,7 +73,13 @@ func LocalSessions(root string, since time.Duration, now time.Time) []LocalSessi
 	rows = append(rows, opencodeSessions(home)...)
 	rows = append(rows, codexSessions(home)...)
 
-	return filterAndSort(rows, root, since, now)
+	kept := filterAndSort(rows, root, since, now)
+	// 残ったものにだけブランチを読む (全部読むと無駄が多い)。
+	for i := range kept {
+		kept[i].Branch = gitBranch(kept[i].Directory)
+		kept[i].Target = targetFromBranch(kept[i].Branch)
+	}
+	return kept
 }
 
 // filterAndSort は、このプロジェクトのものだけを残して新しい順に並べる。

@@ -87,6 +87,12 @@
   }
   /* このマシンで拾ったセッションは、Beacon の名簿と見分けが付くようにする。 */
   .session.local { border-style: dashed; }
+  /* 推測で出しているものは、確かなものと見分けが付くようにする。 */
+  .target.guess {
+    background: transparent; border: 1px dashed var(--line);
+  }
+  .qmark { font-size: 10px; opacity: .7; }
+  .who-badge.guess { background: transparent; border: 1px dashed var(--line); }
   .nobody { font-size: 11px; color: var(--dim); }
   .bar { height: 5px; border-radius: 3px; background: var(--faint); position: relative; }
   .bar span {
@@ -208,6 +214,10 @@ function localCard(s) {
       s.state === "busy" ? "on" : s.running ? "on" : ""}"></span>${esc(head)}</div>
     ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
     ${s.title ? `<div class="sub">${esc(s.title)}</div>` : ""}
+    ${s.target_guess ? `<div class="target guess"
+      title="ブランチ名からの推測です。Beacon に名乗っていないセッションには担当が付きません"
+      >${esc(s.target_guess)} <span class="qmark">推測</span></div>` : ""}
+    ${s.branch ? `<div class="commit">${esc(s.branch)}</div>` : ""}
     <div class="commit" title="${esc(s.directory)}">${esc(s.directory)}</div>
     <div class="sub">${esc(state)}${s.last_active
       ? ` · <span data-ts="${esc(s.last_active)}">${ago(s.last_active)}</span>`
@@ -230,11 +240,18 @@ function sessionsByTarget(board) {
 // 取れていないときに「無人」と出してはいけない。放置されているのではなく
 // **こちらから見えていないだけ**であり、見えていないものを「無い」と誤認させるのは
 // このプロジェクトが繰り返し戦ってきた病理そのもの (doc lM9gHMOAm8VK2xZGKfEe)。
-function targetRow(t, owners, rosterKnown) {
+function targetRow(t, owners, rosterKnown, guessed) {
   const w = t.work_items || {};
   const pct = w.total ? Math.round(w.done / w.total * 100) : 0;
-  const who = owners.length
-    ? owners.map(o => `<span class="who-badge">${esc(o.who.split("@")[0])}</span>`).join(" ")
+  // 名乗っている担当。確かな情報。
+  const named = owners.map(
+    o => `<span class="who-badge">${esc(o.who.split("@")[0])}</span>`);
+  // ブランチ名からの推測。確かなものと見分けが付く形で添える。
+  const guesses = (guessed[t.id] || []).map(
+    g => `<span class="who-badge guess"
+            title="ブランチ名からの推測です">${esc(g)}</span>`);
+  const who = named.length || guesses.length
+    ? named.concat(guesses).join(" ")
     : (rosterKnown && t.is_open ? `<span class="nobody">無人</span>` : "");
   return `<div class="row ${t.is_done ? "done" : ""}" data-id="${esc(t.id)}">
       <div class="id">${esc(t.id)}</div>
@@ -314,14 +331,14 @@ function group(key, title, rows) {
 }
 
 // 組の中身を描く。多いときは少しずつ足す。
-function fillGroup(key, rows, owners, rosterKnown) {
+function fillGroup(key, rows, owners, rosterKnown, guessed) {
   const box = document.getElementById("g-" + key);
   if (!box || box.dataset.filled) return;
   let shown = 0;
   const more = () => {
     const slice = rows.slice(shown, shown + PAGE_SIZE);
     shown += slice.length;
-    const html = slice.map(t => targetRow(t, owners[t.id] || [], rosterKnown)).join("");
+    const html = slice.map(t => targetRow(t, owners[t.id] || [], rosterKnown, guessed)).join("");
     const btn = box.querySelector(".more");
     if (btn) btn.remove();
     box.insertAdjacentHTML("beforeend", html);
@@ -360,6 +377,13 @@ function render(board) {
   // 1 件でも名簿が取れていれば「誰も付いていない対象」は本当に無人と言える。
   // 1 件も無いときは、名簿そのものが取れていないだけの可能性が高い。
   const rosterKnown = sessions.length > 0;
+  // ブランチ名から推測した担当。どの対象に、どのセッションが乗っているか。
+  const guessed = {};
+  for (const s of local) {
+    if (!s.target_guess) continue;
+    (guessed[s.target_guess] = guessed[s.target_guess] || [])
+      .push(s.name || s.tool);
+  }
   const notice = board.unsupported
     ? `<div class="notice">${esc(board.unsupported.reason)}
          (${board.unsupported.target_class_count} 件:
@@ -453,7 +477,7 @@ function render(board) {
   document.getElementById("switch").onclick = openPicker;
 
   // 進行中の組は既定で開いているので、その場で描く (多ければ分割して足す)。
-  if (focus.length) fillGroup("focus", focus, owners, rosterKnown);
+  if (focus.length) fillGroup("focus", focus, owners, rosterKnown, guessed);
 
   // 畳んだ組は、開かれたときに初めて中身を描く。
   const docsEl = document.querySelector('[data-group="docs"]');
@@ -504,10 +528,10 @@ function render(board) {
     const el = document.querySelector(`[data-group="${key}"]`);
     if (!el) continue;
     el.ontoggle = () => {
-      if (el.open) { openGroups.add(key); fillGroup(key, rows, owners, rosterKnown); }
+      if (el.open) { openGroups.add(key); fillGroup(key, rows, owners, rosterKnown, guessed); }
       else openGroups.delete(key);
     };
-    if (el.open) fillGroup(key, rows, owners, rosterKnown);
+    if (el.open) fillGroup(key, rows, owners, rosterKnown, guessed);
   }
 }
 
