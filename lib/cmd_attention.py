@@ -37,15 +37,6 @@ def _fetch_sessions(client, config, all_projects: bool):
     return client.list_sessions(project_id) or []
 
 
-def _row_identity(row: dict) -> str:
-    """Compact 'who/where' suffix for a row (best-effort, never raises)."""
-    actor = row.get("actor") or {}
-    ident = actor.get("email") or actor.get("machine") or actor.get("agent") or ""
-    cwd = row.get("cwd") or ""
-    parts = [p for p in (ident, cwd) if p]
-    return "  ".join(parts)
-
-
 def _sid_short(sid: str) -> str:
     """Trailing 8 chars of a session id (the part humans eyeball)."""
     sid = sid or "?"
@@ -102,8 +93,9 @@ def cmd_attention():
     # ms-159 review #739 (AX high): reject an out-of-vocab --scope instead of
     # letting it fall through to "team" — otherwise `--scope all` (or a typo)
     # silently ESCALATES scope (shows everyone), a silent no-op/over-share.
-    if scope not in ("self", "team"):
-        print(f"Error: --scope must be 'self' or 'team' (got '{scope}')",
+    if scope not in attention.ATTENTION_SCOPES:
+        allowed = " or ".join(f"'{s}'" for s in sorted(attention.ATTENTION_SCOPES))
+        print(f"Error: --scope must be {allowed} (got '{scope}')",
               file=sys.stderr)
         sys.exit(2)
     # root filter (= which root target / project). Named --root (not --target) to

@@ -184,3 +184,49 @@ class TestDispatchSessionWorking:
     def test_handler_registered(self):
         from beacon_cli import dispatch
         assert "session" in dispatch._HANDLERS
+
+
+class TestWorkingMutualExclusion:
+    """#739 review (AX high): --show / --clear / --target are mutually exclusive.
+    A conflict must error (exit 2) BEFORE any API call, not silently pick one
+    (e.g. `--clear --target ms:X` used to eat --target and report success)."""
+
+    def _run(self, monkeypatch, **env):
+        import cmd_session
+        for k in ("SHOW", "CLEAR", "TARGET", "TITLE"):
+            monkeypatch.setenv(f"BEACON_SESSION_WORKING_{k}", env.get(k, ""))
+        monkeypatch.setenv("BEACON_JSON", "")
+        return cmd_session.cmd_session_working
+
+    def test_clear_and_target_conflict(self, monkeypatch):
+        fn = self._run(monkeypatch, CLEAR="1", TARGET="ms:ms-1")
+        with pytest.raises(SystemExit) as ei:
+            fn()
+        assert ei.value.code == 2
+
+    def test_show_and_target_conflict(self, monkeypatch):
+        fn = self._run(monkeypatch, SHOW="1", TARGET="ms:ms-1")
+        with pytest.raises(SystemExit) as ei:
+            fn()
+        assert ei.value.code == 2
+
+    def test_show_and_clear_conflict(self, monkeypatch):
+        fn = self._run(monkeypatch, SHOW="1", CLEAR="1")
+        with pytest.raises(SystemExit) as ei:
+            fn()
+        assert ei.value.code == 2
+
+    def test_guard_fires_before_api_call(self, monkeypatch):
+        # If the guard ran AFTER _get_api_client, this would raise the client's
+        # error, not our exit 2. Patch the client to explode to prove the guard
+        # short-circuits first.
+        import cmd_session
+
+        def _boom():
+            raise AssertionError("_get_api_client must not be reached on conflict")
+
+        monkeypatch.setattr(cmd_session, "_get_api_client", _boom)
+        fn = self._run(monkeypatch, CLEAR="1", TARGET="ms:ms-1")
+        with pytest.raises(SystemExit) as ei:
+            fn()
+        assert ei.value.code == 2

@@ -1744,11 +1744,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_attention.add_argument("--all-projects", dest="all_projects", action="store_true")
     p_attention.add_argument("--attention-only", dest="attention_only",
                              action="store_true")
-    # #739 AX high: choices rejects `--scope all`/typo at parse time so it can't
+    # #739 AX: choices rejects `--scope all`/typo at parse time so it can't
     # silently escalate to team (over-share). --root (not --target) disambiguates
-    # from `session working --target <kind:id>`.
-    p_attention.add_argument("--scope", dest="scope", default="",
-                             choices=["", "self", "team"])
+    # from `session working --target <kind:id>`. Keep in sync with
+    # lib/attention.ATTENTION_SCOPES (the canonical set; not imported here to keep
+    # dispatch a dependency-light argv translator). default="self" (not "") so the
+    # 'choose from' error lists only the two real options, not the "" sentinel.
+    p_attention.add_argument("--scope", dest="scope", default="self",
+                             choices=["self", "team"])
     p_attention.add_argument("--root", dest="root_target", default="")
     p_attention.add_argument("--json", action="store_true")
 
@@ -5219,12 +5222,13 @@ def _handle_morning(root: Path, args: argparse.Namespace) -> int:
 
 def _handle_attention(root: Path, args: argparse.Namespace) -> int:
     """`beacon attention [--all-projects] [--attention-only] [--scope self|team]
-    [--target <root>] [--json]` (ms-159 e-6246/e-6293).
+    [--root <id>] [--json]` (ms-159 e-6246/e-6293).
 
     Default: a roster of the caller's sessions grouped by root target, each row
     showing 作業 target / 状態 / activity / 待機. --attention-only narrows to 要対応
     (awaiting_human/blocked/terminated:failed) = the C+A view. --scope team shows
-    everyone in the project; --target filters to one root target.
+    everyone in the project; --root filters to one root target (named --root, not
+    --target, to disambiguate from `session working --target <kind:id>`).
     """
     if args.show_help:
         print("Usage: beacon attention [--all-projects] [--attention-only] "

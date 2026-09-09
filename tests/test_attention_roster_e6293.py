@@ -62,6 +62,20 @@ class TestScopeMatches:
         assert attention.scope_matches({"user_id": "u2"}, "")
 
 
+class TestRosterInvariants:
+    def test_state_order_covers_all_session_states(self):
+        # #739 review (maintainability): _ROSTER_STATE_ORDER must rank every
+        # canonical session state, else a newly-added state silently falls to the
+        # bottom (dict.get default) with no test failure. Pin exhaustiveness.
+        ranked = set(attention._ROSTER_STATE_ORDER)
+        canonical = set(bus_liveness.DECLARABLE_STATES) | {bus_liveness.STATE_UNKNOWN}
+        missing = canonical - ranked
+        assert not missing, f"_ROSTER_STATE_ORDER missing ranks for: {missing}"
+
+    def test_scope_vocab_constant_matches_validation(self):
+        assert attention.ATTENTION_SCOPES == frozenset({"self", "team"})
+
+
 class TestRootAndTarget:
     def test_root_of(self):
         r = _row("s", "idle", None,

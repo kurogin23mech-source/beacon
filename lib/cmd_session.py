@@ -692,6 +692,18 @@ def cmd_session_working():
     title = os.environ.get("BEACON_SESSION_WORKING_TITLE", "")
     json_out = os.environ.get("BEACON_JSON", "") == "1"
 
+    # #739 review (AX high): --show / --clear / --target are mutually exclusive
+    # modes. Without this guard, `working --clear --target ms:X` silently ate the
+    # --target (clear won by ordering) and reported success — the trifecta for
+    # silent corruption. Reject the conflict loudly instead of picking one.
+    modes = [m for m, on in
+             (("--show", show), ("--clear", clear), ("--target", bool(target_spec)))
+             if on]
+    if len(modes) > 1:
+        print(f"Error: {' and '.join(modes)} are mutually exclusive "
+              "(pick one of --show / --clear / --target).", file=sys.stderr)
+        sys.exit(2)
+
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)
     session_id = _resolve_current_session_id()

@@ -114,6 +114,13 @@ _ROSTER_STATE_ORDER = {
     bus_liveness.STATE_UNKNOWN: 5,
 }
 
+# The scope vocabulary for `beacon attention` (器: 方針3). Single source of truth
+# so the CLI backstop (cmd_attention) and the argparse choices (dispatch.py) can
+# reference the same set instead of re-typing string literals — #739 review
+# (maintainability). The bash frontend can't import this; it cross-references
+# this name in a comment.
+ATTENTION_SCOPES = frozenset({"self", "team"})
+
 
 def row_identity(row: dict) -> str:
     """The row's owner identity for scope=self matching: stamped ``user_id``
@@ -128,10 +135,15 @@ def scope_matches(row: dict, my_identity) -> bool:
     Matches against BOTH the stamped ``user_id`` and the row's ``actor.email``:
     the e-6292 stamp prefers ``actor.user_id`` (a Google sub) but falls back to
     email, and the caller only reliably knows its own email — so checking both
-    keeps scope=self correct whichever identity the row carries."""
+    keeps scope=self correct whichever identity the row carries.
+
+    Delegates the identity extraction to ``row_identity`` (and also checks the
+    raw actor email) so the ownership-resolution rule lives in one place — #739
+    review (maintainability): a future change to how identity is derived updates
+    ``row_identity`` alone, not two divergent copies."""
     if not my_identity:
         return True
-    if (row.get("user_id") or "") == my_identity:
+    if row_identity(row) == my_identity:
         return True
     return ((row.get("actor") or {}).get("email") or "") == my_identity
 

@@ -421,6 +421,11 @@ REQUIRED_FLAG_PARITY: dict[str, set[str]] = {
     "milestone update": {"--priority"},
     "task add": {"--priority", "--untriaged"},
     "task update": {"--priority"},
+    # ms-159 #739 (maintainability): `attention` (case arm, not a cmd_<verb>()
+    # function) and `session working` (nested verb) don't fit this guard's
+    # function-based model. Their bash↔Python argv→env parity is pinned instead by
+    # test_attention_roster_e6293.py::TestDispatchParity and
+    # test_session_working_e6291.py::TestDispatchSessionWorking.
 }
 
 
