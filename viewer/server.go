@@ -7,6 +7,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -40,11 +41,16 @@ func isLoopback(host string) bool {
 // 画面から場所を選んでもらって開き直せるようにするため (起動し直させない)。
 type Server struct {
 	src      *LocalSource
+	cloud    *CloudSource // クラウドを見ているときだけ入る (ローカルとは排他)
+	login    *LoginStart  // ログイン待ちの合図
 	ln       net.Listener
 	URL      string
 	Host     string
 	startDir string // 起動した場所。どこを探したかを画面で伝えるのに使う。
 }
+
+// hasSource は、盤を出せる状態かどうか。
+func (s *Server) hasSource() bool { return s.src != nil || s.cloud != nil }
 
 func (s *Server) beaconDir() string {
 	if s.src == nil {
@@ -116,8 +122,8 @@ func (s *Server) handler() http.Handler {
 			"cwd":         s.startDir,
 			// クラウドから選ぶ経路はまだ無い。**画面に出す前にここで正直に伝える**
 			// (使えない入口を並べておくと、押しても何も起きない状態になる)。
-			"cloud_available": false,
-			"cloud_reason":    "クラウドへの接続はこの版では未対応です (次の段階で対応します)",
+			"cloud_available": true,
+			"cloud_signed_in": cloudEmail(),
 			// 選択ダイアログは **このビューワーが動いている機械** に開く。
 			// サーバに設置した場合、見ている人の手元ではなくサーバ側に出てしまい
 			// 何も起きないように見えるので、その場合は入口ごと出さない。
@@ -170,11 +176,103 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 		s.src = src
+		s.cloud = nil // 取得元は 1 つに保つ
 		writeJSON(w, map[string]any{"ok": true, "path": src.BeaconDir})
 	})
 
+	// クラウドへのログインを始める。合図の符号と、承認してもらう住所を返す。
+	mux.HandleFunc("/api/cloud/login-start", func(w http.ResponseWriter, r *http.Request) {
+		start, err := StartLogin(DefaultAPI)
+		if err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		s.login = start
+		// 承認の画面はこの機械で開く。手元で立ち上げているときは自分の画面に
+		// 出るので、そのまま承認できる。
+		if isLoopback(s.Host) {
+			OpenBrowser(start.URL)
+		}
+		writeJSON(w, start)
+	})
+
+	// 承認されたかを確認する。まだなら pending を返す (これは失敗ではない)。
+	mux.HandleFunc("/api/cloud/login-poll", func(w http.ResponseWriter, r *http.Request) {
+		if s.login == nil {
+			writeJSONError(w, errors.New("ログインが始まっていません"))
+			return
+		}
+		creds, err := PollLogin(DefaultAPI, s.login.Code)
+		if err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		if creds == nil {
+			writeJSON(w, map[string]string{"status": "pending"})
+			return
+		}
+		if err := SaveCredentials(creds); err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		s.login = nil
+		writeJSON(w, map[string]string{"status": "approved", "email": creds.Email})
+	})
+
+	// 参加しているプロジェクトの一覧。
+	mux.HandleFunc("/api/cloud/projects", func(w http.ResponseWriter, r *http.Request) {
+		creds := LoadCredentials()
+		if creds == nil || creds.Expired(time.Now()) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "ログインしていません",
+			})
+			return
+		}
+		c := &CloudSource{API: DefaultAPI, Token: creds.Token}
+		list, err := c.ListProjects()
+		if err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		writeJSON(w, list)
+	})
+
+	// クラウドのプロジェクトを開く。
+	mux.HandleFunc("/api/cloud/open", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST してください", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			ProjectID string `json:"project_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		creds := LoadCredentials()
+		if creds == nil || creds.Expired(time.Now()) {
+			writeJSONError(w, errors.New("ログインしていません"))
+			return
+		}
+		c := &CloudSource{
+			API: DefaultAPI, Token: creds.Token, ProjectID: body.ProjectID}
+		if _, err := c.Load(); err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		// 開けたときだけ差し替える。失敗しても、それまで見ていた盤は壊さない。
+		s.cloud = c
+		s.src = nil
+		writeJSON(w, map[string]any{"ok": true, "project_id": body.ProjectID})
+	})
+
 	mux.HandleFunc("/api/board", func(w http.ResponseWriter, r *http.Request) {
-		if s.src == nil {
+		if !s.hasSource() {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -182,26 +280,21 @@ func (s *Server) handler() http.Handler {
 			})
 			return
 		}
-		p, err := s.src.Load()
+		board, err := s.buildBoard()
 		if err != nil {
 			writeJSONError(w, err)
 			return
 		}
-		// 盤は開くたびに読み直す。自動更新で最新が出るようにするため。
-		board := BuildBoard(p, SourceLocal, "", nil, nil)
-		// このマシンで動いているセッションを添える (ms-171)。取れなくても盤は出す。
-		board.LocalSessions = LocalSessions(
-			filepath.Dir(s.src.BeaconDir), 24*time.Hour, time.Now())
 		writeJSON(w, board)
 	})
 
 	mux.HandleFunc("/api/target/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/target/")
-		if id == "" || s.src == nil {
+		if id == "" || !s.hasSource() {
 			http.NotFound(w, r)
 			return
 		}
-		p, err := s.src.Load()
+		p, err := s.loadProject()
 		if err != nil {
 			writeJSONError(w, err)
 			return
@@ -219,6 +312,42 @@ func (s *Server) handler() http.Handler {
 	})
 
 	return mux
+}
+
+// loadProject は、いま見ている先からプロジェクトを読む。
+// **ここが取得元を尋ねる唯一の場所**。これより先には取得元を持ち込まない。
+func (s *Server) loadProject() (*Project, error) {
+	if s.cloud != nil {
+		return s.cloud.Load()
+	}
+	return s.src.Load()
+}
+
+// buildBoard は盤を 1 面組み立てる。取得元による違いはここで吸収し切る。
+func (s *Server) buildBoard() (*Board, error) {
+	p, err := s.loadProject()
+	if err != nil {
+		return nil, err
+	}
+	if s.cloud != nil {
+		// クラウドに繋いだときだけ、Beacon に名乗っているセッションの名簿が取れる。
+		// 名簿が取れなくても盤は出す (見えないことより出ないことのほうが困る)。
+		sessions, _ := s.cloud.Sessions()
+		return BuildBoard(p, SourceCloud, s.cloud.ProjectID, nil, sessions), nil
+	}
+	board := BuildBoard(p, SourceLocal, "", nil, nil)
+	// このマシンで動いているセッションを添える (ms-171)。取れなくても盤は出す。
+	board.LocalSessions = LocalSessions(
+		filepath.Dir(s.src.BeaconDir), 24*time.Hour, time.Now())
+	return board, nil
+}
+
+// cloudEmail は保存済みの認証情報の持ち主を返す。未ログインなら空。
+func cloudEmail() string {
+	if c := LoadCredentials(); c != nil && !c.Expired(time.Now()) {
+		return c.Email
+	}
+	return ""
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

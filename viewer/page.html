@@ -349,9 +349,17 @@ function render(board) {
 // 「見つかりません」で終わらせず、その場で選べるようにする。実行ファイルを配って
 // もらった人にとって、起動場所に .beacon が無いのは異常ではなく普通のこと。
 function renderPicker(state) {
-  const cloud = state.cloud_available
-    ? `<button id="cloud">クラウドから選ぶ</button>`
-    : `<p class="empty">${esc(state.cloud_reason || "クラウドはまだ使えません")}</p>`;
+  const cloud = !state.cloud_available
+    ? `<p class="empty">${esc(state.cloud_reason || "クラウドはまだ使えません")}</p>`
+    : state.cloud_signed_in
+      ? `<p class="empty">${esc(state.cloud_signed_in)} でログイン中。</p>
+         <div id="projects" class="loading">プロジェクトを読み込んでいます…</div>`
+      : `<p class="empty">ログインすると、参加しているプロジェクトを選べます。
+           他のマシンで動いているセッションも見えるようになります。</p>
+         <button id="login" style="margin-top:8px; padding:7px 16px; font:inherit;
+           cursor:pointer; border:1px solid var(--line); border-radius:6px;
+           background:transparent; color:inherit;">ログインする</button>
+         <p id="loginmsg" class="empty"></p>`;
   // 既に何かを開いているなら、やめて戻れるようにする。切り替えるつもりで押した人を
   // 行き止まりにしない。
   const back = state.has_project
@@ -414,6 +422,43 @@ function renderPicker(state) {
       msg.textContent = "開けませんでした: " + e;
     }
   };
+  // --- クラウド ---
+  const projectsBox = document.getElementById("projects");
+  if (projectsBox) loadCloudProjects(projectsBox);
+
+  const loginBtn = document.getElementById("login");
+  if (loginBtn) loginBtn.onclick = async () => {
+    const lm = document.getElementById("loginmsg");
+    loginBtn.disabled = true;
+    try {
+      const st = await (await fetch("/api/cloud/login-start", {method: "POST"})).json();
+      if (st.error) { lm.textContent = st.error; loginBtn.disabled = false; return; }
+      // 承認の画面はこの機械のブラウザで開く。開けなかった人のために住所も出す。
+      lm.innerHTML = `ブラウザで承認してください。合図の符号: <b>${esc(st.code)}</b>
+        <br><a href="${esc(st.url)}" target="_blank">${esc(st.url)}</a>
+        <br>承認を待っています…`;
+      // 承認されるまで確認し続ける。有効期限が切れたらその旨を伝える。
+      const until = Date.now() + (st.expires_in || 300) * 1000;
+      const tick = async () => {
+        if (Date.now() > until) {
+          lm.textContent = "承認されないまま期限が切れました。もう一度お試しください。";
+          loginBtn.disabled = false;
+          return;
+        }
+        try {
+          const d = await (await fetch("/api/cloud/login-poll")).json();
+          if (d.error) { lm.textContent = d.error; loginBtn.disabled = false; return; }
+          if (d.status === "approved") { openPicker(); return; }
+        } catch (e) { /* 一時的に取れなくても待ち続ける */ }
+        setTimeout(tick, 2000);
+      };
+      setTimeout(tick, 2000);
+    } catch (e) {
+      lm.textContent = "ログインを始められませんでした: " + e;
+      loginBtn.disabled = false;
+    }
+  };
+
   const browse = document.getElementById("browse");
   if (browse) browse.onclick = async () => {
     msg.textContent = "選択ダイアログを開いています…";
@@ -437,6 +482,50 @@ function renderPicker(state) {
   if (backBtn) backBtn.onclick = () => {
     pickerOpen = false; lastBoardJSON = ""; refresh();
   };
+}
+
+async function loadCloudProjects(box) {
+  try {
+    const r = await fetch("/api/cloud/projects");
+    const list = await r.json();
+    if (list.error) { box.innerHTML = `<p class="empty">${esc(list.error)}</p>`; return; }
+    if (!list.length) {
+      box.innerHTML = `<p class="empty">参加しているプロジェクトがありません。</p>`;
+      return;
+    }
+    box.className = "sessions";
+    box.innerHTML = list.map(p => `<div class="session" style="cursor:pointer"
+        data-pid="${esc(p.id)}">
+        <div class="who">${esc(p.name)}</div>
+        <div class="sub">${esc(p.id)} · ${esc(p.role)}</div>
+      </div>`).join("");
+    for (const card of box.querySelectorAll("[data-pid]")) {
+      card.onclick = async () => {
+        box.innerHTML = `<p class="loading">開いています…</p>`;
+        box.className = "loading";
+        try {
+          const res = await fetch("/api/cloud/open", {
+            method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({project_id: card.dataset.pid}),
+          });
+          const d = await res.json();
+          if (!res.ok || d.error) {
+            box.innerHTML = `<p class="err">${esc(d.error || "開けませんでした")}</p>`;
+            return;
+          }
+          pickerOpen = false;
+          lastBoardJSON = "";
+          detailCache.clear();
+          opened.clear();
+          refresh();
+        } catch (e) {
+          box.innerHTML = `<p class="err">開けませんでした: ${esc(e)}</p>`;
+        }
+      };
+    }
+  } catch (e) {
+    box.innerHTML = `<p class="empty">プロジェクトを読めませんでした: ${esc(e)}</p>`;
+  }
 }
 
 // 盤を見ている状態から、選ぶ画面へ移る。

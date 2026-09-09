@@ -253,9 +253,12 @@ def test_starts_and_offers_a_choice_when_no_project_is_found():
             urllib.request.urlopen(base + "/api/state", timeout=5).read())
         assert state["has_project"] is False
         assert state["cwd"], "どこを探したのかが伝わらない"
-        # 使えない入口を黙って並べない。まだなら、まだと言う。
-        assert state["cloud_available"] is False
-        assert state["cloud_reason"], "使えない理由が伝わらない"
+        # クラウドから開く経路が使えること (e-6364 で対応済)。
+        # 使えない入口を黙って並べない、という規則は変わらない。使えなくなった
+        # 場合は cloud_reason で理由を伝えること。
+        assert state["cloud_available"] is True
+        # ログイン済みかどうかが分かること (画面でログインを促すかの判断に要る)。
+        assert "cloud_signed_in" in state
 
         # 盤はまだ出せないが、理由は返す。
         try:
