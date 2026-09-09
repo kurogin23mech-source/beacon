@@ -64,7 +64,7 @@ VERB_LEDGER = {
     "account_rename": {"cls": "R", "secondary": [], "note": ""},
 
     # --- attention (post-memo, ms-159 e-6246) ---
-    "attention": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-159] read-only: 人間の判断を待つセッション (awaiting_human/blocked/terminated:failed) を横断投影。session_attention (--set の記録=R) と別物の一覧(Q)"},
+    "attention": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-159] read-only: セッション名簿(root target ごとに 作業target/状態/activity/待機 を投影)。--attention-only で要対応(awaiting_human/blocked/failed)、--scope self|team、--root <id> で root 絞り。session_attention (--set の記録=R) と別物の一覧(Q)"},
 
     # --- acquisition (post-memo, ms-115 target-class) ---
     "acquisition_add": {"cls": "R", "secondary": [], "note": "[post-memo] 獲得ターゲット起票=台帳追記(R)、milestone add と同型"},
@@ -414,6 +414,7 @@ VERB_LEDGER = {
     "session_attention": {"cls": "R", "secondary": [], "note": "attention_required フラグの記録(R)"},
     "session_end": {"cls": "R", "secondary": ["C"], "note": "session-end 記録(R)/対話(C)"},
     "session_focus": {"cls": "R", "secondary": [], "note": "intent の記録(R)"},
+    "session_working": {"cls": "R", "secondary": [], "note": "[post-memo/ms-159] 作業 target(working_target) の宣言記録(R)。activity は session_focus の intent text を再利用、これは構造化した target を書く"},
     "session_fork": {"cls": "C", "secondary": [], "note": "local"},
     "session_fork_list": {"cls": "Q", "secondary": [], "note": ""},
     "session_id": {"cls": "Q", "secondary": [], "note": ""},

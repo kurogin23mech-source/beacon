@@ -106,6 +106,7 @@ from cmd_session import (  # noqa: F401  (re-exported for dispatch + import-path
     _resolve_current_session_id,
     cmd_session_focus,
     cmd_session_attention,
+    cmd_session_working,
     cmd_session_fork,
     cmd_session_fork_list,
     _release_all_occupations_for_session,
@@ -6572,7 +6573,7 @@ def _help_registry():
         {"command": "beacon claim list", "flags": ["--json"], "description": "List active claims from local `.beacon/active_claims.json` (= restart restore path)"},
         {"command": "beacon stuck check", "flags": ["--telemetry-file <path>", "--idle-min N", "--json"], "description": "Detect sessions idle past --idle-min; emit STUCK stop signals so morning briefing surfaces 介入要望"},
         {"command": "beacon morning", "flags": ["--since-hours N", "--events-file <path>", "--no-doc", "--json"], "description": "4-bucket digest of recent autonomous activity (完了 / 停止 / skip / 介入要望); auto-saves as scope=report doc"},
-        {"command": "beacon attention", "flags": ["--all-projects", "--json"], "description": "List sessions awaiting a human (awaiting_human / blocked / terminated:failed), longest-waiting first; --all-projects spans every project you belong to (ms-159)"},
+        {"command": "beacon attention", "flags": ["--all-projects", "--attention-only", "--scope self|team", "--root <id>", "--json"], "description": "Session roster grouped by root target (作業 target / 状態 / activity / 待機); --attention-only narrows to 要対応 (awaiting_human / blocked / terminated:failed); --scope self|team; --root <id> filters to one root target; --all-projects spans every project you belong to (ms-159)"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
 
@@ -10827,6 +10828,7 @@ if __name__ == "__main__":
         "session_id": cmd_session_id,
         "session_focus": cmd_session_focus,
         "session_attention": cmd_session_attention,
+        "session_working": cmd_session_working,
         "session_fork": cmd_session_fork,
         "session_fork_list": cmd_session_fork_list,
         "channel_install": cmd_channel_install,

@@ -1471,6 +1471,16 @@ def build_parser() -> argparse.ArgumentParser:
                                       choices=["true", "false"], default="")
     p_session_attention.add_argument("--json", action="store_true")
 
+    # ms-159 / e-6291: declare WHICH target this session works on.
+    p_session_working = session_sub.add_parser("working", add_help=False)
+    p_session_working.add_argument("--target", dest="working_target", default="")
+    p_session_working.add_argument("--title", dest="working_title", default="")
+    p_session_working.add_argument("--show", action="store_true",
+                                    help="Show current working_target (read-only)")
+    p_session_working.add_argument("--clear", action="store_true",
+                                    help="Clear the declared working_target")
+    p_session_working.add_argument("--json", action="store_true")
+
     # ms-73 / e-1762: Win parity for session lifecycle / forensics verbs.
     # `end` aggregates this session's notes/commits/PRs into the session log
     # (graceful close path). `rescue` aggregates all OTHER sessions (used when
@@ -1727,11 +1737,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     # `beacon attention` (ms-159 e-6246) — sessions awaiting a human, oldest first.
     p_attention = sub.add_parser(
-        "attention", help="List sessions awaiting a human (longest-waiting first)",
+        "attention", help="Session roster grouped by target (--attention-only for 要対応)",
         add_help=False,
     )
     p_attention.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_attention.add_argument("--all-projects", dest="all_projects", action="store_true")
+    p_attention.add_argument("--attention-only", dest="attention_only",
+                             action="store_true")
+    # #739 AX: choices rejects `--scope all`/typo at parse time so it can't
+    # silently escalate to team (over-share). --root (not --target) disambiguates
+    # from `session working --target <kind:id>`. Keep in sync with
+    # lib/attention.ATTENTION_SCOPES (the canonical set; not imported here to keep
+    # dispatch a dependency-light argv translator). default="self" (not "") so the
+    # 'choose from' error lists only the two real options, not the "" sentinel.
+    p_attention.add_argument("--scope", dest="scope", default="self",
+                             choices=["self", "team"])
+    p_attention.add_argument("--root", dest="root_target", default="")
     p_attention.add_argument("--json", action="store_true")
 
     # ---- monitor (ms-44 e-854) ----
@@ -4739,6 +4760,8 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
         print("Usage: beacon session id")
         print("       beacon session focus \"<text>\" | --clear | --show [--json]")
         print("       beacon session attention --set true|false [--json]")
+        print("       beacon session working --target <kind:id> [--title <t>] "
+              "| --clear | --show [--json]")
         print("       beacon session end [--summary <text>] [--session-id <id>] "
               "[--bus-origin] [--json]")
         print("       beacon session rescue [--json]")
@@ -4763,6 +4786,15 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if args.json else "",
         }
         return _run_commands_py(root, "session_attention", env)
+    if args.session_cmd == "working":
+        env = {
+            "BEACON_SESSION_WORKING_TARGET": getattr(args, "working_target", "") or "",
+            "BEACON_SESSION_WORKING_TITLE": getattr(args, "working_title", "") or "",
+            "BEACON_SESSION_WORKING_SHOW": "1" if getattr(args, "show", False) else "",
+            "BEACON_SESSION_WORKING_CLEAR": "1" if getattr(args, "clear", False) else "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "session_working", env)
     # ----- ms-73 e-1762 additions -----
     if args.session_cmd == "end":
         env = {
@@ -5189,12 +5221,29 @@ def _handle_morning(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_attention(root: Path, args: argparse.Namespace) -> int:
-    """`beacon attention [--all-projects] [--json]` (ms-159 e-6246)."""
+    """`beacon attention [--all-projects] [--attention-only] [--scope self|team]
+    [--root <id>] [--json]` (ms-159 e-6246/e-6293).
+
+    Default: a roster of the caller's sessions grouped by root target, each row
+    showing 作業 target / 状態 / activity / 待機. --attention-only narrows to 要対応
+    (awaiting_human/blocked/terminated:failed) = the C+A view. --scope team shows
+    everyone in the project; --root filters to one root target (named --root, not
+    --target, to disambiguate from `session working --target <kind:id>`).
+    """
     if args.show_help:
-        print("Usage: beacon attention [--all-projects] [--json]")
+        print("Usage: beacon attention [--all-projects] [--attention-only] "
+              "[--scope self|team] [--root <id>] [--json]\n"
+              "  Default: roster of your sessions grouped by root target "
+              "(作業 target / 状態 / activity / 待機, oldest-waiting first within a group).\n"
+              "  --attention-only: only 要対応 (awaiting_human / blocked / terminated:failed).\n"
+              "  --scope team: include other members' sessions (default: just yours).\n"
+              "  --root <id>: filter to one root target (project).")
         return 0
     return _run_commands_py(root, "attention", {
         "BEACON_ATTENTION_ALL_PROJECTS": "1" if getattr(args, "all_projects", False) else "",
+        "BEACON_ATTENTION_ATTENTION_ONLY": "1" if getattr(args, "attention_only", False) else "",
+        "BEACON_ATTENTION_SCOPE": getattr(args, "scope", "") or "",
+        "BEACON_ATTENTION_ROOT": getattr(args, "root_target", "") or "",
         "BEACON_JSON": "1" if getattr(args, "json", False) else "",
     })
 

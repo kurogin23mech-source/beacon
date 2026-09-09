@@ -2029,6 +2029,35 @@ except ValueError as e:
                     BEACON_JSON="$_sa_json" \
                     python3 "$COMMANDS_PY" session_attention
                 ;;
+            working)
+                # ms-159 / e-6291: AI declares WHICH target it works on. The
+                # activity ("what am I doing") reuses the intent text set by
+                # `session focus`; this sets the structured working_target.
+                # Absent a declaration the server derives it from branch/cwd/focus.
+                shift 2
+                _sw_target=""
+                _sw_title=""
+                _sw_show=""
+                _sw_clear=""
+                _sw_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --target) _sw_target="${2:-}"; shift 2 ;;
+                        --title)  _sw_title="${2:-}";  shift 2 ;;
+                        --show)   _sw_show="1";  shift ;;
+                        --clear)  _sw_clear="1"; shift ;;
+                        --json)   _sw_json="1";  shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)      shift ;;
+                    esac
+                done
+                BEACON_SESSION_WORKING_TARGET="$_sw_target" \
+                    BEACON_SESSION_WORKING_TITLE="$_sw_title" \
+                    BEACON_SESSION_WORKING_SHOW="$_sw_show" \
+                    BEACON_SESSION_WORKING_CLEAR="$_sw_clear" \
+                    BEACON_JSON="$_sw_json" \
+                    python3 "$COMMANDS_PY" session_working
+                ;;
             fork)
                 # ms-67 / e-1549: create a sibling worktree + bclaude-ready
                 # workspace for parallel work on a target milestone.
@@ -2075,13 +2104,14 @@ except ValueError as e:
                 echo "       beacon session id"
                 echo "       beacon session focus \"<text>\" | --clear | --show [--json]"
                 echo "       beacon session attention --set true|false [--json]"
+                echo "       beacon session working --target <kind:id> [--title <t>] | --clear | --show [--json]"
                 echo "       beacon session fork <ms-id> [--json]"
                 echo "       beacon session fork list [--json]"
                 echo "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
                 ;;
             *)
                 echo "Unknown session subcommand: ${2:-}"
-                echo "Usage: beacon session [end|rescue|log|id|focus|attention|fork]"
+                echo "Usage: beacon session [end|rescue|log|id|focus|attention|working|fork]"
                 ;;
         esac
         ;;
@@ -2200,24 +2230,40 @@ EOF
         esac
         ;;
     attention)
-        # ms-159 e-6246: list sessions awaiting a human (awaiting_human / blocked
-        # / terminated:failed), longest-waiting first. Top-level verb (distinct
-        # from `session attention --set`, which is one session's intent flag).
+        # ms-159 e-6246/e-6293: the ops面. Default = a roster of the caller's
+        # sessions grouped by root target (作業 target / 状態 / activity / 待機).
+        # `--attention-only` narrows to 要対応 (awaiting_human/blocked/failed) =
+        # the C+A "who is waiting on me" view. `--scope team` shows everyone in
+        # the project; `--root <id>` filters to one root target (named --root, not
+        # --target, to disambiguate from `session working --target <kind:id>`).
+        # Distinct from `session attention --set` (= one session's intent flag).
         shift
         _att_all=""
         _att_json=""
+        _att_only=""
+        _att_scope=""
+        _att_root=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --all-projects) _att_all="1"; shift ;;
-                --json)         _att_json="1"; shift ;;
-                -?*)            _guard_flag "$1" ;;
+                --all-projects)   _att_all="1";           shift ;;
+                --attention-only) _att_only="1";          shift ;;
+                --scope)          _att_scope="${2:-}";     shift 2 ;;
+                --root)           _att_root="${2:-}";      shift 2 ;;
+                --json)           _att_json="1";           shift ;;
+                -?*)              _guard_flag "$1" ;;
                 # ms-159 review (#735): a positional arg is not a state filter —
                 # error instead of silently dropping it, else `beacon attention
                 # awaiting_human` returns every row and the AI mis-reads it as
-                # "these all match". Scope is set by --all-projects, not positionals.
-                *)              echo "Error: unexpected argument '$1' (beacon attention は位置引数を取りません; スコープは --all-projects で指定します)." >&2; exit 1 ;;
+                # "these all match". Scope is set by --scope, not positionals.
+                *)              echo "Error: unexpected argument '$1' (beacon attention は位置引数を取りません; スコープは --scope / --all-projects で指定します)." >&2; exit 1 ;;
             esac
         done
+        # ms-159 review #739 (AX high): reject an out-of-vocab --scope so
+        # `--scope all`/typo can't silently escalate to team (over-share).
+        if [[ -n "$_att_scope" && "$_att_scope" != "self" && "$_att_scope" != "team" ]]; then
+            echo "Error: --scope must be 'self' or 'team' (got '$_att_scope')." >&2
+            exit 2
+        fi
         # ms-159 review (#735 AX medium): --all-projects is user-scoped (spans
         # every project you belong to), so it must NOT require a cwd project —
         # gating it behind ensure_project made `beacon attention --all-projects`
@@ -2226,6 +2272,9 @@ EOF
         # flags first so the gate can see --all-projects.
         [[ -n "$_att_all" ]] || ensure_project
         BEACON_ATTENTION_ALL_PROJECTS="$_att_all" \
+            BEACON_ATTENTION_ATTENTION_ONLY="$_att_only" \
+            BEACON_ATTENTION_SCOPE="$_att_scope" \
+            BEACON_ATTENTION_ROOT="$_att_root" \
             BEACON_JSON="$_att_json" \
             python3 "$COMMANDS_PY" attention
         ;;

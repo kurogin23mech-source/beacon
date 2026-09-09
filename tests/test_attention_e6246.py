@@ -151,10 +151,17 @@ class TestCmdAttention:
 
         monkeypatch.setattr(cmd_attention, "_get_api_client", lambda: (FakeClient(), {}))
         monkeypatch.setattr(cmd_attention, "_resolve_bus_project_id", lambda cfg: "proj")
+        # Empty identity ⇒ scope=self matches all rows (these tests pin the
+        # 要対応 filter, not the scope filter; don't let real local creds hide rows).
+        monkeypatch.setattr(cmd_attention, "_read_credentials_for_identity",
+                            lambda: ("", ""))
         return cmd_attention
 
     def test_human_output_filters_and_sorts(self, wired, capsys, monkeypatch):
+        # C+A "who is waiting on me" is now the --attention-only view (ms-159
+        # e-6293 demoted 要対応 from the default to a filter over the roster).
         monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "1")
+        monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "1")
         monkeypatch.setenv("BEACON_JSON", "")
         wired.cmd_attention()
         out = capsys.readouterr().out
@@ -168,11 +175,12 @@ class TestCmdAttention:
     def test_json_output_is_filtered_rows(self, wired, capsys, monkeypatch):
         import json as _json
         monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "1")
+        monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "1")
         monkeypatch.setenv("BEACON_JSON", "1")
         wired.cmd_attention()
         out = capsys.readouterr().out
         data = _json.loads(out)
-        assert [r["session_id"] for r in data] == ["sv-old", "sv-new"]
+        assert {r["session_id"] for r in data} == {"sv-old", "sv-new"}
 
     def test_empty_message_when_nothing_waiting(self, wired, capsys, monkeypatch):
         import cmd_attention
@@ -184,6 +192,7 @@ class TestCmdAttention:
                 return []
         monkeypatch.setattr(cmd_attention, "_get_api_client", lambda: (EmptyClient(), {}))
         monkeypatch.setenv("BEACON_ATTENTION_ALL_PROJECTS", "")
+        monkeypatch.setenv("BEACON_ATTENTION_ATTENTION_ONLY", "1")
         monkeypatch.setenv("BEACON_JSON", "")
         cmd_attention.cmd_attention()
         out = capsys.readouterr().out
