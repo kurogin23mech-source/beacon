@@ -99,3 +99,18 @@ func TestProcessAliveRejectsInvalidPid(t *testing.T) {
 		t.Error("無効な番号を動作中と判定している")
 	}
 }
+
+// 「そのセッションが動いているか」と「その道具が動いているか」を混ぜないこと。
+//
+// 道具単位の判定を全セッションに適用していた頃は、何時間も前に終わったものまで
+// 稼働中に見えていた (2026-09-10 に「稼働中 · 15 時間前」で発覚)。
+func TestPerSessionAndPerToolLivenessAreSeparate(t *testing.T) {
+	// セッション単位で確かめられない道具は Running を立てない。
+	row := LocalSessionRow{Tool: "codex", ToolRunning: true}
+	if row.Running {
+		t.Error("プロセス番号が分からないのに、このセッションが動いていると言っている")
+	}
+	if !row.ToolRunning {
+		t.Error("道具が起動していることまで失われている")
+	}
+}

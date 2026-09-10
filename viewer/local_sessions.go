@@ -42,8 +42,18 @@ type LocalSessionRow struct {
 	Title string `json:"title"`
 	// LastActive は最後に動いた時刻。
 	LastActive string `json:"last_active"`
-	// Running は、いまその道具のプロセスが動いているか。
+	// Running は **このセッションが確かに動いている** か。
+	//
+	// 確かめられるのは、そのセッションのプロセス番号が分かる場合だけ (Claude Code は
+	// 台帳に持っている)。分からない道具では false になる — これは「止まっている」
+	// ではなく「確かめられない」の意味。
 	Running bool `json:"running"`
+	// ToolRunning はその道具のプロセスが動いているか (セッション単位ではない)。
+	//
+	// **これを「このセッションが稼働中」と読んではいけない。** 道具が 1 つでも
+	// 動いていれば、何日も前に終わったセッションまで稼働中に見えてしまう
+	// (2026-09-10 に「稼働中 · 15 時間前」という矛盾した表示で発覚)。
+	ToolRunning bool `json:"tool_running"`
 	// Name はセッションの呼び名 (分かる場合)。Claude Code は台帳に持っている。
 	Name string `json:"name"`
 	// State は busy / idle など、その道具が申告している状態 (分かる場合)。
@@ -233,10 +243,10 @@ func claudeFromTranscripts(home string) []LocalSessionRow {
 				continue
 			}
 			rows = append(rows, LocalSessionRow{
-				Tool:       "claude-code",
-				Directory:  dir,
-				LastActive: info.ModTime().UTC().Format(time.RFC3339),
-				Running:    running,
+				Tool:        "claude-code",
+				Directory:   dir,
+				LastActive:  info.ModTime().UTC().Format(time.RFC3339),
+				ToolRunning: running,
 			})
 		}
 	}
@@ -294,7 +304,9 @@ func opencodeSessions(home string) []LocalSessionRow {
 			Directory:  dir.String,
 			Title:      title.String,
 			LastActive: last,
-			Running:    running,
+			// OpenCode はセッションごとのプロセス番号を持たないので、
+			// このセッションが動いているかは確かめられない。
+			ToolRunning: running,
 		})
 	}
 	return out
@@ -338,7 +350,8 @@ func codexSessions(home string) []LocalSessionRow {
 			Tool:       "codex",
 			Directory:  dir,
 			LastActive: info.ModTime().UTC().Format(time.RFC3339),
-			Running:    running,
+			// Codex も同様。記録の更新時刻しか手がかりが無い。
+			ToolRunning: running,
 		})
 	}
 	return out

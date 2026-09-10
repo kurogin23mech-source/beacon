@@ -179,6 +179,33 @@
     overflow: hidden;
   }
   .sub1 { -webkit-line-clamp: 1; }
+  /* セッションは札を並べる。1 行 1 件だと縦に長くなりすぎる。 */
+  .grid {
+    display: grid; gap: 10px; margin-top: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  }
+  .card {
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+    background: var(--faint); min-width: 0;
+  }
+  .card-head {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 2px;
+  }
+  .card-name {
+    font-weight: 600; font-size: 13px; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .card-attrs {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;
+  }
+  .card-foot {
+    display: flex; justify-content: space-between; gap: 8px; margin-top: 8px;
+    padding-top: 6px; border-top: 1px solid var(--line);
+  }
+  .card-foot span:first-child {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .card-foot span:last-child { white-space: nowrap; }
   .section-title {
     font-size: 11px; letter-spacing: .08em; color: var(--dim);
     text-transform: uppercase; margin: 22px 0 4px;
@@ -242,6 +269,32 @@ const TYPE_LABEL = {
 };
 function typeLabel(t) { return esc(TYPE_LABEL[t] || t || ""); }
 
+// セッションが動いているかの表し方。**確かめられないものを「稼働中」と言わない。**
+//
+//  作業中 / 待機中 … その道具が申告している状態 (Claude Code の台帳)
+//  稼働中          … このセッションのプロセスが生きていることを確かめた
+//  最近動いた      … 道具は起動しているが、このセッションかは確かめられない
+//  停止            … 上のどれでもない
+//
+// 「道具が起動しているか」だけで全セッションを稼働中と呼んでいた頃は、
+// 「稼働中 · 15 時間前」という矛盾した表示が出ていた (2026-09-10 に修正)。
+const RECENT_MS = 10 * 60 * 1000;
+function liveness(s) {
+  if (s.state === "busy") return {label: "作業中", on: true};
+  if (s.state === "idle") return {label: "待機中", on: false};
+  if (s.running) return {label: "稼働中", on: true};
+  const recent = s.last_active &&
+    (Date.now() - new Date(s.last_active)) < RECENT_MS;
+  if (s.tool_running && recent) {
+    return {label: "最近動いた", on: false,
+            hint: `${s.tool} は起動していますが、このセッションかどうかは確かめられません`};
+  }
+  return {label: "停止", on: false,
+          hint: s.tool_running
+            ? `${s.tool} は起動していますが、このセッションは最近動いていません`
+            : ""};
+}
+
 function ago(iso) {
   if (!iso) return "";
   const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
@@ -274,12 +327,9 @@ function localCard(s) {
   const head = s.name || s.tool;
   const sub = s.name ? s.tool : "";
   // 状態は道具が申告しているものをそのまま出す (作業中 / 待機)。
-  const state = s.state === "busy" ? "作業中"
-              : s.state === "idle" ? "待機中"
-              : s.running ? "起動中" : "停止";
+  const live = liveness(s);
   return `<div class="session local">
-    <div class="who"><span class="dot ${
-      s.state === "busy" ? "on" : s.running ? "on" : ""}"></span>${esc(head)}</div>
+    <div class="who"><span class="dot ${live.on ? "on" : ""}"></span>${esc(head)}</div>
     ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
     ${s.title ? `<div class="sub">${esc(s.title)}</div>` : ""}
     ${s.target_guess ? `<div class="target guess"
@@ -287,7 +337,7 @@ function localCard(s) {
       >${esc(s.target_guess)} <span class="qmark">推測</span></div>` : ""}
     ${s.branch ? `<div class="commit">${esc(s.branch)}</div>` : ""}
     <div class="commit" title="${esc(s.directory)}">${esc(s.directory)}</div>
-    <div class="sub">${esc(state)}${s.last_active
+    <div class="sub" title="${esc(live.hint || "")}">${esc(live.label)}${s.last_active
       ? ` · <span data-ts="${esc(s.last_active)}">${ago(s.last_active)}</span>`
       : ""}</div>
   </div>`;
@@ -894,28 +944,32 @@ async function openSessions() {
       <br>他のマシンで動いているものは含まれません (このマシンの記録から拾っているため)。</p>
     ${rows.length ? [...groups.entries()].map(([name, list]) => `
       <div class="section-title">${esc(name)} (${list.length})</div>
-      <div class="rows">${list.map(s => `
-        <div class="row" style="cursor:default; align-items:start;
-             grid-template-columns: 140px 1fr 150px 150px 88px;">
-          <div>
-            <div>${esc(s.name || s.tool)}</div>
-            <div class="sub2 sub1">${esc(s.tool)}</div>
+      <div class="grid">${list.map(s => {
+        const l = liveness(s);
+        return `<div class="card">
+          <div class="card-head">
+            <span class="dot ${l.on ? "on" : ""}"></span>
+            <span class="card-name">${esc(s.name || s.tool)}</span>
+            <span class="badge ${l.on ? "s-open" : "s-todo"}"
+              title="${esc(l.hint || "")}">${esc(l.label)}</span>
           </div>
-          <div class="label" title="${esc(s.directory)}">
-            ${esc(s.title || s.branch || s.directory)}
-            <div class="sub2 sub1">${esc(s.directory)}</div>
+          <div class="sub2 sub1">${esc(s.tool)}${s.branch
+            ? " · " + esc(s.branch) : ""}</div>
+          ${s.title ? `<div class="sub2">${esc(s.title)}</div>` : ""}
+          <div class="card-attrs">
+            <div>${attribution(s.target,
+              "ブランチ名にもコミット件名にも対象 (ms-NN) が無いため分かりません")}</div>
+            <div>${attribution(s.task,
+              "直近のコミット件名にタスク番号 (e-NNNN) が無いため分かりません")}</div>
           </div>
-          <div>${attribution(s.target,
-            "ブランチ名にもコミット件名にも対象 (ms-NN) が無いため分かりません")}</div>
-          <div>${attribution(s.task,
-            "直近のコミット件名にタスク番号 (e-NNNN) が無いため分かりません")}</div>
-          <div>
-            ${statusBadge(s.state) || (s.running ? statusBadge("open") : "")}
-            <div class="sub2 sub1"
-                 ${s.last_active ? `data-ts="${esc(s.last_active)}"` : ""}
-              >${s.last_active ? ago(s.last_active) : ""}</div>
+          <div class="card-foot">
+            <span class="sub2 sub1" title="${esc(s.directory)}"
+              >${esc(s.directory)}</span>
+            <span class="sub2 sub1"
+              ${s.last_active ? `data-ts="${esc(s.last_active)}"` : ""}
+              >${s.last_active ? ago(s.last_active) : ""}</span>
           </div>
-        </div>`).join("")}</div>`).join("")
+        </div>`; }).join("")}</div>`).join("")
       : `<p class="empty">動いているセッションが見つかりませんでした。</p>`}
   `;
   document.getElementById("to-board").onclick = () => {

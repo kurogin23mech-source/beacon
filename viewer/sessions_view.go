@@ -56,7 +56,8 @@ type SessionOverview struct {
 	Directory  string       `json:"directory"`
 	Branch     string       `json:"branch"`
 	LastActive string       `json:"last_active"`
-	Running    bool         `json:"running"`
+	Running     bool `json:"running"`
+	ToolRunning bool `json:"tool_running"`
 	Project    *ProjectRef  `json:"project,omitempty"`
 	Target     *Attribution `json:"target,omitempty"`
 	Task       *Attribution `json:"task,omitempty"`
@@ -119,7 +120,8 @@ func AllSessions(since time.Duration, now time.Time,
 	for _, r := range kept {
 		o := SessionOverview{
 			Tool: r.Tool, Name: r.Name, State: r.State, Title: r.Title,
-			Directory: r.Directory, LastActive: r.LastActive, Running: r.Running,
+			Directory: r.Directory, LastActive: r.LastActive,
+			Running: r.Running, ToolRunning: r.ToolRunning,
 			Branch: gitBranch(r.Directory),
 		}
 
