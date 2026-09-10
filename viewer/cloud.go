@@ -240,6 +240,15 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 				Title string `json:"title"`
 			} `json:"milestone"`
 		} `json:"focus"`
+		// サーバが解決した「そのセッションの作業対象」。宣言 → fork → ブランチ →
+		// cwd の順で決まる。**これが本当の担当**。
+		WorkingTarget *struct {
+			Target struct {
+				ID    string `json:"id"`
+				Label string `json:"label"`
+			} `json:"target"`
+			Source string `json:"source"`
+		} `json:"working_target"`
 		PollHealth struct {
 			Healthy bool `json:"healthy"`
 		} `json:"poll_health"`
@@ -256,20 +265,33 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 		if !s.Live {
 			continue
 		}
-		rows = append(rows, SessionRow{
-			ID:          s.SessionID,
-			Who:         s.Actor.Email,
-			Machine:     s.Actor.Machine,
-			Agent:       s.Agent.Kind,
-			Cwd:         s.Cwd,
-			Target:      s.Focus.Milestone.ID,
-			TargetLabel: s.Focus.Milestone.Title,
+		row := SessionRow{
+			ID:      s.SessionID,
+			Who:     s.Actor.Email,
+			Machine: s.Actor.Machine,
+			Agent:   s.Agent.Kind,
+			Cwd:     s.Cwd,
 			Live:        s.Live,
 			Healthy:     s.PollHealth.Healthy,
 			LastActive:  s.LastActive,
 			Branch:      s.Git.Branch,
 			HeadSubject: s.Git.HeadSubject,
-		})
+		}
+
+		// 担当はサーバが解決した working_target を使う。
+		//
+		// **focus.milestone を担当として使ってはいけない。** あれは「プロジェクトの
+		// 進行中マイルストーン」であって、そのセッションが何をしているかではない。
+		// Beacon 自身のコードにも「session-specific ではない、別の対象で fork した
+		// セッションに誤った値を出す」と明記されている (lib/working_target.py)。
+		if wt := s.WorkingTarget; wt != nil && wt.Target.ID != "" {
+			row.Target = wt.Target.ID
+			row.TargetLabel = wt.Target.Label
+			row.TargetSource = wt.Source
+		}
+		// プロジェクトの進行中マイルストーンは、担当とは別の欄で持つ。
+		row.ProjectFocus = s.Focus.Milestone.ID
+		rows = append(rows, row)
 	}
 	return rows, nil
 }

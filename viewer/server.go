@@ -271,6 +271,20 @@ func (s *Server) handler() http.Handler {
 		writeJSON(w, map[string]any{"ok": true, "project_id": body.ProjectID})
 	})
 
+	// 全セッション横断の一覧 (ms-171)。盤とは逆に、プロジェクトを跨いで
+	// 「このマシンで何が動いているか」を並べる。
+	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
+		// 名乗っている名簿が取れるなら渡す。名乗っているものは担当が確かなので
+		// 手元の推測より優先される。
+		var named []SessionRow
+		if s.cloud != nil {
+			named, _ = s.cloud.Sessions()
+		} else if s.src != nil {
+			named = s.rosterForLocal()
+		}
+		writeJSON(w, AllSessions(24*time.Hour, time.Now(), named))
+	})
+
 	mux.HandleFunc("/api/board", func(w http.ResponseWriter, r *http.Request) {
 		if !s.hasSource() {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")

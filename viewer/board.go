@@ -135,8 +135,15 @@ type SessionRow struct {
 	Machine     string `json:"machine"`
 	Agent       string `json:"agent"`
 	Cwd         string `json:"cwd"`
+	// Target はそのセッションが取り組んでいる対象。サーバが解決した
+	// working_target のみを使う。空なら「分からない」であって「無い」ではない。
 	Target      string `json:"target"`
 	TargetLabel string `json:"target_label"`
+	// TargetSource は担当がどう決まったか (宣言 / fork / ブランチ / cwd)。
+	TargetSource string `json:"target_source"`
+	// ProjectFocus はプロジェクトの進行中マイルストーン。**担当ではない。**
+	// 全セッションが同じ値になるので、担当として出すと嘘になる。
+	ProjectFocus string `json:"project_focus"`
 	Live        bool   `json:"live"`
 	Healthy     bool   `json:"healthy"`
 	LastActive  string `json:"last_active"`
