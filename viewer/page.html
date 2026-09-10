@@ -195,6 +195,9 @@
     font-weight: 600; font-size: 13px; flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* 他のマシンで動いているものは、手元のものと見分けが付くようにする。 */
+  .card.remote { border-style: dashed; }
+  .remote-note { color: var(--dim); font-style: italic; }
   .card-attrs {
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;
   }
@@ -990,20 +993,26 @@ async function openSessions() {
       <br>タスクは直近のコミット件名に含まれる番号 (e-NNNN) から辿ります。
       書かれていなければ <b>—</b> になります (そのセッションがタスクを持っていない
       という意味ではありません)。
-      <br>他のマシンで動いているものは含まれません (このマシンの記録から拾っているため)。</p>
+      <br>Beacon に名乗っているセッションは、<b>他のマシンのものも含みます</b>
+      (名簿はどのマシンからでも引けるため)。破線の札がそれです。
+      名乗っていないセッションは、このマシンの分しか分かりません。</p>
     ${rows.length ? [...groups.entries()].map(([name, list]) => `
       <div class="section-title">${esc(name)} (${list.length})</div>
       <div class="grid">${list.map(s => {
         const l = liveness(s);
-        return `<div class="card">
+        return `<div class="card ${s.remote ? "remote" : ""}">
           <div class="card-head">
             <span class="dot ${l.on ? "on" : ""}"></span>
             <span class="card-name">${esc(s.name || s.tool)}</span>
             <span class="badge ${l.on ? "s-open" : "s-todo"}"
               title="${esc(l.hint || "")}">${esc(l.label)}</span>
           </div>
-          <div class="sub2 sub1">${esc(s.tool)}${s.branch
-            ? " · " + esc(s.branch) : ""}</div>
+          <div class="sub2 sub1">${esc(s.tool || "不明")}${s.branch
+            ? " · " + esc(s.branch) : ""}${s.remote && s.machine
+            ? ` · ${esc(s.machine)}` : ""}</div>
+          ${s.remote ? `<div class="sub2 sub1 remote-note"
+            title="Beacon の名簿から拾ったものです。このマシンには痕跡がありません"
+            >別のマシン${s.who ? " · " + esc(s.who) : ""}</div>` : ""}
           ${s.title ? `<div class="sub2">${esc(s.title)}</div>` : ""}
           <div class="card-attrs">
             <div>${attribution(s.target,

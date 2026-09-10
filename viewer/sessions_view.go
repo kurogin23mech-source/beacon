@@ -68,6 +68,16 @@ type SessionOverview struct {
 	Named bool `json:"named"`
 	// SessionID は名乗っているセッションの識別子 (送信の宛先)。
 	SessionID string `json:"session_id,omitempty"`
+	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
+	Machine string `json:"machine,omitempty"`
+	// Who は動かしている人 (名乗っているセッションのみ分かる)。
+	Who string `json:"who,omitempty"`
+	// Remote は **このマシン以外** で動いているか。
+	//
+	// 名乗っているセッションはどのマシンのものも名簿に載るので、手元の記録には
+	// 無いものが出てくる。手元のものと混ぜると「このマシンで動いている」と
+	// 誤解させるため、区別できるようにする。
+	Remote bool `json:"remote"`
 }
 
 // SessionsView は一覧 1 面分。
@@ -121,6 +131,8 @@ func AllSessions(since time.Duration, now time.Time,
 	}
 
 	lookup := newProjectLookup()
+	// 手元の記録と突き合わせ済みの名簿を覚えておく (二重に並べないため)。
+	seenNamed := map[string]bool{}
 	out := SessionsView{Sessions: []SessionOverview{}}
 	for _, r := range kept {
 		o := SessionOverview{
@@ -165,10 +177,49 @@ func AllSessions(since time.Duration, now time.Time,
 			o.Task = &Attribution{ID: id, Source: "commit"}
 		}
 
+		if isNamed {
+			o.Machine = n.Machine
+			o.Who = n.Who
+		}
+
 		// 分かった ID に、読める名前を与える。
 		lookup.decorate(proj, &o)
 		out.Sessions = append(out.Sessions, o)
+		seenNamed[normalisePath(r.Directory)] = true
 	}
+
+	// 名乗っているセッションのうち、手元の記録に無いものを足す。
+	//
+	// **これが他のマシンで動いている bclaude セッション。** 名簿には載るが、この
+	// マシンには痕跡が無いので、手元の記録を並べるだけでは一覧から丸ごと抜ける。
+	for _, n := range named {
+		if seenNamed[normalisePath(n.Cwd)] {
+			continue
+		}
+		o := SessionOverview{
+			Tool:       n.Agent,
+			Name:       n.Who,
+			Directory:  n.Cwd,
+			Branch:     n.Branch,
+			LastActive: n.LastActive,
+			Running:    n.Live, // 名簿の稼働はサーバの心拍なので確か
+			Named:      true,
+			SessionID:  n.ID,
+			Machine:    n.Machine,
+			Who:        n.Who,
+			Remote:     true,
+		}
+		if n.Target != "" {
+			o.Target = &Attribution{
+				ID: n.Target, Label: n.TargetLabel, Source: "beacon"}
+		}
+		out.Sessions = append(out.Sessions, o)
+	}
+
+	// 新しい順に並べ直す (足した分が末尾に付いたままにならないように)。
+	sort.SliceStable(out.Sessions, func(i, j int) bool {
+		return out.Sessions[i].LastActive > out.Sessions[j].LastActive
+	})
 	return out
 }
 
