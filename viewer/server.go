@@ -331,7 +331,7 @@ func (s *Server) handler() http.Handler {
 			beaconDir = s.src.BeaconDir
 		}
 		roster, rosterErr := c.Sessions()
-		sender, err := resolveSender(beaconDir, roster, rosterErr == nil)
+		sender, err := resolveSender(beaconDir, s.localRoot(), roster, rosterErr == nil)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)

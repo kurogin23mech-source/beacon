@@ -54,7 +54,12 @@ type SendResult struct {
 //
 // 名簿そのものが引けなかった場合 (通信断など) だけは、手元の記録に頼る。
 // 「確かめられない」を「名乗れない」に格上げして送信を止めるのは行き過ぎ。
-func resolveSender(beaconDir string, roster []SessionRow, rosterKnown bool) (string, error) {
+//
+// ``root`` は「このビューワーが立っている場所」。クラウドの盤を見ているときは
+// .beacon が手元に無いので、起動した場所がこれにあたる。**ここを beaconDir から
+// 導いてはいけない**: クラウド表示では beaconDir が空になり、名乗れるはずの
+// セッションを取り逃して送信ごと断ってしまう (2026-09-11 に実際に起きた)。
+func resolveSender(beaconDir, root string, roster []SessionRow, rosterKnown bool) (string, error) {
 	local := localSessionID(beaconDir)
 
 	if !rosterKnown {
@@ -72,9 +77,9 @@ func resolveSender(beaconDir string, roster []SessionRow, rosterKnown bool) (str
 		}
 	}
 
-	root := normalisePath(filepath.Dir(beaconDir))
+	here := normalisePath(root)
 	for _, r := range roster {
-		if r.Live && r.Cwd != "" && normalisePath(r.Cwd) == root {
+		if here != "" && r.Live && r.Cwd != "" && normalisePath(r.Cwd) == here {
 			return r.ID, nil
 		}
 	}

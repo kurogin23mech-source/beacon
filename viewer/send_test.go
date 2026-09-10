@@ -121,28 +121,34 @@ func TestResolveSender(t *testing.T) {
 
 	// 手元の記録が名簿にあれば、それをそのまま使う。
 	write("now")
-	if got, err := resolveSender(beaconDir, live, true); err != nil || got != "now" {
+	if got, err := resolveSender(beaconDir, dir, live, true); err != nil || got != "now" {
 		t.Fatalf("名簿にある識別子を使うはず: got=%q err=%v", got, err)
 	}
 
 	// 手元の記録が古い場合、同じ作業フォルダで生きている行に乗り換える。
 	write("stale")
-	if got, err := resolveSender(beaconDir, live, true); err != nil || got != "now" {
+	if got, err := resolveSender(beaconDir, dir, live, true); err != nil || got != "now" {
 		t.Fatalf("名簿を正とするはず: got=%q err=%v", got, err)
 	}
 
 	// 名簿に自分が居ないなら、空で送らずに断る。
-	if _, err := resolveSender(beaconDir, []SessionRow{}, true); err == nil {
+	if _, err := resolveSender(beaconDir, dir, []SessionRow{}, true); err == nil {
 		t.Fatal("名乗れないときは断るはず")
 	}
 
 	// 名簿が引けなかっただけなら、手元の記録に頼って送らせる。
-	if got, err := resolveSender(beaconDir, nil, false); err != nil || got != "stale" {
+	if got, err := resolveSender(beaconDir, dir, nil, false); err != nil || got != "stale" {
 		t.Fatalf("名簿が引けないときは手元の記録を使うはず: got=%q err=%v", got, err)
 	}
 
+	// クラウドの盤を見ていて .beacon が手元に無くても、立っている場所が
+	// 名簿の行と一致すれば名乗れる。ここを断ると送信ごと死ぬ (2026-09-11 の退行)。
+	if got, err := resolveSender("", dir, live, true); err != nil || got != "now" {
+		t.Fatalf("クラウド表示でも場所で名乗れるはず: got=%q err=%v", got, err)
+	}
+
 	// 記録も名簿も無いなら断る。
-	if _, err := resolveSender(t.TempDir(), nil, false); err == nil {
+	if _, err := resolveSender(t.TempDir(), t.TempDir(), nil, false); err == nil {
 		t.Fatal("何も分からないときは断るはず")
 	}
 }
