@@ -339,6 +339,17 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 
+		// 自分宛には送れない。送信は通るのに配送されないので、押せてしまうと
+		// 「送れたのに永遠に届かない」という一番たちの悪い形になる。
+		if body.SessionID == sender {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "これはこのビューワー自身のセッションです。自分宛には届きません",
+			})
+			return
+		}
+
 		res, err := c.SendPrompt(body.SessionID, body.Text, sender)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -361,7 +372,17 @@ func (s *Server) handler() http.Handler {
 		} else if s.src != nil {
 			named = s.rosterForLocal()
 		}
-		writeJSON(w, AllSessions(24*time.Hour, time.Now(), named))
+		view := AllSessions(24*time.Hour, time.Now(), named)
+		// 自分自身がどれかを添える。宛先に選べないことを画面で示すため。
+		beaconDir := ""
+		if s.src != nil {
+			beaconDir = s.src.BeaconDir
+		}
+		if self, err := resolveSender(
+			beaconDir, s.localRoot(), named, named != nil); err == nil {
+			view.SelfSessionID = self
+		}
+		writeJSON(w, view)
 	})
 
 	mux.HandleFunc("/api/board", func(w http.ResponseWriter, r *http.Request) {

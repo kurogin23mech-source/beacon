@@ -160,3 +160,4 @@ func TestSendPromptRefusesEmptySender(t *testing.T) {
 		t.Fatal("送り主が空なら断るはず")
 	}
 }
+

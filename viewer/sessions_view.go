@@ -86,6 +86,11 @@ type SessionsView struct {
 	// NoProject は、どのプロジェクトにも紐づけられなかった数。
 	// **黙って落とさない** ため、数だけでも伝える。
 	NoProject int `json:"no_project"`
+	// SelfSessionID は、このビューワー自身が名乗る識別子。
+	//
+	// 自分宛の DM は配送されない (送り主 = 宛先の輪は成立しない)。それを知らずに
+	// 押せてしまうと、送れたように見えて永遠に届かない。画面で判るようにする。
+	SelfSessionID string `json:"self_session_id,omitempty"`
 }
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
