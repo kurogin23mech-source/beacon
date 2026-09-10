@@ -1019,11 +1019,15 @@ async function openSessions() {
               title="${esc(l.hint || "")}">${esc(l.label)}</span>
           </div>
           <div class="sub2 sub1">${esc(s.tool || "不明")}${s.branch
-            ? " · " + esc(s.branch) : ""}${s.remote && s.machine
-            ? ` · ${esc(s.machine)}` : ""}</div>
+            ? " · " + esc(s.branch) : ""}</div>
+          ${s.named && (s.who || s.machine)
+            ? `<div class="sub2 sub1"
+                 title="Beacon の名簿が持っている、このセッションの持ち主と機械です"
+                 >${[s.who, s.machine].filter(Boolean).map(esc).join(" · ")}</div>`
+            : ""}
           ${s.remote ? `<div class="sub2 sub1 remote-note"
             title="Beacon の名簿から拾ったものです。このマシンには痕跡がありません"
-            >別のマシン${s.who ? " · " + esc(s.who) : ""}</div>` : ""}
+            >別のマシン</div>` : ""}
           ${s.title ? `<div class="sub2">${esc(s.title)}</div>` : ""}
           <div class="card-attrs">
             <div>${attribution(s.target,
