@@ -237,6 +237,8 @@ let viewerState = {};
 let pickerOpen = false;
 // セッション一覧を見ている間は盤の自動更新を止める (画面を奪われないため)。
 let sessionsOpen = false;
+// 止まっているセッションを出すかどうか。既定は隠す。
+let showStopped = false;
 // 絞り込みの語。画面を作り直しても打ち直さずに済むよう覚えておく。
 let lastFilter = "";
 // 開いている組 (未着手 / 完了 / ドキュメント)。**画面を作り直しても開いたままにする。**
@@ -969,7 +971,13 @@ async function openSessions() {
     app.innerHTML = `<p class="err">読めませんでした: ${esc(e)}</p>`;
     return;
   }
-  const rows = d.sessions || [];
+  const all = d.sessions || [];
+  // 止まっているものは既定で隠す。いま何が動いているかを読みに来ているのに、
+  // 終わった分に埋もれては意味がない (2026-09-10 の指摘)。
+  // 「止まっている」の判定は liveness に一本化してある。
+  const stopped = all.filter(s => liveness(s).label === "停止");
+  const rows = showStopped ? all : all.filter(s => liveness(s).label !== "停止");
+
   // プロジェクトごとにまとめる。どのプロジェクトの作業かが一目で分かるように。
   const groups = new Map();
   for (const s of rows) {
@@ -985,6 +993,9 @@ async function openSessions() {
       <div class="meta">
         <b>${rows.length}</b> セッション ・ <b>${groups.size}</b> プロジェクト
         ${d.no_project ? ` ・ プロジェクトに紐づかないもの <b>${d.no_project}</b>` : ""}
+        ${stopped.length ? ` &nbsp;·&nbsp; <button id="toggle-stopped" class="linkish">${
+          showStopped ? `停止中 ${stopped.length} 件を隠す`
+                      : `停止中 ${stopped.length} 件も表示`}</button>` : ""}
         &nbsp;·&nbsp; <button id="to-board" class="linkish">盤に戻る</button>
       </div>
     </header>
@@ -1036,9 +1047,13 @@ async function openSessions() {
                  title="Beacon に名乗っているセッションにしか文面を渡せません">
                  送信不可 — Beacon に名乗っていません</div>`}
         </div>`; }).join("")}</div>`).join("")
-      : `<p class="empty">動いているセッションが見つかりませんでした。</p>`}
+      : `<p class="empty">${stopped.length && !showStopped
+          ? `動いているセッションはありません (停止中が ${stopped.length} 件あります)。`
+          : "セッションが見つかりませんでした。"}</p>`}
   `;
   wireSendButtons();
+  const toggle = document.getElementById("toggle-stopped");
+  if (toggle) toggle.onclick = () => { showStopped = !showStopped; openSessions(); };
   document.getElementById("to-board").onclick = () => {
     sessionsOpen = false; lastBoardJSON = ""; refresh();
   };
