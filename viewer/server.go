@@ -324,31 +324,8 @@ func (s *Server) handler() http.Handler {
 		}
 		c := &CloudSource{API: DefaultAPI, Token: creds.Token, ProjectID: pid}
 
-		// 誰として送るかを決める。名乗れないなら送らない。
-		// 名簿が引けたときは名簿を正とする (手元の記録はずれることがある)。
-		beaconDir := ""
-		if s.src != nil {
-			beaconDir = s.src.BeaconDir
-		}
-		roster, rosterErr := c.Sessions()
-		sender, err := resolveSender(beaconDir, s.localRoot(), roster, rosterErr == nil)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-
-		// 自分宛には送れない。送信は通るのに配送されないので、押せてしまうと
-		// 「送れたのに永遠に届かない」という一番たちの悪い形になる。
-		if body.SessionID == sender {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": "これはこのビューワー自身のセッションです。自分宛には届きません",
-			})
-			return
-		}
+		// ビューワー自身の名で送る。手元のセッションの名を借りない。
+		sender := resolveSender()
 
 		res, err := c.SendPrompt(body.SessionID, body.Text, sender)
 		if err != nil {
@@ -372,17 +349,7 @@ func (s *Server) handler() http.Handler {
 		} else if s.src != nil {
 			named = s.rosterForLocal()
 		}
-		view := AllSessions(24*time.Hour, time.Now(), named)
-		// 自分自身がどれかを添える。宛先に選べないことを画面で示すため。
-		beaconDir := ""
-		if s.src != nil {
-			beaconDir = s.src.BeaconDir
-		}
-		if self, err := resolveSender(
-			beaconDir, s.localRoot(), named, named != nil); err == nil {
-			view.SelfSessionID = self
-		}
-		writeJSON(w, view)
+		writeJSON(w, AllSessions(24*time.Hour, time.Now(), named))
 	})
 
 	mux.HandleFunc("/api/board", func(w http.ResponseWriter, r *http.Request) {

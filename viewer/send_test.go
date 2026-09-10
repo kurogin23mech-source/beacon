@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -100,56 +98,15 @@ func TestCheckReceiptStages(t *testing.T) {
 	}
 }
 
-// 送り主の決め方 (2026-09-11)。
-// 手元の記録がずれていても、名簿を正として正しい識別子を選べること。
-// 名乗れないときは黙って空で送らず、断ること。
-func TestResolveSender(t *testing.T) {
-	dir := t.TempDir()
-	beaconDir := filepath.Join(dir, ".beacon")
-	if err := os.MkdirAll(beaconDir, 0o755); err != nil {
-		t.Fatal(err)
+// ビューワーは自分の名で名乗ること。
+// 手元のセッションの名を借りると、本来の宛先が「自分自身」に見えて送信口が塞がる。
+func TestResolveSenderIsViewerIdentity(t *testing.T) {
+	got := resolveSender()
+	if !strings.HasPrefix(got, "beacon-viewer") {
+		t.Fatalf("ビューワー自身の名で名乗るはず: got=%q", got)
 	}
-	write := func(id string) {
-		body := `{"session_id":"` + id + `"}`
-		if err := os.WriteFile(filepath.Join(beaconDir, "session.json"),
-			[]byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	live := []SessionRow{{ID: "now", Cwd: dir, Live: true}}
-
-	// 手元の記録が名簿にあれば、それをそのまま使う。
-	write("now")
-	if got, err := resolveSender(beaconDir, dir, live, true); err != nil || got != "now" {
-		t.Fatalf("名簿にある識別子を使うはず: got=%q err=%v", got, err)
-	}
-
-	// 手元の記録が古い場合、同じ作業フォルダで生きている行に乗り換える。
-	write("stale")
-	if got, err := resolveSender(beaconDir, dir, live, true); err != nil || got != "now" {
-		t.Fatalf("名簿を正とするはず: got=%q err=%v", got, err)
-	}
-
-	// 名簿に自分が居ないなら、空で送らずに断る。
-	if _, err := resolveSender(beaconDir, dir, []SessionRow{}, true); err == nil {
-		t.Fatal("名乗れないときは断るはず")
-	}
-
-	// 名簿が引けなかっただけなら、手元の記録に頼って送らせる。
-	if got, err := resolveSender(beaconDir, dir, nil, false); err != nil || got != "stale" {
-		t.Fatalf("名簿が引けないときは手元の記録を使うはず: got=%q err=%v", got, err)
-	}
-
-	// クラウドの盤を見ていて .beacon が手元に無くても、立っている場所が
-	// 名簿の行と一致すれば名乗れる。ここを断ると送信ごと死ぬ (2026-09-11 の退行)。
-	if got, err := resolveSender("", dir, live, true); err != nil || got != "now" {
-		t.Fatalf("クラウド表示でも場所で名乗れるはず: got=%q err=%v", got, err)
-	}
-
-	// 記録も名簿も無いなら断る。
-	if _, err := resolveSender(t.TempDir(), t.TempDir(), nil, false); err == nil {
-		t.Fatal("何も分からないときは断るはず")
+	if got == "" {
+		t.Fatal("送り主が空だと、受け取った側が誰からか分からない")
 	}
 }
 
@@ -160,4 +117,3 @@ func TestSendPromptRefusesEmptySender(t *testing.T) {
 		t.Fatal("送り主が空なら断るはず")
 	}
 }
-

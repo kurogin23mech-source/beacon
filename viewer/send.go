@@ -38,61 +38,24 @@ type SendResult struct {
 	Note string `json:"note,omitempty"`
 }
 
-// resolveSender は、送り主として名乗る識別子を決める。
+// resolveSender は、送り主として名乗る識別子を返す。
 //
-// **名乗れないなら送らない。** 送り主が空のままでも送信自体は通ってしまうが、
-// 受け取った側には「誰からか分からない DM」として届き、返信もできない。
-// 宛先が空なら断るのに送り主が空だと通す、というのは筋が通らない。
+// **ビューワーは、同じフォルダで動いているセッションではない。** 別のプログラムで
+// あり、自分の名で名乗る。ここを取り違えて手元のセッションの名を借りると、本来の
+// 宛先であるそのセッションが「自分自身」に見えてしまい、送信口ごと塞がる
+// (2026-09-11 に実際にやった)。
 //
-// 手元の記録 (.beacon/session.json) は当てにしきれない。セッションが切り替わっても
-// 古い識別子が残ることがあり、実際にずれているのを観測した (2026-09-11)。
-// そこで **名簿 (サーバが今 live として持っているもの) を正とする**:
+// 名前は機械ごとに決まる形にする。受け取った側が「どの機械のビューワーから来たか」
+// を読めて、かつ生きているセッションの識別子と衝突しない。
 //
-//	1. 手元の記録の識別子が名簿にあれば、それを使う
-//	2. 無ければ、同じ作業フォルダで生きている名簿の行を使う
-//	3. どちらも取れなければ断る
-//
-// 名簿そのものが引けなかった場合 (通信断など) だけは、手元の記録に頼る。
-// 「確かめられない」を「名乗れない」に格上げして送信を止めるのは行き過ぎ。
-//
-// ``root`` は「このビューワーが立っている場所」。クラウドの盤を見ているときは
-// .beacon が手元に無いので、起動した場所がこれにあたる。**ここを beaconDir から
-// 導いてはいけない**: クラウド表示では beaconDir が空になり、名乗れるはずの
-// セッションを取り逃して送信ごと断ってしまう (2026-09-11 に実際に起きた)。
-func resolveSender(beaconDir, root string, roster []SessionRow, rosterKnown bool) (string, error) {
-	local := localSessionID(beaconDir)
-
-	if !rosterKnown {
-		if local == "" {
-			return "", errors.New(
-				"送り主として名乗れる Beacon セッションが見つかりません " +
-					"(.beacon/session.json が読めず、名簿も引けませんでした)")
-		}
-		return local, nil
+// 送り主を空にしてはいけない。送信自体は通ってしまうが、受け取った側には
+// 「誰からか分からない DM」として届く。
+func resolveSender() string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		return "beacon-viewer"
 	}
-
-	for _, r := range roster {
-		if local != "" && r.ID == local {
-			return local, nil
-		}
-	}
-
-	here := normalisePath(root)
-	for _, r := range roster {
-		if here != "" && r.Live && r.Cwd != "" && normalisePath(r.Cwd) == here {
-			return r.ID, nil
-		}
-	}
-
-	if local != "" {
-		return "", errors.New(
-			"このビューワーが名乗ろうとしたセッション (" + local +
-				") は、Beacon の名簿にもう居ません。" +
-				"Beacon に名乗っているセッションから開き直してください")
-	}
-	return "", errors.New(
-		"送り主として名乗れる Beacon セッションが見つかりません。" +
-			"このプロジェクトで beacon channel install を済ませたセッションから開いてください")
+	return "beacon-viewer-" + host
 }
 
 // localSessionID は、このマシンの Beacon セッション識別子 (分かれば)。

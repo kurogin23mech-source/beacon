@@ -86,11 +86,6 @@ type SessionsView struct {
 	// NoProject は、どのプロジェクトにも紐づけられなかった数。
 	// **黙って落とさない** ため、数だけでも伝える。
 	NoProject int `json:"no_project"`
-	// SelfSessionID は、このビューワー自身が名乗る識別子。
-	//
-	// 自分宛の DM は配送されない (送り主 = 宛先の輪は成立しない)。それを知らずに
-	// 押せてしまうと、送れたように見えて永遠に届かない。画面で判るようにする。
-	SelfSessionID string `json:"self_session_id,omitempty"`
 }
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
@@ -127,11 +122,16 @@ func AllSessions(since time.Duration, now time.Time,
 		return kept[i].LastActive > kept[j].LastActive
 	})
 
-	// 名簿を作業フォルダで引けるようにする (名乗っているものを優先するため)。
+	// 名簿を「作業フォルダ + 道具」で引けるようにする。
+	//
+	// **フォルダだけで引いてはいけない。** 同じフォルダで Codex や OpenCode を
+	// 何本も動かしていると、その全部が bclaude セッションの識別子を貰ってしまい、
+	// 名乗っていないセッションが名乗っているように見える。送信先にも選べてしまい、
+	// 押すと無関係のセッション宛に飛ぶ (2026-09-11 に観測)。
 	namedByDir := map[string]SessionRow{}
 	for _, n := range named {
 		if n.Cwd != "" {
-			namedByDir[normalisePath(n.Cwd)] = n
+			namedByDir[namedKey(n.Cwd, n.Agent)] = n
 		}
 	}
 
@@ -156,7 +156,7 @@ func AllSessions(since time.Duration, now time.Time,
 		subject := gitHeadSubject(r.Directory)
 
 		// 名乗っているセッションかどうかは、担当の有無とは別に記録する。
-		n, isNamed := namedByDir[normalisePath(r.Directory)]
+		n, isNamed := namedByDir[namedKey(r.Directory, r.Tool)]
 		o.Named = isNamed
 		if isNamed {
 			o.SessionID = n.ID
@@ -190,7 +190,9 @@ func AllSessions(since time.Duration, now time.Time,
 		// 分かった ID に、読める名前を与える。
 		lookup.decorate(proj, &o)
 		out.Sessions = append(out.Sessions, o)
-		seenNamed[normalisePath(r.Directory)] = true
+		if isNamed {
+			seenNamed[namedKey(r.Directory, r.Tool)] = true
+		}
 	}
 
 	// 名乗っているセッションのうち、手元の記録に無いものを足す。
@@ -198,7 +200,7 @@ func AllSessions(since time.Duration, now time.Time,
 	// **これが他のマシンで動いている bclaude セッション。** 名簿には載るが、この
 	// マシンには痕跡が無いので、手元の記録を並べるだけでは一覧から丸ごと抜ける。
 	for _, n := range named {
-		if seenNamed[normalisePath(n.Cwd)] {
+		if seenNamed[namedKey(n.Cwd, n.Agent)] {
 			continue
 		}
 		o := SessionOverview{
@@ -226,6 +228,12 @@ func AllSessions(since time.Duration, now time.Time,
 		return out.Sessions[i].LastActive > out.Sessions[j].LastActive
 	})
 	return out
+}
+
+// namedKey は名簿と手元の記録を突き合わせる鍵。
+// 場所が同じでも道具が違えば別のセッション。
+func namedKey(dir, tool string) string {
+	return normalisePath(dir) + "	" + strings.ToLower(strings.TrimSpace(tool))
 }
 
 func normalisePath(p string) string {

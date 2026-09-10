@@ -972,8 +972,6 @@ async function openSessions() {
     return;
   }
   const all = d.sessions || [];
-  // このビューワー自身のセッション。自分宛は配送されないので送信口を出さない。
-  const selfId = d.self_session_id || "";
   // 止まっているものは既定で隠す。いま何が動いているかを読みに来ているのに、
   // 終わった分に埋もれては意味がない (2026-09-10 の指摘)。
   // 「止まっている」の判定は liveness に一本化してある。
@@ -1040,11 +1038,7 @@ async function openSessions() {
               ${s.last_active ? `data-ts="${esc(s.last_active)}"` : ""}
               >${s.last_active ? ago(s.last_active) : ""}</span>
           </div>
-          ${s.session_id && s.session_id === selfId
-            ? `<div class="sub2 sub1" style="margin-top:8px;"
-                 title="送り主と宛先が同じ輪は成立しないため、自分宛の文面は配送されません">
-                 これはこのビューワー自身 — 自分宛には送れません</div>`
-            : s.named && s.session_id
+          ${s.named && s.session_id
             ? `<button class="linkish send" style="margin-top:8px; width:100%;"
                  data-sid="${esc(s.session_id)}"
                  data-pid="${esc((s.project || {}).project_id || "")}"
