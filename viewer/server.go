@@ -271,6 +271,73 @@ func (s *Server) handler() http.Handler {
 		writeJSON(w, map[string]any{"ok": true, "project_id": body.ProjectID})
 	})
 
+	// 名乗っているセッションに文面を送る (ms-171)。
+	//
+	// **自分の機械の中に開いているときだけ**。この受け口は認証を持たないので、
+	// 外に開いた状態で送れると、その口に届く誰もがあなたの名前で他のセッションを
+	// 動かせてしまう (フォルダ選択ダイアログと同じ扱い)。
+	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST してください", http.StatusMethodNotAllowed)
+			return
+		}
+		if !isLoopback(s.Host) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "外に開いている盤からは送れません (この受け口は認証を持たないため)",
+			})
+			return
+		}
+		var body struct {
+			SessionID string `json:"session_id"`
+			ProjectID string `json:"project_id"`
+			Text      string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		creds := LoadCredentials()
+		if creds == nil || creds.Expired(time.Now()) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "ログインしていません",
+			})
+			return
+		}
+		pid := body.ProjectID
+		if pid == "" && s.cloud != nil {
+			pid = s.cloud.ProjectID
+		}
+		if pid == "" && s.src != nil {
+			pid = s.src.CloudProjectID()
+		}
+		if pid == "" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "どのプロジェクト宛か分かりません",
+			})
+			return
+		}
+		c := &CloudSource{API: DefaultAPI, Token: creds.Token, ProjectID: pid}
+		sender := ""
+		if s.src != nil {
+			sender = localSessionID(s.src.BeaconDir)
+		}
+		res, err := c.SendPrompt(body.SessionID, body.Text, sender)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		// 送っただけで終わらせず、届いたかまで確かめて返す。
+		writeJSON(w, c.waitForReceipt(res.EventID))
+	})
+
 	// 全セッション横断の一覧 (ms-171)。盤とは逆に、プロジェクトを跨いで
 	// 「このマシンで何が動いているか」を並べる。
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {

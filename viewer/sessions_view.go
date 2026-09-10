@@ -61,8 +61,13 @@ type SessionOverview struct {
 	Project    *ProjectRef  `json:"project,omitempty"`
 	Target     *Attribution `json:"target,omitempty"`
 	Task       *Attribution `json:"task,omitempty"`
-	// Named は Beacon に名乗っているか。名乗っていれば担当は確かなものになる。
+	// Named は Beacon に名乗っているか。
+	//
+	// **送れるのはこれが真のものだけ。** 名乗っていないセッションには、外から
+	// 文面を渡す口が無い (または非公開・認証で塞がっている)。
 	Named bool `json:"named"`
+	// SessionID は名乗っているセッションの識別子 (送信の宛先)。
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // SessionsView は一覧 1 面分。
@@ -136,6 +141,9 @@ func AllSessions(since time.Duration, now time.Time,
 		// 名乗っているセッションかどうかは、担当の有無とは別に記録する。
 		n, isNamed := namedByDir[normalisePath(r.Directory)]
 		o.Named = isNamed
+		if isNamed {
+			o.SessionID = n.ID
+		}
 
 		// 担当は、サーバが解決した値があるときだけ「確か」として扱う。
 		//

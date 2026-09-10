@@ -314,6 +314,9 @@ function sessionCard(s) {
     <div class="sub">${esc(s.agent)}${s.machine ? " · " + esc(s.machine) : ""}</div>
     ${s.target ? `<div class="target">${esc(s.target)}</div>` : ""}
     ${commit}
+    ${s.live && viewerState.can_send !== false
+      ? `<button class="linkish send" data-sid="${esc(s.id)}"
+           style="margin-top:6px;">プロンプトを送る</button>` : ""}
     <div class="sub">${s.live ? "稼働中" : "停止"}${s.last_active
       ? ` · <span data-ts="${esc(s.last_active)}">${ago(s.last_active)}</span>`
       : ""}</div>
@@ -610,6 +613,7 @@ function render(board) {
   `;
   wireRows();
   document.getElementById("switch").onclick = openPicker;
+  wireSendButtons();
   document.getElementById("to-sessions").onclick = openSessions;
 
   // 絞り込み。打つたびに、当てはまらない行を隠す。
@@ -882,6 +886,51 @@ async function loadCloudProjects(box) {
   }
 }
 
+// 名乗っているセッションに文面を送る。
+//
+// 送れるのは Beacon に名乗っているセッションだけ。素の Claude / OpenCode / Codex
+// には送る口が無い (または非公開・認証で塞がっている) ので、入口自体を出さない。
+async function sendPrompt(sessionId, projectId, btn) {
+  const text = prompt("送る文面を入力してください（相手のセッションに届きます）");
+  if (text === null || !text.trim()) return;
+  const before = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "送っています…";
+  try {
+    const r = await fetch("/api/send", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({session_id: sessionId, project_id: projectId || "",
+                            text: text}),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      btn.textContent = "送れませんでした";
+      btn.title = d.error || "";
+      alert("送れませんでした: " + (d.error || ""));
+      return;
+    }
+    // 送れたことと届いたことは別。届いたところまで伝える。
+    btn.textContent = d.opened ? "読まれました"
+                    : d.delivered ? "届きました" : "送りました";
+    btn.title = d.note || "";
+    if (d.note) alert(d.note);
+  } catch (e) {
+    btn.textContent = "送れませんでした";
+    alert("送れませんでした: " + e);
+  } finally {
+    setTimeout(() => { btn.disabled = false; btn.textContent = before; }, 4000);
+  }
+}
+
+function wireSendButtons() {
+  for (const btn of document.querySelectorAll("button.send")) {
+    btn.onclick = e => {
+      e.stopPropagation();
+      sendPrompt(btn.dataset.sid, btn.dataset.pid || "", btn);
+    };
+  }
+}
+
 // 盤を見ている状態から、選ぶ画面へ移る。
 async function openPicker() {
   pickerOpen = true;
@@ -969,9 +1018,18 @@ async function openSessions() {
               ${s.last_active ? `data-ts="${esc(s.last_active)}"` : ""}
               >${s.last_active ? ago(s.last_active) : ""}</span>
           </div>
+          ${s.named && s.session_id
+            ? `<button class="linkish send" style="margin-top:8px; width:100%;"
+                 data-sid="${esc(s.session_id)}"
+                 data-pid="${esc((s.project || {}).project_id || "")}"
+                >プロンプトを送る</button>`
+            : `<div class="sub2 sub1" style="margin-top:8px;"
+                 title="Beacon に名乗っているセッションにしか文面を渡せません">
+                 送信不可 — Beacon に名乗っていません</div>`}
         </div>`; }).join("")}</div>`).join("")
       : `<p class="empty">動いているセッションが見つかりませんでした。</p>`}
   `;
+  wireSendButtons();
   document.getElementById("to-board").onclick = () => {
     sessionsOpen = false; lastBoardJSON = ""; refresh();
   };
