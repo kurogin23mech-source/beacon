@@ -323,10 +323,22 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 		c := &CloudSource{API: DefaultAPI, Token: creds.Token, ProjectID: pid}
-		sender := ""
+
+		// 誰として送るかを決める。名乗れないなら送らない。
+		// 名簿が引けたときは名簿を正とする (手元の記録はずれることがある)。
+		beaconDir := ""
 		if s.src != nil {
-			sender = localSessionID(s.src.BeaconDir)
+			beaconDir = s.src.BeaconDir
 		}
+		roster, rosterErr := c.Sessions()
+		sender, err := resolveSender(beaconDir, roster, rosterErr == nil)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
 		res, err := c.SendPrompt(body.SessionID, body.Text, sender)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -38,9 +38,64 @@ type SendResult struct {
 	Note string `json:"note,omitempty"`
 }
 
+// resolveSender は、送り主として名乗る識別子を決める。
+//
+// **名乗れないなら送らない。** 送り主が空のままでも送信自体は通ってしまうが、
+// 受け取った側には「誰からか分からない DM」として届き、返信もできない。
+// 宛先が空なら断るのに送り主が空だと通す、というのは筋が通らない。
+//
+// 手元の記録 (.beacon/session.json) は当てにしきれない。セッションが切り替わっても
+// 古い識別子が残ることがあり、実際にずれているのを観測した (2026-09-11)。
+// そこで **名簿 (サーバが今 live として持っているもの) を正とする**:
+//
+//	1. 手元の記録の識別子が名簿にあれば、それを使う
+//	2. 無ければ、同じ作業フォルダで生きている名簿の行を使う
+//	3. どちらも取れなければ断る
+//
+// 名簿そのものが引けなかった場合 (通信断など) だけは、手元の記録に頼る。
+// 「確かめられない」を「名乗れない」に格上げして送信を止めるのは行き過ぎ。
+func resolveSender(beaconDir string, roster []SessionRow, rosterKnown bool) (string, error) {
+	local := localSessionID(beaconDir)
+
+	if !rosterKnown {
+		if local == "" {
+			return "", errors.New(
+				"送り主として名乗れる Beacon セッションが見つかりません " +
+					"(.beacon/session.json が読めず、名簿も引けませんでした)")
+		}
+		return local, nil
+	}
+
+	for _, r := range roster {
+		if local != "" && r.ID == local {
+			return local, nil
+		}
+	}
+
+	root := normalisePath(filepath.Dir(beaconDir))
+	for _, r := range roster {
+		if r.Live && r.Cwd != "" && normalisePath(r.Cwd) == root {
+			return r.ID, nil
+		}
+	}
+
+	if local != "" {
+		return "", errors.New(
+			"このビューワーが名乗ろうとしたセッション (" + local +
+				") は、Beacon の名簿にもう居ません。" +
+				"Beacon に名乗っているセッションから開き直してください")
+	}
+	return "", errors.New(
+		"送り主として名乗れる Beacon セッションが見つかりません。" +
+			"このプロジェクトで beacon channel install を済ませたセッションから開いてください")
+}
+
 // localSessionID は、このマシンの Beacon セッション識別子 (分かれば)。
-// 送り主として添える。分からなくても送れる。
 func localSessionID(beaconDir string) string {
+	if beaconDir == "" {
+		// 空のまま join すると、たまたま手元にある session.json を拾いかねない。
+		return ""
+	}
 	raw, err := os.ReadFile(filepath.Join(beaconDir, "session.json"))
 	if err != nil {
 		return ""
@@ -63,6 +118,10 @@ func (c *CloudSource) SendPrompt(recipientSessionID, text, senderSessionID strin
 	}
 	if recipientSessionID == "" {
 		return nil, errors.New("宛先のセッションが分かりません")
+	}
+	// 送り主が空のまま送ると、受け取った側が誰からか分からない DM になる。
+	if senderSessionID == "" {
+		return nil, errors.New("送り主のセッションが分かりません")
 	}
 	body := map[string]any{
 		"channel":           "dm",
