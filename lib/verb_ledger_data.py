@@ -522,6 +522,12 @@ VERB_LEDGER = {
     "watch_list": {"cls": "Q", "secondary": [], "note": ""},
     "watch_set": {"cls": "B", "secondary": [], "note": ""},
 
+    # --- view (ms-170 e-6344) ---
+    # Q: 盤を読んで見せるだけ (書き込みなし)。表示は手元 HTTP + ブラウザなので
+    # 人間向け出力 = C を副次に持つ。
+    "view": {"cls": "Q", "secondary": ["C"],
+             "note": "[post-memo] ms-170 e-6344 local board viewer"},
+
     # --- shell top-level (not in the dispatch map; memo: status=Q, reset=B(+C)) ---
     "status": {"cls": "Q", "secondary": [], "note": ""},
     "reset": {"cls": "B", "secondary": ["C"], "note": ""},

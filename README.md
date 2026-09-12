@@ -201,6 +201,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon setup` | First-time setup wizard (auth + hooks + project) / 初回セットアップ |
 | `beacon init [--name n] [--objective o] [--storage local\|cloud]` | Initialize `.beacon/` (flags for non-interactive use) / プロジェクト作成 |
 | `beacon status [--json]` | Show project status / ステータス表示 |
+| `beacon view [--port n] [--host addr] [--expose] [--no-open] [--json]` | Open the board in a browser (local by default; `--host`+`--expose` to serve externally) / 盤をブラウザで見る (既定はローカル、外部公開は `--host`+`--expose`) |
 | `beacon deadline due [--json]` | List due/overdue work items across ALL occupations (dev milestone target_date / task, sales activity — one profession-agnostic query) / 職種横断で期日 到達・超過 の作業を一覧 |
 | `beacon skill install` | Install Claude Code Skills / Skillインストール |
 | `beacon monitor context [--dry-run]` | Run the Stop hook context-usage threshold monitor (debug / 動作確認) |

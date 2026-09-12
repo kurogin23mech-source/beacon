@@ -390,6 +390,9 @@ from cmd_deploy import (  # noqa: F401
 
 # ms-127 e-4849: milestone family moved to lib/cmd_milestone.py. Re-imported
 # here so dispatch + external `commands.cmd_milestone_*` keep resolving. Family-
+# ms-170 e-6344 — `beacon view` (手元で盤を立ち上げてブラウザで見る)。
+from cmd_view import cmd_view  # noqa: F401
+
 # private helpers/constants stay canonical in cmd_milestone (patch there per the
 # e-4320 rule).
 from cmd_milestone import (  # noqa: F401
@@ -6398,6 +6401,7 @@ def _help_registry():
         {"command": "beacon init", "flags": [], "description": "Initialize .beacon/ in current directory"},
         {"command": "beacon setup", "flags": [], "description": "First-time setup wizard (auth + hooks + project)"},
         {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
+        {"command": "beacon view", "flags": ["--port <n>", "--host <addr>", "--expose", "--no-open", "--json"], "description": "Open the board in a browser (local by default; --host + --expose to serve externally)"},
         {"command": "beacon milestone add", "flags": [], "description": "Add a new milestone (interactive)"},
         {"command": "beacon milestone list", "flags": ["--json"], "description": "List milestones"},
         {"command": "beacon milestone start <id>", "flags": ["--no-branch", "--no-assignee"], "description": "Activate milestone + auto-create ms-XX-<slug> branch + self-add as assignee"},
@@ -10914,6 +10918,7 @@ if __name__ == "__main__":
         "help_json": cmd_help_json,
         "help_render": cmd_help_render,
         "doctor": cmd_doctor,
+        "view": cmd_view,
     }
     fn = commands.get(cmd)
     # ms-54 e-1319: the CLI-side heartbeat (formerly bumped here, ms-57 e-1035)
