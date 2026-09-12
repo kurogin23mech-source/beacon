@@ -395,14 +395,36 @@ func (s *Server) handler() http.Handler {
 		} else if s.src != nil {
 			named = s.rosterForLocal()
 		}
+		// 表示範囲を決める。未指定は既定 (self) に倒すが、**未知値 (typo 等) は黙って
+		// self に倒さず 400 で拒否する** — さもないと ?scope=atention のような打ち間違いが
+		// 無警告で「自分のみ」に化け、他マシン / 他人のセッションを『存在しない』と
+		// 誤読させる (e-6401 レビュー high)。受理値の真実源は sessions_view.go の Scope* 定数。
+		scope := r.URL.Query().Get("scope")
+		if scope == "" {
+			scope = ScopeSelf
+		}
+		if !KnownScope(scope) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": fmt.Sprintf("不明な表示範囲 %q です。使える値: %s / %s / %s",
+					scope, ScopeSelf, ScopeAttention, ScopeAll),
+				"allowed": []string{ScopeSelf, ScopeAttention, ScopeAll},
+			})
+			return
+		}
+
 		view := AllSessions(24*time.Hour, time.Now(), named)
 		// 表示範囲 (自分のみ=既定 / 要対応のみ / 全て) をサーバ側で絞る。誰が「自分」かは
 		// ログイン情報から引く (未ログインならこのマシンの分だけを自分とみなす)。
 		// プロジェクト (root) 絞りは画面側の責務 (選択肢を全プロジェクト分そろえたまま
 		// 切り替えるため) なので、ここでは掛けない — 絞りの真実源を 1 つに保つ。
-		view.Sessions = FilterSessions(view.Sessions, SessionFilter{
-			Scope: r.URL.Query().Get("scope"),
-		}, cloudEmail())
+		total := len(view.Sessions)
+		view.Sessions = FilterSessions(view.Sessions, SessionFilter{Scope: scope}, cloudEmail())
+		// 絞り込みの発生を応答自身に名乗らせる (silent narrowing を防ぐ)。
+		view.Scope = scope
+		view.Total = total
+		view.Shown = len(view.Sessions)
 		writeJSON(w, view)
 	})
 

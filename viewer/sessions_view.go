@@ -105,6 +105,15 @@ type SessionsView struct {
 	// NoProject は、どのプロジェクトにも紐づけられなかった数。
 	// **黙って落とさない** ため、数だけでも伝える。
 	NoProject int `json:"no_project"`
+	// Scope は実際に適用した表示範囲 (self / attention / all)。
+	// **絞り込みが起きたことを応答自身が名乗る** ため常に載せる。これが無いと、
+	// 呼び出し側 (画面・AI・自動化) は「全部返ってきた」のか「self に絞られた」のかを
+	// 区別できず、他マシン / 他人のセッションを『存在しない』と誤読する (e-6401 レビュー)。
+	Scope string `json:"scope"`
+	// Total は絞り込み前の総数、Shown は絞り込み後に返した数。
+	// 差があれば「隠したものがある」と呼び出し側が機械的に検知できる。
+	Total int `json:"total"`
+	Shown int `json:"shown"`
 }
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
@@ -380,9 +389,29 @@ func (l *projectLookup) decorate(ref *ProjectRef, o *SessionOverview) {
 // プロジェクト (root) 絞りはここには無い。選択肢を全プロジェクト分そろえたまま
 // 切り替えたいので画面側 (page.html) の責務にしてある — 絞りの真実源を 1 つに保つ。
 
+// 運用室の表示範囲の許容値。**受理する scope の真実源はここ 1 つ** — 画面・API の
+// 検証も doc も、この定数と KnownScope から引く (値を増やすときはここだけ直す)。
+const (
+	ScopeSelf      = "self"      // 自分のセッションのみ (既定)
+	ScopeAttention = "attention" // 生きているのに道具が止まっている = 手が要りそうなもの
+	ScopeAll       = "all"       // 他人のものも含め全部
+)
+
+// KnownScope は scope が受理できる表示範囲かを返す。
+// 空文字は「未指定」で、既定 (self) に倒す側の判断は呼び出し側 (API ハンドラ) が持つ
+// ため、ここでは false を返す (= 空 と 既定 self を混同しない)。
+func KnownScope(scope string) bool {
+	switch scope {
+	case ScopeSelf, ScopeAttention, ScopeAll:
+		return true
+	}
+	return false
+}
+
 // SessionFilter は運用室の表示範囲の条件。
 type SessionFilter struct {
-	// Scope は "self" (既定) / "attention" / "all"。未知値は "self" に倒す。
+	// Scope は表示範囲。受理値は KnownScope / Scope* 定数を参照 (真実源はそこ)。
+	// 空 / 未知値はこの純関数では既定 (self) に倒す — 未知値の拒否は表面 (API) の責務。
 	Scope string `json:"scope"`
 }
 
@@ -424,13 +453,13 @@ func FilterSessions(sessions []SessionOverview, f SessionFilter,
 	out := make([]SessionOverview, 0, len(sessions))
 	for _, s := range sessions {
 		switch f.Scope {
-		case "attention":
+		case ScopeAttention:
 			if !NeedsAttention(s) {
 				continue
 			}
-		case "all":
+		case ScopeAll:
 			// 全部通す
-		default: // "self" と未知値は「自分のみ」に倒す (既定)
+		default: // ScopeSelf と空 / 未知値は「自分のみ」に倒す (既定)
 			if !isSelf(s, selfEmail) {
 				continue
 			}
