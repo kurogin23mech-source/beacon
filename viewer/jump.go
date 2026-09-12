@@ -103,37 +103,72 @@ func appleTerminalJumpScript(tty string) string {
 end tell`, dev)
 }
 
-// isAppleTerminal は harness の種類が Terminal.app かどうか。
-// 空 (= 種類不明) は Terminal.app とみなす (macOS の既定端末)。
-func isAppleTerminal(harness string) bool {
-	switch strings.ToLower(strings.TrimSpace(harness)) {
-	case "", "apple-terminal", "terminal", "apple_terminal":
-		return true
-	default:
-		return false
-	}
+// terminalDriver は 1 種類の端末アプリの前面化の仕方を束ねる。
+//
+// **端末種別に関する知識はこのテーブル 1 か所だけ** に置く (SPEC の単一の真実源)。
+// 新しい端末 (WezTerm 等) を足すときは、ここに 1 エントリ (kinds / script / appName)
+// を加えるだけで、飛べる判定・スクリプト選択・表示名・画面のボタン (Jumpable 経由) が
+// 揃って対応する。判定を JS 側に複製しない (= Go が唯一の正典、page.html は Jumpable を読むだけ)。
+type terminalDriver struct {
+	// kinds はサーバの harness.kind として来うる別名 (すべて小文字)。
+	kinds []string
+	// script は tty を持つタブを前面化する AppleScript を組む純関数。
+	script func(tty string) string
+	// appName は見つからない時のメッセージに出す表示名。
+	appName string
 }
 
-// isITerm2 は harness の種類が iTerm2 かどうか。
-func isITerm2(harness string) bool {
-	switch strings.ToLower(strings.TrimSpace(harness)) {
-	case "iterm2", "iterm", "iterm.app":
-		return true
-	default:
-		return false
+// terminalDrivers は対応端末の一覧 (= 唯一の正典)。空文字 "" は種類不明で、macOS の
+// 既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
+// 前面化に未対応で、画面では fallback (パスのコピー) に回す。
+var terminalDrivers = []terminalDriver{
+	{
+		kinds:   []string{"", "apple-terminal", "terminal", "apple_terminal"},
+		script:  appleTerminalJumpScript,
+		appName: "Terminal.app",
+	},
+	{
+		kinds:   []string{"iterm2", "iterm", "iterm.app"},
+		script:  iTerm2JumpScript,
+		appName: "iTerm2",
+	},
+}
+
+// driverForHarness は harness に対応する driver を返す (無ければ nil)。
+func driverForHarness(harness string) *terminalDriver {
+	k := strings.ToLower(strings.TrimSpace(harness))
+	for i := range terminalDrivers {
+		for _, want := range terminalDrivers[i].kinds {
+			if k == want {
+				return &terminalDrivers[i]
+			}
+		}
 	}
+	return nil
 }
 
 // jumpableHarness は「端末へ飛ぶ」に対応した端末かどうか (前面化できるか)。
-// 対応外 (kitty / VS Code / tmux 等) は fallback (パスのコピー) に回す。
+// 対応外は fallback (パスのコピー) に回す。frontend には Go が計算した
+// SessionOverview.Jumpable を渡す (JS 側に許可集合を複製しない = ドリフト防止)。
 func jumpableHarness(harness string) bool {
-	return isAppleTerminal(harness) || isITerm2(harness)
+	return driverForHarness(harness) != nil
 }
 
-// terminalAppName は前面化対象の端末アプリ名 (見つからない時のメッセージ用)。
+// jumpableHarnessKinds は対応端末の別名を全部並べる (テスト / ドキュメント用)。
+// テストはこれを回して網羅するので、テーブルに足した別名がテスト漏れしない。
+func jumpableHarnessKinds() []string {
+	var out []string
+	for _, d := range terminalDrivers {
+		out = append(out, d.kinds...)
+	}
+	return out
+}
+
+// terminalAppName は前面化対象の端末アプリの表示名 (見つからない時のメッセージ用)。
+// これは表示名であって harness の値ではない (harness に "Terminal.app" は渡せない)。
 func terminalAppName(harness string) string {
-	if isITerm2(harness) {
-		return "iTerm2"
+	if d := driverForHarness(harness); d != nil {
+		return d.appName
 	}
 	return "Terminal.app"
 }
@@ -164,15 +199,11 @@ end tell`, dev)
 // jumpScriptBuilder は端末種別に応じた AppleScript 組み立て関数を返す。
 // 未対応の種別は fallback として理由付きエラーを返す (SPEC 方針4: 落とさない)。
 func jumpScriptBuilder(harness string) (func(tty string) string, error) {
-	switch {
-	case isAppleTerminal(harness):
-		return appleTerminalJumpScript, nil
-	case isITerm2(harness):
-		return iTerm2JumpScript, nil
-	default:
-		return nil, fmt.Errorf(
-			"この端末 (%s) への前面化は未対応です — 作業フォルダを手で開いてください", harness)
+	if d := driverForHarness(harness); d != nil {
+		return d.script, nil
 	}
+	return nil, fmt.Errorf(
+		"この端末 (%s) への前面化は未対応です — 作業フォルダを手で開いてください", harness)
 }
 
 // jumpToTerminal は pid のセッションが動いている端末ウィンドウを前面化する。

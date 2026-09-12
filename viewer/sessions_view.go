@@ -77,9 +77,16 @@ type SessionOverview struct {
 	// **端末へ飛ぶ (jump-to-terminal) の起点。** 手元で拾ったセッションだけが持つ。
 	// 別マシンのセッション (Remote) は 0 で、そのマシンの端末は前面化できない。
 	PID int `json:"pid,omitempty"`
-	// Harness は端末の種類 (apple-terminal / iterm2 等)。どの端末アプリを前面化するかの
-	// 分岐に使う。名乗っているセッションだけが持つ (サーバが解決)。空は不明 = 既定扱い。
+	// Harness は端末の種類。どの端末アプリを前面化するかの分岐に使う。名乗っている
+	// セッションだけが持つ (サーバが解決)。受け付ける値は jump.go の terminalDrivers が
+	// 唯一の正典 (apple-terminal / terminal / apple_terminal / iterm2 / iterm / iterm.app)。
+	// 空は不明 = Terminal.app 既定扱い。ここに無い値は前面化に未対応 (Jumpable=false)。
 	Harness string `json:"harness,omitempty"`
+	// Jumpable は「端末へ飛ぶ」に対応した端末か (= Go が harness から計算した判定)。
+	//
+	// **画面はこの値を読むだけ。** 対応端末の許可集合を JS 側に複製すると Go と
+	// ドリフトするため、判定は Go (jump.go) を唯一の正典にして結果だけを渡す。
+	Jumpable bool `json:"jumpable"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
 	Machine string `json:"machine,omitempty"`
 	// Who は動かしている人 (名乗っているセッションのみ分かる)。
@@ -202,6 +209,8 @@ func AllSessions(since time.Duration, now time.Time,
 			o.Harness = n.Harness
 		}
 
+		// 端末へ飛べるかを Go 側で確定させる (画面は結果を読むだけ)。
+		o.Jumpable = jumpableHarness(o.Harness)
 		// 分かった ID に、読める名前を与える。
 		lookup.decorate(proj, &o)
 		out.Sessions = append(out.Sessions, o)

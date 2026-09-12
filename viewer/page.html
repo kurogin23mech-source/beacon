@@ -949,15 +949,6 @@ function wireSendButtons() {
   }
 }
 
-// 前面化に対応した端末か (Go 側 jump.go の jumpableHarness と同じ許可集合)。
-// ここを変えるときは jump.go の isAppleTerminal / isITerm2 と揃える。
-// 空 (種類不明) は macOS 既定の Terminal.app とみなして飛べる扱いにする。
-function jumpableHarness(h) {
-  const k = (h || "").toLowerCase().trim();
-  return k === "" || k === "apple-terminal" || k === "terminal"
-    || k === "apple_terminal" || k === "iterm2" || k === "iterm" || k === "iterm.app";
-}
-
 // 「端末へ飛ぶ」ボタン。押すとそのセッションの端末ウィンドウを前面化する。
 // 見つからない/未対応でも落とさず、ボタン脇に理由を出す (SPEC ms-173 方針4)。
 function wireJumpButtons() {
@@ -1165,7 +1156,7 @@ async function openSessions() {
                  title="Beacon に名乗っているセッションにしか文面を渡せません">
                  送信不可 — Beacon に名乗っていません</div>`}
           ${viewerState.jump_available && s.pid
-            ? (jumpableHarness(s.harness)
+            ? (s.jumpable
               ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
                    data-process-pid="${esc(String(s.pid))}"
                    data-harness="${esc(s.harness || "")}"

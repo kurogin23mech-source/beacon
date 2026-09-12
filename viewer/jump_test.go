@@ -41,23 +41,19 @@ func TestAppleTerminalJumpScript(t *testing.T) {
 }
 
 // 端末の種類の判定: 空 (不明) と Terminal 系は Terminal.app、他は未対応 (fallback)。
-// iTerm2 等を Terminal.app として誤って前面化しないための境界 (e-6403 で拡張)。
-func TestIsAppleTerminal(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"", true},               // 不明は macOS 既定端末とみなす
-		{"apple-terminal", true}, // サーバの harness.kind 表記
-		{"Terminal", true},
-		{"Apple_Terminal", true},
-		{"iterm2", false}, // e-6403 で対応するまでは未対応
-		{"kitty", false},
-		{"vscode", false},
+// 端末種別テーブルが表示名を正しく引き、大文字/前後空白も吸収すること。
+func TestTerminalAppName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "Terminal.app"},               // 不明は macOS 既定端末
+		{"apple-terminal", "Terminal.app"}, // サーバの harness.kind 表記
+		{" Apple_Terminal ", "Terminal.app"},
+		{"iterm2", "iTerm2"},
+		{"ITERM.APP", "iTerm2"}, // 大文字でも引ける
+		{"kitty", "Terminal.app"}, // 未対応は既定表示名 (メッセージ用のみ)
 	}
 	for _, c := range cases {
-		if got := isAppleTerminal(c.in); got != c.want {
-			t.Errorf("isAppleTerminal(%q) = %v, want %v", c.in, got, c.want)
+		if got := terminalAppName(c.in); got != c.want {
+			t.Errorf("terminalAppName(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -99,13 +95,20 @@ func TestITerm2JumpScript(t *testing.T) {
 	}
 }
 
-// 前面化に対応した端末の集合。frontend の jumpableHarness と揃っていること。
+// 対応端末はテーブル (terminalDrivers) が唯一の正典。テストはそこから網羅を導出し、
+// 別名を足しても (apple_terminal / iterm.app 含め) テスト漏れが起きないようにする。
 func TestJumpableHarness(t *testing.T) {
-	for _, h := range []string{"", "apple-terminal", "terminal", "iterm2", "iterm"} {
+	// テーブルに載る全別名は必ず jumpable。
+	for _, h := range jumpableHarnessKinds() {
 		if !jumpableHarness(h) {
-			t.Errorf("jumpableHarness(%q) = false, want true", h)
+			t.Errorf("jumpableHarness(%q) = false, want true (テーブルに在る別名)", h)
 		}
 	}
+	// 大文字/前後空白も吸収する。
+	if !jumpableHarness(" ITerm2 ") {
+		t.Error("大文字/空白付きの別名が jumpable と判定されない")
+	}
+	// テーブルに無い端末は未対応 (fallback へ)。
 	for _, h := range []string{"kitty", "vscode", "tmux", "wezterm"} {
 		if jumpableHarness(h) {
 			t.Errorf("jumpableHarness(%q) = true, want false", h)
