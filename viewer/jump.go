@@ -105,13 +105,73 @@ end tell`, dev)
 
 // isAppleTerminal は harness の種類が Terminal.app かどうか。
 // 空 (= 種類不明) は Terminal.app とみなす (macOS の既定端末)。
-// iTerm2 等への拡張は e-6403 で harness.kind 分岐として足す。
 func isAppleTerminal(harness string) bool {
 	switch strings.ToLower(strings.TrimSpace(harness)) {
 	case "", "apple-terminal", "terminal", "apple_terminal":
 		return true
 	default:
 		return false
+	}
+}
+
+// isITerm2 は harness の種類が iTerm2 かどうか。
+func isITerm2(harness string) bool {
+	switch strings.ToLower(strings.TrimSpace(harness)) {
+	case "iterm2", "iterm", "iterm.app":
+		return true
+	default:
+		return false
+	}
+}
+
+// jumpableHarness は「端末へ飛ぶ」に対応した端末かどうか (前面化できるか)。
+// 対応外 (kitty / VS Code / tmux 等) は fallback (パスのコピー) に回す。
+func jumpableHarness(harness string) bool {
+	return isAppleTerminal(harness) || isITerm2(harness)
+}
+
+// terminalAppName は前面化対象の端末アプリ名 (見つからない時のメッセージ用)。
+func terminalAppName(harness string) string {
+	if isITerm2(harness) {
+		return "iTerm2"
+	}
+	return "Terminal.app"
+}
+
+// iTerm2JumpScript は tty を持つ iTerm2 のタブを前面化する AppleScript を組む
+// (純関数)。iTerm2 は window → tab → session の 3 段で、session が tty を持つ。
+func iTerm2JumpScript(tty string) string {
+	dev := "/dev/" + tty
+	return fmt.Sprintf(`tell application "iTerm2"
+  set matched to false
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is %q then
+          set matched to true
+          select w
+          select t
+          select s
+        end if
+      end repeat
+    end repeat
+  end repeat
+  if matched then activate
+  return matched
+end tell`, dev)
+}
+
+// jumpScriptBuilder は端末種別に応じた AppleScript 組み立て関数を返す。
+// 未対応の種別は fallback として理由付きエラーを返す (SPEC 方針4: 落とさない)。
+func jumpScriptBuilder(harness string) (func(tty string) string, error) {
+	switch {
+	case isAppleTerminal(harness):
+		return appleTerminalJumpScript, nil
+	case isITerm2(harness):
+		return iTerm2JumpScript, nil
+	default:
+		return nil, fmt.Errorf(
+			"この端末 (%s) への前面化は未対応です — 作業フォルダを手で開いてください", harness)
 	}
 }
 
@@ -123,23 +183,23 @@ func jumpToTerminal(pid int, harness string) error {
 		return fmt.Errorf(
 			"端末の前面化はこの OS では未対応です (現状 macOS のみ)")
 	}
-	if !isAppleTerminal(harness) {
-		// e-6403 で iTerm2 等を足すまでは、未対応端末は fallback として理由を返す。
-		return fmt.Errorf(
-			"この端末 (%s) への前面化は未対応です — 作業フォルダを手で開いてください", harness)
+	// 端末種別で前面化スクリプトを選ぶ。未対応端末は fallback として理由を返す。
+	build, err := jumpScriptBuilder(harness)
+	if err != nil {
+		return err
 	}
 	tty, err := resolveTTY(pid)
 	if err != nil {
 		return err
 	}
-	out, err := exec.Command("osascript", "-e", appleTerminalJumpScript(tty)).Output()
+	out, err := exec.Command("osascript", "-e", build(tty)).Output()
 	if err != nil {
 		return fmt.Errorf("端末の前面化に失敗しました (osascript): %v", err)
 	}
 	if strings.TrimSpace(string(out)) != "true" {
 		return fmt.Errorf(
-			"その端末 (tty %s) を持つ Terminal.app のタブが見つかりませんでした "+
-				"(別の端末アプリで開いている可能性)", tty)
+			"その端末 (tty %s) を持つ %s のタブが見つかりませんでした "+
+				"(別の端末アプリで開いている可能性)", tty, terminalAppName(harness))
 	}
 	return nil
 }

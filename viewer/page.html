@@ -949,6 +949,15 @@ function wireSendButtons() {
   }
 }
 
+// 前面化に対応した端末か (Go 側 jump.go の jumpableHarness と同じ許可集合)。
+// ここを変えるときは jump.go の isAppleTerminal / isITerm2 と揃える。
+// 空 (種類不明) は macOS 既定の Terminal.app とみなして飛べる扱いにする。
+function jumpableHarness(h) {
+  const k = (h || "").toLowerCase().trim();
+  return k === "" || k === "apple-terminal" || k === "terminal"
+    || k === "apple_terminal" || k === "iterm2" || k === "iterm" || k === "iterm.app";
+}
+
 // 「端末へ飛ぶ」ボタン。押すとそのセッションの端末ウィンドウを前面化する。
 // 見つからない/未対応でも落とさず、ボタン脇に理由を出す (SPEC ms-173 方針4)。
 function wireJumpButtons() {
@@ -970,7 +979,7 @@ function wireJumpButtons() {
         const r = await fetch("/api/jump", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({pid}),
+          body: JSON.stringify({pid, harness: btn.dataset.harness || ""}),
         });
         const res = await r.json();
         if (!r.ok || res.error) {
@@ -986,6 +995,27 @@ function wireJumpButtons() {
         btn.title = String(err);
       }
       setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
+    };
+  }
+}
+
+// 「パスをコピー」ボタン。前面化に未対応の端末 (kitty / VS Code 等) の fallback。
+// 作業フォルダのパスをクリップボードにコピーして、手で開けるようにする (SPEC 方針4)。
+function wireCopyPathButtons() {
+  for (const btn of document.querySelectorAll("button.copypath")) {
+    btn.onclick = async e => {
+      e.stopPropagation();
+      const path = btn.dataset.path || "";
+      const original = btn.textContent;
+      try {
+        await navigator.clipboard.writeText(path);
+        btn.textContent = "コピーしました";
+      } catch (err) {
+        // クリップボードが使えない環境でも落とさず、パスをそのまま見せる。
+        btn.textContent = path || "パスが分かりません";
+        btn.title = path;
+      }
+      setTimeout(() => { btn.textContent = original; }, 2000);
     };
   }
 }
@@ -1135,10 +1165,16 @@ async function openSessions() {
                  title="Beacon に名乗っているセッションにしか文面を渡せません">
                  送信不可 — Beacon に名乗っていません</div>`}
           ${viewerState.jump_available && s.pid
-            ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
-                 data-process-pid="${esc(String(s.pid))}"
-                 title="このセッションが動いている端末ウィンドウを前面に出します">
-                 端末へ飛ぶ</button>`
+            ? (jumpableHarness(s.harness)
+              ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
+                   data-process-pid="${esc(String(s.pid))}"
+                   data-harness="${esc(s.harness || "")}"
+                   title="このセッションが動いている端末ウィンドウを前面に出します">
+                   端末へ飛ぶ</button>`
+              : `<button class="linkish copypath" style="margin-top:6px; width:100%;"
+                   data-path="${esc(s.directory || "")}"
+                   title="この端末 (${esc(s.harness)}) は前面化に未対応です。作業フォルダのパスをコピーします">
+                   パスをコピー (${esc(s.harness)} は未対応)</button>`)
             : ""}
         </div>`; }).join("")}</div>`).join("")
       : `<p class="empty">${stopped.length && !showStopped
@@ -1147,6 +1183,7 @@ async function openSessions() {
   `;
   wireSendButtons();
   wireJumpButtons();
+  wireCopyPathButtons();
   const toggle = document.getElementById("toggle-stopped");
   if (toggle) toggle.onclick = () => { showStopped = !showStopped; openSessions(); };
   // 表示範囲 (自分のみ / 要対応のみ / 全て) の切り替え。

@@ -148,6 +148,8 @@ type SessionRow struct {
 	// **このビューワーは作らない。消費するだけ。** サーバが出し始めるまで空で、
 	// 空は「分からない」であって「何もしていない」ではない (運用室では空欄で描く)。
 	Activity string `json:"activity"`
+	// Harness は端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶ分岐に使う。
+	Harness string `json:"harness"`
 	Live        bool   `json:"live"`
 	Healthy     bool   `json:"healthy"`
 	LastActive  string `json:"last_active"`

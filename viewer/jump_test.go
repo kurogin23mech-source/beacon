@@ -62,6 +62,57 @@ func TestIsAppleTerminal(t *testing.T) {
 	}
 }
 
+// 端末種別ごとに正しい AppleScript が選ばれ、未対応は fallback (理由付きエラー) になること。
+func TestJumpScriptBuilder(t *testing.T) {
+	// apple-terminal → Terminal.app を狙う。
+	b, err := jumpScriptBuilder("apple-terminal")
+	if err != nil || !strings.Contains(b("ttys000"), `application "Terminal"`) {
+		t.Errorf("apple-terminal が Terminal.app を狙っていない (err=%v)", err)
+	}
+	// iterm2 → iTerm2 を狙う。
+	b, err = jumpScriptBuilder("iterm2")
+	if err != nil || !strings.Contains(b("ttys000"), `application "iTerm2"`) {
+		t.Errorf("iterm2 が iTerm2 を狙っていない (err=%v)", err)
+	}
+	// 空 (種類不明) → 既定の Terminal.app。
+	b, err = jumpScriptBuilder("")
+	if err != nil || !strings.Contains(b("ttys000"), `application "Terminal"`) {
+		t.Errorf("空 harness が Terminal.app 既定になっていない (err=%v)", err)
+	}
+	// 未対応 (kitty 等) → エラー (落とさず fallback の理由)。builder は nil。
+	if b, err := jumpScriptBuilder("kitty"); err == nil || b != nil {
+		t.Error("未対応端末で fallback エラーを返していない (silent に飛ばそうとしてはいけない)")
+	}
+}
+
+// iTerm2 の前面化スクリプトが、対象 tty を含み iTerm2 を狙い、見つかったかを返すこと。
+func TestITerm2JumpScript(t *testing.T) {
+	s := iTerm2JumpScript("ttys007")
+	if !strings.Contains(s, "/dev/ttys007") {
+		t.Errorf("対象 tty が含まれていない: %q", s)
+	}
+	if !strings.Contains(s, `application "iTerm2"`) {
+		t.Errorf("iTerm2 を狙っていない: %q", s)
+	}
+	if !strings.Contains(s, "return matched") {
+		t.Errorf("見つかったかを返していない: %q", s)
+	}
+}
+
+// 前面化に対応した端末の集合。frontend の jumpableHarness と揃っていること。
+func TestJumpableHarness(t *testing.T) {
+	for _, h := range []string{"", "apple-terminal", "terminal", "iterm2", "iterm"} {
+		if !jumpableHarness(h) {
+			t.Errorf("jumpableHarness(%q) = false, want true", h)
+		}
+	}
+	for _, h := range []string{"kitty", "vscode", "tmux", "wezterm"} {
+		if jumpableHarness(h) {
+			t.Errorf("jumpableHarness(%q) = true, want false", h)
+		}
+	}
+}
+
 // pid が無い (= 別マシンのセッション等) は、落とさず理由を返すこと。
 func TestResolveTTYRejectsZeroPID(t *testing.T) {
 	if _, err := resolveTTY(0); err == nil {

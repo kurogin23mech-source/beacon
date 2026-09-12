@@ -367,15 +367,15 @@ func (s *Server) handler() http.Handler {
 		}
 		var body struct {
 			PID int `json:"pid"`
+			// 端末の種類 (apple-terminal / iterm2)。画面がセッションの harness を
+			// そのまま渡す。空は不明 = Terminal.app 既定として扱う。
+			Harness string `json:"harness"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSONError(w, err)
 			return
 		}
-		// 現状は apple-terminal のみ。端末種別 (harness) の受け渡しは iTerm2 対応
-		// (e-6403) で harness.kind を配線するときに足す (今は未配線の空フィールドを
-		// 公開して誤解を招かないよう、リクエストに含めない)。
-		if err := jumpToTerminal(body.PID, ""); err != nil {
+		if err := jumpToTerminal(body.PID, body.Harness); err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})

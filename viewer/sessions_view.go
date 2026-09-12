@@ -77,6 +77,9 @@ type SessionOverview struct {
 	// **端末へ飛ぶ (jump-to-terminal) の起点。** 手元で拾ったセッションだけが持つ。
 	// 別マシンのセッション (Remote) は 0 で、そのマシンの端末は前面化できない。
 	PID int `json:"pid,omitempty"`
+	// Harness は端末の種類 (apple-terminal / iterm2 等)。どの端末アプリを前面化するかの
+	// 分岐に使う。名乗っているセッションだけが持つ (サーバが解決)。空は不明 = 既定扱い。
+	Harness string `json:"harness,omitempty"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
 	Machine string `json:"machine,omitempty"`
 	// Who は動かしている人 (名乗っているセッションのみ分かる)。
@@ -196,6 +199,7 @@ func AllSessions(since time.Duration, now time.Time,
 			o.Machine = n.Machine
 			o.Who = n.Who
 			o.Activity = n.Activity
+			o.Harness = n.Harness
 		}
 
 		// 分かった ID に、読める名前を与える。
@@ -226,6 +230,7 @@ func AllSessions(since time.Duration, now time.Time,
 			Machine:    n.Machine,
 			Who:        n.Who,
 			Activity:   n.Activity,
+			Harness:    n.Harness,
 			Remote:     true,
 		}
 		if n.Target != "" {
