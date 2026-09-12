@@ -949,6 +949,40 @@ function wireSendButtons() {
   }
 }
 
+// 「端末へ飛ぶ」ボタン。押すとそのセッションの端末ウィンドウを前面化する。
+// 見つからない/未対応でも落とさず、ボタン脇に理由を出す (SPEC ms-173 方針4)。
+function wireJumpButtons() {
+  for (const btn of document.querySelectorAll("button.jump")) {
+    btn.onclick = async e => {
+      e.stopPropagation();
+      const pid = parseInt(btn.dataset.pid, 10);
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = "前面化中…";
+      try {
+        const r = await fetch("/api/jump", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({pid}),
+        });
+        const res = await r.json();
+        if (!r.ok || res.error) {
+          btn.textContent = "飛べません";
+          btn.title = res.error || "端末を前面化できませんでした";
+        } else {
+          btn.textContent = "前面に出しました";
+          setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
+          return;
+        }
+      } catch (err) {
+        btn.textContent = "飛べません";
+        btn.title = String(err);
+      }
+      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
+    };
+  }
+}
+
 // 盤を見ている状態から、選ぶ画面へ移る。
 async function openPicker() {
   pickerOpen = true;
@@ -979,6 +1013,8 @@ async function openSessions() {
   app.innerHTML = `<p class="loading">読み込み中…</p>`;
   let d;
   try {
+    // 「端末へ飛ぶ」が使えるか (自分の機械の中か) を知るために状態も引く。
+    viewerState = await (await fetch("/api/state")).json();
     // 「自分のみ / 要対応のみ / 全て」はサーバ側で絞る (誰が自分かはログイン情報で判定)。
     d = await (await fetch("/api/sessions?scope=" +
       encodeURIComponent(sessionScope))).json();
@@ -1091,12 +1127,19 @@ async function openSessions() {
             : `<div class="sub2 sub1" style="margin-top:8px;"
                  title="Beacon に名乗っているセッションにしか文面を渡せません">
                  送信不可 — Beacon に名乗っていません</div>`}
+          ${viewerState.jump_available && s.pid
+            ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
+                 data-pid="${esc(String(s.pid))}"
+                 title="このセッションが動いている端末ウィンドウを前面に出します">
+                 端末へ飛ぶ</button>`
+            : ""}
         </div>`; }).join("")}</div>`).join("")
       : `<p class="empty">${stopped.length && !showStopped
           ? `動いているセッションはありません (停止中が ${stopped.length} 件あります)。`
           : "セッションが見つかりませんでした。"}</p>`}
   `;
   wireSendButtons();
+  wireJumpButtons();
   const toggle = document.getElementById("toggle-stopped");
   if (toggle) toggle.onclick = () => { showStopped = !showStopped; openSessions(); };
   // 表示範囲 (自分のみ / 要対応のみ / 全て) の切り替え。

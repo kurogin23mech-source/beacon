@@ -66,6 +66,11 @@ type LocalSessionRow struct {
 	// ブランチ名が対象を含む慣習があるので推し量れる。**推測なので、画面では
 	// 推測と分かる形で出すこと。** 人が自由に名前を付けられる以上、外れる。
 	Target string `json:"target_guess"`
+	// PID はこのマシンで動いているセッションのプロセス番号 (分かる場合)。
+	//
+	// **端末へ飛ぶ (jump-to-terminal) の起点。** ここから制御端末 (tty) を辿り、
+	// その tty を持つ端末ウィンドウを前面化する。分からない道具では 0 = 飛べない。
+	PID int `json:"pid,omitempty"`
 }
 
 // LocalSessions は、与えられたプロジェクトのフォルダで動いていたセッションを集める。
@@ -190,6 +195,8 @@ func claudeFromRegistry(home string) []LocalSessionRow {
 			LastActive: msToTime(rec.UpdatedAt),
 			// 台帳に載っていて、そのプロセスが生きていれば動いている。
 			Running: processAlive(rec.PID),
+			// 端末へ飛ぶために、プロセス番号も残す (生きている時のみ意味がある)。
+			PID: rec.PID,
 		})
 	}
 	return rows

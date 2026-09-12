@@ -72,6 +72,11 @@ type SessionOverview struct {
 	Named bool `json:"named"`
 	// SessionID は名乗っているセッションの識別子 (送信の宛先)。
 	SessionID string `json:"session_id,omitempty"`
+	// PID はこのマシンで動いているセッションのプロセス番号 (分かる場合)。
+	//
+	// **端末へ飛ぶ (jump-to-terminal) の起点。** 手元で拾ったセッションだけが持つ。
+	// 別マシンのセッション (Remote) は 0 で、そのマシンの端末は前面化できない。
+	PID int `json:"pid,omitempty"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
 	Machine string `json:"machine,omitempty"`
 	// Who は動かしている人 (名乗っているセッションのみ分かる)。
@@ -149,6 +154,7 @@ func AllSessions(since time.Duration, now time.Time,
 			Directory: r.Directory, LastActive: r.LastActive,
 			Running: r.Running, ToolRunning: r.ToolRunning,
 			Branch: gitBranch(r.Directory),
+			PID:    r.PID, // 手元で拾ったセッションのプロセス番号 (端末へ飛ぶ起点)
 		}
 
 		proj := lookup.forDir(r.Directory)

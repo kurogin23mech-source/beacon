@@ -47,6 +47,15 @@ type Server struct {
 	URL      string
 	Host     string
 	startDir string // 起動した場所。どこを探したかを画面で伝えるのに使う。
+	expose   bool   // 外向きに公開しているか。端末へ飛ぶ操作は公開時に無効化する。
+}
+
+// jumpAvailable は「端末へ飛ぶ」を許してよいか。
+//
+// 自分の機械の中 (loopback) で、かつ外部公開していない時だけ。外に開いた口から
+// 他所の端末を前面化することはできず、無意味かつ危険なため (SPEC ms-173 方針4)。
+func (s *Server) jumpAvailable() bool {
+	return isLoopback(s.Host) && !s.expose
 }
 
 // hasSource は、盤を出せる状態かどうか。
@@ -75,7 +84,7 @@ func NewServer(src *LocalSource, host string, port int, expose bool) (*Server, e
 		return nil, err
 	}
 	cwd, _ := os.Getwd()
-	s := &Server{src: src, ln: ln, Host: host, startDir: cwd}
+	s := &Server{src: src, ln: ln, Host: host, startDir: cwd, expose: expose}
 	s.URL = fmt.Sprintf("http://%s/", ln.Addr().String())
 	if isLoopback(host) {
 		// 表示用の住所は指定された名前を保つ (localhost と書かれたら localhost と出す)。
@@ -128,6 +137,8 @@ func (s *Server) handler() http.Handler {
 			// サーバに設置した場合、見ている人の手元ではなくサーバ側に出てしまい
 			// 何も起きないように見えるので、その場合は入口ごと出さない。
 			"picker_available": isLoopback(s.Host),
+			// 端末へ飛ぶは自分の機械の中でのみ有効 (外部公開時は無効)。
+			"jump_available": s.jumpAvailable(),
 		})
 	})
 
@@ -336,6 +347,40 @@ func (s *Server) handler() http.Handler {
 		}
 		// 送っただけで終わらせず、届いたかまで確かめて返す。
 		writeJSON(w, c.waitForReceipt(res.EventID))
+	})
+
+	// 端末へ飛ぶ (jump-to-terminal, ms-173 e-6402)。一覧から実物の端末ウィンドウ/
+	// タブを前面化する。自分の機械の中 (loopback) 限定、外部公開時は無効。
+	mux.HandleFunc("/api/jump", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST してください", http.StatusMethodNotAllowed)
+			return
+		}
+		if !s.jumpAvailable() {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "端末へ飛ぶのは自分の機械の中 (loopback) でのみ有効です " +
+					"(外部公開中は無効)",
+			})
+			return
+		}
+		var body struct {
+			PID     int    `json:"pid"`
+			Harness string `json:"harness"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		// 見つからない/前面化できない場合も、落とさず理由を返す (SPEC 方針4)。
+		if err := jumpToTerminal(body.PID, body.Harness); err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
 	})
 
 	// 全セッション横断の一覧 (ms-171)。盤とは逆に、プロジェクトを跨いで
