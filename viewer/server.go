@@ -350,11 +350,12 @@ func (s *Server) handler() http.Handler {
 			named = s.rosterForLocal()
 		}
 		view := AllSessions(24*time.Hour, time.Now(), named)
-		// 運用室の絞り込み (自分のみ=既定 / 要対応のみ / root)。誰が「自分」かは
+		// 表示範囲 (自分のみ=既定 / 要対応のみ / 全て) をサーバ側で絞る。誰が「自分」かは
 		// ログイン情報から引く (未ログインならこのマシンの分だけを自分とみなす)。
+		// プロジェクト (root) 絞りは画面側の責務 (選択肢を全プロジェクト分そろえたまま
+		// 切り替えるため) なので、ここでは掛けない — 絞りの真実源を 1 つに保つ。
 		view.Sessions = FilterSessions(view.Sessions, SessionFilter{
 			Scope: r.URL.Query().Get("scope"),
-			Root:  r.URL.Query().Get("root"),
 		}, cloudEmail())
 		writeJSON(w, view)
 	})

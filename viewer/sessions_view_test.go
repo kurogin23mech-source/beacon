@@ -74,7 +74,8 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 		ID: "sv-remote", Who: "someone@example.com", Machine: "Mac-mini",
 		Agent: "claude-code", Cwd: "/Users/someone/proj",
 		Target: "ms-42", TargetLabel: "何かの対象",
-		Live: true, LastActive: "2030-01-01T00:00:00Z",
+		Activity: "テストを書いている",
+		Live:     true, LastActive: "2030-01-01T00:00:00Z",
 	}}
 	// 手元の記録は空 (= このマシンでは何も動いていない) とする。
 	view := AllSessions(24*time.Hour, time.Now(), named)
@@ -100,6 +101,27 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 	}
 	if found.Machine != "Mac-mini" || found.Who != "someone@example.com" {
 		t.Errorf("誰のどのマシンかが落ちている: %+v", found)
+	}
+	// activity (今何をしているか) は名簿の値がそのまま運ばれること。
+	// ここが落ちると運用室の activity 欄が常に空になり「分からない」と区別が付かない。
+	if found.Activity != "テストを書いている" {
+		t.Errorf("activity が名簿から引き継がれていない: %q", found.Activity)
+	}
+}
+
+// 名乗っていない (= このマシンで拾っただけの) セッションには activity が付かないこと。
+// activity の真実源はサーバ (ms-159) の名簿であって、手元の推測ではない。
+// 空欄は「分からない」であって「何もしていない」ではない、という不変条件を機械で守る。
+func TestUnnamedSessionHasNoActivity(t *testing.T) {
+	// 名簿を空にして AllSessions を呼ぶと、手元で拾ったセッションだけになる。
+	// このマシンの実セッションは環境依存なので、名簿が空でも落ちないこと + 出た行に
+	// activity が (名簿由来でないので) 付かないことだけを確かめる。
+	view := AllSessions(24*time.Hour, time.Now(), nil)
+	for _, s := range view.Sessions {
+		if !s.Named && s.Activity != "" {
+			t.Errorf("名乗っていないセッションに activity が付いている: %q (%s)",
+				s.Activity, s.Directory)
+		}
 	}
 }
 
@@ -167,7 +189,7 @@ func TestIsSelf(t *testing.T) {
 	}
 }
 
-// 絞り込みは scope (自分/要対応/全て) と root (プロジェクト) の 2 軸を掛け合わせること。
+// 表示範囲 scope (自分/要対応/全て) がそれぞれ正しい集合を返すこと。
 func TestFilterSessions(t *testing.T) {
 	me := "me@example.com"
 	pA := &ProjectRef{Name: "A"}
@@ -190,11 +212,6 @@ func TestFilterSessions(t *testing.T) {
 	got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me)
 	if len(got) != 1 || got[0].Project.Name != "B" {
 		t.Errorf("attention で B の 1 件にならない: %+v", got)
-	}
-	// root=A かつ self: 自分/A の 1 件。
-	got = FilterSessions(sessions, SessionFilter{Scope: "self", Root: "A"}, me)
-	if len(got) != 1 || got[0].Project.Name != "A" {
-		t.Errorf("self+root=A で 1 件にならない: %+v", got)
 	}
 	// 未知の scope は self に倒す。
 	if got := FilterSessions(sessions, SessionFilter{Scope: "???"}, me); len(got) != 2 {
@@ -247,11 +264,6 @@ func TestFilterSessionsAtScale(t *testing.T) {
 	}
 	if got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me); len(got) != wantAttention {
 		t.Errorf("attention が件数と合わない: %d / %d", len(got), wantAttention)
-	}
-	// root 絞りは、そのプロジェクトの件数ちょうどになる。
-	got := FilterSessions(sessions, SessionFilter{Scope: "all", Root: refs[0].Name}, me)
-	if len(got) != perProject {
-		t.Errorf("root 絞りが 1 プロジェクト分にならない: %d / %d", len(got), perProject)
 	}
 }
 

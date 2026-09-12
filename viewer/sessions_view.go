@@ -347,22 +347,23 @@ func (l *projectLookup) decorate(ref *ProjectRef, o *SessionOverview) {
 // --- 運用室の絞り込み (ms-173 e-6401) --------------------------------------
 //
 // 並列に走るセッションは容易に数十〜数百になる。全部を等しく並べると、いま自分が
-// 気にすべきものが埋もれる。そこで 3 つの軸で絞れるようにする:
+// 気にすべきものが埋もれる。そこで表示範囲を絞れるようにする:
 //
 //	自分のみ (既定) … 他人のセッションを畳んで、自分の並列作業だけを見る
 //	要対応のみ       … 生きているのに道具が止まっている = 手が要りそうなものだけ
-//	root 絞り        … 特定のプロジェクトのセッションだけ
+//	全て             … 他人のものも含め全部
 //
 // **絞り込みは「隠す」であって「消す」ではない。** 既定を自分にするのは多人数の
 // ノイズを畳むためで、他人の作業が存在しないと誤解させないよう、切り替えられる。
 // (ms-159 D スライスの「モデルは多ユーザ対応 / 既定表示は自分」に対応。)
+//
+// プロジェクト (root) 絞りはここには無い。選択肢を全プロジェクト分そろえたまま
+// 切り替えたいので画面側 (page.html) の責務にしてある — 絞りの真実源を 1 つに保つ。
 
-// SessionFilter は運用室の絞り込み条件。
+// SessionFilter は運用室の表示範囲の条件。
 type SessionFilter struct {
 	// Scope は "self" (既定) / "attention" / "all"。未知値は "self" に倒す。
 	Scope string `json:"scope"`
-	// Root はプロジェクト名で絞る。空なら全プロジェクト。
-	Root string `json:"root"`
 }
 
 // NeedsAttention は「人の手が要りそう」か。
@@ -392,9 +393,11 @@ func isSelf(s SessionOverview, selfEmail string) bool {
 	return strings.EqualFold(strings.TrimSpace(s.Who), strings.TrimSpace(selfEmail))
 }
 
-// FilterSessions は運用室の絞り込みを適用する (純関数、入力は変更しない、並び順は保つ)。
+// FilterSessions は運用室の表示範囲を適用する (純関数、入力は変更しない、並び順は保つ)。
 //
-// Scope (自分 / 要対応 / 全て) と Root (プロジェクト名) は独立した軸で、両方を掛け合わせる。
+// **"attention" は誰の attention かを問わない** — 生きていて道具が止まっている
+// セッションを持ち主に関係なく拾う (自分に絞りたい場合は "self" を選ぶ。self と
+// attention の掛け合わせは提供しない = 表示範囲は 1 つ選ぶ形にして語義を単純に保つ)。
 func FilterSessions(sessions []SessionOverview, f SessionFilter,
 	selfEmail string) []SessionOverview {
 
@@ -409,15 +412,6 @@ func FilterSessions(sessions []SessionOverview, f SessionFilter,
 			// 全部通す
 		default: // "self" と未知値は「自分のみ」に倒す (既定)
 			if !isSelf(s, selfEmail) {
-				continue
-			}
-		}
-		if strings.TrimSpace(f.Root) != "" {
-			name := ""
-			if s.Project != nil {
-				name = s.Project.Name
-			}
-			if !strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(f.Root)) {
 				continue
 			}
 		}

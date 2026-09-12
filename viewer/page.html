@@ -987,12 +987,14 @@ async function openSessions() {
     return;
   }
   const scoped = d.sessions || [];
+  // プロジェクト名は 3 箇所 (選択肢 / 絞り / グルーピング) で使うので 1 か所に寄せる。
+  // ここを変えれば 3 箇所が揃って変わる (= 真実源を 1 つに)。
+  const projectName = s => s.project ? s.project.name : "(プロジェクト外)";
   // root (プロジェクト) 絞りは手元で掛ける。こうすると絞っていても選択肢の一覧は
   // 全プロジェクト分そろったままで、別の root に切り替えられる。
-  const rootNames = [...new Set(scoped.map(
-    s => s.project ? s.project.name : "(プロジェクト外)"))].sort();
+  const rootNames = [...new Set(scoped.map(projectName))].sort();
   const all = sessionRoot
-    ? scoped.filter(s => (s.project ? s.project.name : "(プロジェクト外)") === sessionRoot)
+    ? scoped.filter(s => projectName(s) === sessionRoot)
     : scoped;
   // 止まっているものは既定で隠す。いま何が動いているかを読みに来ているのに、
   // 終わった分に埋もれては意味がない (2026-09-10 の指摘)。
@@ -1003,7 +1005,7 @@ async function openSessions() {
   // プロジェクトごとにまとめる。どのプロジェクトの作業かが一目で分かるように。
   const groups = new Map();
   for (const s of rows) {
-    const key = s.project ? s.project.name : "(プロジェクト外)";
+    const key = projectName(s);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   }
