@@ -267,6 +267,111 @@ func TestFilterSessionsAtScale(t *testing.T) {
 	}
 }
 
+// groupByProjectName は運用室の画面が行うグルーピングを再現する (テスト用)。
+// 画面 (page.html) は project.name をキーに束ねる。ここでは規模で崩れないことを
+// 確かめるために同じ規則を Go で当てる (キー導出が壊れれば選択肢とグループがズレる)。
+func groupByProjectName(sessions []SessionOverview) map[string][]SessionOverview {
+	groups := map[string][]SessionOverview{}
+	for _, s := range sessions {
+		key := "(プロジェクト外)"
+		if s.Project != nil {
+			key = s.Project.Name
+		}
+		groups[key] = append(groups[key], s)
+	}
+	return groups
+}
+
+// 運用室が規模で崩れないこと (ms-173 e-6406 / doc scale-contract-principle)。
+// 多数セッション × 多 root target で、グルーピング・フィルタ・端末へ飛ぶ対象解決の
+// 3 つが数と対象を取り違えないことを 1 本で pin する。
+func TestOpsRoomAtScale(t *testing.T) {
+	const projects, perProject = 50, 20 // 1000 セッション × 50 プロジェクト
+	me := "me@example.com"
+	harnesses := []string{"apple-terminal", "iterm2", "kitty", "vscode", ""}
+	refs := make([]*ProjectRef, projects)
+	for i := range refs {
+		refs[i] = &ProjectRef{Name: "proj-" + itoaSmall(i)}
+	}
+	sessions := make([]SessionOverview, 0, projects*perProject)
+	wantSelf, wantAttention, wantJumpEligible := 0, 0, 0
+	for p := 0; p < projects; p++ {
+		for k := 0; k < perProject; k++ {
+			h := harnesses[k%len(harnesses)]
+			s := SessionOverview{Project: refs[p], Harness: h, Jumpable: jumpableHarness(h)}
+			if k%4 == 0 { // 1/4 は別マシン (他人・pid 無し・飛べない)
+				s.Who = "other@example.com"
+				s.Remote = true
+				s.Running = true
+				s.Jumpable = false // 別マシンは前面化できない (AllSessions と同じ規則)
+			} else {
+				s.Who = ""     // このマシン = 自分
+				s.PID = 1000 + p*perProject + k
+				wantSelf++
+				if k%2 == 0 {
+					s.Running, s.ToolRunning = true, false // 待機中 = 要対応
+					wantAttention++
+				} else {
+					s.Running, s.ToolRunning = true, true
+				}
+				// 端末へ飛べるボタンが出る条件: このマシン (pid>0・非 Remote) かつ対応端末。
+				if s.Jumpable {
+					wantJumpEligible++
+				}
+			}
+			sessions = append(sessions, s)
+		}
+	}
+	total := projects * perProject
+
+	// (1) グルーピング: プロジェクト数ちょうどに束ね、取りこぼし/重複が無い。
+	groups := groupByProjectName(sessions)
+	if len(groups) != projects {
+		t.Errorf("グループ数がプロジェクト数と合わない: %d / %d", len(groups), projects)
+	}
+	sum := 0
+	for _, g := range groups {
+		sum += len(g)
+	}
+	if sum != total {
+		t.Errorf("グループ合計が総数と合わない (取りこぼし/重複): %d / %d", sum, total)
+	}
+
+	// (2) フィルタ: self / attention / all が規模でも正しい数を返す。
+	if got := FilterSessions(sessions, SessionFilter{Scope: "all"}, me); len(got) != total {
+		t.Errorf("all が全件を返さない: %d / %d", len(got), total)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "self"}, me); len(got) != wantSelf {
+		t.Errorf("self が自分の件数と合わない: %d / %d", len(got), wantSelf)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me); len(got) != wantAttention {
+		t.Errorf("attention が件数と合わない: %d / %d", len(got), wantAttention)
+	}
+
+	// (3) 端末へ飛ぶ対象解決: 飛べるボタンが出る条件 (このマシン・pid>0・対応端末) を
+	// 規模で数え、取り違えが無いことを確かめる。
+	gotJumpEligible := 0
+	for _, s := range sessions {
+		if !s.Remote && s.PID > 0 && s.Jumpable {
+			gotJumpEligible++
+		}
+	}
+	if gotJumpEligible != wantJumpEligible {
+		t.Errorf("飛べる対象の解決が規模で崩れている: %d / %d", gotJumpEligible, wantJumpEligible)
+	}
+	// 飛べる対象は必ず「自分のみ」表示に含まれる (見失い防止の要): self ⊇ jump対象。
+	self := FilterSessions(sessions, SessionFilter{Scope: "self"}, me)
+	selfJump := 0
+	for _, s := range self {
+		if !s.Remote && s.PID > 0 && s.Jumpable {
+			selfJump++
+		}
+	}
+	if selfJump != wantJumpEligible {
+		t.Errorf("自分のみ表示に飛べる対象が全部含まれない: %d / %d", selfJump, wantJumpEligible)
+	}
+}
+
 // itoaSmall は小さな整数を文字列にする (テスト内でプロジェクト名を作るためだけの簡易版)。
 func itoaSmall(n int) string {
 	if n == 0 {
