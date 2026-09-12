@@ -201,6 +201,15 @@
   .card-attrs {
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;
   }
+  /* 「今何をしているか」は 1 行使って幅いっぱいに出す (対象 / タスクの下)。 */
+  .card-attrs .activity {
+    grid-column: 1 / -1; color: var(--dim); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 運用室の絞り込み帯。選ばれている表示範囲を強調する。 */
+  .filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .filters button.scope.on { font-weight: 600; text-decoration: underline; }
+  .filters select { font-size: 11px; }
   .card-foot {
     display: flex; justify-content: space-between; gap: 8px; margin-top: 8px;
     padding-top: 6px; border-top: 1px solid var(--line);
@@ -241,6 +250,10 @@ let sessionsOpen = false;
 let showStopped = false;
 // 絞り込みの語。画面を作り直しても打ち直さずに済むよう覚えておく。
 let lastFilter = "";
+// 運用室の絞り込み。既定は「自分のみ」= 他人のセッションを畳んで並列作業を見失わない。
+// scope: "self" / "attention" / "all"、root: プロジェクト名 (空なら全部)。
+let sessionScope = "self";
+let sessionRoot = "";
 // 開いている組 (未着手 / 完了 / ドキュメント)。**画面を作り直しても開いたままにする。**
 // ローカルセッションの最終活動時刻は数秒ごとに変わるため盤は頻繁に更新される。
 // 状態を引き継がないと、読んでいる最中に組が閉じてしまう (2026-09-09 の指摘)。
@@ -936,6 +949,68 @@ function wireSendButtons() {
   }
 }
 
+// 「端末へ飛ぶ」ボタン。押すとそのセッションの端末ウィンドウを前面化する。
+// 見つからない/未対応でも落とさず、ボタン脇に理由を出す (SPEC ms-173 方針4)。
+function wireJumpButtons() {
+  for (const btn of document.querySelectorAll("button.jump")) {
+    btn.onclick = async e => {
+      e.stopPropagation();
+      const pid = parseInt(btn.dataset.processPid, 10);
+      // 数値でなければサーバに投げない (NaN は JSON で欠落し pid=0 として届き、
+      // 「別マシン」と誤診されるため。ここで正直な理由を出す)。
+      if (!Number.isFinite(pid)) {
+        btn.textContent = "PID が読めません";
+        btn.title = "このセッションのプロセス番号が取得できませんでした";
+        return;
+      }
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = "前面化中…";
+      try {
+        const r = await fetch("/api/jump", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({pid, harness: btn.dataset.harness || ""}),
+        });
+        const res = await r.json();
+        if (!r.ok || res.error) {
+          btn.textContent = "飛べません";
+          btn.title = res.error || "端末を前面化できませんでした";
+        } else {
+          btn.textContent = "前面に出しました";
+          setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
+          return;
+        }
+      } catch (err) {
+        btn.textContent = "飛べません";
+        btn.title = String(err);
+      }
+      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
+    };
+  }
+}
+
+// 「パスをコピー」ボタン。前面化に未対応の端末 (kitty / VS Code 等) の fallback。
+// 作業フォルダのパスをクリップボードにコピーして、手で開けるようにする (SPEC 方針4)。
+function wireCopyPathButtons() {
+  for (const btn of document.querySelectorAll("button.copypath")) {
+    btn.onclick = async e => {
+      e.stopPropagation();
+      const path = btn.dataset.path || "";
+      const original = btn.textContent;
+      try {
+        await navigator.clipboard.writeText(path);
+        btn.textContent = "コピーしました";
+      } catch (err) {
+        // クリップボードが使えない環境でも落とさず、パスをそのまま見せる。
+        btn.textContent = path || "パスが分かりません";
+        btn.title = path;
+      }
+      setTimeout(() => { btn.textContent = original; }, 2000);
+    };
+  }
+}
+
 // 盤を見ている状態から、選ぶ画面へ移る。
 async function openPicker() {
   pickerOpen = true;
@@ -966,12 +1041,25 @@ async function openSessions() {
   app.innerHTML = `<p class="loading">読み込み中…</p>`;
   let d;
   try {
-    d = await (await fetch("/api/sessions")).json();
+    // 「端末へ飛ぶ」が使えるか (自分の機械の中か) を知るために状態も引く。
+    viewerState = await (await fetch("/api/state")).json();
+    // 「自分のみ / 要対応のみ / 全て」はサーバ側で絞る (誰が自分かはログイン情報で判定)。
+    d = await (await fetch("/api/sessions?scope=" +
+      encodeURIComponent(sessionScope))).json();
   } catch (e) {
     app.innerHTML = `<p class="err">読めませんでした: ${esc(e)}</p>`;
     return;
   }
-  const all = d.sessions || [];
+  const scoped = d.sessions || [];
+  // プロジェクト名は 3 箇所 (選択肢 / 絞り / グルーピング) で使うので 1 か所に寄せる。
+  // ここを変えれば 3 箇所が揃って変わる (= 真実源を 1 つに)。
+  const projectName = s => s.project ? s.project.name : "(プロジェクト外)";
+  // root (プロジェクト) 絞りは手元で掛ける。こうすると絞っていても選択肢の一覧は
+  // 全プロジェクト分そろったままで、別の root に切り替えられる。
+  const rootNames = [...new Set(scoped.map(projectName))].sort();
+  const all = sessionRoot
+    ? scoped.filter(s => projectName(s) === sessionRoot)
+    : scoped;
   // 止まっているものは既定で隠す。いま何が動いているかを読みに来ているのに、
   // 終わった分に埋もれては意味がない (2026-09-10 の指摘)。
   // 「止まっている」の判定は liveness に一本化してある。
@@ -981,7 +1069,7 @@ async function openSessions() {
   // プロジェクトごとにまとめる。どのプロジェクトの作業かが一目で分かるように。
   const groups = new Map();
   for (const s of rows) {
-    const key = s.project ? s.project.name : "(プロジェクト外)";
+    const key = projectName(s);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   }
@@ -997,6 +1085,21 @@ async function openSessions() {
           showStopped ? `停止中 ${stopped.length} 件を隠す`
                       : `停止中 ${stopped.length} 件も表示`}</button>` : ""}
         &nbsp;·&nbsp; <button id="to-board" class="linkish">盤に戻る</button>
+      </div>
+      <div class="meta filters">
+        表示:
+        <button class="linkish scope ${sessionScope === "self" ? "on" : ""}"
+          data-scope="self" title="他人のセッションを畳んで、自分の並列作業だけを見ます">自分のみ</button>
+        <button class="linkish scope ${sessionScope === "attention" ? "on" : ""}"
+          data-scope="attention" title="生きているのに道具が止まっている = 手が要りそうなものだけ">要対応のみ</button>
+        <button class="linkish scope ${sessionScope === "all" ? "on" : ""}"
+          data-scope="all" title="他の人のものも含め、すべて表示します">全て</button>
+        &nbsp;·&nbsp; プロジェクト:
+        <select id="root-filter">
+          <option value="">すべて</option>
+          ${rootNames.map(n => `<option value="${esc(n)}"${
+            n === sessionRoot ? " selected" : ""}>${esc(n)}</option>`).join("")}
+        </select>
       </div>
     </header>
     <p class="empty">担当は、Beacon に名乗っているセッションはその申告を、そうでないものは
@@ -1034,6 +1137,8 @@ async function openSessions() {
               "ブランチ名にもコミット件名にも対象 (ms-NN) が無いため分かりません")}</div>
             <div>${attribution(s.task,
               "直近のコミット件名にタスク番号 (e-NNNN) が無いため分かりません")}</div>
+            <div class="activity" title="このセッションが今何をしているか。Beacon (ms-159) が申告し始めるまでは空欄です (「何もしていない」ではありません)">${
+              s.activity ? esc(s.activity) : "活動 —"}</div>
           </div>
           <div class="card-foot">
             <span class="sub2 sub1" title="${esc(s.directory)}"
@@ -1050,14 +1155,35 @@ async function openSessions() {
             : `<div class="sub2 sub1" style="margin-top:8px;"
                  title="Beacon に名乗っているセッションにしか文面を渡せません">
                  送信不可 — Beacon に名乗っていません</div>`}
+          ${viewerState.jump_available && s.pid
+            ? (s.jumpable
+              ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
+                   data-process-pid="${esc(String(s.pid))}"
+                   data-harness="${esc(s.harness || "")}"
+                   title="このセッションが動いている端末ウィンドウを前面に出します">
+                   端末へ飛ぶ</button>`
+              : `<button class="linkish copypath" style="margin-top:6px; width:100%;"
+                   data-path="${esc(s.directory || "")}"
+                   title="この端末 (${esc(s.harness)}) は前面化に未対応です。作業フォルダのパスをコピーします">
+                   パスをコピー (${esc(s.harness)} は未対応)</button>`)
+            : ""}
         </div>`; }).join("")}</div>`).join("")
       : `<p class="empty">${stopped.length && !showStopped
           ? `動いているセッションはありません (停止中が ${stopped.length} 件あります)。`
           : "セッションが見つかりませんでした。"}</p>`}
   `;
   wireSendButtons();
+  wireJumpButtons();
+  wireCopyPathButtons();
   const toggle = document.getElementById("toggle-stopped");
   if (toggle) toggle.onclick = () => { showStopped = !showStopped; openSessions(); };
+  // 表示範囲 (自分のみ / 要対応のみ / 全て) の切り替え。
+  document.querySelectorAll("button.scope").forEach(b => {
+    b.onclick = () => { sessionScope = b.dataset.scope; openSessions(); };
+  });
+  // プロジェクト絞り。
+  const rootSel = document.getElementById("root-filter");
+  if (rootSel) rootSel.onchange = () => { sessionRoot = rootSel.value; openSessions(); };
   document.getElementById("to-board").onclick = () => {
     sessionsOpen = false; lastBoardJSON = ""; refresh();
   };

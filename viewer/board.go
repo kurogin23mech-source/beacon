@@ -144,6 +144,12 @@ type SessionRow struct {
 	// ProjectFocus はプロジェクトの進行中マイルストーン。**担当ではない。**
 	// 全セッションが同じ値になるので、担当として出すと嘘になる。
 	ProjectFocus string `json:"project_focus"`
+	// Activity は「今このセッションが何をしているか」の要約 (ms-159 が produce する)。
+	// **このビューワーは作らない。消費するだけ。** サーバが出し始めるまで空で、
+	// 空は「分からない」であって「何もしていない」ではない (運用室では空欄で描く)。
+	Activity string `json:"activity"`
+	// Harness は端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶ分岐に使う。
+	Harness string `json:"harness"`
 	Live        bool   `json:"live"`
 	Healthy     bool   `json:"healthy"`
 	LastActive  string `json:"last_active"`

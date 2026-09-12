@@ -47,6 +47,15 @@ type Server struct {
 	URL      string
 	Host     string
 	startDir string // 起動した場所。どこを探したかを画面で伝えるのに使う。
+	expose   bool   // 外向きに公開しているか。端末へ飛ぶ操作は公開時に無効化する。
+}
+
+// jumpAvailable は「端末へ飛ぶ」を許してよいか。
+//
+// 条件の実体は jumpSupported (対応 OS + loopback + 非公開) に集約してある。ここは
+// このサーバの状態を渡して委譲するだけ。判定の真実源を 1 つに保つ (SPEC ms-173 方針4)。
+func (s *Server) jumpAvailable() bool {
+	return jumpSupported(runtime.GOOS, s.Host, s.expose)
 }
 
 // hasSource は、盤を出せる状態かどうか。
@@ -75,7 +84,7 @@ func NewServer(src *LocalSource, host string, port int, expose bool) (*Server, e
 		return nil, err
 	}
 	cwd, _ := os.Getwd()
-	s := &Server{src: src, ln: ln, Host: host, startDir: cwd}
+	s := &Server{src: src, ln: ln, Host: host, startDir: cwd, expose: expose}
 	s.URL = fmt.Sprintf("http://%s/", ln.Addr().String())
 	if isLoopback(host) {
 		// 表示用の住所は指定された名前を保つ (localhost と書かれたら localhost と出す)。
@@ -128,6 +137,8 @@ func (s *Server) handler() http.Handler {
 			// サーバに設置した場合、見ている人の手元ではなくサーバ側に出てしまい
 			// 何も起きないように見えるので、その場合は入口ごと出さない。
 			"picker_available": isLoopback(s.Host),
+			// 端末へ飛ぶは自分の機械の中でのみ有効 (外部公開時は無効)。
+			"jump_available": s.jumpAvailable(),
 		})
 	})
 
@@ -338,6 +349,41 @@ func (s *Server) handler() http.Handler {
 		writeJSON(w, c.waitForReceipt(res.EventID))
 	})
 
+	// 端末へ飛ぶ (jump-to-terminal, ms-173 e-6402)。一覧から実物の端末ウィンドウ/
+	// タブを前面化する。自分の機械の中 (loopback) 限定、外部公開時は無効。
+	mux.HandleFunc("/api/jump", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST してください", http.StatusMethodNotAllowed)
+			return
+		}
+		if !s.jumpAvailable() {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "端末へ飛ぶのは自分の機械の中 (loopback) でのみ有効です " +
+					"(外部公開中は無効)",
+			})
+			return
+		}
+		var body struct {
+			PID int `json:"pid"`
+			// 端末の種類 (apple-terminal / iterm2)。画面がセッションの harness を
+			// そのまま渡す。空は不明 = Terminal.app 既定として扱う。
+			Harness string `json:"harness"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONError(w, err)
+			return
+		}
+		if err := jumpToTerminal(body.PID, body.Harness); err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	})
+
 	// 全セッション横断の一覧 (ms-171)。盤とは逆に、プロジェクトを跨いで
 	// 「このマシンで何が動いているか」を並べる。
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -349,7 +395,37 @@ func (s *Server) handler() http.Handler {
 		} else if s.src != nil {
 			named = s.rosterForLocal()
 		}
-		writeJSON(w, AllSessions(24*time.Hour, time.Now(), named))
+		// 表示範囲を決める。未指定は既定 (self) に倒すが、**未知値 (typo 等) は黙って
+		// self に倒さず 400 で拒否する** — さもないと ?scope=atention のような打ち間違いが
+		// 無警告で「自分のみ」に化け、他マシン / 他人のセッションを『存在しない』と
+		// 誤読させる (e-6401 レビュー high)。受理値の真実源は sessions_view.go の Scope* 定数。
+		scope := r.URL.Query().Get("scope")
+		if scope == "" {
+			scope = ScopeSelf
+		}
+		if !KnownScope(scope) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": fmt.Sprintf("不明な表示範囲 %q です。使える値: %s / %s / %s",
+					scope, ScopeSelf, ScopeAttention, ScopeAll),
+				"allowed": []string{ScopeSelf, ScopeAttention, ScopeAll},
+			})
+			return
+		}
+
+		view := AllSessions(24*time.Hour, time.Now(), named)
+		// 表示範囲 (自分のみ=既定 / 要対応のみ / 全て) をサーバ側で絞る。誰が「自分」かは
+		// ログイン情報から引く (未ログインならこのマシンの分だけを自分とみなす)。
+		// プロジェクト (root) 絞りは画面側の責務 (選択肢を全プロジェクト分そろえたまま
+		// 切り替えるため) なので、ここでは掛けない — 絞りの真実源を 1 つに保つ。
+		total := len(view.Sessions)
+		view.Sessions = FilterSessions(view.Sessions, SessionFilter{Scope: scope}, cloudEmail())
+		// 絞り込みの発生を応答自身に名乗らせる (silent narrowing を防ぐ)。
+		view.Scope = scope
+		view.Total = total
+		view.Shown = len(view.Sessions)
+		writeJSON(w, view)
 	})
 
 	mux.HandleFunc("/api/board", func(w http.ResponseWriter, r *http.Request) {

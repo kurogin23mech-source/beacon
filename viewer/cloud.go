@@ -252,6 +252,15 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 		PollHealth struct {
 			Healthy bool `json:"healthy"`
 		} `json:"poll_health"`
+		// サーバが出す「今何をしているか」の要約 (ms-159)。まだ出していなければ空。
+		Activity string `json:"activity"`
+		// 端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶときに、どの端末アプリを
+		// 前面化するかの分岐に使う (ms-173 e-6403)。空なら不明。
+		Runtime struct {
+			Harness struct {
+				Kind string `json:"kind"`
+			} `json:"harness"`
+		} `json:"runtime"`
 	}
 	if err := c.get("/api/me/sessions?live=true", &raw); err != nil {
 		return nil, err
@@ -291,6 +300,10 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 		}
 		// プロジェクトの進行中マイルストーンは、担当とは別の欄で持つ。
 		row.ProjectFocus = s.Focus.Milestone.ID
+		// 「今何をしているか」はサーバの申告をそのまま運ぶ (無ければ空のまま)。
+		row.Activity = s.Activity
+		// 端末の種類も運ぶ (端末へ飛ぶときの分岐に使う)。
+		row.Harness = s.Runtime.Harness.Kind
 		rows = append(rows, row)
 	}
 	return rows, nil

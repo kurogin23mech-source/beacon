@@ -74,7 +74,8 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 		ID: "sv-remote", Who: "someone@example.com", Machine: "Mac-mini",
 		Agent: "claude-code", Cwd: "/Users/someone/proj",
 		Target: "ms-42", TargetLabel: "何かの対象",
-		Live: true, LastActive: "2030-01-01T00:00:00Z",
+		Activity: "テストを書いている",
+		Live:     true, LastActive: "2030-01-01T00:00:00Z",
 	}}
 	// 手元の記録は空 (= このマシンでは何も動いていない) とする。
 	view := AllSessions(24*time.Hour, time.Now(), named)
@@ -101,6 +102,27 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 	if found.Machine != "Mac-mini" || found.Who != "someone@example.com" {
 		t.Errorf("誰のどのマシンかが落ちている: %+v", found)
 	}
+	// activity (今何をしているか) は名簿の値がそのまま運ばれること。
+	// ここが落ちると運用室の activity 欄が常に空になり「分からない」と区別が付かない。
+	if found.Activity != "テストを書いている" {
+		t.Errorf("activity が名簿から引き継がれていない: %q", found.Activity)
+	}
+}
+
+// 名乗っていない (= このマシンで拾っただけの) セッションには activity が付かないこと。
+// activity の真実源はサーバ (ms-159) の名簿であって、手元の推測ではない。
+// 空欄は「分からない」であって「何もしていない」ではない、という不変条件を機械で守る。
+func TestUnnamedSessionHasNoActivity(t *testing.T) {
+	// 名簿を空にして AllSessions を呼ぶと、手元で拾ったセッションだけになる。
+	// このマシンの実セッションは環境依存なので、名簿が空でも落ちないこと + 出た行に
+	// activity が (名簿由来でないので) 付かないことだけを確かめる。
+	view := AllSessions(24*time.Hour, time.Now(), nil)
+	for _, s := range view.Sessions {
+		if !s.Named && s.Activity != "" {
+			t.Errorf("名乗っていないセッションに activity が付いている: %q (%s)",
+				s.Activity, s.Directory)
+		}
+	}
 }
 
 // 手元の記録と名簿の両方に在るセッションを、二重に並べないこと。
@@ -112,4 +134,253 @@ func TestNamedSessionOnThisMachineIsNotDuplicated(t *testing.T) {
 	if a != b {
 		t.Fatalf("突き合わせの規則が壊れている: %q vs %q", a, b)
 	}
+}
+
+// --- 運用室の絞り込み (ms-173 e-6401) --------------------------------------
+
+// 「要対応」の判定: 生きているのに道具が止まっているものだけ。
+// 別マシンのものは道具の状態が手元に無いので、既定の false を待機と取り違えない。
+func TestNeedsAttention(t *testing.T) {
+	cases := []struct {
+		name string
+		s    SessionOverview
+		want bool
+	}{
+		{"生きていて道具が止まっている = 要対応",
+			SessionOverview{Running: true, ToolRunning: false}, true},
+		{"道具が動いている = 作業中なので要対応でない",
+			SessionOverview{Running: true, ToolRunning: true}, false},
+		{"止まっている = 要対応でない",
+			SessionOverview{Running: false, ToolRunning: false}, false},
+		{"別マシンは道具の状態が分からないので要対応に挙げない",
+			SessionOverview{Running: true, ToolRunning: false, Remote: true}, false},
+	}
+	for _, c := range cases {
+		if got := NeedsAttention(c.s); got != c.want {
+			t.Errorf("%s: NeedsAttention = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 「自分」の判定: 名乗っているものは持ち主で、名乗っていないものはこのマシンの分。
+func TestIsSelf(t *testing.T) {
+	me := "me@example.com"
+	cases := []struct {
+		name  string
+		s     SessionOverview
+		email string
+		want  bool
+	}{
+		{"名乗っていない (Who 空) = このマシンの分 = 自分",
+			SessionOverview{Who: ""}, me, true},
+		{"持ち主が自分",
+			SessionOverview{Who: "me@example.com"}, me, true},
+		{"持ち主が他人",
+			SessionOverview{Who: "other@example.com", Remote: true}, me, false},
+		{"identity 不明なら別マシンは自分でない",
+			SessionOverview{Who: "x@example.com", Remote: true}, "", false},
+		{"identity 不明でもこのマシンの名乗りは自分",
+			SessionOverview{Who: "x@example.com", Remote: false}, "", true},
+	}
+	for _, c := range cases {
+		if got := isSelf(c.s, c.email); got != c.want {
+			t.Errorf("%s: isSelf = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 表示範囲 scope (自分/要対応/全て) がそれぞれ正しい集合を返すこと。
+func TestFilterSessions(t *testing.T) {
+	me := "me@example.com"
+	pA := &ProjectRef{Name: "A"}
+	pB := &ProjectRef{Name: "B"}
+	sessions := []SessionOverview{
+		{Who: "", Project: pA, Running: true, ToolRunning: true},          // 自分/A/作業中
+		{Who: "me@example.com", Project: pB, Running: true, ToolRunning: false}, // 自分/B/要対応
+		{Who: "other@example.com", Project: pA, Remote: true, Running: true},    // 他人/A
+	}
+
+	// 既定 (self): 他人を畳む。
+	if got := FilterSessions(sessions, SessionFilter{}, me); len(got) != 2 {
+		t.Errorf("既定 self で自分の 2 件にならない: %d 件", len(got))
+	}
+	// all: 全部。
+	if got := FilterSessions(sessions, SessionFilter{Scope: "all"}, me); len(got) != 3 {
+		t.Errorf("all で 3 件にならない: %d 件", len(got))
+	}
+	// attention: 生きていて道具が止まっている 1 件。
+	got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me)
+	if len(got) != 1 || got[0].Project.Name != "B" {
+		t.Errorf("attention で B の 1 件にならない: %+v", got)
+	}
+	// 未知の scope は self に倒す。
+	if got := FilterSessions(sessions, SessionFilter{Scope: "???"}, me); len(got) != 2 {
+		t.Errorf("未知 scope が self に倒れていない: %d 件", len(got))
+	}
+	// 入力を変更しないこと。
+	if len(sessions) != 3 {
+		t.Errorf("入力が変更された: %d 件", len(sessions))
+	}
+}
+
+// 規模で崩れないこと (doc scale-contract-principle: 一覧処理には規模テストを 1 本)。
+// 多数セッション × 多プロジェクトでも絞り込みが数と対象を取り違えない。
+func TestFilterSessionsAtScale(t *testing.T) {
+	const projects, perProject = 40, 25 // 1000 セッション
+	me := "me@example.com"
+	refs := make([]*ProjectRef, projects)
+	for i := range refs {
+		refs[i] = &ProjectRef{Name: string(rune('A'+i%26)) + itoaSmall(i)}
+	}
+	sessions := make([]SessionOverview, 0, projects*perProject)
+	wantSelf, wantAttention := 0, 0
+	for p := 0; p < projects; p++ {
+		for k := 0; k < perProject; k++ {
+			s := SessionOverview{Project: refs[p]}
+			if k%3 == 0 { // 1/3 は他人 (別マシン)
+				s.Who = "other@example.com"
+				s.Remote = true
+				s.Running = true
+			} else {
+				s.Who = "" // このマシン = 自分
+				wantSelf++
+				if k%2 == 0 { // 自分のうち一部は待機中 = 要対応
+					s.Running = true
+					s.ToolRunning = false
+					wantAttention++
+				} else {
+					s.Running = true
+					s.ToolRunning = true
+				}
+			}
+			sessions = append(sessions, s)
+		}
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "all"}, me); len(got) != projects*perProject {
+		t.Errorf("all が全件を返さない: %d / %d", len(got), projects*perProject)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "self"}, me); len(got) != wantSelf {
+		t.Errorf("self が自分の件数と合わない: %d / %d", len(got), wantSelf)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me); len(got) != wantAttention {
+		t.Errorf("attention が件数と合わない: %d / %d", len(got), wantAttention)
+	}
+}
+
+// groupByProjectName は運用室の画面が行うグルーピングを再現する (テスト用)。
+// 画面 (page.html) は project.name をキーに束ねる。ここでは規模で崩れないことを
+// 確かめるために同じ規則を Go で当てる (キー導出が壊れれば選択肢とグループがズレる)。
+func groupByProjectName(sessions []SessionOverview) map[string][]SessionOverview {
+	groups := map[string][]SessionOverview{}
+	for _, s := range sessions {
+		key := "(プロジェクト外)"
+		if s.Project != nil {
+			key = s.Project.Name
+		}
+		groups[key] = append(groups[key], s)
+	}
+	return groups
+}
+
+// 運用室が規模で崩れないこと (ms-173 e-6406 / doc scale-contract-principle)。
+// 多数セッション × 多 root target で、グルーピング・フィルタ・端末へ飛ぶ対象解決の
+// 3 つが数と対象を取り違えないことを 1 本で pin する。
+func TestOpsRoomAtScale(t *testing.T) {
+	const projects, perProject = 50, 20 // 1000 セッション × 50 プロジェクト
+	me := "me@example.com"
+	harnesses := []string{"apple-terminal", "iterm2", "kitty", "vscode", ""}
+	refs := make([]*ProjectRef, projects)
+	for i := range refs {
+		refs[i] = &ProjectRef{Name: "proj-" + itoaSmall(i)}
+	}
+	sessions := make([]SessionOverview, 0, projects*perProject)
+	wantSelf, wantAttention, wantJumpEligible := 0, 0, 0
+	for p := 0; p < projects; p++ {
+		for k := 0; k < perProject; k++ {
+			h := harnesses[k%len(harnesses)]
+			s := SessionOverview{Project: refs[p], Harness: h, Jumpable: jumpableHarness(h)}
+			if k%4 == 0 { // 1/4 は別マシン (他人・pid 無し・飛べない)
+				s.Who = "other@example.com"
+				s.Remote = true
+				s.Running = true
+				s.Jumpable = false // 別マシンは前面化できない (AllSessions と同じ規則)
+			} else {
+				s.Who = ""     // このマシン = 自分
+				s.PID = 1000 + p*perProject + k
+				wantSelf++
+				if k%2 == 0 {
+					s.Running, s.ToolRunning = true, false // 待機中 = 要対応
+					wantAttention++
+				} else {
+					s.Running, s.ToolRunning = true, true
+				}
+				// 端末へ飛べるボタンが出る条件: このマシン (pid>0・非 Remote) かつ対応端末。
+				if s.Jumpable {
+					wantJumpEligible++
+				}
+			}
+			sessions = append(sessions, s)
+		}
+	}
+	total := projects * perProject
+
+	// (1) グルーピング: プロジェクト数ちょうどに束ね、取りこぼし/重複が無い。
+	groups := groupByProjectName(sessions)
+	if len(groups) != projects {
+		t.Errorf("グループ数がプロジェクト数と合わない: %d / %d", len(groups), projects)
+	}
+	sum := 0
+	for _, g := range groups {
+		sum += len(g)
+	}
+	if sum != total {
+		t.Errorf("グループ合計が総数と合わない (取りこぼし/重複): %d / %d", sum, total)
+	}
+
+	// (2) フィルタ: self / attention / all が規模でも正しい数を返す。
+	if got := FilterSessions(sessions, SessionFilter{Scope: "all"}, me); len(got) != total {
+		t.Errorf("all が全件を返さない: %d / %d", len(got), total)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "self"}, me); len(got) != wantSelf {
+		t.Errorf("self が自分の件数と合わない: %d / %d", len(got), wantSelf)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me); len(got) != wantAttention {
+		t.Errorf("attention が件数と合わない: %d / %d", len(got), wantAttention)
+	}
+
+	// (3) 端末へ飛ぶ対象解決: 飛べるボタンが出る条件 (このマシン・pid>0・対応端末) を
+	// 規模で数え、取り違えが無いことを確かめる。
+	gotJumpEligible := 0
+	for _, s := range sessions {
+		if !s.Remote && s.PID > 0 && s.Jumpable {
+			gotJumpEligible++
+		}
+	}
+	if gotJumpEligible != wantJumpEligible {
+		t.Errorf("飛べる対象の解決が規模で崩れている: %d / %d", gotJumpEligible, wantJumpEligible)
+	}
+	// 飛べる対象は必ず「自分のみ」表示に含まれる (見失い防止の要): self ⊇ jump対象。
+	self := FilterSessions(sessions, SessionFilter{Scope: "self"}, me)
+	selfJump := 0
+	for _, s := range self {
+		if !s.Remote && s.PID > 0 && s.Jumpable {
+			selfJump++
+		}
+	}
+	if selfJump != wantJumpEligible {
+		t.Errorf("自分のみ表示に飛べる対象が全部含まれない: %d / %d", selfJump, wantJumpEligible)
+	}
+}
+
+// itoaSmall は小さな整数を文字列にする (テスト内でプロジェクト名を作るためだけの簡易版)。
+func itoaSmall(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
 }

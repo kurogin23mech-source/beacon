@@ -61,6 +61,10 @@ type SessionOverview struct {
 	Project    *ProjectRef  `json:"project,omitempty"`
 	Target     *Attribution `json:"target,omitempty"`
 	Task       *Attribution `json:"task,omitempty"`
+	// Activity は「今このセッションが何をしているか」の要約 (ms-159 が produce する)。
+	// **このビューワーは作らない。消費するだけ。** 空は「分からない」であって
+	// 「何もしていない」ではないので、運用室では空欄として描く (でっち上げない)。
+	Activity string `json:"activity,omitempty"`
 	// Named は Beacon に名乗っているか。
 	//
 	// **送れるのはこれが真のものだけ。** 名乗っていないセッションには、外から
@@ -68,6 +72,21 @@ type SessionOverview struct {
 	Named bool `json:"named"`
 	// SessionID は名乗っているセッションの識別子 (送信の宛先)。
 	SessionID string `json:"session_id,omitempty"`
+	// PID はこのマシンで動いているセッションのプロセス番号 (分かる場合)。
+	//
+	// **端末へ飛ぶ (jump-to-terminal) の起点。** 手元で拾ったセッションだけが持つ。
+	// 別マシンのセッション (Remote) は 0 で、そのマシンの端末は前面化できない。
+	PID int `json:"pid,omitempty"`
+	// Harness は端末の種類。どの端末アプリを前面化するかの分岐に使う。名乗っている
+	// セッションだけが持つ (サーバが解決)。受け付ける値は jump.go の terminalDrivers が
+	// 唯一の正典 (apple-terminal / terminal / apple_terminal / iterm2 / iterm / iterm.app)。
+	// 空は不明 = Terminal.app 既定扱い。ここに無い値は前面化に未対応 (Jumpable=false)。
+	Harness string `json:"harness,omitempty"`
+	// Jumpable は「端末へ飛ぶ」に対応した端末か (= Go が harness から計算した判定)。
+	//
+	// **画面はこの値を読むだけ。** 対応端末の許可集合を JS 側に複製すると Go と
+	// ドリフトするため、判定は Go (jump.go) を唯一の正典にして結果だけを渡す。
+	Jumpable bool `json:"jumpable"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
 	Machine string `json:"machine,omitempty"`
 	// Who は動かしている人 (名乗っているセッションのみ分かる)。
@@ -86,6 +105,15 @@ type SessionsView struct {
 	// NoProject は、どのプロジェクトにも紐づけられなかった数。
 	// **黙って落とさない** ため、数だけでも伝える。
 	NoProject int `json:"no_project"`
+	// Scope は実際に適用した表示範囲 (self / attention / all)。
+	// **絞り込みが起きたことを応答自身が名乗る** ため常に載せる。これが無いと、
+	// 呼び出し側 (画面・AI・自動化) は「全部返ってきた」のか「self に絞られた」のかを
+	// 区別できず、他マシン / 他人のセッションを『存在しない』と誤読する (e-6401 レビュー)。
+	Scope string `json:"scope"`
+	// Total は絞り込み前の総数、Shown は絞り込み後に返した数。
+	// 差があれば「隠したものがある」と呼び出し側が機械的に検知できる。
+	Total int `json:"total"`
+	Shown int `json:"shown"`
 }
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
@@ -145,6 +173,7 @@ func AllSessions(since time.Duration, now time.Time,
 			Directory: r.Directory, LastActive: r.LastActive,
 			Running: r.Running, ToolRunning: r.ToolRunning,
 			Branch: gitBranch(r.Directory),
+			PID:    r.PID, // 手元で拾ったセッションのプロセス番号 (端末へ飛ぶ起点)
 		}
 
 		proj := lookup.forDir(r.Directory)
@@ -185,8 +214,12 @@ func AllSessions(since time.Duration, now time.Time,
 		if isNamed {
 			o.Machine = n.Machine
 			o.Who = n.Who
+			o.Activity = n.Activity
+			o.Harness = n.Harness
 		}
 
+		// 端末へ飛べるかを Go 側で確定させる (画面は結果を読むだけ)。
+		o.Jumpable = jumpableHarness(o.Harness)
 		// 分かった ID に、読める名前を与える。
 		lookup.decorate(proj, &o)
 		out.Sessions = append(out.Sessions, o)
@@ -214,6 +247,8 @@ func AllSessions(since time.Duration, now time.Time,
 			SessionID:  n.ID,
 			Machine:    n.Machine,
 			Who:        n.Who,
+			Activity:   n.Activity,
+			Harness:    n.Harness,
 			Remote:     true,
 		}
 		if n.Target != "" {
@@ -336,6 +371,102 @@ func (l *projectLookup) decorate(ref *ProjectRef, o *SessionOverview) {
 			}
 		}
 	}
+}
+
+// --- 運用室の絞り込み (ms-173 e-6401) --------------------------------------
+//
+// 並列に走るセッションは容易に数十〜数百になる。全部を等しく並べると、いま自分が
+// 気にすべきものが埋もれる。そこで表示範囲を絞れるようにする:
+//
+//	自分のみ (既定) … 他人のセッションを畳んで、自分の並列作業だけを見る
+//	要対応のみ       … 生きているのに道具が止まっている = 手が要りそうなものだけ
+//	全て             … 他人のものも含め全部
+//
+// **絞り込みは「隠す」であって「消す」ではない。** 既定を自分にするのは多人数の
+// ノイズを畳むためで、他人の作業が存在しないと誤解させないよう、切り替えられる。
+// (ms-159 D スライスの「モデルは多ユーザ対応 / 既定表示は自分」に対応。)
+//
+// プロジェクト (root) 絞りはここには無い。選択肢を全プロジェクト分そろえたまま
+// 切り替えたいので画面側 (page.html) の責務にしてある — 絞りの真実源を 1 つに保つ。
+
+// 運用室の表示範囲の許容値。**受理する scope の真実源はここ 1 つ** — 画面・API の
+// 検証も doc も、この定数と KnownScope から引く (値を増やすときはここだけ直す)。
+const (
+	ScopeSelf      = "self"      // 自分のセッションのみ (既定)
+	ScopeAttention = "attention" // 生きているのに道具が止まっている = 手が要りそうなもの
+	ScopeAll       = "all"       // 他人のものも含め全部
+)
+
+// KnownScope は scope が受理できる表示範囲かを返す。
+// 空文字は「未指定」で、既定 (self) に倒す側の判断は呼び出し側 (API ハンドラ) が持つ
+// ため、ここでは false を返す (= 空 と 既定 self を混同しない)。
+func KnownScope(scope string) bool {
+	switch scope {
+	case ScopeSelf, ScopeAttention, ScopeAll:
+		return true
+	}
+	return false
+}
+
+// SessionFilter は運用室の表示範囲の条件。
+type SessionFilter struct {
+	// Scope は表示範囲。受理値は KnownScope / Scope* 定数を参照 (真実源はそこ)。
+	// 空 / 未知値はこの純関数では既定 (self) に倒す — 未知値の拒否は表面 (API) の責務。
+	Scope string `json:"scope"`
+}
+
+// NeedsAttention は「人の手が要りそう」か。
+//
+// 生きている (Running) のに道具が動いていない (!ToolRunning) = 待機中で、返事待ちの
+// 可能性がある。名乗っているだけの別マシンのセッションは道具の状態が手元に無く、
+// 既定の false を「待機中」と取り違えて全部 要対応 に挙げてしまうため、対象外にする。
+//
+// **これは手がかりであって断定ではない。** ms-159 が activity を出し始めたら、
+// もっと確かな「返事待ち」の判定に寄せられる。それまでの近似。
+func NeedsAttention(s SessionOverview) bool {
+	return s.Running && !s.ToolRunning && !s.Remote
+}
+
+// isSelf は自分のセッションか。
+//
+// 名乗っている (Who が分かる) セッションは、その持ち主が自分かで判定する。
+// 名乗っていないセッションはこのマシンで拾ったものなので、定義上いつも自分。
+// 自分の identity が分からない (未ログイン等) ときは、このマシンの分だけを自分とみなす。
+func isSelf(s SessionOverview, selfEmail string) bool {
+	if strings.TrimSpace(s.Who) == "" {
+		return true // このマシンで拾った、名乗っていないセッション = 自分
+	}
+	if strings.TrimSpace(selfEmail) == "" {
+		return !s.Remote // identity 不明なら、このマシンの分だけを自分とみなす
+	}
+	return strings.EqualFold(strings.TrimSpace(s.Who), strings.TrimSpace(selfEmail))
+}
+
+// FilterSessions は運用室の表示範囲を適用する (純関数、入力は変更しない、並び順は保つ)。
+//
+// **"attention" は誰の attention かを問わない** — 生きていて道具が止まっている
+// セッションを持ち主に関係なく拾う (自分に絞りたい場合は "self" を選ぶ。self と
+// attention の掛け合わせは提供しない = 表示範囲は 1 つ選ぶ形にして語義を単純に保つ)。
+func FilterSessions(sessions []SessionOverview, f SessionFilter,
+	selfEmail string) []SessionOverview {
+
+	out := make([]SessionOverview, 0, len(sessions))
+	for _, s := range sessions {
+		switch f.Scope {
+		case ScopeAttention:
+			if !NeedsAttention(s) {
+				continue
+			}
+		case ScopeAll:
+			// 全部通す
+		default: // ScopeSelf と空 / 未知値は「自分のみ」に倒す (既定)
+			if !isSelf(s, selfEmail) {
+				continue
+			}
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // findEntryLabel は配下の記録から、その番号の説明を再帰的に探す。
