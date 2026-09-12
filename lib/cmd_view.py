@@ -153,6 +153,14 @@ def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
             "(このビューワーは認証を持ちません)。"
             "意図した設置なら --expose を付けてください。"
             "社外に出す場合は認証を持つ前段の後ろに置いてください。")
+    # 逆向きの誤り (ms-170 #742 AX review): --expose は「外に開く」明示なのに
+    # loopback で単独指定すると何も起きず黙って受理され、「公開したつもりで非公開」
+    # の逆誤りになる。--host が loopback 以外を要求するのと対称に、こちらも拒否する。
+    if _is_loopback(host) and expose:
+        raise ValueError(
+            "--expose は自分の機械の外に開くときの明示です。"
+            f"--host に loopback 以外の宛先 (例 0.0.0.0) を指定してください "
+            f"(いまの --host は {host})。ローカルだけで見るなら --expose は不要です。")
     store = store or store_mod.get_store()
     chosen = _pick_port(port, host)
     server = http.server.HTTPServer(
@@ -193,7 +201,19 @@ def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
 
 def cmd_view() -> None:
     """CLI 入口。環境変数は他の commands.py の verb と同じ渡し方に揃える。"""
-    port = int(os.environ.get("BEACON_VIEW_PORT") or DEFAULT_PORT)
+    # --port の入口検証 (ms-170 #742 AX review): 非数値だと素の traceback で
+    # 落ちて何を直せばよいか分からない。数値と範囲を verb 入口で確かめ、回復の
+    # 手掛かりを文言に埋める (bash / dispatch のどちらの frontend も env 経由で
+    # ここを通るので、ここ 1 箇所で両 frontend を閉じる)。
+    raw_port = os.environ.get("BEACON_VIEW_PORT") or ""
+    try:
+        port = int(raw_port) if raw_port else DEFAULT_PORT
+    except ValueError:
+        raise SystemExit(
+            f"Error: --port は数値で指定してください (1-65535)。受け取った値: '{raw_port}'")
+    if not (1 <= port <= 65535):
+        raise SystemExit(
+            f"Error: --port は 1-65535 の範囲で指定してください。受け取った値: {port}")
     no_open = os.environ.get("BEACON_VIEW_NO_OPEN") == "1"
     host = os.environ.get("BEACON_VIEW_HOST") or LOOPBACK
     expose = os.environ.get("BEACON_VIEW_EXPOSE") == "1"

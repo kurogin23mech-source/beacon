@@ -6401,6 +6401,7 @@ def _help_registry():
         {"command": "beacon init", "flags": [], "description": "Initialize .beacon/ in current directory"},
         {"command": "beacon setup", "flags": [], "description": "First-time setup wizard (auth + hooks + project)"},
         {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
+        {"command": "beacon view", "flags": ["--port <n>", "--host <addr>", "--expose", "--no-open", "--json"], "description": "Open the board in a browser (local by default; --host + --expose to serve externally)"},
         {"command": "beacon milestone add", "flags": [], "description": "Add a new milestone (interactive)"},
         {"command": "beacon milestone list", "flags": ["--json"], "description": "List milestones"},
         {"command": "beacon milestone start <id>", "flags": ["--no-branch", "--no-assignee"], "description": "Activate milestone + auto-create ms-XX-<slug> branch + self-add as assignee"},

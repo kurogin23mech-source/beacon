@@ -4658,14 +4658,25 @@ EOF
         _view_host=""; _view_expose=""
         while [ $# -gt 0 ]; do
             case "$1" in
-                --port) _view_port="$2"; shift 2 ;;
+                # help は副作用ゼロで出す (旧: *) で握り潰されサーバ+ブラウザが
+                # 起動していた = ms-170 #742 AX review HIGH)。
+                -h|--help)
+                    echo "usage: beacon view [--port N] [--host ADDR] [--expose] [--no-open] [--json]"
+                    echo "  盤をブラウザで見る。既定は 127.0.0.1 (自分の機械の中だけ)。"
+                    echo "  --host で外に開くには --expose の明示が要る (盤は認証を持たない)。"
+                    exit 0 ;;
+                --port) _need_flag_value "$#" "$1"; _view_port="$2"; shift 2 ;;
+                --port=*) _view_port="${1#*=}"; shift ;;
                 --no-open) _view_no_open="1"; shift ;;
                 --json) _view_json="1"; shift ;;
                 # サーバ設置 (e-6345)。--host を自分の機械の外に向けるときは
                 # --expose の明示が要る (盤は認証を持たないため)。
-                --host) _view_host="$2"; shift 2 ;;
+                --host) _need_flag_value "$#" "$1"; _view_host="$2"; shift 2 ;;
+                --host=*) _view_host="${1#*=}"; shift ;;
                 --expose) _view_expose="1"; shift ;;
-                *) shift ;;
+                # 未知 flag は typo の可能性。黙って捨てず loud に落とす
+                # (旧: *) shift = silent 握り潰し。mac/Windows で挙動が割れていた)。
+                *) echo "beacon view: unknown option: $1" >&2; exit 2 ;;
             esac
         done
         BEACON_VIEW_PORT="$_view_port" \
