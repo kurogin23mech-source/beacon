@@ -22,6 +22,25 @@ import (
 	"strings"
 )
 
+// commandRunner はコマンド実行を差し替え可能にする継ぎ目 (テストで stub するため)。
+// これが無いと ps / osascript を実際に叩くしか検証手段がなく、エラー処理の変更を
+// 局所フィードバックで確かめられない。
+type commandRunner func(name string, args ...string) ([]byte, error)
+
+// defaultRunner は実プロセスを起動する既定の実行器。
+func defaultRunner(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
+}
+
+// jumpSupported は「端末へ飛ぶ」が使える条件を **1 か所** で判定する (純関数)。
+//
+// macOS (osascript がある) かつ 自分の機械の中 (loopback) かつ 非公開 のときだけ。
+// 対応 OS / 公開ポリシーを変えるときはこの関数 1 つを直せば、ボタンの表示可否
+// (jumpAvailable 経由) も揃って変わる (= 判定の真実源を 1 つに)。
+func jumpSupported(goos, host string, expose bool) bool {
+	return goos == "darwin" && isLoopback(host) && !expose
+}
+
 // ttyFromPS は `ps -o tty= -p <pid>` の出力から制御端末名を取り出す (純関数)。
 //
 // ps は環境により "s000" / "ttys000" / "/dev/ttys000" と表記が揺れる。制御端末が
@@ -39,13 +58,19 @@ func ttyFromPS(out string) string {
 	return t
 }
 
-// resolveTTY は pid の制御端末を実際に引く (ps を叩く)。
+// resolveTTY は pid の制御端末を引く (既定の実行器で ps を叩く)。
 func resolveTTY(pid int) (string, error) {
+	return resolveTTYWith(defaultRunner, pid)
+}
+
+// resolveTTYWith は実行器を差し替え可能にした本体 (テスト可能)。
+func resolveTTYWith(run commandRunner, pid int) (string, error) {
 	if pid <= 0 {
+		// pid が無効 / 欠落 (0 は Go の int ゼロ値)。「別マシン」とは別の失敗。
 		return "", fmt.Errorf(
-			"プロセス番号が分かりません (このセッションは手元で拾えていない = 別マシンの可能性)")
+			"プロセス番号が指定されていないか無効です (pid=%d)", pid)
 	}
-	out, err := exec.Command("ps", "-o", "tty=", "-p", strconv.Itoa(pid)).Output()
+	out, err := run("ps", "-o", "tty=", "-p", strconv.Itoa(pid))
 	if err != nil {
 		return "", fmt.Errorf(
 			"プロセス %d の端末を辿れません (すでに終了している可能性)", pid)

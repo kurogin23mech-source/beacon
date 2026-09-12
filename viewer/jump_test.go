@@ -68,3 +68,65 @@ func TestResolveTTYRejectsZeroPID(t *testing.T) {
 		t.Error("pid 0 でエラーを返していない (別マシンのセッションを黙って飛ばそうとしてはいけない)")
 	}
 }
+
+// 「端末へ飛ぶ」が使える条件が 1 か所で正しく判定されること。
+// macOS かつ loopback かつ 非公開 のときだけ true。他は全て false。
+func TestJumpSupported(t *testing.T) {
+	cases := []struct {
+		goos, host string
+		expose     bool
+		want       bool
+		why        string
+	}{
+		{"darwin", "127.0.0.1", false, true, "macOS + loopback + 非公開"},
+		{"darwin", "localhost", false, true, "localhost も loopback"},
+		{"linux", "127.0.0.1", false, false, "非 macOS は osascript が無い"},
+		{"darwin", "0.0.0.0", false, false, "外向き host は loopback でない"},
+		{"darwin", "127.0.0.1", true, false, "外部公開時は無効"},
+	}
+	for _, c := range cases {
+		if got := jumpSupported(c.goos, c.host, c.expose); got != c.want {
+			t.Errorf("jumpSupported(%q,%q,%v) = %v, want %v (%s)",
+				c.goos, c.host, c.expose, got, c.want, c.why)
+		}
+	}
+}
+
+// resolveTTY のエラー処理を、実プロセスなしで (実行器を差し替えて) 確かめられること。
+func TestResolveTTYWith(t *testing.T) {
+	// 正常: ps が tty を返す。
+	ok := func(name string, args ...string) ([]byte, error) {
+		return []byte("ttys009\n"), nil
+	}
+	if got, err := resolveTTYWith(ok, 123); err != nil || got != "ttys009" {
+		t.Errorf("正常系: got %q err %v, want ttys009", got, err)
+	}
+	// ps 自体が失敗 (プロセスがもう無い等)。
+	boom := func(name string, args ...string) ([]byte, error) {
+		return nil, errForTest("no such process")
+	}
+	if _, err := resolveTTYWith(boom, 123); err == nil {
+		t.Error("ps 失敗時にエラーを返していない")
+	}
+	// 制御端末なし (?) は「端末の外」で落とさず理由を返す。
+	noTTY := func(name string, args ...string) ([]byte, error) {
+		return []byte("??\n"), nil
+	}
+	if _, err := resolveTTYWith(noTTY, 123); err == nil {
+		t.Error("制御端末なしでエラーを返していない")
+	}
+	// pid<=0 は実行器を呼ばずに弾く。
+	called := false
+	spy := func(name string, args ...string) ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+	if _, err := resolveTTYWith(spy, 0); err == nil || called {
+		t.Errorf("pid 0 は実行器を呼ばずに弾くべき (called=%v err=%v)", called, err)
+	}
+}
+
+// errForTest はテスト内で使う軽いエラー。
+type errForTest string
+
+func (e errForTest) Error() string { return string(e) }

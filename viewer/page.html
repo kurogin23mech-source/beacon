@@ -955,7 +955,14 @@ function wireJumpButtons() {
   for (const btn of document.querySelectorAll("button.jump")) {
     btn.onclick = async e => {
       e.stopPropagation();
-      const pid = parseInt(btn.dataset.pid, 10);
+      const pid = parseInt(btn.dataset.processPid, 10);
+      // 数値でなければサーバに投げない (NaN は JSON で欠落し pid=0 として届き、
+      // 「別マシン」と誤診されるため。ここで正直な理由を出す)。
+      if (!Number.isFinite(pid)) {
+        btn.textContent = "PID が読めません";
+        btn.title = "このセッションのプロセス番号が取得できませんでした";
+        return;
+      }
       btn.disabled = true;
       const original = btn.textContent;
       btn.textContent = "前面化中…";
@@ -1129,7 +1136,7 @@ async function openSessions() {
                  送信不可 — Beacon に名乗っていません</div>`}
           ${viewerState.jump_available && s.pid
             ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
-                 data-pid="${esc(String(s.pid))}"
+                 data-process-pid="${esc(String(s.pid))}"
                  title="このセッションが動いている端末ウィンドウを前面に出します">
                  端末へ飛ぶ</button>`
             : ""}

@@ -52,10 +52,10 @@ type Server struct {
 
 // jumpAvailable は「端末へ飛ぶ」を許してよいか。
 //
-// 自分の機械の中 (loopback) で、かつ外部公開していない時だけ。外に開いた口から
-// 他所の端末を前面化することはできず、無意味かつ危険なため (SPEC ms-173 方針4)。
+// 条件の実体は jumpSupported (対応 OS + loopback + 非公開) に集約してある。ここは
+// このサーバの状態を渡して委譲するだけ。判定の真実源を 1 つに保つ (SPEC ms-173 方針4)。
 func (s *Server) jumpAvailable() bool {
-	return isLoopback(s.Host) && !s.expose
+	return jumpSupported(runtime.GOOS, s.Host, s.expose)
 }
 
 // hasSource は、盤を出せる状態かどうか。
@@ -366,15 +366,16 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 		var body struct {
-			PID     int    `json:"pid"`
-			Harness string `json:"harness"`
+			PID int `json:"pid"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSONError(w, err)
 			return
 		}
-		// 見つからない/前面化できない場合も、落とさず理由を返す (SPEC 方針4)。
-		if err := jumpToTerminal(body.PID, body.Harness); err != nil {
+		// 現状は apple-terminal のみ。端末種別 (harness) の受け渡しは iTerm2 対応
+		// (e-6403) で harness.kind を配線するときに足す (今は未配線の空フィールドを
+		// 公開して誤解を招かないよう、リクエストに含めない)。
+		if err := jumpToTerminal(body.PID, ""); err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
