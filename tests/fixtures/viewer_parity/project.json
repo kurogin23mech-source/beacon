@@ -1,0 +1,79 @@
+{
+  "name": "パリティ確認用プロジェクト",
+  "objective": "Go 版と Python 版のビューワーが同じ盤を出すことを機械で確かめる",
+  "summary": "この固定データは tests/test_go_viewer_parity_ms170.py 専用。リポジトリの生きた .beacon に依存せず、CI でも常に読める。編集したら board.golden.json を再生成すること。",
+  "profession": "dev",
+  "milestones": [
+    {
+      "id": "ms-1",
+      "label": "最初の一歩",
+      "status": "done",
+      "progress": 100,
+      "target_date": "2026-01-10",
+      "priority": "high",
+      "entries": [
+        {"id": "e-2", "type": "task", "status": "done", "description": "土台を作る", "priority": "high", "created_at": "2026-01-02T09:00:00Z", "entries": []},
+        {"id": "e-1", "type": "task", "status": "done", "description": "方針を決める", "priority": "medium", "created_at": "2026-01-01T09:00:00Z", "entries": []},
+        {"id": "e-3", "type": "commit", "status": "done", "description": "初回コミット", "priority": "", "created_at": "2026-01-03T09:00:00Z", "entries": []}
+      ]
+    },
+    {
+      "id": "ms-2",
+      "label": "期日未定の対象",
+      "status": "in_progress",
+      "progress": 40,
+      "target_date": null,
+      "priority": "medium",
+      "entries": [
+        {"id": "e-10", "type": "task", "status": "done", "description": "調査", "priority": "medium", "created_at": "2026-02-01T09:00:00Z", "entries": []},
+        {"id": "e-11", "type": "task", "status": "in_progress", "description": "実装", "priority": "high", "created_at": "2026-02-05T09:00:00Z", "entries": []},
+        {"id": "e-12", "type": "pr", "status": "merged", "description": "PR: 実装の一部", "priority": "", "created_at": "2026-02-06T09:00:00Z", "entries": []},
+        {"id": "e-13", "type": "pr", "status": "open", "description": "PR: レビュー中", "priority": "", "created_at": "2026-02-07T09:00:00Z", "entries": []}
+      ]
+    },
+    {
+      "id": "ms-10",
+      "label": "並び順の確認 (数の順で ms-2 の後)",
+      "status": "todo",
+      "progress": 0,
+      "target_date": "2026-03-01",
+      "priority": "",
+      "entries": [
+        {"id": "e-20", "type": "task", "status": "todo", "description": "未着手の作業", "priority": "", "created_at": "", "entries": []},
+        {"id": "e-21", "type": "task", "status": "todo", "description": "もう一つ (作成時刻なし・ID で決まる)", "priority": "", "created_at": "", "entries": []}
+      ]
+    }
+  ],
+  "operations": [
+    {"id": "op-1", "title": "毎日のヘルスチェック", "status": "open", "opened_at": "2026-01-15T09:00:00Z", "schedule": {"frequency": "daily"}},
+    {"id": "op-2", "title": "準備中の監視", "status": "todo", "opened_at": "", "schedule": {"frequency": ""}}
+  ],
+  "releases": [
+    {"id": "r-1", "semver": "v0.1.0", "date": "2026-01-05", "description": "最初の出荷"},
+    {"id": "r-2", "semver": "v0.2.0", "date": "2026-01-06", "description": "2"},
+    {"id": "r-3", "semver": "v0.3.0", "date": "2026-01-07", "description": "3"},
+    {"id": "r-4", "semver": "v0.4.0", "date": "2026-01-08", "description": "4"},
+    {"id": "r-5", "semver": "v0.5.0", "date": "2026-01-09", "description": "5"},
+    {"id": "r-6", "semver": "v0.6.0", "date": "2026-01-10", "description": "6"},
+    {"id": "r-7", "semver": "v0.7.0", "date": "2026-01-11", "description": "7"},
+    {"id": "r-8", "semver": "v0.8.0", "date": "2026-01-12", "description": "8"},
+    {"id": "r-9", "semver": "v0.9.0", "date": "2026-01-13", "description": "9"},
+    {"id": "r-10", "semver": "v0.10.0", "date": "2026-01-14", "description": "10"},
+    {"id": "r-11", "semver": "v0.11.0", "date": "2026-01-15", "description": "11 (直近 10 件で切られ、これは残る)"},
+    {"id": "r-12", "semver": "v0.12.0", "date": "2026-01-16", "description": "12 (最新)"}
+  ],
+  "deployments": [
+    {"id": "d-1", "date": "2026-01-05", "environment": "prod", "description": "1"},
+    {"id": "d-2", "date": "2026-01-06", "environment": "prod", "description": "2"},
+    {"id": "d-3", "date": "2026-01-07", "environment": "prod", "description": "3"},
+    {"id": "d-4", "date": "2026-01-08", "environment": "prod", "description": "4"},
+    {"id": "d-5", "date": "2026-01-09", "environment": "prod", "description": "5"},
+    {"id": "d-6", "date": "2026-01-10", "environment": "prod", "description": "6"},
+    {"id": "d-7", "date": "2026-01-11", "environment": "prod", "description": "7"},
+    {"id": "d-8", "date": "2026-01-12", "environment": "prod", "description": "8"},
+    {"id": "d-9", "date": "2026-01-13", "environment": "prod", "description": "9"},
+    {"id": "d-10", "date": "2026-01-14", "environment": "prod", "description": "10"},
+    {"id": "d-11", "date": "2026-01-15", "environment": "prod", "description": "11 (残る)"},
+    {"id": "d-12", "date": "2026-01-16", "environment": "prod", "description": "12 (最新)"}
+  ]
+}

@@ -44,6 +44,21 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      # ms-170 e-6362 レビュー由来: 盤の読み取りは Python と Go の二重実装で、
+      # 両者がズレないことの唯一の歯止めが tests/test_go_viewer_parity_ms170.py の
+      # 突き合わせ。だが Go が無い環境ではその Go 側が丸ごと skip され、CI は緑の
+      # まま Go 版だけ静かにズレていた。ここで Go を入れてビューワーを建てておくと、
+      # 同じ pytest 実行内で needs_go_only の突き合わせが走り、Go 側 drift も CI で
+      # 捕まる (固定データ tests/fixtures/viewer_parity + golden に突き合わせる)。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: viewer/go.mod
+          cache-dependency-path: viewer/go.sum
+
+      - name: Build the Go viewer (for parity tests)
+        run: go build -o viewer ./...
+        working-directory: viewer
+
       - name: Install package with dev + server runtime deps
         # `-e .[dev]` pulls pytest + ruff from pyproject.toml's dev extra.
         # Cloud extras (google-auth*) are pulled in from requirements.txt.
