@@ -252,6 +252,8 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 		PollHealth struct {
 			Healthy bool `json:"healthy"`
 		} `json:"poll_health"`
+		// サーバが出す「今何をしているか」の要約 (ms-159)。まだ出していなければ空。
+		Activity string `json:"activity"`
 	}
 	if err := c.get("/api/me/sessions?live=true", &raw); err != nil {
 		return nil, err
@@ -291,6 +293,8 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 		}
 		// プロジェクトの進行中マイルストーンは、担当とは別の欄で持つ。
 		row.ProjectFocus = s.Focus.Milestone.ID
+		// 「今何をしているか」はサーバの申告をそのまま運ぶ (無ければ空のまま)。
+		row.Activity = s.Activity
 		rows = append(rows, row)
 	}
 	return rows, nil

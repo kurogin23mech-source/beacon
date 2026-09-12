@@ -201,6 +201,15 @@
   .card-attrs {
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;
   }
+  /* 「今何をしているか」は 1 行使って幅いっぱいに出す (対象 / タスクの下)。 */
+  .card-attrs .activity {
+    grid-column: 1 / -1; color: var(--dim); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 運用室の絞り込み帯。選ばれている表示範囲を強調する。 */
+  .filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .filters button.scope.on { font-weight: 600; text-decoration: underline; }
+  .filters select { font-size: 11px; }
   .card-foot {
     display: flex; justify-content: space-between; gap: 8px; margin-top: 8px;
     padding-top: 6px; border-top: 1px solid var(--line);
@@ -241,6 +250,10 @@ let sessionsOpen = false;
 let showStopped = false;
 // 絞り込みの語。画面を作り直しても打ち直さずに済むよう覚えておく。
 let lastFilter = "";
+// 運用室の絞り込み。既定は「自分のみ」= 他人のセッションを畳んで並列作業を見失わない。
+// scope: "self" / "attention" / "all"、root: プロジェクト名 (空なら全部)。
+let sessionScope = "self";
+let sessionRoot = "";
 // 開いている組 (未着手 / 完了 / ドキュメント)。**画面を作り直しても開いたままにする。**
 // ローカルセッションの最終活動時刻は数秒ごとに変わるため盤は頻繁に更新される。
 // 状態を引き継がないと、読んでいる最中に組が閉じてしまう (2026-09-09 の指摘)。
@@ -966,12 +979,21 @@ async function openSessions() {
   app.innerHTML = `<p class="loading">読み込み中…</p>`;
   let d;
   try {
-    d = await (await fetch("/api/sessions")).json();
+    // 「自分のみ / 要対応のみ / 全て」はサーバ側で絞る (誰が自分かはログイン情報で判定)。
+    d = await (await fetch("/api/sessions?scope=" +
+      encodeURIComponent(sessionScope))).json();
   } catch (e) {
     app.innerHTML = `<p class="err">読めませんでした: ${esc(e)}</p>`;
     return;
   }
-  const all = d.sessions || [];
+  const scoped = d.sessions || [];
+  // root (プロジェクト) 絞りは手元で掛ける。こうすると絞っていても選択肢の一覧は
+  // 全プロジェクト分そろったままで、別の root に切り替えられる。
+  const rootNames = [...new Set(scoped.map(
+    s => s.project ? s.project.name : "(プロジェクト外)"))].sort();
+  const all = sessionRoot
+    ? scoped.filter(s => (s.project ? s.project.name : "(プロジェクト外)") === sessionRoot)
+    : scoped;
   // 止まっているものは既定で隠す。いま何が動いているかを読みに来ているのに、
   // 終わった分に埋もれては意味がない (2026-09-10 の指摘)。
   // 「止まっている」の判定は liveness に一本化してある。
@@ -997,6 +1019,21 @@ async function openSessions() {
           showStopped ? `停止中 ${stopped.length} 件を隠す`
                       : `停止中 ${stopped.length} 件も表示`}</button>` : ""}
         &nbsp;·&nbsp; <button id="to-board" class="linkish">盤に戻る</button>
+      </div>
+      <div class="meta filters">
+        表示:
+        <button class="linkish scope ${sessionScope === "self" ? "on" : ""}"
+          data-scope="self" title="他人のセッションを畳んで、自分の並列作業だけを見ます">自分のみ</button>
+        <button class="linkish scope ${sessionScope === "attention" ? "on" : ""}"
+          data-scope="attention" title="生きているのに道具が止まっている = 手が要りそうなものだけ">要対応のみ</button>
+        <button class="linkish scope ${sessionScope === "all" ? "on" : ""}"
+          data-scope="all" title="他の人のものも含め、すべて表示します">全て</button>
+        &nbsp;·&nbsp; プロジェクト:
+        <select id="root-filter">
+          <option value="">すべて</option>
+          ${rootNames.map(n => `<option value="${esc(n)}"${
+            n === sessionRoot ? " selected" : ""}>${esc(n)}</option>`).join("")}
+        </select>
       </div>
     </header>
     <p class="empty">担当は、Beacon に名乗っているセッションはその申告を、そうでないものは
@@ -1034,6 +1071,8 @@ async function openSessions() {
               "ブランチ名にもコミット件名にも対象 (ms-NN) が無いため分かりません")}</div>
             <div>${attribution(s.task,
               "直近のコミット件名にタスク番号 (e-NNNN) が無いため分かりません")}</div>
+            <div class="activity" title="このセッションが今何をしているか。Beacon (ms-159) が申告し始めるまでは空欄です (「何もしていない」ではありません)">${
+              s.activity ? esc(s.activity) : "活動 —"}</div>
           </div>
           <div class="card-foot">
             <span class="sub2 sub1" title="${esc(s.directory)}"
@@ -1058,6 +1097,13 @@ async function openSessions() {
   wireSendButtons();
   const toggle = document.getElementById("toggle-stopped");
   if (toggle) toggle.onclick = () => { showStopped = !showStopped; openSessions(); };
+  // 表示範囲 (自分のみ / 要対応のみ / 全て) の切り替え。
+  document.querySelectorAll("button.scope").forEach(b => {
+    b.onclick = () => { sessionScope = b.dataset.scope; openSessions(); };
+  });
+  // プロジェクト絞り。
+  const rootSel = document.getElementById("root-filter");
+  if (rootSel) rootSel.onchange = () => { sessionRoot = rootSel.value; openSessions(); };
   document.getElementById("to-board").onclick = () => {
     sessionsOpen = false; lastBoardJSON = ""; refresh();
   };

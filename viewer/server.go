@@ -349,7 +349,14 @@ func (s *Server) handler() http.Handler {
 		} else if s.src != nil {
 			named = s.rosterForLocal()
 		}
-		writeJSON(w, AllSessions(24*time.Hour, time.Now(), named))
+		view := AllSessions(24*time.Hour, time.Now(), named)
+		// 運用室の絞り込み (自分のみ=既定 / 要対応のみ / root)。誰が「自分」かは
+		// ログイン情報から引く (未ログインならこのマシンの分だけを自分とみなす)。
+		view.Sessions = FilterSessions(view.Sessions, SessionFilter{
+			Scope: r.URL.Query().Get("scope"),
+			Root:  r.URL.Query().Get("root"),
+		}, cloudEmail())
+		writeJSON(w, view)
 	})
 
 	mux.HandleFunc("/api/board", func(w http.ResponseWriter, r *http.Request) {

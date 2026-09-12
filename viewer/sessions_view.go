@@ -61,6 +61,10 @@ type SessionOverview struct {
 	Project    *ProjectRef  `json:"project,omitempty"`
 	Target     *Attribution `json:"target,omitempty"`
 	Task       *Attribution `json:"task,omitempty"`
+	// Activity は「今このセッションが何をしているか」の要約 (ms-159 が produce する)。
+	// **このビューワーは作らない。消費するだけ。** 空は「分からない」であって
+	// 「何もしていない」ではないので、運用室では空欄として描く (でっち上げない)。
+	Activity string `json:"activity,omitempty"`
 	// Named は Beacon に名乗っているか。
 	//
 	// **送れるのはこれが真のものだけ。** 名乗っていないセッションには、外から
@@ -185,6 +189,7 @@ func AllSessions(since time.Duration, now time.Time,
 		if isNamed {
 			o.Machine = n.Machine
 			o.Who = n.Who
+			o.Activity = n.Activity
 		}
 
 		// 分かった ID に、読める名前を与える。
@@ -214,6 +219,7 @@ func AllSessions(since time.Duration, now time.Time,
 			SessionID:  n.ID,
 			Machine:    n.Machine,
 			Who:        n.Who,
+			Activity:   n.Activity,
 			Remote:     true,
 		}
 		if n.Target != "" {
@@ -336,6 +342,88 @@ func (l *projectLookup) decorate(ref *ProjectRef, o *SessionOverview) {
 			}
 		}
 	}
+}
+
+// --- 運用室の絞り込み (ms-173 e-6401) --------------------------------------
+//
+// 並列に走るセッションは容易に数十〜数百になる。全部を等しく並べると、いま自分が
+// 気にすべきものが埋もれる。そこで 3 つの軸で絞れるようにする:
+//
+//	自分のみ (既定) … 他人のセッションを畳んで、自分の並列作業だけを見る
+//	要対応のみ       … 生きているのに道具が止まっている = 手が要りそうなものだけ
+//	root 絞り        … 特定のプロジェクトのセッションだけ
+//
+// **絞り込みは「隠す」であって「消す」ではない。** 既定を自分にするのは多人数の
+// ノイズを畳むためで、他人の作業が存在しないと誤解させないよう、切り替えられる。
+// (ms-159 D スライスの「モデルは多ユーザ対応 / 既定表示は自分」に対応。)
+
+// SessionFilter は運用室の絞り込み条件。
+type SessionFilter struct {
+	// Scope は "self" (既定) / "attention" / "all"。未知値は "self" に倒す。
+	Scope string `json:"scope"`
+	// Root はプロジェクト名で絞る。空なら全プロジェクト。
+	Root string `json:"root"`
+}
+
+// NeedsAttention は「人の手が要りそう」か。
+//
+// 生きている (Running) のに道具が動いていない (!ToolRunning) = 待機中で、返事待ちの
+// 可能性がある。名乗っているだけの別マシンのセッションは道具の状態が手元に無く、
+// 既定の false を「待機中」と取り違えて全部 要対応 に挙げてしまうため、対象外にする。
+//
+// **これは手がかりであって断定ではない。** ms-159 が activity を出し始めたら、
+// もっと確かな「返事待ち」の判定に寄せられる。それまでの近似。
+func NeedsAttention(s SessionOverview) bool {
+	return s.Running && !s.ToolRunning && !s.Remote
+}
+
+// isSelf は自分のセッションか。
+//
+// 名乗っている (Who が分かる) セッションは、その持ち主が自分かで判定する。
+// 名乗っていないセッションはこのマシンで拾ったものなので、定義上いつも自分。
+// 自分の identity が分からない (未ログイン等) ときは、このマシンの分だけを自分とみなす。
+func isSelf(s SessionOverview, selfEmail string) bool {
+	if strings.TrimSpace(s.Who) == "" {
+		return true // このマシンで拾った、名乗っていないセッション = 自分
+	}
+	if strings.TrimSpace(selfEmail) == "" {
+		return !s.Remote // identity 不明なら、このマシンの分だけを自分とみなす
+	}
+	return strings.EqualFold(strings.TrimSpace(s.Who), strings.TrimSpace(selfEmail))
+}
+
+// FilterSessions は運用室の絞り込みを適用する (純関数、入力は変更しない、並び順は保つ)。
+//
+// Scope (自分 / 要対応 / 全て) と Root (プロジェクト名) は独立した軸で、両方を掛け合わせる。
+func FilterSessions(sessions []SessionOverview, f SessionFilter,
+	selfEmail string) []SessionOverview {
+
+	out := make([]SessionOverview, 0, len(sessions))
+	for _, s := range sessions {
+		switch f.Scope {
+		case "attention":
+			if !NeedsAttention(s) {
+				continue
+			}
+		case "all":
+			// 全部通す
+		default: // "self" と未知値は「自分のみ」に倒す (既定)
+			if !isSelf(s, selfEmail) {
+				continue
+			}
+		}
+		if strings.TrimSpace(f.Root) != "" {
+			name := ""
+			if s.Project != nil {
+				name = s.Project.Name
+			}
+			if !strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(f.Root)) {
+				continue
+			}
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // findEntryLabel は配下の記録から、その番号の説明を再帰的に探す。

@@ -113,3 +113,157 @@ func TestNamedSessionOnThisMachineIsNotDuplicated(t *testing.T) {
 		t.Fatalf("突き合わせの規則が壊れている: %q vs %q", a, b)
 	}
 }
+
+// --- 運用室の絞り込み (ms-173 e-6401) --------------------------------------
+
+// 「要対応」の判定: 生きているのに道具が止まっているものだけ。
+// 別マシンのものは道具の状態が手元に無いので、既定の false を待機と取り違えない。
+func TestNeedsAttention(t *testing.T) {
+	cases := []struct {
+		name string
+		s    SessionOverview
+		want bool
+	}{
+		{"生きていて道具が止まっている = 要対応",
+			SessionOverview{Running: true, ToolRunning: false}, true},
+		{"道具が動いている = 作業中なので要対応でない",
+			SessionOverview{Running: true, ToolRunning: true}, false},
+		{"止まっている = 要対応でない",
+			SessionOverview{Running: false, ToolRunning: false}, false},
+		{"別マシンは道具の状態が分からないので要対応に挙げない",
+			SessionOverview{Running: true, ToolRunning: false, Remote: true}, false},
+	}
+	for _, c := range cases {
+		if got := NeedsAttention(c.s); got != c.want {
+			t.Errorf("%s: NeedsAttention = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 「自分」の判定: 名乗っているものは持ち主で、名乗っていないものはこのマシンの分。
+func TestIsSelf(t *testing.T) {
+	me := "me@example.com"
+	cases := []struct {
+		name  string
+		s     SessionOverview
+		email string
+		want  bool
+	}{
+		{"名乗っていない (Who 空) = このマシンの分 = 自分",
+			SessionOverview{Who: ""}, me, true},
+		{"持ち主が自分",
+			SessionOverview{Who: "me@example.com"}, me, true},
+		{"持ち主が他人",
+			SessionOverview{Who: "other@example.com", Remote: true}, me, false},
+		{"identity 不明なら別マシンは自分でない",
+			SessionOverview{Who: "x@example.com", Remote: true}, "", false},
+		{"identity 不明でもこのマシンの名乗りは自分",
+			SessionOverview{Who: "x@example.com", Remote: false}, "", true},
+	}
+	for _, c := range cases {
+		if got := isSelf(c.s, c.email); got != c.want {
+			t.Errorf("%s: isSelf = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 絞り込みは scope (自分/要対応/全て) と root (プロジェクト) の 2 軸を掛け合わせること。
+func TestFilterSessions(t *testing.T) {
+	me := "me@example.com"
+	pA := &ProjectRef{Name: "A"}
+	pB := &ProjectRef{Name: "B"}
+	sessions := []SessionOverview{
+		{Who: "", Project: pA, Running: true, ToolRunning: true},          // 自分/A/作業中
+		{Who: "me@example.com", Project: pB, Running: true, ToolRunning: false}, // 自分/B/要対応
+		{Who: "other@example.com", Project: pA, Remote: true, Running: true},    // 他人/A
+	}
+
+	// 既定 (self): 他人を畳む。
+	if got := FilterSessions(sessions, SessionFilter{}, me); len(got) != 2 {
+		t.Errorf("既定 self で自分の 2 件にならない: %d 件", len(got))
+	}
+	// all: 全部。
+	if got := FilterSessions(sessions, SessionFilter{Scope: "all"}, me); len(got) != 3 {
+		t.Errorf("all で 3 件にならない: %d 件", len(got))
+	}
+	// attention: 生きていて道具が止まっている 1 件。
+	got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me)
+	if len(got) != 1 || got[0].Project.Name != "B" {
+		t.Errorf("attention で B の 1 件にならない: %+v", got)
+	}
+	// root=A かつ self: 自分/A の 1 件。
+	got = FilterSessions(sessions, SessionFilter{Scope: "self", Root: "A"}, me)
+	if len(got) != 1 || got[0].Project.Name != "A" {
+		t.Errorf("self+root=A で 1 件にならない: %+v", got)
+	}
+	// 未知の scope は self に倒す。
+	if got := FilterSessions(sessions, SessionFilter{Scope: "???"}, me); len(got) != 2 {
+		t.Errorf("未知 scope が self に倒れていない: %d 件", len(got))
+	}
+	// 入力を変更しないこと。
+	if len(sessions) != 3 {
+		t.Errorf("入力が変更された: %d 件", len(sessions))
+	}
+}
+
+// 規模で崩れないこと (doc scale-contract-principle: 一覧処理には規模テストを 1 本)。
+// 多数セッション × 多プロジェクトでも絞り込みが数と対象を取り違えない。
+func TestFilterSessionsAtScale(t *testing.T) {
+	const projects, perProject = 40, 25 // 1000 セッション
+	me := "me@example.com"
+	refs := make([]*ProjectRef, projects)
+	for i := range refs {
+		refs[i] = &ProjectRef{Name: string(rune('A'+i%26)) + itoaSmall(i)}
+	}
+	sessions := make([]SessionOverview, 0, projects*perProject)
+	wantSelf, wantAttention := 0, 0
+	for p := 0; p < projects; p++ {
+		for k := 0; k < perProject; k++ {
+			s := SessionOverview{Project: refs[p]}
+			if k%3 == 0 { // 1/3 は他人 (別マシン)
+				s.Who = "other@example.com"
+				s.Remote = true
+				s.Running = true
+			} else {
+				s.Who = "" // このマシン = 自分
+				wantSelf++
+				if k%2 == 0 { // 自分のうち一部は待機中 = 要対応
+					s.Running = true
+					s.ToolRunning = false
+					wantAttention++
+				} else {
+					s.Running = true
+					s.ToolRunning = true
+				}
+			}
+			sessions = append(sessions, s)
+		}
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "all"}, me); len(got) != projects*perProject {
+		t.Errorf("all が全件を返さない: %d / %d", len(got), projects*perProject)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "self"}, me); len(got) != wantSelf {
+		t.Errorf("self が自分の件数と合わない: %d / %d", len(got), wantSelf)
+	}
+	if got := FilterSessions(sessions, SessionFilter{Scope: "attention"}, me); len(got) != wantAttention {
+		t.Errorf("attention が件数と合わない: %d / %d", len(got), wantAttention)
+	}
+	// root 絞りは、そのプロジェクトの件数ちょうどになる。
+	got := FilterSessions(sessions, SessionFilter{Scope: "all", Root: refs[0].Name}, me)
+	if len(got) != perProject {
+		t.Errorf("root 絞りが 1 プロジェクト分にならない: %d / %d", len(got), perProject)
+	}
+}
+
+// itoaSmall は小さな整数を文字列にする (テスト内でプロジェクト名を作るためだけの簡易版)。
+func itoaSmall(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
+}
