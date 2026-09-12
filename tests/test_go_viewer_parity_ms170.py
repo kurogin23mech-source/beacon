@@ -14,7 +14,32 @@
 3. SQLite から組み立て直すときの並び順が文字列順になっており、ms-1 の次が ms-10
    になっていた (読む先によって盤の並びが変わる状態)。
 
-Go が無い環境では丸ごと飛ばす。CI は Python だけで回るので、ここで落ちないこと。
+CI で確実に走らせる (e-6362 レビュー由来の恒久化)
+--------------------------------------------------
+この歯止めは当初「リポジトリの生きた ``.beacon/project.json`` を突き合わせの基準に
+する」形だった。だが ``.beacon/`` は ``.gitignore`` されており CI には存在しないため、
+``needs_go`` の skip 条件 (``not os.path.exists(PROJECT_JSON)``) が Go の有無に
+関わらず必ず成立し、**この突き合わせは CI で 1 件も走らなかった**。つまり
+lib/view_model.py を変えても CI は緑のまま Go 版だけが静かにズレる状態だった。
+
+これを閉じるため、突き合わせの基準を**チェックイン済みの固定データ**
+(``tests/fixtures/viewer_parity/project.json``) と、そこから生成した
+**期待盤 (golden)** (``board.golden.json``) に置き換えた:
+
+- ``test_python_board_matches_golden`` は Go 無しで走る = 既存の pytest ジョブ
+  (CI 常時実行) が Python 側の drift を捕まえる。
+- Go 側の突き合わせは ``needs_go_only`` (Go があれば走る) で、test.yml の
+  ``viewer-parity`` ジョブが Go を入れて実行する = Go 側の drift を捕まえる。
+
+固定データを変えたら golden を再生成すること:
+  python3 -c "import sys,json; sys.path.insert(0,'lib'); import store_local,view_model; \
+    d=store_local.LocalStore('tests/fixtures/viewer_parity/project.json').load_project(); \
+    json.dump(view_model.build_board_view(d,source=view_model.SOURCE_LOCAL), \
+      open('tests/fixtures/viewer_parity/board.golden.json','w'), \
+      ensure_ascii=False,indent=2,sort_keys=True)"
+
+リポジトリの生きたデータやクラウドに依る挙動テストは従来どおり ``needs_go`` で、
+そのデータが無い環境 (CI 含む) では飛ばす。
 """
 
 import hashlib
@@ -32,6 +57,12 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 
 VIEWER_DIR = os.path.join(REPO, "viewer")
 PROJECT_JSON = os.path.join(REPO, ".beacon", "project.json")
+
+# チェックイン済みの固定データと期待盤 (golden)。リポジトリの生きた .beacon に
+# 依らないので CI でも常に読める。突き合わせの基準はこれ。
+FIXTURE_DIR = os.path.join(REPO, "tests", "fixtures", "viewer_parity")
+FIXTURE_JSON = os.path.join(FIXTURE_DIR, "project.json")
+GOLDEN_JSON = os.path.join(FIXTURE_DIR, "board.golden.json")
 
 
 def _go_binary():
@@ -51,6 +82,15 @@ def _go_binary():
 
 BINARY = _go_binary()
 
+# Go があれば走る (固定データを使うので、リポジトリの生きた .beacon には依らない)。
+# CI の viewer-parity ジョブが Go を入れて走らせる = Go 側の drift を捕まえる。
+needs_go_only = pytest.mark.skipif(
+    BINARY is None,
+    reason="Go 版ビューワーが無い環境",
+)
+
+# Go に加えてリポジトリの生きたデータ / クラウドが要る挙動テスト用。CI (データ無し)
+# では飛ばす。突き合わせの歯止めではなく、実データ / クラウド経路の確認に使う。
 needs_go = pytest.mark.skipif(
     BINARY is None or not os.path.exists(PROJECT_JSON),
     reason="Go 版ビューワー、またはローカルのプロジェクトデータが無い環境",
@@ -80,15 +120,40 @@ def _python_board(project_json):
     return view_model.build_board_view(data, source=view_model.SOURCE_LOCAL)
 
 
-@needs_go
+def test_python_board_matches_golden():
+    """Python 版が固定データから作る盤が、期待盤 (golden) と 1 項目も違わないこと。
+
+    **Go を要さないので既存の pytest ジョブ (CI 常時実行) で走る。** これにより
+    lib/view_model.py 等の Python 側 drift が、Go の有無に関わらず CI で捕まる。
+    golden がズレたら、固定データを意図的に変えたか (= golden 再生成) 、それとも
+    盤の作り方を壊したか (= バグ) のどちらか。
+    """
+    with open(GOLDEN_JSON, encoding="utf-8") as f:
+        golden = json.load(f)
+    assert _python_board(FIXTURE_JSON) == golden
+
+
+@needs_go_only
+def test_go_board_matches_golden():
+    """Go 版が固定データから作る盤が、期待盤 (golden) と 1 項目も違わないこと。
+
+    Python 側と同じ golden に突き合わせるので、両実装が同一の契約を満たすことを
+    別々に確かめられる (Python は上の試験、Go はここ)。
+    """
+    with open(GOLDEN_JSON, encoding="utf-8") as f:
+        golden = json.load(f)
+    assert _go_board(FIXTURE_DIR) == golden
+
+
+@needs_go_only
 def test_go_and_python_produce_the_same_board_from_json():
-    """同じデータを読ませたら、Go 版と Python 版の盤が 1 項目も違わないこと。"""
-    go = _go_board(os.path.join(REPO, "."))
-    py = _python_board(PROJECT_JSON)
+    """同じ固定データを読ませたら、Go 版と Python 版の盤が 1 項目も違わないこと。"""
+    go = _go_board(FIXTURE_DIR)
+    py = _python_board(FIXTURE_JSON)
     assert go == py
 
 
-@needs_go
+@needs_go_only
 def test_go_reads_sqlite_and_json_identically():
     """読む先が SQLite でも JSON でも、出てくる盤が同じであること。
 
@@ -101,25 +166,27 @@ def test_go_reads_sqlite_and_json_identically():
     tmp = tempfile.mkdtemp()
     try:
         project_json = os.path.join(tmp, "project.json")
-        shutil.copy(PROJECT_JSON, project_json)
+        shutil.copy(FIXTURE_JSON, project_json)
         data = store_local.LocalStore(project_json).load_project()
         store_sqlite.SqliteStore(project_json).populate_if_empty(data)
         assert os.path.exists(os.path.join(tmp, "project.db")), "SQLite が作られていない"
 
         from_sqlite = _go_board(tmp)
-        from_json = _go_board(os.path.join(REPO, "."))
+        from_json = _go_board(FIXTURE_DIR)
         assert from_sqlite == from_json
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-@needs_go
+@needs_go_only
 def test_target_order_is_numeric_not_lexicographic():
     """ms-1 の次は ms-2 であって ms-10 ではないこと。
 
     組み立て直しで並び順が失われるため、Python と同じ規則で並べ直す必要がある。
+    固定データは ms-1 / ms-2 / ms-10 を持つので、文字列順なら ms-10 が ms-2 の
+    前に来てしまう。
     """
-    ids = [t["id"] for t in _go_board(os.path.join(REPO, "."))["targets"]]
+    ids = [t["id"] for t in _go_board(FIXTURE_DIR)["targets"]]
     numeric = [int(i.split("-")[1]) for i in ids
                if i.startswith("ms-") and i.split("-")[1].isdigit()]
     assert numeric == sorted(numeric), "対象の並びが数の順になっていない"

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -23,9 +24,41 @@ func main() {
 	asJSON := flag.Bool("json", false, "画面を出さず、盤の中身をそのまま出力する")
 	flag.Parse()
 
+	// Go 標準 flag は最初の非フラグ引数でパースを打ち切る。そのため
+	// `beacon-view <場所> --json` と打つと --json 以降が黙って捨てられ、意図と違う
+	// 挙動 (画面起動でブロック) に静かに落ちる。AI は「コマンド 引数 フラグ」の順を
+	// 高頻度で生成するので、フラグが場所より後ろに来たら黙って無視せず断る。
+	rest := flag.Args()
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			fail(fmt.Errorf(
+				"フラグ %q が場所の指定より後ろにあります。"+
+					"引数解釈は最初の場所でフラグの読み取りを止めるため、"+
+					"このままでは %q は黙って無視されます。"+
+					"フラグは場所より前に置いてください (例: beacon-view --json <場所>)。",
+				a, a))
+		}
+	}
+	if len(rest) > 1 {
+		fail(fmt.Errorf(
+			"場所は 1 つだけ指定してください (受け取った: %v)。", rest))
+	}
+
 	// 位置引数でも場所を受け取れるようにする (beacon-view ./あるフォルダ)。
-	if args := flag.Args(); len(args) > 0 {
-		path = &args[0]
+	// --path と位置引数の同時指定は、どちらが効くか分かりにくいので断る。
+	if len(rest) == 1 {
+		pathSetByFlag := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "path" {
+				pathSetByFlag = true
+			}
+		})
+		if pathSetByFlag {
+			fail(fmt.Errorf(
+				"場所は --path か位置引数のどちらか一方で指定してください " +
+					"(両方渡されました)。"))
+		}
+		path = &rest[0]
 	}
 
 	// プロジェクトが見つからなくても止めない。画面から場所を選んでもらう

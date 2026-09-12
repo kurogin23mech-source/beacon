@@ -1,0 +1,225 @@
+{
+  "deliverables": [
+    {
+      "kind": "feature-map",
+      "label": "機能",
+      "projector": "changelog",
+      "ref": "",
+      "target_class": "milestone"
+    }
+  ],
+  "deployments": [
+    {
+      "date": "2026-01-07",
+      "description": "3",
+      "environment": "prod",
+      "id": "d-3"
+    },
+    {
+      "date": "2026-01-08",
+      "description": "4",
+      "environment": "prod",
+      "id": "d-4"
+    },
+    {
+      "date": "2026-01-09",
+      "description": "5",
+      "environment": "prod",
+      "id": "d-5"
+    },
+    {
+      "date": "2026-01-10",
+      "description": "6",
+      "environment": "prod",
+      "id": "d-6"
+    },
+    {
+      "date": "2026-01-11",
+      "description": "7",
+      "environment": "prod",
+      "id": "d-7"
+    },
+    {
+      "date": "2026-01-12",
+      "description": "8",
+      "environment": "prod",
+      "id": "d-8"
+    },
+    {
+      "date": "2026-01-13",
+      "description": "9",
+      "environment": "prod",
+      "id": "d-9"
+    },
+    {
+      "date": "2026-01-14",
+      "description": "10",
+      "environment": "prod",
+      "id": "d-10"
+    },
+    {
+      "date": "2026-01-15",
+      "description": "11 (残る)",
+      "environment": "prod",
+      "id": "d-11"
+    },
+    {
+      "date": "2026-01-16",
+      "description": "12 (最新)",
+      "environment": "prod",
+      "id": "d-12"
+    }
+  ],
+  "documents": [],
+  "operations": [
+    {
+      "frequency": "daily",
+      "id": "op-1",
+      "opened_at": "2026-01-15T09:00:00Z",
+      "status": "open",
+      "title": "毎日のヘルスチェック"
+    },
+    {
+      "frequency": "",
+      "id": "op-2",
+      "opened_at": "",
+      "status": "todo",
+      "title": "準備中の監視"
+    }
+  ],
+  "progress": {
+    "done": 1,
+    "open": 2,
+    "total": 3
+  },
+  "project": {
+    "name": "パリティ確認用プロジェクト",
+    "objective": "Go 版と Python 版のビューワーが同じ盤を出すことを機械で確かめる",
+    "profession": "dev",
+    "summary": "この固定データは tests/test_go_viewer_parity_ms170.py 専用。リポジトリの生きた .beacon に依存せず、CI でも常に読める。編集したら board.golden.json を再生成すること。"
+  },
+  "releases": [
+    {
+      "date": "2026-01-07",
+      "description": "3",
+      "id": "r-3",
+      "version": "v0.3.0"
+    },
+    {
+      "date": "2026-01-08",
+      "description": "4",
+      "id": "r-4",
+      "version": "v0.4.0"
+    },
+    {
+      "date": "2026-01-09",
+      "description": "5",
+      "id": "r-5",
+      "version": "v0.5.0"
+    },
+    {
+      "date": "2026-01-10",
+      "description": "6",
+      "id": "r-6",
+      "version": "v0.6.0"
+    },
+    {
+      "date": "2026-01-11",
+      "description": "7",
+      "id": "r-7",
+      "version": "v0.7.0"
+    },
+    {
+      "date": "2026-01-12",
+      "description": "8",
+      "id": "r-8",
+      "version": "v0.8.0"
+    },
+    {
+      "date": "2026-01-13",
+      "description": "9",
+      "id": "r-9",
+      "version": "v0.9.0"
+    },
+    {
+      "date": "2026-01-14",
+      "description": "10",
+      "id": "r-10",
+      "version": "v0.10.0"
+    },
+    {
+      "date": "2026-01-15",
+      "description": "11 (直近 10 件で切られ、これは残る)",
+      "id": "r-11",
+      "version": "v0.11.0"
+    },
+    {
+      "date": "2026-01-16",
+      "description": "12 (最新)",
+      "id": "r-12",
+      "version": "v0.12.0"
+    }
+  ],
+  "schema_version": 1,
+  "sessions": [],
+  "source": {
+    "kind": "local",
+    "project_id": ""
+  },
+  "targets": [
+    {
+      "detail": {
+        "priority": "high",
+        "progress": 100,
+        "target_date": "2026-01-10"
+      },
+      "id": "ms-1",
+      "is_done": true,
+      "is_open": false,
+      "kind": "milestone",
+      "label": "最初の一歩",
+      "status": "done",
+      "work_items": {
+        "done": 3,
+        "open": 0,
+        "total": 3
+      }
+    },
+    {
+      "detail": {
+        "priority": "medium",
+        "progress": 40,
+        "target_date": null
+      },
+      "id": "ms-2",
+      "is_done": false,
+      "is_open": true,
+      "kind": "milestone",
+      "label": "期日未定の対象",
+      "status": "in_progress",
+      "work_items": {
+        "done": 2,
+        "open": 2,
+        "total": 4
+      }
+    },
+    {
+      "detail": {
+        "priority": "",
+        "progress": 0,
+        "target_date": "2026-03-01"
+      },
+      "id": "ms-10",
+      "is_done": false,
+      "is_open": true,
+      "kind": "milestone",
+      "label": "並び順の確認 (数の順で ms-2 の後)",
+      "status": "todo",
+      "work_items": {
+        "done": 0,
+        "open": 2,
+        "total": 2
+      }
+    }
+  ]
+}
