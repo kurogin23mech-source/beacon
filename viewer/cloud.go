@@ -212,11 +212,29 @@ func (c *CloudSource) Load() (*Project, error) {
 	return &p, nil
 }
 
-// Sessions は Beacon に名乗っているセッションの名簿を返す。
+// Sessions は Beacon に名乗っているセッションの名簿を、**いま見ているプロジェクトに
+// 絞って**返す。盤 (1 プロジェクトを見る面) が使う。
 //
 // **これがクラウドに繋ぐ最大の意味**。ローカルのデータだけでは、誰がどの対象を
 // 進めているかが分からない。他のマシンで動いているセッションもここに出る。
 func (c *CloudSource) Sessions() ([]SessionRow, error) {
+	return c.sessions(false)
+}
+
+// SessionsCrossProject は名簿を **プロジェクトで絞らず** に返す。横断一覧 (ms-171) が
+// 使う。運用室はプロジェクトを跨いで「このマシンで何が動いているか」を並べる面なので、
+// 現在のプロジェクトで絞ると、他プロジェクトに正しく名乗っているセッション
+// (例: cairn-sales) が名簿から丸ごと落ち、運用室に出ない (2026-09-11/09-13 dogfood)。
+// 生存の真値は bus heartbeat 一本 (Live=true) にし、プロジェクトの違いでは落とさない。
+func (c *CloudSource) SessionsCrossProject() ([]SessionRow, error) {
+	return c.sessions(true)
+}
+
+// sessions は名簿を読む共通処理。crossProject=false なら現在のプロジェクトに絞る
+// (盤用)、true ならプロジェクトで絞らない (横断一覧用)。どちらも各行に自分の
+// ProjectID を刻むので、呼び出し側は declared 判定・DM ルーティングを
+// 「そのセッション自身のプロジェクト」で行える。
+func (c *CloudSource) sessions(crossProject bool) ([]SessionRow, error) {
 	var raw []struct {
 		SessionID string `json:"session_id"`
 		Cwd       string `json:"cwd"`
@@ -267,19 +285,22 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 	}
 	rows := []SessionRow{}
 	for _, s := range raw {
-		// 名簿は参加している全プロジェクト分が返るので、いま見ている盤のものに絞る。
-		if c.ProjectID != "" && s.ProjectID != c.ProjectID {
+		// 名簿は参加している全プロジェクト分が返る。盤 (crossProject=false) では
+		// いま見ているプロジェクトに絞るが、横断一覧 (crossProject=true) では
+		// プロジェクトの違いで落とさない (生存の真値は下の Live 一本)。
+		if !crossProject && c.ProjectID != "" && s.ProjectID != c.ProjectID {
 			continue
 		}
 		if !s.Live {
 			continue
 		}
 		row := SessionRow{
-			ID:      s.SessionID,
-			Who:     s.Actor.Email,
-			Machine: s.Actor.Machine,
-			Agent:   s.Agent.Kind,
-			Cwd:     s.Cwd,
+			ID:          s.SessionID,
+			Who:         s.Actor.Email,
+			Machine:     s.Actor.Machine,
+			Agent:       s.Agent.Kind,
+			Cwd:         s.Cwd,
+			ProjectID:   s.ProjectID, // 各行に自分のプロジェクトを刻む (declared/DM の宛先)
 			Live:        s.Live,
 			Healthy:     s.PollHealth.Healthy,
 			LastActive:  s.LastActive,

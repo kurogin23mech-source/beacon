@@ -109,6 +109,100 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 	}
 }
 
+// 生存の真値は bus heartbeat 一本 (ms-171 e-6431)。
+//
+// 会話ログが 24h カットオフより古くても、名簿に居る (= サーバの心拍が続いている)
+// セッションは運用室に残る。会話が止まっているだけの armed / 受信待ちのセッションを
+// 取りこぼさない (cairn-sales が運用室に出なかった実バグ、2026-09-13)。
+// 一方、名乗っていない古い痕跡は従来どおりカットオフで落とす (痕跡ログで溢れさせない)。
+func TestBusLiveSurvivesConversationCutoff(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-36 * time.Hour).Format(time.RFC3339) // 会話は 36h 前 = カットオフ外
+
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/cairn-sales", LastActive: old},
+		{Tool: "claude-code", Directory: "/Users/x/orphan", LastActive: old},
+	}
+	// cairn-sales だけが名簿に居る (別プロジェクトだが cross-project 名簿なので入る)。
+	named := []SessionRow{{
+		ID: "sv-cairn", Who: "me@example.com", Agent: "claude-code",
+		Cwd: "/Users/x/cairn-sales", ProjectID: "cairn-abc",
+		Live: true, LastActive: old,
+	}}
+
+	view := assembleSessions(local, named, 24*time.Hour, now)
+
+	var cairn, orphan *SessionOverview
+	for i := range view.Sessions {
+		switch view.Sessions[i].Directory {
+		case "/Users/x/cairn-sales":
+			cairn = &view.Sessions[i]
+		case "/Users/x/orphan":
+			orphan = &view.Sessions[i]
+		}
+	}
+	if cairn == nil {
+		t.Fatal("bus-live なのに会話時刻カットオフで運用室から落ちている (e-6431 の実バグ)")
+	}
+	if !cairn.Named || cairn.SessionID != "sv-cairn" {
+		t.Errorf("名乗り/識別子が落ちている: %+v", cairn)
+	}
+	// 宛先ルーティング用に、そのセッション自身のプロジェクトが載っていること (e-6396)。
+	if cairn.Project == nil || cairn.Project.ProjectID != "cairn-abc" {
+		t.Errorf("DM 宛先のプロジェクトが載っていない: %+v", cairn.Project)
+	}
+	if orphan != nil {
+		t.Error("名乗っていない古い痕跡はカットオフで落ちるべき (溢れ防止)")
+	}
+}
+
+// 名乗っていないセッションは、会話時刻が新しければ従来どおり出ること (回帰防止)。
+// Gate A は「名乗っている古いもの」を救うだけで、名乗っていないものの規則は変えない。
+func TestUnnamedRecentSessionStillShown(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	local := []LocalSessionRow{
+		{Tool: "codex", Directory: "/Users/x/fresh", LastActive: recent},
+	}
+	view := assembleSessions(local, nil, 24*time.Hour, now)
+	found := false
+	for _, s := range view.Sessions {
+		if s.Directory == "/Users/x/fresh" {
+			found = true
+			if s.Named {
+				t.Error("名簿が空なのに名乗り扱いになっている")
+			}
+		}
+	}
+	if !found {
+		t.Error("新しい未名乗りセッションが落ちている")
+	}
+}
+
+// 別マシンの名乗りセッションが、宛先ルーティング用に自分のプロジェクトを運ぶこと
+// (ms-171 e-6396)。これが無いと、横断一覧からの DM が「今見ているプロジェクト」に
+// 誤ルートして、別プロジェクトの live セッションに構造的に届かない (2026-09-11 dogfood)。
+func TestRemoteSessionCarriesOwnProjectForDM(t *testing.T) {
+	named := []SessionRow{{
+		ID: "sv-remote", Who: "peer@example.com", Machine: "Mac-mini",
+		Agent: "claude-code", Cwd: "/Users/peer/other-proj",
+		ProjectID: "other-xyz", Live: true, LastActive: "2030-01-01T00:00:00Z",
+	}}
+	view := assembleSessions(nil, named, 24*time.Hour, time.Now())
+	var found *SessionOverview
+	for i := range view.Sessions {
+		if view.Sessions[i].SessionID == "sv-remote" {
+			found = &view.Sessions[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("別マシンの名乗りセッションが一覧から抜けている")
+	}
+	if found.Project == nil || found.Project.ProjectID != "other-xyz" {
+		t.Errorf("宛先ルーティング用のプロジェクトが載っていない: %+v", found.Project)
+	}
+}
+
 // 名乗っていない (= このマシンで拾っただけの) セッションには activity が付かないこと。
 // activity の真実源はサーバ (ms-159) の名簿であって、手元の推測ではない。
 // 空欄は「分からない」であって「何もしていない」ではない、という不変条件を機械で守る。

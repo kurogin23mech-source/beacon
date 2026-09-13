@@ -389,11 +389,13 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		// 名乗っている名簿が取れるなら渡す。名乗っているものは担当が確かなので
 		// 手元の推測より優先される。
+		// 横断一覧はプロジェクトを跨ぐので、名簿も **全プロジェクト分** を引く
+		// (現在プロジェクトで絞ると他プロジェクトのセッションが運用室から落ちる)。
 		var named []SessionRow
 		if s.cloud != nil {
-			named, _ = s.cloud.Sessions()
+			named, _ = s.cloud.SessionsCrossProject()
 		} else if s.src != nil {
-			named = s.rosterForLocal()
+			named = s.rosterForLocal(true)
 		}
 		// 表示範囲を決める。未指定は既定 (self) に倒すが、**未知値 (typo 等) は黙って
 		// self に倒さず 400 で拒否する** — さもないと ?scope=atention のような打ち間違いが
@@ -502,7 +504,7 @@ func (s *Server) buildBoard() (*Board, error) {
 		// ここを取りに行かないと「クラウドのセッションが出ない」ように見える
 		// (2026-09-10 の指摘)。名簿の在り処は取得元とは別の話。
 		board = BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir),
-			s.rosterForLocal())
+			s.rosterForLocal(false))
 	}
 
 	// このマシンで動いているセッションは **どちらの取得元でも添える**。
@@ -519,9 +521,11 @@ func (s *Server) buildBoard() (*Board, error) {
 
 // rosterForLocal は、ローカルで開いているプロジェクトの名簿をクラウドから取る。
 //
-// 結び付いていない / 未ログイン / 繋がらない、のいずれでも空を返す。名簿が
-// 取れなくても盤は出す (見えないことより出ないことのほうが困る)。
-func (s *Server) rosterForLocal() []SessionRow {
+// crossProject=false なら現在のプロジェクトに絞った名簿 (盤用)、true なら全
+// プロジェクト分の名簿 (横断一覧用)。結び付いていない / 未ログイン / 繋がらない、
+// のいずれでも空を返す。名簿が取れなくても盤は出す (見えないことより出ないことの
+// ほうが困る)。
+func (s *Server) rosterForLocal(crossProject bool) []SessionRow {
 	pid := s.src.CloudProjectID()
 	if pid == "" {
 		return nil
@@ -530,8 +534,14 @@ func (s *Server) rosterForLocal() []SessionRow {
 	if creds == nil || creds.Expired(time.Now()) {
 		return nil
 	}
-	rows, err := (&CloudSource{
-		API: DefaultAPI, Token: creds.Token, ProjectID: pid}).Sessions()
+	src := &CloudSource{API: DefaultAPI, Token: creds.Token, ProjectID: pid}
+	var rows []SessionRow
+	var err error
+	if crossProject {
+		rows, err = src.SessionsCrossProject()
+	} else {
+		rows, err = src.Sessions()
+	}
 	if err != nil {
 		return nil
 	}

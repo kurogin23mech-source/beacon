@@ -131,26 +131,19 @@ func AllSessions(since time.Duration, now time.Time,
 	rows = append(rows, claudeSessions(home)...)
 	rows = append(rows, opencodeSessions(home)...)
 	rows = append(rows, codexSessions(home)...)
+	return assembleSessions(rows, named, since, now)
+}
 
-	// 全プロジェクト横断なので、場所では絞らない。古いものだけ落とす。
-	cutoff := now.Add(-since)
-	kept := []LocalSessionRow{}
-	for _, r := range rows {
-		if r.Directory == "" {
-			continue
-		}
-		if t, err := time.Parse(time.RFC3339, r.LastActive); err == nil {
-			if t.Before(cutoff) {
-				continue
-			}
-		}
-		kept = append(kept, r)
-	}
-	sort.SliceStable(kept, func(i, j int) bool {
-		return kept[i].LastActive > kept[j].LastActive
-	})
+// assembleSessions は、集めたローカルの記録と名簿を紐づけて一覧を組み立てる純関数。
+//
+// ディスク走査 (AllSessions) から切り離してあるのは、**生存判定 (Gate A) を注入した
+// 入力で機械的に確かめられるようにするため** (ms-171 e-6431)。手元の記録は環境依存で
+// 実際の ~/.claude を用意しないと出せないので、ここを純関数にして試験可能にする。
+func assembleSessions(rows []LocalSessionRow, named []SessionRow,
+	since time.Duration, now time.Time) SessionsView {
 
-	// 名簿を「作業フォルダ + 道具」で引けるようにする。
+	// 名簿を「作業フォルダ + 道具」で引けるようにする。**カットオフより先に作る** —
+	// bus-live かどうかを、古いものを落とす前に知る必要があるため (下記 Gate A)。
 	//
 	// **フォルダだけで引いてはいけない。** 同じフォルダで Codex や OpenCode を
 	// 何本も動かしていると、その全部が bclaude セッションの識別子を貰ってしまい、
@@ -162,6 +155,35 @@ func AllSessions(since time.Duration, now time.Time,
 			namedByDir[namedKey(n.Cwd, n.Agent)] = n
 		}
 	}
+
+	// 古いものを落とす。ただし **生存の真値は bus heartbeat 一本** (ms-171 e-6431)。
+	//
+	// 名乗っているセッション (名簿に居る = サーバの心拍が続いている) は、手元の
+	// 会話ログが何時間前でも「生きている」。会話が止まっているだけの armed / 受信待ちの
+	// セッションを、会話時刻の 24h カットオフで取りこぼしてはいけない (cairn-sales が
+	// 運用室に出なかった実バグ、2026-09-13)。
+	//
+	// 名乗っていないセッションには心拍が無いので、会話時刻が唯一の生存の手がかり。
+	// そちらにだけ 24h カットオフを当てる (痕跡ログで溢れさせない)。
+	cutoff := now.Add(-since)
+	kept := []LocalSessionRow{}
+	for _, r := range rows {
+		if r.Directory == "" {
+			continue
+		}
+		_, busLive := namedByDir[namedKey(r.Directory, r.Tool)]
+		if !busLive {
+			if t, err := time.Parse(time.RFC3339, r.LastActive); err == nil {
+				if t.Before(cutoff) {
+					continue
+				}
+			}
+		}
+		kept = append(kept, r)
+	}
+	sort.SliceStable(kept, func(i, j int) bool {
+		return kept[i].LastActive > kept[j].LastActive
+	})
 
 	lookup := newProjectLookup()
 	// 手元の記録と突き合わせ済みの名簿を覚えておく (二重に並べないため)。
@@ -189,6 +211,22 @@ func AllSessions(since time.Duration, now time.Time,
 		o.Named = isNamed
 		if isNamed {
 			o.SessionID = n.ID
+			// 名簿に居る = サーバの心拍が続いている = 確かに生きている (ms-171 e-6431)。
+			// 手元のプロセス検出が拾い漏れても、心拍が生存の真値。ここで確定させないと、
+			// 画面が「停止」と判定して既定の隠しに巻き込まれ、せっかく救った行がまた消える。
+			o.Running = true
+			// DM の宛先はそのセッション自身のプロジェクト (e-6396)。名簿が持つ
+			// ProjectID を権威として載せる — 手元の .beacon から引けなかったり、
+			// 別プロジェクトのフォルダで作業していても、正しいプロジェクト宛に送れる。
+			if n.ProjectID != "" {
+				if o.Project == nil {
+					// 手元の .beacon から引けなかった (別マシン由来のフォルダ等)。
+					// 宛先に要る ProjectID だけでも載せる (名前は不明のまま)。
+					o.Project = &ProjectRef{ProjectID: n.ProjectID}
+				} else if o.Project.ProjectID == "" {
+					o.Project.ProjectID = n.ProjectID
+				}
+			}
 		}
 
 		// 担当は、サーバが解決した値があるときだけ「確か」として扱う。
@@ -250,6 +288,12 @@ func AllSessions(since time.Duration, now time.Time,
 			Activity:   n.Activity,
 			Harness:    n.Harness,
 			Remote:     true,
+		}
+		// 別マシンの名乗りセッションにも、宛先ルーティング用に自分のプロジェクトを
+		// 載せる (e-6396)。手元に痕跡が無いので名前は引けないが、ProjectID は名簿が
+		// 持っている。これが無いと DM が「今見ているプロジェクト」に誤ルートする。
+		if n.ProjectID != "" {
+			o.Project = &ProjectRef{ProjectID: n.ProjectID}
 		}
 		if n.Target != "" {
 			o.Target = &Attribution{
