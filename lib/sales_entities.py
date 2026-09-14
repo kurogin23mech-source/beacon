@@ -1756,6 +1756,13 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
         raise ValueError(
             f"'{terminal_phase}' は terminal (決着) フェーズではありません "
             f"(既知の決着: {[p['name'] for p in opportunity_phases(data) if p.get('terminal')]})")
+    # ms-174 成約ガード (方針4 / AC2-4): 成約 (won) の決着は「gating な締結済み契約」を
+    # 前提とする。この raise は最初の mutation (settle_gate) より前なので、block 時は
+    # 商談が現フェーズ (合意済み等) のまま 1 バイトも変わらず留まる (= 合意済み維持)。
+    # 全 caller を構造で塞ぐ backstop (judge handler は同じ理由関数で clean に pre-check)。
+    block = won_terminal_contract_block_reason(data, target_id, terminal_phase)
+    if block:
+        raise ValueError(block)
     opp = find_opportunity(data, target_id)
     cur = opp.get("phase", "") if opp else ""
     gate = current_gate(data, target_id)
@@ -2745,6 +2752,32 @@ def has_gating_signed_contract(data: dict, opportunity_id: str) -> bool:
         if c.get("gating") and c.get("status") == CONTRACT_SIGNED:
             return True
     return False
+
+
+def won_terminal_contract_block_reason(data: dict, opportunity_id: str,
+                                       terminal_phase: str):
+    """Return a block-reason string when declaring ``terminal_phase`` as 成約 (won)
+    must be refused because the商談 has no gating 締結済み契約, else ``None`` (ms-174
+    方針4 / AC2-4). THE single source of the 成約 guard rule + message, read by both
+    ``terminal_transition`` (structural backstop for every caller) and the judge
+    handler (clean-UX pre-check).
+
+    Only the **won** outcome is gated — 失注 (lost) / 不成立 (abandoned) need no
+    contract (AC の「失注 は締結不要」)。An NDA-only (gating=False) deal is still
+    blocked (AC4). Never blocks a non-terminal or a non-won terminal, so it is inert
+    for advance / retry and for every existing project that has no contracts and is
+    not being pushed to 成約 (遡及 block しない, 方針5 / AC5)."""
+    pdef = _find_phase_def(opportunity_phases(data), terminal_phase)
+    if (pdef or {}).get("outcome") != "won":
+        return None
+    if has_gating_signed_contract(data, opportunity_id):
+        return None
+    return (
+        "成約にするには「成約の前提 (gating)」の締結済み契約が 1 つ以上必要です "
+        "(商談は合意済みのまま留まります)。契約の締結を記録してから再判定してください: "
+        f"未締結の契約があれば `beacon opportunity contract sign <ctr-id> --date <YYYY-MM-DD>`、"
+        f"契約がまだ無ければ `beacon opportunity contract add {opportunity_id} \"<契約名>\" --gating` "
+        "で本契約を起票してから締結してください。")
 
 
 def instantiate_phase_activities(data: dict, target_id: str, *,

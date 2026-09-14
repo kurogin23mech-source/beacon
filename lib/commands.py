@@ -9545,6 +9545,16 @@ def cmd_opportunity_judge():
             save_project(data)
             print(f"{opp_id} retry → 同フェーズ継続、新しい遷移日: {arg}")
         elif decision == "terminal":
+            # ms-174 成約ガード (方針4 / AC2): 成約 (won) の決着は「gating な締結済み
+            # 契約」を前提とする。無ければ block して合意済みのまま留め、締結を記録して
+            # から再判定するよう促す。ここで clean に弾くことで、成約ブロックに対して
+            # 「決着できるのは 成約/失注」という的外れな allowed-terminals ヒント (下の
+            # except 節) を出さない。terminal_transition 側にも同じ理由関数の raise を
+            # 置いており (全 caller の構造 backstop)、ここはその CLI 向け前置き。
+            block = sales_entities.won_terminal_contract_block_reason(data, opp_id, arg)
+            if block:
+                print(f"Error: {block}", file=sys.stderr)
+                sys.exit(1)
             # 決着候補の外を宣言した時は warning を出す (block しない、master=人間)。
             opp = occupation.find_target(data, opp_id, kind="opportunity")
             cur = opp.get("phase", "") if opp else ""
