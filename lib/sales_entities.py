@@ -1803,6 +1803,14 @@ def jump_transition(data: dict, target_id: str, new_phase: str, *,
     if not new_phase or not new_phase.strip():
         raise ValueError("new_phase is required")
     new_phase = new_phase.strip()
+    # ms-174 成約ガード (独立 思想レビュー HIGH): 手動フェーズ宣言 (`opportunity phase
+    # <opp> 成約`) も 成約 terminal への日常経路。terminal_transition だけ塞いで
+    # ここを開けておくと「構造で防ぐ」が片側しか閉じず、事故 (契約未締結で 成約) の
+    # 再発経路が残る。同じ理由関数で won-terminal を最初の mutation より前に block し、
+    # 商談を現フェーズのまま留める (失注/不成立/非terminal・後退の corrective は不変)。
+    block = won_terminal_contract_block_reason(data, target_id, new_phase)
+    if block:
+        raise ValueError(block)
     terminal = opportunity_phase_is_terminal(data, new_phase)
     gate = current_gate(data, target_id)
     if gate is not None:
@@ -2645,6 +2653,21 @@ CONTRACT_UNSIGNED = "unsigned"     # 未締結
 CONTRACT_SIGNED = "signed"         # 締結済み
 VALID_CONTRACT_STATUS = {CONTRACT_UNSIGNED, CONTRACT_SIGNED}
 
+# 締結日は YYYY-MM-DD の日付。format を機構で強制し、壊れた日付が「締結済み」の
+# 監査痕跡に紛れ込む (guard は status で通るのに 締結日 がゴミ) 穴を塞ぐ
+# (ms-174 独立 AX レビュー finding)。
+import re as _re  # noqa: E402
+_CONTRACT_DATE_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def live_contracts(opp: dict) -> list:
+    """An opportunity DICT の非取消 (live) 契約リスト (ms-174)。「live な契約」の
+    filter を持つ唯一の場所。id を持つ呼び手は ``contracts_of`` を、opp レコードを
+    既に握っている呼び手 (投影 / 盤面レンダリング) はこれを使う — 両者が「live とは
+    何か」で食い違わないよう定義を 1 箇所に集約する (独立 保守性レビュー finding)。"""
+    return [c for c in (opp or {}).get("contracts", [])
+            if not work_model.is_cancelled(c)]
+
 
 def next_contract_id(data: dict) -> str:
     ids = []
@@ -2702,12 +2725,9 @@ def contracts_of(data: dict, opportunity_id: str, *,
     opp = find_opportunity(data, opportunity_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
-    out = []
-    for c in opp.get("contracts", []):
-        if not include_cancelled and work_model.is_cancelled(c):
-            continue
-        out.append(c)
-    return out
+    if include_cancelled:
+        return list(opp.get("contracts", []))
+    return live_contracts(opp)  # 「live な契約」の filter は live_contracts が正典
 
 
 def contract_sign(data: dict, contract_id: str, *, signed_date: str = "",
@@ -2722,8 +2742,13 @@ def contract_sign(data: dict, contract_id: str, *, signed_date: str = "",
         raise ValueError(f"Contract not found: {contract_id}")
     if work_model.is_cancelled(ctr):
         raise ValueError(f"Contract {contract_id} is cancelled; cannot sign")
-    ctr["status"] = CONTRACT_SIGNED
     new_date = (signed_date or "").strip()
+    # 締結日 format を機構で強制 (ms-174 独立 AX finding): 壊れた日付が「締結済み」に
+    # 紛れ込むと guard は status で通るのに監査痕跡がゴミになる。default 経路
+    # ((at or now_iso())[:10]) は必ず YYYY-MM-DD なので、明示指定のみ検査する。
+    if new_date and not _CONTRACT_DATE_RE.match(new_date):
+        raise ValueError(f"signed_date must be YYYY-MM-DD, got {new_date!r}")
+    ctr["status"] = CONTRACT_SIGNED
     if new_date or not ctr.get("signed_date"):
         # 締結日は日付 (YYYY-MM-DD)。明示指定が無ければ ``at`` (ISO timestamp) か
         # 現在時刻の日付部を採る。
@@ -4163,14 +4188,13 @@ def project_targets(data: dict) -> list:
         # (締結の状態語彙は unsigned/signed で todo/done と別、e-6433 の設計判断)、
         # detail の contracts summary として surface する — status / Web UI / cockpit が
         # 「締結の有無が盤面に見える」よう活動と区別してレンダリングできる (AC6)。
-        live_contracts = [c for c in opp.get("contracts", [])
-                          if not work_model.is_cancelled(c)]
+        live_ctr = live_contracts(opp)  # 「live な契約」filter は 1 箇所 (live_contracts)
         contracts_summary = {
-            "total": len(live_contracts),
-            "signed": sum(1 for c in live_contracts
+            "total": len(live_ctr),
+            "signed": sum(1 for c in live_ctr
                           if c.get("status") == CONTRACT_SIGNED),
             "gating_signed": any(c.get("gating") and c.get("status") == CONTRACT_SIGNED
-                                 for c in live_contracts),
+                                 for c in live_ctr),
         }
         targets.append({
             "id": opp.get("id", ""),

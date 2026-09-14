@@ -9274,8 +9274,7 @@ def cmd_opportunity_list():
         # ms-174: 契約 (締結の有無) を activity と別枠で盤面に出す。締結済み/総数と、
         # gating (成約の前提) な締結済み契約の有無を 1 行で示す。契約がまだ無い商談は
         # 行ごと省略 (ノイズ回避) — 締結の前提チェックは成約ガードが別途行う。
-        live_ctr = [c for c in o.get("contracts", [])
-                    if not work_model.is_cancelled(c)]
+        live_ctr = sales_entities.live_contracts(o)  # filter は entity 側の正典
         if live_ctr:
             signed_n = sum(1 for c in live_ctr
                            if c.get("status") == sales_entities.CONTRACT_SIGNED)
@@ -10081,7 +10080,9 @@ def cmd_opportunity_contract_add():
     save_project(data)
     kind = "成約の前提 (gating)" if gating else "前提でない (NDA 等)"
     print(f"Added contract {ctr_id} to {opp_id}: {desc} [{kind}] — 未締結")
-    print(f"  締結を記録するには: beacon opportunity contract sign {ctr_id} --date <YYYY-MM-DD>")
+    # --date は任意 (省略時は本日) なので [] で囲って sign の Usage と signal を揃える
+    # (ms-174 独立 AX finding: 括弧無しだと AI が --date 必須と誤読する)。
+    print(f"  締結を記録するには: beacon opportunity contract sign {ctr_id} [--date <YYYY-MM-DD>]")
 
 
 def cmd_opportunity_contract_sign():
@@ -10093,6 +10094,17 @@ def cmd_opportunity_contract_sign():
     date = os.environ.get("BEACON_CONTRACT_DATE", "")
     ref = os.environ.get("BEACON_CONTRACT_REF", "")
     data = load_project()
+    # 既に締結済みの契約を再 sign する時は silent に締結日を書き換えず警告する
+    # (ms-174 独立 AX finding: retry 等で元の締結日が黙って上書きされ監査痕跡が濁る)。
+    _o, _existing = sales_entities.find_contract(data, ctr_id)
+    if _existing is not None and _existing.get("status") == sales_entities.CONTRACT_SIGNED:
+        _orig = _existing.get("signed_date", "")
+        if date.strip() and date.strip() != _orig:
+            print(f"⚠ contract {ctr_id} は既に {_orig} に締結済みです — "
+                  f"{date.strip()} で締結日を上書きします", file=sys.stderr)
+        else:
+            print(f"⚠ contract {ctr_id} は既に {_orig} に締結済みです (締結日は変更なし)",
+                  file=sys.stderr)
     try:
         ctr = sales_entities.contract_sign(
             data, ctr_id, signed_date=date, ref=ref, at=core._now_iso())
@@ -10142,6 +10154,10 @@ def cmd_opportunity_contract_list():
     if not contracts:
         print(f"No contracts on {opp_id} yet. Add one with: "
               f"beacon opportunity contract add {opp_id} \"<desc>\" [--gating]")
+        # gating の意味を最初の add の時点で見せる (ms-174 独立 AX finding: [--gating]
+        # が無説明だと NDA を gating 無しで足し、後で 成約 が block されて初めて気づく)。
+        print("  --gating を付けると成約の前提となる本契約 (覚書/業務委託/法人契約)。"
+              "NDA 等は付けない (成約ガードは gating 締結済み契約だけを見る)。")
         return
     import work_model
     for c in contracts:

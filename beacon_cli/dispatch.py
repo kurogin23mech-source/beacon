@@ -2775,6 +2775,8 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             if not args.a1 or not args.a2:
                 print('Usage: beacon opportunity contract add <opp-id> "<desc>" '
                       "[--gating] [--ref <url>]")
+                print("         --gating   この契約は成約の前提 (本契約: 覚書/業務委託/"
+                      "法人契約)。省略時は前提でない (NDA 等)。")
                 return 1
             return _run_commands_py(root, "opportunity_contract_add", {
                 "BEACON_OPP_ID": args.a1,

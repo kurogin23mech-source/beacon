@@ -261,3 +261,53 @@ def test_projection_contracts_excludes_cancelled():
     se.contract_cancel(data, se.contract_add(data, opp, "誤覚書", gating=True))
     row = next(t for t in se.project_targets(data) if t["id"] == opp)
     assert row["detail"]["contracts"] == {"total": 0, "signed": 0, "gating_signed": False}
+
+
+# --- 独立レビュー findings の回帰 (2026-09-14) ------------------------------
+
+def test_jump_transition_to_won_blocked_without_gating_signed():
+    """独立 思想レビュー HIGH: 手動フェーズ宣言 (`opportunity phase <opp> 成約` =
+    jump_transition) も 成約 terminal への日常経路。契約が無ければ block し、
+    合意済みのまま留める (terminal_transition と同じガードで両扉を塞ぐ)。"""
+    data, opp = _fresh()
+    with pytest.raises(ValueError):
+        se.jump_transition(data, opp, "成約", at="T2")
+    assert se.find_opportunity(data, opp)["phase"] == "合意済み"
+
+
+def test_jump_transition_to_won_passes_with_gating_signed():
+    data, opp = _fresh()
+    se.contract_sign(data, se.contract_add(data, opp, "覚書", gating=True),
+                     signed_date="2026-09-14")
+    se.jump_transition(data, opp, "成約", at="T2")
+    assert se.find_opportunity(data, opp)["phase"] == "成約"
+
+
+def test_jump_transition_to_lost_needs_no_contract():
+    """失注/不成立/後退の corrective jump は契約不要 — ガードは won のみ。"""
+    data, opp = _fresh()
+    se.jump_transition(data, opp, "失注", at="T2")
+    assert se.find_opportunity(data, opp)["phase"] == "失注"
+
+
+def test_contract_sign_rejects_malformed_date():
+    """独立 AX finding: 締結日は YYYY-MM-DD を機構で強制 (壊れた日付が締結済みに
+    紛れ込み guard は status で通るのに監査痕跡がゴミになる穴を塞ぐ)。"""
+    data, opp = _fresh()
+    ctr = se.contract_add(data, opp, "覚書", gating=True)
+    for bad in ("2026/09/14", "September 14", "2026-13-45x", "26-9-14"):
+        with pytest.raises(ValueError):
+            se.contract_sign(data, ctr, signed_date=bad)
+    # 正常形は通る / default 経路 (at) も YYYY-MM-DD
+    se.contract_sign(data, ctr, signed_date="2026-09-14")
+    assert se.find_contract(data, ctr)[1]["signed_date"] == "2026-09-14"
+
+
+def test_live_contracts_helper_is_the_one_filter():
+    """live_contracts(opp) と contracts_of(data, id) が同じ「live」定義を返す。"""
+    data, opp = _fresh()
+    se.contract_add(data, opp, "覚書", gating=True)
+    se.contract_cancel(data, se.contract_add(data, opp, "誤", gating=False))
+    o = se.find_opportunity(data, opp)
+    assert [c["id"] for c in se.live_contracts(o)] == [c["id"] for c in se.contracts_of(data, opp)]
+    assert len(se.live_contracts(o)) == 1  # cancelled 除外
