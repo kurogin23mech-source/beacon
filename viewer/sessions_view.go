@@ -156,23 +156,49 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 		}
 	}
 
-	// 古いものを落とす。ただし **生存の真値は bus heartbeat 一本** (ms-171 e-6431)。
+	// 古いものを落とす。ただし **生存の真値は transport の live** (ms-171 e-6431)。
 	//
-	// 名乗っているセッション (名簿に居る = サーバの心拍が続いている) は、手元の
-	// 会話ログが何時間前でも「生きている」。会話が止まっているだけの armed / 受信待ちの
-	// セッションを、会話時刻の 24h カットオフで取りこぼしてはいけない (cairn-sales が
-	// 運用室に出なかった実バグ、2026-09-13)。
+	// 生存 (= 名簿の live) は liveness の transport 次元 = `ws_live` (期限内の WebSocket
+	// 接続) OR `poll_health.healthy` (bridge の polling が新鮮) の union で、サーバが
+	// session ごとに判定する (CORE doc liveness-three-dimensions §1)。名簿に載る =
+	// transport live なので、手元の会話ログが何時間前でも「生きている」。会話が止まって
+	// いるだけの armed / 受信待ちのセッションを、会話時刻の 24h カットオフで取りこぼして
+	// はいけない (cairn-sales が運用室に出なかった実バグ、2026-09-13)。
 	//
-	// 名乗っていないセッションには心拍が無いので、会話時刻が唯一の生存の手がかり。
-	// そちらにだけ 24h カットオフを当てる (痕跡ログで溢れさせない)。
+	// **「heartbeat」は生存の真値ではない**。`heartbeat_fresh` は attention 次元 (人/AI が
+	// 能動的に見ているか) の弱いシグナルで、live には畳み込まない (同 doc §3、回帰防止)。
+	// ここでの生存判定は transport の live 一本で、heartbeat_fresh は使わない。
+	//
+	// 名乗っていないセッションには transport live が無いので、会話時刻が唯一の生存の
+	// 手がかり。そちらにだけ 24h カットオフを当てる (痕跡ログで溢れさせない)。
+	//
+	// **新しい順に先に並べてから畳む** — 突合キー namedKey(dir, tool) はフォルダ + 道具
+	// 粒度なので、同じフォルダで同じ道具を複数本動かすと 1 つの live 名簿に複数のローカル
+	// 痕跡が当たる。全部を live 扱いすると、同フォルダの死んだ痕跡まで「稼働中」に見える
+	// 偽稼働が生じる (原典が嫌う silent 非機能の鏡像、思想レビュー finding 2026-09-14)。
+	// session 単位の identity が手元に無い環境では、**キーあたり最新 1 行だけ** を live
+	// 名簿の主 (claimer) とし、残りの痕跡は名乗り扱いにしない (= 通常のカットオフ + 実際の
+	// プロセス生存で扱う)。
+	sort.SliceStable(rows, func(i, j int) bool {
+		return rows[i].LastActive > rows[j].LastActive
+	})
 	cutoff := now.Add(-since)
 	kept := []LocalSessionRow{}
+	claimedCutoff := map[string]bool{}
 	for _, r := range rows {
 		if r.Directory == "" {
 			continue
 		}
-		_, busLive := namedByDir[namedKey(r.Directory, r.Tool)]
-		if !busLive {
+		key := namedKey(r.Directory, r.Tool)
+		_, inRoster := namedByDir[key]
+		// live 名簿の主になれるのは、そのキーで最初に来た (= 最新の) 1 行だけ。
+		claimer := inRoster && !claimedCutoff[key]
+		if claimer {
+			claimedCutoff[key] = true
+		}
+		if !claimer {
+			// 名乗りの主でない行 (= 未名乗り、または同フォルダの古い重複) は
+			// 会話時刻のカットオフに従う。
 			if t, err := time.Parse(time.RFC3339, r.LastActive); err == nil {
 				if t.Before(cutoff) {
 					continue
@@ -181,13 +207,13 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 		}
 		kept = append(kept, r)
 	}
-	sort.SliceStable(kept, func(i, j int) bool {
-		return kept[i].LastActive > kept[j].LastActive
-	})
 
 	lookup := newProjectLookup()
 	// 手元の記録と突き合わせ済みの名簿を覚えておく (二重に並べないため)。
 	seenNamed := map[string]bool{}
+	// 名乗りの主 (claimer) を、キーあたり最新 1 行に限る (cutoff loop と同じ規則)。
+	// kept は新しい順なので、各キーで最初に出会う行が主。
+	claimedNamed := map[string]bool{}
 	out := SessionsView{Sessions: []SessionOverview{}}
 	for _, r := range kept {
 		o := SessionOverview{
@@ -207,13 +233,20 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 		subject := gitHeadSubject(r.Directory)
 
 		// 名乗っているセッションかどうかは、担当の有無とは別に記録する。
-		n, isNamed := namedByDir[namedKey(r.Directory, r.Tool)]
+		// **名乗りの主はキーあたり最新 1 行だけ** — 同フォルダの古い重複に live の
+		// 識別子や稼働を漏らさない (思想レビュー finding 2026-09-14、上の claimer 規則)。
+		key := namedKey(r.Directory, r.Tool)
+		n, inRoster := namedByDir[key]
+		isNamed := inRoster && !claimedNamed[key]
 		o.Named = isNamed
 		if isNamed {
+			claimedNamed[key] = true
 			o.SessionID = n.ID
-			// 名簿に居る = サーバの心拍が続いている = 確かに生きている (ms-171 e-6431)。
-			// 手元のプロセス検出が拾い漏れても、心拍が生存の真値。ここで確定させないと、
-			// 画面が「停止」と判定して既定の隠しに巻き込まれ、せっかく救った行がまた消える。
+			// 名簿に居る = transport が live (ws_live OR poll_health) = 確かに生きて
+			// いる (ms-171 e-6431 / CORE doc liveness-three-dimensions §1)。手元の
+			// プロセス検出が拾い漏れても、transport live が生存の真値。ここで確定させ
+			// ないと、画面が「停止」と判定して既定の隠しに巻き込まれ、救った行がまた
+			// 消える。**主 (claimer) の 1 行にだけ与える** ので、死んだ重複には漏れない。
 			o.Running = true
 			// DM の宛先はそのセッション自身のプロジェクト (e-6396)。名簿が持つ
 			// ProjectID を権威として載せる — 手元の .beacon から引けなかったり、
@@ -262,7 +295,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 		lookup.decorate(proj, &o)
 		out.Sessions = append(out.Sessions, o)
 		if isNamed {
-			seenNamed[namedKey(r.Directory, r.Tool)] = true
+			seenNamed[key] = true
 		}
 	}
 

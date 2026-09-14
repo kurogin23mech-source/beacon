@@ -203,6 +203,61 @@ func TestRemoteSessionCarriesOwnProjectForDM(t *testing.T) {
 	}
 }
 
+// 同じフォルダ + 道具の重複痕跡に、live 名簿の識別子や稼働を漏らさないこと
+// (思想レビュー finding 2026-09-14)。突合キーはフォルダ + 道具粒度なので、1 つの
+// live セッションが居るフォルダに古い死んだ痕跡があると、素朴に突合すると死んだ
+// 痕跡まで「稼働中」+ live の SessionID を貰い、偽の稼働に見える。**キーあたり最新
+// 1 行だけ** を名乗りの主にすることで、これを防ぐ。
+func TestDuplicateLocalTraceDoesNotInheritLiveIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	newer := now.Add(-1 * time.Hour).Format(time.RFC3339) // live セッションの主
+	// 同フォルダの重複痕跡 (プロセスは死んでいる)。カットオフ内 (3h < 24h) にして
+	// 「主でないから名乗り扱いされない」ことを確かめる (カットオフで消えるのとは別の経路)。
+	older := now.Add(-3 * time.Hour).Format(time.RFC3339)
+
+	local := []LocalSessionRow{
+		// 入力順をわざと古い→新しいにして、並べ替え (新しい順) が効いて主が正しく
+		// 選ばれることも確かめる。古い方はプロセスが死んでいる (Running:false)。
+		{Tool: "claude-code", Directory: "/Users/x/proj", LastActive: older, Running: false},
+		{Tool: "claude-code", Directory: "/Users/x/proj", LastActive: newer, Running: true},
+	}
+	named := []SessionRow{{
+		ID: "sv-live", Who: "me@example.com", Agent: "claude-code",
+		Cwd: "/Users/x/proj", ProjectID: "proj-abc",
+		Live: true, LastActive: newer,
+	}}
+
+	view := assembleSessions(local, named, 24*time.Hour, now)
+
+	namedCount := 0
+	for _, s := range view.Sessions {
+		if s.Directory != "/Users/x/proj" {
+			continue
+		}
+		if s.Named {
+			namedCount++
+			if s.LastActive != newer {
+				t.Errorf("名乗りの主が最新行でない: last_active=%s", s.LastActive)
+			}
+			if s.SessionID != "sv-live" {
+				t.Errorf("主の SessionID が名簿と一致しない: %q", s.SessionID)
+			}
+		} else {
+			// 名乗りの主でない古い重複は、live の識別子を貰わず、実際のプロセス生存
+			// (false) のまま = 稼働中に見えない。
+			if s.SessionID != "" {
+				t.Errorf("重複行が live の SessionID を継いでいる: %q", s.SessionID)
+			}
+			if s.Running {
+				t.Error("死んだ重複行が稼働中に見えている (偽稼働)")
+			}
+		}
+	}
+	if namedCount != 1 {
+		t.Errorf("名乗りの主はキーあたり 1 行のはずが %d 行", namedCount)
+	}
+}
+
 // 名乗っていない (= このマシンで拾っただけの) セッションには activity が付かないこと。
 // activity の真実源はサーバ (ms-159) の名簿であって、手元の推測ではない。
 // 空欄は「分からない」であって「何もしていない」ではない、という不変条件を機械で守る。
