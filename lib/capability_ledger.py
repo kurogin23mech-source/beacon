@@ -1162,8 +1162,16 @@ _NOUN_SCOPE = {
 
 # Per-verb overrides where a single verb does not follow its noun's scope.
 _VERB_SCOPE_OVERRIDE: dict = {
-    # (none yet — the noun rules cover every current verb. Add here when a verb's
-    # scope diverges from its noun, e.g. a future ``bus_*`` verb that is admin-only.)
+    # ms-174: 契約 (contract) verb は noun=opportunity(L2) を持つが、契約は営業固有の
+    # 対象 (NDA / 覚書 / 本契約の締結) であって全職種共通の Target grain (activity=
+    # WorkItem / communication=Evidence) ではない。L2 の Target インスタンス
+    # (opportunity) に営業が固有機能を足したもの = L3。owner は verb 単位で
+    # _VERB_OWNER_OVERRIDE が sales を与える (noun=opportunity は L2 なので
+    # _L3_NOUN_PROFESSION には載せられない — noun 同期テストが弾く)。
+    "opportunity_contract_add": "L3",
+    "opportunity_contract_sign": "L3",
+    "opportunity_contract_list": "L3",
+    "opportunity_contract_cancel": "L3",
 }
 
 
@@ -1256,6 +1264,17 @@ _L3_NOUN_PROFESSION = {
 # project / TrailNode stamps its project id here (orthogonal to origin_of).
 _L4_VERB_PROJECT: dict = {}
 
+# Per-verb L3 owner overrides — the ownership twin of _VERB_SCOPE_OVERRIDE, for an
+# L3 verb whose noun is NOT itself L3 (so _L3_NOUN_PROFESSION cannot carry the
+# owner). ms-174: 契約 verb の noun は opportunity (L2) なので、noun 経由では営業
+# 所有を表せない。verb 単位でここに営業を宣言する (_L4_VERB_PROJECT と同型)。
+_VERB_OWNER_OVERRIDE: dict = {
+    "opportunity_contract_add": "sales",
+    "opportunity_contract_sign": "sales",
+    "opportunity_contract_list": "sales",
+    "opportunity_contract_cancel": "sales",
+}
+
 
 def owner_of(cap_key: str) -> str:
     """Return the ownership handle of a capability, dispatched by its scope
@@ -1272,10 +1291,15 @@ def owner_of(cap_key: str) -> str:
         not owner-bearing.)
     """
     scope = scope_of(cap_key)
+    key = (cap_key or "").strip()
     if scope == "L3":
+        # verb 単位の owner override が noun 規則に優先 (契約 verb 等、noun が L3 でない
+        # L3 verb のため; ms-174)。
+        if key in _VERB_OWNER_OVERRIDE:
+            return _VERB_OWNER_OVERRIDE[key]
         return _L3_NOUN_PROFESSION.get(_noun_from_key(cap_key), "")
     if scope == "L4":
-        return _L4_VERB_PROJECT.get((cap_key or "").strip(), "")
+        return _L4_VERB_PROJECT.get(key, "")
     return ""
 
 

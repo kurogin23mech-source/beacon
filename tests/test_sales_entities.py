@@ -2533,10 +2533,13 @@ def test_jump_transition_settles_gate_and_preserves_note():
 def test_jump_transition_to_terminal_opens_no_new_gate():
     data = se.build_sales_project("Acme", "close")
     oid = se.opportunity_add(data, "Deal")
+    # ms-174: 成約 (won) terminal は gating 締結済み契約を要求するようになったため、
+    # gate ライフサイクルだけを見るこのテストは契約不要の非-won terminal (失注/不成立)
+    # を使う (テストの本旨 = 決着 jump が新ゲートを開かない、は不変)。
     terminals = [p["name"] for p in se.opportunity_phases(data)
-                 if p.get("terminal")]
+                 if p.get("terminal") and p.get("outcome") != "won"]
     if not terminals:
-        return  # funnel has no terminal phase configured
+        return  # funnel has no non-won terminal phase configured
     se.jump_transition(data, oid, terminals[0], note="失注", at="2026-07-18")
     assert _open_gates(data, oid) == []  # 決着 → no phase left in progress
     done = _done_gates(data, oid)

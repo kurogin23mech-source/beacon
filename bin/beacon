@@ -513,8 +513,9 @@ case "${1:-}" in
             judge)    shift 2; cmd_opportunity_judge "$@" ;;
             due)      shift 2; cmd_opportunity_due "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
+            contract) shift 2; cmd_opportunity_contract "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|rename|phase-prob|transition-date|anchor|judge|due|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|rename|phase-prob|transition-date|anchor|judge|due|activity|contract|delete]" ;;
         esac
         ;;
     communication|comm)

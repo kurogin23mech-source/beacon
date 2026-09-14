@@ -1756,6 +1756,13 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
         raise ValueError(
             f"'{terminal_phase}' は terminal (決着) フェーズではありません "
             f"(既知の決着: {[p['name'] for p in opportunity_phases(data) if p.get('terminal')]})")
+    # ms-174 成約ガード (方針4 / AC2-4): 成約 (won) の決着は「gating な締結済み契約」を
+    # 前提とする。この raise は最初の mutation (settle_gate) より前なので、block 時は
+    # 商談が現フェーズ (合意済み等) のまま 1 バイトも変わらず留まる (= 合意済み維持)。
+    # 全 caller を構造で塞ぐ backstop (judge handler は同じ理由関数で clean に pre-check)。
+    block = won_terminal_contract_block_reason(data, target_id, terminal_phase)
+    if block:
+        raise ValueError(block)
     opp = find_opportunity(data, target_id)
     cur = opp.get("phase", "") if opp else ""
     gate = current_gate(data, target_id)
@@ -1796,6 +1803,14 @@ def jump_transition(data: dict, target_id: str, new_phase: str, *,
     if not new_phase or not new_phase.strip():
         raise ValueError("new_phase is required")
     new_phase = new_phase.strip()
+    # ms-174 成約ガード (独立 思想レビュー HIGH): 手動フェーズ宣言 (`opportunity phase
+    # <opp> 成約`) も 成約 terminal への日常経路。terminal_transition だけ塞いで
+    # ここを開けておくと「構造で防ぐ」が片側しか閉じず、事故 (契約未締結で 成約) の
+    # 再発経路が残る。同じ理由関数で won-terminal を最初の mutation より前に block し、
+    # 商談を現フェーズのまま留める (失注/不成立/非terminal・後退の corrective は不変)。
+    block = won_terminal_contract_block_reason(data, target_id, new_phase)
+    if block:
+        raise ValueError(block)
     terminal = opportunity_phase_is_terminal(data, new_phase)
     gate = current_gate(data, target_id)
     if gate is not None:
@@ -2607,6 +2622,199 @@ def nurturing_add(data: dict, account_id: str, description: str, *,
         "created_in_phase": created_in_phase or acc.get("phase", ""),
     })
     return nrt_id
+
+
+# ---------------------------------------------------------------------------
+# Contract (契約 — 締結の有無を第一級で持つ Opportunity 専用 work-item, ms-174)
+# ---------------------------------------------------------------------------
+# 営業商談の「合意済み (握った)」と「成約 (締結して確定)」は別事実。契約 (NDA / 覚書 /
+# 業務委託 / 法人契約) を activity に埋めず第一級の work-item として Opportunity に
+# ぶら下げ、締結の有無を盤面に出す (SPEC ms-174 方針1)。最小状態 = 未締結 (unsigned) /
+# 締結済み (signed, +締結日)。``gating`` は「成約の前提か」を表すフラグ — NDA は契約
+# として残すが gating=False、本契約 (覚書 / 業務委託 / 法人契約) は gating=True。成約
+# ガード (e-6435) はこの gating=True かつ signed の contract が1つ以上あるかを
+# ``has_gating_signed_contract`` で読む。
+#
+# 構造上の位置 (方針1): contract は Opportunity 専用の従属 composition で、activity
+# (act-) / nurturing (nrt-) と同じ「target 配下の nested child」層。ただし gate を
+# 発火させる anchor work-item (``WORK_ITEM_KINDS`` = mtg-/act-/nrt-) には **加えない**
+# — 契約締結は前進ゲートの判定源ではなく、成約 terminal の前提条件として guard が
+# 直接読む (方針4: 汎用「要契約」フレームワークは作らず terminal ロジックに直接置く
+# 最小実装)。ゆえに ``ctr-`` は work-item ファミリの一員だが anchor 集合とは別に持つ。
+#
+# 互換 (pnhATs 3条 / 方針5): ``contracts`` は Opportunity の新しい nested key で追記
+# のみ。tolerant read (``opp.get("contracts", [])``) なので contract 未導入の既存商談は
+# 空配列として読め、遡及 block はしない。back-office profession の同名 top-level
+# ``contracts`` target class (``ctr-`` prefix) とは別物: あちらは ``data["contracts"]``
+# の第一級 target、こちらは opportunity 配下の nested child。1 project = 1 profession
+# なので同一 project 内で両者が同居することはなく、id 採番も互いのリストを見ない。
+
+CONTRACT_UNSIGNED = "unsigned"     # 未締結
+CONTRACT_SIGNED = "signed"         # 締結済み
+VALID_CONTRACT_STATUS = {CONTRACT_UNSIGNED, CONTRACT_SIGNED}
+
+# 締結日は YYYY-MM-DD の日付。format を機構で強制し、壊れた日付が「締結済み」の
+# 監査痕跡に紛れ込む (guard は status で通るのに 締結日 がゴミ) 穴を塞ぐ
+# (ms-174 独立 AX レビュー finding)。
+import re as _re  # noqa: E402
+_CONTRACT_DATE_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def live_contracts(opp: dict) -> list:
+    """An opportunity DICT の非取消 (live) 契約リスト (ms-174)。「live な契約」の
+    filter を持つ唯一の場所。id を持つ呼び手は ``contracts_of`` を、opp レコードを
+    既に握っている呼び手 (投影 / 盤面レンダリング) はこれを使う — 両者が「live とは
+    何か」で食い違わないよう定義を 1 箇所に集約する (独立 保守性レビュー finding)。"""
+    return [c for c in (opp or {}).get("contracts", [])
+            if not work_model.is_cancelled(c)]
+
+
+def next_contract_id(data: dict) -> str:
+    ids = []
+    for opp in data.get("opportunities", []):
+        ids.extend(c.get("id", "") for c in opp.get("contracts", []))
+    return _next_prefixed_id(ids, "ctr-")
+
+
+def contract_add(data: dict, opportunity_id: str, description: str, *,
+                 gating: bool = False, ref: str = "", created_at: str = "",
+                 created_in_phase: str = "") -> str:
+    """Append a Contract (契約) under an Opportunity and return its id (ms-174).
+
+    A 契約 is a first-class work-item recording whether an NDA / 覚書 / 業務委託 /
+    法人契約 has been 締結 (signed). It is born ``unsigned`` and moves to ``signed``
+    (+締結日) via ``contract_sign`` — NOT the activity todo/done vocabulary, because
+    締結の有無 is the fact the 成約 guard reads. ``gating`` marks whether this contract
+    is a *precondition of 成約* (本契約 → True; NDA は残すが False)。``ref`` は任意の
+    署名済 doc URL。``created_in_phase`` は生成時のフェーズ帰属 (set-once) を刻み、空なら
+    商談の現フェーズを既定にする — activity が持つのと同じ phase-attribution (e-3555)。
+    """
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    if not description or not description.strip():
+        raise ValueError("Contract description is required")
+    ctr_id = next_contract_id(data)
+    opp.setdefault("contracts", []).append({
+        "id": ctr_id,
+        "description": description.strip(),
+        "gating": bool(gating),
+        "status": CONTRACT_UNSIGNED,
+        "signed_date": "",
+        "ref": (ref or "").strip(),
+        "created_at": created_at or work_base.now_iso(),
+        "created_in_phase": created_in_phase or opp.get("phase", ""),
+    })
+    return ctr_id
+
+
+def find_contract(data: dict, contract_id: str):
+    """Return ``(opportunity, contract)`` for a contract id, or ``(None, None)``."""
+    for opp in data.get("opportunities", []):
+        for c in opp.get("contracts", []):
+            if c.get("id") == contract_id:
+                return opp, c
+    return None, None
+
+
+def contracts_of(data: dict, opportunity_id: str, *,
+                 include_cancelled: bool = False) -> list:
+    """The contracts under an Opportunity (ms-174). Excludes soft-cancelled
+    (取消済) ones by default — a mis-entered contract stays in the record
+    (append-only) but drops out of the 盤面 and the 成約 guard's read."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    if include_cancelled:
+        return list(opp.get("contracts", []))
+    return live_contracts(opp)  # 「live な契約」の filter は live_contracts が正典
+
+
+def contract_sign(data: dict, contract_id: str, *, signed_date: str = "",
+                  ref: str = "", at: str = "") -> dict:
+    """Mark a Contract 締結済み (signed) and return it (ms-174). Records the 締結日
+    (``signed_date`` = a ``YYYY-MM-DD`` date; defaults to today when omitted) and,
+    optionally, an updated signed-doc ``ref``. Idempotent on an already-signed
+    contract — keeps the original 締結日 unless a new one is passed. A cancelled
+    (取消済) contract cannot be signed."""
+    _opp, ctr = find_contract(data, contract_id)
+    if ctr is None:
+        raise ValueError(f"Contract not found: {contract_id}")
+    if work_model.is_cancelled(ctr):
+        raise ValueError(f"Contract {contract_id} is cancelled; cannot sign")
+    new_date = (signed_date or "").strip()
+    # 締結日 format を機構で強制 (ms-174 独立 AX finding): 壊れた日付が「締結済み」に
+    # 紛れ込むと guard は status で通るのに監査痕跡がゴミになる。default 経路
+    # ((at or now_iso())[:10]) は必ず YYYY-MM-DD なので、明示指定のみ検査する。
+    if new_date and not _CONTRACT_DATE_RE.match(new_date):
+        raise ValueError(f"signed_date must be YYYY-MM-DD, got {new_date!r}")
+    ctr["status"] = CONTRACT_SIGNED
+    if new_date or not ctr.get("signed_date"):
+        # 締結日は日付 (YYYY-MM-DD)。明示指定が無ければ ``at`` (ISO timestamp) か
+        # 現在時刻の日付部を採る。
+        ctr["signed_date"] = new_date or (at or work_base.now_iso())[:10]
+    if (ref or "").strip():
+        ctr["ref"] = ref.strip()
+    return ctr
+
+
+def contract_cancel(data: dict, contract_id: str, *, reason: str = "") -> dict:
+    """Soft-cancel (取消) a Contract — correcting a mis-recorded contract without
+    deleting it (data-immutability-principle). Routes through
+    ``work_base.stamp_cancel``, the same cancel vocabulary activities use."""
+    _opp, ctr = find_contract(data, contract_id)
+    if ctr is None:
+        raise ValueError(f"Contract not found: {contract_id}")
+    return work_base.stamp_cancel(ctr, reason=reason)
+
+
+def has_gating_signed_contract(data: dict, opportunity_id: str) -> bool:
+    """True when the Opportunity has at least one gating (成約の前提) contract that
+    is 締結済み (signed) — the predicate the 成約 terminal guard reads (ms-174 方針4
+    / AC2-4). A cancelled contract never counts (``contracts_of`` drops it). An NDA
+    (gating=False) alone does NOT satisfy it (AC4)."""
+    for c in contracts_of(data, opportunity_id):
+        if c.get("gating") and c.get("status") == CONTRACT_SIGNED:
+            return True
+    return False
+
+
+def won_terminal_contract_block_reason(data: dict, opportunity_id: str,
+                                       terminal_phase: str):
+    """Return a block-reason string when declaring ``terminal_phase`` as 成約 (won)
+    must be refused because the商談 has no gating 締結済み契約, else ``None`` (ms-174
+    方針4 / AC2-4). THE single source of the 成約 guard rule + message, read by both
+    ``terminal_transition`` (structural backstop for every caller) and the judge
+    handler (clean-UX pre-check).
+
+    Only the **won** outcome is gated — 失注 (lost) / 不成立 (abandoned) need no
+    contract (AC の「失注 は締結不要」)。An NDA-only (gating=False) deal is still
+    blocked (AC4). Never blocks a non-terminal or a non-won terminal, so it is inert
+    for advance / retry and for every existing project that has no contracts and is
+    not being pushed to 成約 (遡及 block しない, 方針5 / AC5)."""
+    pdef = _find_phase_def(opportunity_phases(data), terminal_phase)
+    if (pdef or {}).get("outcome") != "won":
+        return None
+    if has_gating_signed_contract(data, opportunity_id):
+        return None
+    # AX review (親レビュー #746 misleading): 旧文言は「未締結の契約があれば sign」と
+    # gating 条件を落としていたため、未締結が NDA (gating=False) だけの商談で「sign → 再判定
+    # → 同じ block」の無限ループを誘発した。実状態で分岐し、次に打つべき 1 コマンドだけを出す。
+    opp = find_opportunity(data, opportunity_id) or {}
+    unsigned_gating = [c for c in live_contracts(opp)
+                       if c.get("gating") and c.get("status") != CONTRACT_SIGNED]
+    head = ("成約にするには「成約の前提 (gating)」の締結済み契約が 1 つ以上必要です "
+            "(商談は合意済みのまま留まります)。")
+    if unsigned_gating:
+        ids = " / ".join(c.get("id", "") for c in unsigned_gating)
+        first = unsigned_gating[0].get("id", "<ctr-id>")
+        return (head + "成約の前提となる本契約は起票済みですが未締結です。締結を記録してから"
+                f"再判定してください: `beacon opportunity contract sign {first} "
+                f"--date <YYYY-MM-DD>` (未締結の本契約: {ids})。")
+    return (head + "成約の前提となる本契約 (gating) がまだありません。起票して締結してください: "
+            f"`beacon opportunity contract add {opportunity_id} \"<契約名>\" --gating` "
+            "→ 起票後に `beacon opportunity contract sign <ctr-id> --date <YYYY-MM-DD>`。"
+            "(NDA 等 gating でない契約は成約の前提になりません)")
 
 
 def instantiate_phase_activities(data: dict, target_id: str, *,
@@ -3988,6 +4196,18 @@ def project_targets(data: dict) -> list:
         total = len(activities)
         done = sum(1 for a in activities
                    if a.get("status") == work_model.DONE_STATUS)
+        # ms-174: 契約 (締結の有無) は activity とは別枠。work_items には数えず
+        # (締結の状態語彙は unsigned/signed で todo/done と別、e-6433 の設計判断)、
+        # detail の contracts summary として surface する — status / Web UI / cockpit が
+        # 「締結の有無が盤面に見える」よう活動と区別してレンダリングできる (AC6)。
+        live_ctr = live_contracts(opp)  # 「live な契約」filter は 1 箇所 (live_contracts)
+        contracts_summary = {
+            "total": len(live_ctr),
+            "signed": sum(1 for c in live_ctr
+                          if c.get("status") == CONTRACT_SIGNED),
+            "gating_signed": any(c.get("gating") and c.get("status") == CONTRACT_SIGNED
+                                 for c in live_ctr),
+        }
         targets.append({
             "id": opp.get("id", ""),
             "label": work_model.target_label(opp),
@@ -4002,6 +4222,7 @@ def project_targets(data: dict) -> list:
                 "probability": opp.get("probability"),
                 "deadline": opp.get("deadline", ""),
                 "account_id": opp.get("account_id"),
+                "contracts": contracts_summary,
             },
         })
     # ms-115 e-3786: 顧客獲得ターゲット (Acquisition) を商談とは別レーンとして同じ
