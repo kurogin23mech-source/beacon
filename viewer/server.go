@@ -391,11 +391,20 @@ func (s *Server) handler() http.Handler {
 		// 手元の推測より優先される。
 		// 横断一覧はプロジェクトを跨ぐので、名簿も **全プロジェクト分** を引く
 		// (現在プロジェクトで絞ると他プロジェクトのセッションが運用室から落ちる)。
+		//
+		// **取得失敗を握り潰さない** (AX review high, 2026-09-14)。名簿は生存の真値 +
+		// カットオフ免除の根拠なので、失敗を空名簿と混同すると bus-live が無信号で消える。
 		var named []SessionRow
+		rosterStatus := RosterNA
 		if s.cloud != nil {
-			named, _ = s.cloud.SessionsCrossProject()
+			rows, err := s.cloud.SessionsCrossProject()
+			if err != nil {
+				rosterStatus = RosterUnavailable
+			} else {
+				named, rosterStatus = rows, RosterOK
+			}
 		} else if s.src != nil {
-			named = s.rosterForLocal(true)
+			named, rosterStatus = s.rosterForLocal(true)
 		}
 		// 表示範囲を決める。未指定は既定 (self) に倒すが、**未知値 (typo 等) は黙って
 		// self に倒さず 400 で拒否する** — さもないと ?scope=atention のような打ち間違いが
@@ -427,6 +436,7 @@ func (s *Server) handler() http.Handler {
 		view.Scope = scope
 		view.Total = total
 		view.Shown = len(view.Sessions)
+		view.RosterStatus = rosterStatus
 		writeJSON(w, view)
 	})
 
@@ -503,8 +513,9 @@ func (s *Server) buildBoard() (*Board, error) {
 		//
 		// ここを取りに行かないと「クラウドのセッションが出ない」ように見える
 		// (2026-09-10 の指摘)。名簿の在り処は取得元とは別の話。
+		roster, _ := s.rosterForLocal(false)
 		board = BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir),
-			s.rosterForLocal(false))
+			roster)
 	}
 
 	// このマシンで動いているセッションは **どちらの取得元でも添える**。
@@ -525,14 +536,21 @@ func (s *Server) buildBoard() (*Board, error) {
 // プロジェクト分の名簿 (横断一覧用)。結び付いていない / 未ログイン / 繋がらない、
 // のいずれでも空を返す。名簿が取れなくても盤は出す (見えないことより出ないことの
 // ほうが困る)。
-func (s *Server) rosterForLocal(crossProject bool) []SessionRow {
+// 戻り値の 2 つ目は名簿の取得状態 (RosterOK / RosterUnavailable / RosterNA)。
+// **取得失敗 (unavailable) を「クラウド未接続 (n/a)」や空名簿と混同しない** (AX
+// review high, 2026-09-14): 未 login / token 失効 / 通信断は unavailable として
+// 呼び出し側に伝え、画面が「名簿未取得」を空と別表示できるようにする。
+func (s *Server) rosterForLocal(crossProject bool) ([]SessionRow, string) {
 	pid := s.src.CloudProjectID()
 	if pid == "" {
-		return nil
+		// クラウドに結び付いていない = 名簿が原理的に無い (失敗ではない)。
+		return nil, RosterNA
 	}
 	creds := LoadCredentials()
 	if creds == nil || creds.Expired(time.Now()) {
-		return nil
+		// 結び付いているのに認証が無い / 切れている = 名乗っているセッションが
+		// 取れていない可能性。空ではなく「取得失敗」として伝える。
+		return nil, RosterUnavailable
 	}
 	src := &CloudSource{API: DefaultAPI, Token: creds.Token, ProjectID: pid}
 	var rows []SessionRow
@@ -543,9 +561,9 @@ func (s *Server) rosterForLocal(crossProject bool) []SessionRow {
 		rows, err = src.Sessions()
 	}
 	if err != nil {
-		return nil
+		return nil, RosterUnavailable
 	}
-	return rows
+	return rows, RosterOK
 }
 
 // localRoot は、このマシンのセッションを探す起点。

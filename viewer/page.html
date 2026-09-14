@@ -1102,6 +1102,11 @@ async function openSessions() {
         </select>
       </div>
     </header>
+    ${d.roster_status === "unavailable" ? `<div class="notice">
+      ⚠ 名乗っているセッションの名簿を取得できませんでした (ログイン切れ・通信断の可能性)。
+      <b>名乗って動いているセッション (他のマシン・クラウド分を含む) が、ここに出ていない
+      恐れがあります。</b>空に見えても「誰も居ない」とは限りません。
+      <code>beacon auth login</code> でログインし直すと回復します。</div>` : ""}
     <p class="empty">担当は、Beacon に名乗っているセッションはその申告を、そうでないものは
       ブランチ名や直近のコミットから推し量っています。<b>推測は破線</b>で示します。
       <br>タスクは直近のコミット件名に含まれる番号 (e-NNNN) から辿ります。

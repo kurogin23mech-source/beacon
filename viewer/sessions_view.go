@@ -56,6 +56,12 @@ type SessionOverview struct {
 	Directory  string       `json:"directory"`
 	Branch     string       `json:"branch"`
 	LastActive string       `json:"last_active"`
+	// Running は「このセッションは生きているか」。**真値源が 2 つある** (ms-171 e-6431):
+	// 名乗りの主 (claimer) の行では transport の live (サーバ判定、ローカルのプロセス
+	// 検出を上書き)、それ以外の行では手元のプロセス生存 (processAlive)。消費側
+	// (NeedsAttention / page.html の停止判定) はこの合成後の値を読む。
+	// **「ローカルにプロセスがある」の意味だけで局所推論しないこと** — 別マシン /
+	// クラウドの名乗り行も true になりうる。出自の分離 (別フィールド化) は follow-up。
 	Running     bool `json:"running"`
 	ToolRunning bool `json:"tool_running"`
 	Project    *ProjectRef  `json:"project,omitempty"`
@@ -114,7 +120,26 @@ type SessionsView struct {
 	// 差があれば「隠したものがある」と呼び出し側が機械的に検知できる。
 	Total int `json:"total"`
 	Shown int `json:"shown"`
+	// RosterStatus は名簿 (= 名乗っているセッションの一覧、生存の真値) を取れたか。
+	//
+	// **取得失敗を空名簿と混同してはいけない** (AX review high, 2026-09-14)。名簿は
+	// ms-171 で「生存の真値 + 24h カットオフ免除の根拠」に昇格したので、取得に失敗
+	// (未 login / token 失効 / 通信断) すると、bus-live なセッションが無信号で一覧から
+	// 消える (カットオフに落ち、稼働表示も失う) — この MS が直した cairn-sales 消失の
+	// 別経路での再発。値は:
+	//   ok          … 名簿を取得できた (空でも「誰も名乗っていない」で正しい)
+	//   unavailable … 取得に失敗した (名乗っているセッションが抜けている可能性)
+	//   n/a         … このプロジェクトはクラウドに結び付いておらず名簿が原理的に無い
+	// 画面は unavailable を空一覧と別表示にして、見えない事実を隠さない。
+	RosterStatus string `json:"roster_status"`
 }
+
+// roster status の値 (真実源はここ 1 つ)。
+const (
+	RosterOK          = "ok"
+	RosterUnavailable = "unavailable"
+	RosterNA          = "n/a"
+)
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
 //

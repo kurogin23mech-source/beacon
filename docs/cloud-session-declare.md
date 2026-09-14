@@ -24,13 +24,16 @@ Beacon の bus (= セッション間メッセージング経路) に自分の識
 
 クラウド環境 (= セッションが動くコンテナ / VM) で、次を満たす:
 
-1. **Beacon 本体が入っていること。** `beacon --version` が通ること。
+1. **Beacon 本体と bclaude が入っていること。** `beacon --version` と
+   `bclaude --version` (または `which bclaude`) が通ること。bclaude が無い環境は
+   下の手順 5 の fallback (素の `claude` にチャネル旗を付けて起動) を使う。
 2. **クラウドの資格情報があること。** そのセッションが名簿サーバ (beacon-ai.dev)
    に対して認証済みであること。手元と同じ `~/.beacon/profiles/default/credentials.json`
-   を使う。未認証なら `beacon login` で 1 度承認する。
+   を使う。未認証なら `beacon auth login` で 1 度承認する。
 3. **作業フォルダがクラウドのプロジェクトに結び付いていること。** その cwd の
    `.beacon/cloud.json` に `project_id` が入っていること (= どのプロジェクトとして
-   名乗るか)。無ければ `beacon cloud open` 等で結び付ける。
+   名乗るか)。無ければ `beacon cloud join <project-id>` で結び付ける
+   (参加中プロジェクトの一覧は `beacon cloud list`)。
 4. **bus チャネルを install すること。** そのフォルダで:
 
    ```bash
@@ -45,7 +48,11 @@ Beacon の bus (= セッション間メッセージング経路) に自分の識
    bclaude
    ```
 
-   `bclaude` は `claude` にチャネル旗を足すラッパー。これで起動したセッションは
+   `bclaude` は `claude` にチャネル旗 (`--dangerously-load-development-channels
+   server:beacon-bus`) を足すラッパー。bclaude が無い環境では、素の
+   `claude --dangerously-load-development-channels server:beacon-bus` で等価に起動
+   できる (この旗が無いと bus に繋がらず、名乗れない = 名簿にも運用室にも出ない)。
+   これで起動したセッションは
    自分の識別子を bus に mint (= 発行) し、以後 **受信経路を生かし続ける**。この
    transport の live (= `ws_live` OR `poll_health.healthy` の union、サーバが判定)
    が **生存の真値**になる (ms-171 e-6431: 運用室の生存判定は会話ログの時刻ではなく
