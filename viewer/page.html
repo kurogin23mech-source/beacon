@@ -1163,14 +1163,18 @@ async function openSessions() {
               ${s.last_active ? `data-ts="${esc(s.last_active)}"` : ""}
               >${s.last_active ? ago(s.last_active) : ""}</span>
           </div>
-          ${s.named && s.session_id
-            ? `<button class="linkish send" style="margin-top:8px; width:100%;"
-                 data-sid="${esc(s.session_id)}"
-                 data-pid="${esc((s.project || {}).project_id || "")}"
-                >プロンプトを送る</button>`
-            : `<div class="sub2 sub1" style="margin-top:8px;"
+          ${!(s.named && s.session_id)
+            ? `<div class="sub2 sub1" style="margin-top:8px;"
                  title="Beacon に名乗っているセッションにしか文面を渡せません">
-                 送信不可 — Beacon に名乗っていません</div>`}
+                 送信不可 — Beacon に名乗っていません</div>`
+            : s.collapsed_peers
+              ? `<div class="sub2 sub1" style="margin-top:8px;"
+                   title="同じフォルダ・道具で複数の live セッションが1行に畳まれており、この行の識別子 (session_id) が畳まれたどのセッションを指すか一意に定まりません。押した相手と違うセッションに届く誤配を防ぐため、送信口を出していません (session_id 粒度の突合 e-6446 で解消予定)">
+                   送信不可 — 宛先が一意に定まりません (同フォルダに他 ${s.collapsed_peers} セッション)</div>`
+              : `<button class="linkish send" style="margin-top:8px; width:100%;"
+                   data-sid="${esc(s.session_id)}"
+                   data-pid="${esc((s.project || {}).project_id || "")}"
+                  >プロンプトを送る</button>`}
           ${viewerState.jump_available && s.pid
             ? (s.jumpable
               ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
