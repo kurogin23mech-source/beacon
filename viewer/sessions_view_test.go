@@ -92,8 +92,10 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 	if !found.Remote {
 		t.Error("別のマシンであることが分からない")
 	}
-	if !found.Named || !found.Running {
-		t.Errorf("名乗り/稼働が落ちている: %+v", found)
+	// 別マシンは手元のプロセス観測が無い (Running=false) が、サーバの transport live
+	// で生きている (TransportLive=true)。生存判定は合成 alive() で見る (e-6454)。
+	if !found.Named || found.Running || !found.TransportLive || !alive(*found) {
+		t.Errorf("名乗り/生存 (transport live) が落ちている: %+v", found)
 	}
 	if found.Target == nil || found.Target.ID != "ms-42" ||
 		found.Target.Source != "beacon" {
@@ -146,6 +148,11 @@ func TestBusLiveSurvivesConversationCutoff(t *testing.T) {
 	}
 	if !cairn.Named || cairn.SessionID != "sv-cairn" {
 		t.Errorf("名乗り/識別子が落ちている: %+v", cairn)
+	}
+	// 生存は transport live で確定 (会話ログ由来でない)。Running (ローカルプロセス
+	// 観測) は上書きされず false のまま、alive() は真 (e-6454 の出自分離)。
+	if !cairn.TransportLive || cairn.Running || !alive(*cairn) {
+		t.Errorf("transport live による生存が落ちている / Running を誤上書き: %+v", cairn)
 	}
 	// 宛先ルーティング用に、そのセッション自身のプロジェクトが載っていること (e-6396)。
 	if cairn.Project == nil || cairn.Project.ProjectID != "cairn-abc" {
@@ -255,6 +262,63 @@ func TestDuplicateLocalTraceDoesNotInheritLiveIdentity(t *testing.T) {
 	}
 	if namedCount != 1 {
 		t.Errorf("名乗りの主はキーあたり 1 行のはずが %d 行", namedCount)
+	}
+}
+
+// claimedCutoff 側の規則を単独で殺すケース (保守性レビュー finding 2026-09-14):
+// 同一キーの重複痕跡が **両方ともカットオフより古い** とき、最新 1 行 (claimer) だけが
+// transport live で残り、残りは落ちること。cutoff loop の claimer 規則が「roster に
+// 居る行は全部カットオフ免除」へ退化していないかを pin する (退化すると古い死んだ
+// 重複が溢れて並ぶ = selectKept の存在理由そのものが silent に壊れる)。
+func TestAllDuplicatesBeyondCutoffKeepOnlyClaimer(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	newer := now.Add(-30 * time.Hour).Format(time.RFC3339) // 主だがカットオフ外
+	older := now.Add(-40 * time.Hour).Format(time.RFC3339) // さらに古い重複
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/p", LastActive: older, Running: false},
+		{Tool: "claude-code", Directory: "/Users/x/p", LastActive: newer, Running: false},
+	}
+	named := []SessionRow{{
+		ID: "sv-live", Agent: "claude-code", Cwd: "/Users/x/p",
+		ProjectID: "p-abc", Live: true, LastActive: newer,
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	rows := 0
+	for _, s := range view.Sessions {
+		if s.Directory == "/Users/x/p" {
+			rows++
+			if !s.Named || s.LastActive != newer {
+				t.Errorf("残ったのが最新の主でない: %+v", s)
+			}
+		}
+	}
+	if rows != 1 {
+		t.Errorf("カットオフ外の重複が畳まれず %d 行残った (退化)", rows)
+	}
+}
+
+// 同一キーに複数の live 名簿が畳まれたら、その事実を CollapsedPeers で開示すること
+// (AX review finding 2026-09-14)。粒度不足で個別に出せないが、黙って消さない。
+func TestCollapsedPeersDisclosed(t *testing.T) {
+	named := []SessionRow{
+		{ID: "sv-a", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p", Live: true, LastActive: "2030-01-01T00:00:00Z"},
+		{ID: "sv-b", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p", Live: true, LastActive: "2030-01-01T00:00:00Z"},
+	}
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/p", LastActive: "2030-01-01T00:00:00Z", Running: true},
+	}
+	view := assembleSessions(local, named, 24*time.Hour, time.Now())
+	var claimer *SessionOverview
+	for i := range view.Sessions {
+		if view.Sessions[i].Named && view.Sessions[i].Directory == "/Users/x/p" {
+			claimer = &view.Sessions[i]
+		}
+	}
+	if claimer == nil {
+		t.Fatal("名乗りの主が出ていない")
+	}
+	if claimer.CollapsedPeers != 1 {
+		t.Errorf("畳まれた live の開示が誤り: CollapsedPeers=%d (want 1)", claimer.CollapsedPeers)
 	}
 }
 

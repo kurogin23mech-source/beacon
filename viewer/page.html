@@ -300,7 +300,11 @@ const RECENT_MS = 10 * 60 * 1000;
 function liveness(s) {
   if (s.state === "busy") return {label: "作業中", on: true};
   if (s.state === "idle") return {label: "待機中", on: false};
-  if (s.running) return {label: "稼働中", on: true};
+  // 生存はローカルのプロセス観測 (running) か、サーバの transport live
+  // (transport_live) の合成 (e-6454)。どちらかが真なら「稼働中」= 停止隠しに
+  // 巻き込まれない。片方だけ見ない (名乗りの主はローカル観測が漏れても transport
+  // live で生きている)。
+  if (s.running || s.transport_live) return {label: "稼働中", on: true};
   const recent = s.last_active &&
     (Date.now() - new Date(s.last_active)) < RECENT_MS;
   if (s.tool_running && recent) {
@@ -1140,6 +1144,9 @@ async function openSessions() {
           ${s.remote ? `<div class="sub2 sub1 remote-note"
             title="Beacon の名簿から拾ったものです。このマシンには痕跡がありません"
             >別のマシン</div>` : ""}
+          ${s.collapsed_peers ? `<div class="sub2 sub1 remote-note"
+            title="同じフォルダ・同じ道具で名乗っている live セッションが他にもありますが、識別子の粒度が足りず個別に表示できていません (session_id 突合で解消予定)"
+            >⚠ 同フォルダに他 ${s.collapsed_peers} セッション (未表示)</div>` : ""}
           ${s.title ? `<div class="sub2">${esc(s.title)}</div>` : ""}
           <div class="card-attrs">
             <div>${attribution(s.target,

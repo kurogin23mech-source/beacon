@@ -397,14 +397,14 @@ func (s *Server) handler() http.Handler {
 		var named []SessionRow
 		rosterStatus := RosterNA
 		if s.cloud != nil {
-			rows, err := s.cloud.SessionsCrossProject()
+			rows, err := s.cloud.SessionsAllProjects()
 			if err != nil {
 				rosterStatus = RosterUnavailable
 			} else {
 				named, rosterStatus = rows, RosterOK
 			}
 		} else if s.src != nil {
-			named, rosterStatus = s.rosterForLocal(true)
+			named, rosterStatus = s.rosterForLocal(ScopeAllProjects)
 		}
 		// 表示範囲を決める。未指定は既定 (self) に倒すが、**未知値 (typo 等) は黙って
 		// self に倒さず 400 で拒否する** — さもないと ?scope=atention のような打ち間違いが
@@ -503,7 +503,7 @@ func (s *Server) buildBoard() (*Board, error) {
 		// クラウドに繋いだときだけ、Beacon に名乗っているセッションの名簿が取れる。
 		// 名簿もドキュメントも、取れなくても盤は出す (見えないことより出ないことの
 		// ほうが困る)。
-		sessions, _ := s.cloud.Sessions()
+		sessions, _ := s.cloud.SessionsForCurrentProject()
 		docs, _ := s.cloud.Documents()
 		board = BuildBoard(p, SourceCloud, s.cloud.ProjectID, docs, sessions)
 	} else {
@@ -513,7 +513,7 @@ func (s *Server) buildBoard() (*Board, error) {
 		//
 		// ここを取りに行かないと「クラウドのセッションが出ない」ように見える
 		// (2026-09-10 の指摘)。名簿の在り処は取得元とは別の話。
-		roster, _ := s.rosterForLocal(false)
+		roster, _ := s.rosterForLocal(ScopeCurrentProject)
 		board = BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir),
 			roster)
 	}
@@ -540,7 +540,7 @@ func (s *Server) buildBoard() (*Board, error) {
 // **取得失敗 (unavailable) を「クラウド未接続 (n/a)」や空名簿と混同しない** (AX
 // review high, 2026-09-14): 未 login / token 失効 / 通信断は unavailable として
 // 呼び出し側に伝え、画面が「名簿未取得」を空と別表示できるようにする。
-func (s *Server) rosterForLocal(crossProject bool) ([]SessionRow, string) {
+func (s *Server) rosterForLocal(scope RosterScope) ([]SessionRow, string) {
 	pid := s.src.CloudProjectID()
 	if pid == "" {
 		// クラウドに結び付いていない = 名簿が原理的に無い (失敗ではない)。
@@ -555,10 +555,10 @@ func (s *Server) rosterForLocal(crossProject bool) ([]SessionRow, string) {
 	src := &CloudSource{API: DefaultAPI, Token: creds.Token, ProjectID: pid}
 	var rows []SessionRow
 	var err error
-	if crossProject {
-		rows, err = src.SessionsCrossProject()
+	if scope == ScopeAllProjects {
+		rows, err = src.SessionsAllProjects()
 	} else {
-		rows, err = src.Sessions()
+		rows, err = src.SessionsForCurrentProject()
 	}
 	if err != nil {
 		return nil, RosterUnavailable
