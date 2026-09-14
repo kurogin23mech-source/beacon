@@ -622,6 +622,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_activity.add_argument("--reason", default="")
     p_opp_activity.add_argument("--description", "--desc", dest="description", default="")
 
+    # ms-174 e-6434: 契約 (締結の有無を第一級で持つ Opportunity 専用 work-item) の
+    # add/sign/list/cancel。先頭 positional = sub-verb、以降は verb ごとに opp-id /
+    # ctr-id / desc を取る (bash cmd_opportunity_contract と parity)。
+    p_opp_contract = opp_sub.add_parser("contract", add_help=False)
+    p_opp_contract.add_argument("verb", nargs="?", default="")
+    p_opp_contract.add_argument("a1", nargs="?", default="")
+    p_opp_contract.add_argument("a2", nargs="?", default="")
+    p_opp_contract.add_argument("--gating", action="store_true")
+    p_opp_contract.add_argument("--ref", default="")
+    p_opp_contract.add_argument("--date", default="")
+    p_opp_contract.add_argument("--reason", default="")
+    p_opp_contract.add_argument("--all", action="store_true")
+    p_opp_contract.add_argument("--json", action="store_true")
+
     p_opp_delete = opp_sub.add_parser("delete", add_help=False)
     p_opp_delete.add_argument("opp_id", nargs="?", default="")
 
@@ -2754,6 +2768,52 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "BEACON_ACTIVITY_BALL": args.ball or "",
         }
         return _run_commands_py(root, "opportunity_activity", env)
+    if cmd == "contract":
+        # ms-174 e-6434: 契約の add/sign/list/cancel (bash parity)。
+        verb = args.verb
+        if verb == "add":
+            if not args.a1 or not args.a2:
+                print('Usage: beacon opportunity contract add <opp-id> "<desc>" '
+                      "[--gating] [--ref <url>]")
+                return 1
+            return _run_commands_py(root, "opportunity_contract_add", {
+                "BEACON_OPP_ID": args.a1,
+                "BEACON_CONTRACT_DESC": args.a2,
+                "BEACON_CONTRACT_GATING": "1" if args.gating else "",
+                "BEACON_CONTRACT_REF": args.ref or "",
+            })
+        if verb == "sign":
+            if not args.a1:
+                print("Usage: beacon opportunity contract sign <ctr-id> "
+                      "[--date <YYYY-MM-DD>] [--ref <url>]")
+                return 1
+            return _run_commands_py(root, "opportunity_contract_sign", {
+                "BEACON_CONTRACT_ID": args.a1,
+                "BEACON_CONTRACT_DATE": args.date or "",
+                "BEACON_CONTRACT_REF": args.ref or "",
+            })
+        if verb in ("list", "ls"):
+            if not args.a1:
+                print("Usage: beacon opportunity contract list <opp-id> [--all] [--json]")
+                return 1
+            return _run_commands_py(root, "opportunity_contract_list", {
+                "BEACON_OPP_ID": args.a1,
+                "BEACON_JSON": "1" if args.json else "",
+                "BEACON_ALL": "1" if args.all else "",
+            })
+        if verb == "cancel":
+            if not args.a1:
+                print("Usage: beacon opportunity contract cancel <ctr-id> [--reason <text>]")
+                return 1
+            return _run_commands_py(root, "opportunity_contract_cancel", {
+                "BEACON_CONTRACT_ID": args.a1,
+                "BEACON_REASON": args.reason or "",
+            })
+        print('Usage: beacon opportunity contract add <opp-id> "<desc>" [--gating] [--ref <url>]')
+        print("       beacon opportunity contract sign <ctr-id> [--date <YYYY-MM-DD>] [--ref <url>]")
+        print("       beacon opportunity contract list <opp-id> [--all] [--json]")
+        print("       beacon opportunity contract cancel <ctr-id> [--reason <text>]")
+        return 1
     if cmd == "delete":
         if not args.opp_id:
             print("Usage: beacon opportunity delete <opp-id>")

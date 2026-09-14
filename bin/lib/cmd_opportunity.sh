@@ -344,6 +344,103 @@ cmd_opportunity_activity_update() {
         python3 "$COMMANDS_PY" activity_update
 }
 
+cmd_opportunity_contract() {
+    # ms-174 e-6434: 契約 (締結の有無を第一級で持つ Opportunity 専用 work-item) の
+    # ライフサイクル動詞。activity と同じく先頭 sub-verb で分岐する。契約は NDA /
+    # 覚書 / 業務委託 / 法人契約 を第一級で残し、成約ガード (e-6435) が「gating な
+    # 締結済み契約があるか」を読む。
+    ensure_project
+    case "${1:-}" in
+        add)     shift; cmd_opportunity_contract_add "$@"; return ;;
+        sign)    shift; cmd_opportunity_contract_sign "$@"; return ;;
+        list|ls) shift; cmd_opportunity_contract_list "$@"; return ;;
+        cancel)  shift; cmd_opportunity_contract_cancel "$@"; return ;;
+    esac
+    echo "Usage: beacon opportunity contract add <opp-id> \"<desc>\" [--gating] [--ref <url>]"
+    echo "         --gating   この契約は成約の前提 (本契約: 覚書/業務委託/法人契約)。省略時は前提でない (NDA 等)。"
+    echo "       beacon opportunity contract sign <ctr-id> [--date <YYYY-MM-DD>] [--ref <url>]"
+    echo "       beacon opportunity contract list <opp-id> [--all] [--json]"
+    echo "       beacon opportunity contract cancel <ctr-id> [--reason <text>]"
+    exit 1
+}
+
+cmd_opportunity_contract_add() {
+    local opp_id="" desc="" gating="" ref=""
+    local _usage="Usage: beacon opportunity contract add <opp-id> \"<desc>\" [--gating] [--ref <url>]"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gating) gating="1"; shift ;;
+            --ref)    ref="${2:-}"; shift 2 ;;
+            -?*)      _guard_positional "$1" "$_usage" ;;
+            *)        if [ -z "$opp_id" ]; then opp_id="$1"; else desc="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$desc" ]; then
+        echo "$_usage"
+        echo "  --gating   この契約は成約の前提 (本契約: 覚書/業務委託/法人契約)。省略時は前提でない (NDA 等)。"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_CONTRACT_DESC="$desc" \
+        BEACON_CONTRACT_GATING="$gating" BEACON_CONTRACT_REF="$ref" \
+        python3 "$COMMANDS_PY" opportunity_contract_add
+}
+
+cmd_opportunity_contract_sign() {
+    local ctr_id="" date="" ref=""
+    local _usage="Usage: beacon opportunity contract sign <ctr-id> [--date <YYYY-MM-DD>] [--ref <url>]"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --date) date="${2:-}"; shift 2 ;;
+            --ref)  ref="${2:-}"; shift 2 ;;
+            -?*)    _guard_positional "$1" "$_usage" ;;
+            *)      ctr_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$ctr_id" ]; then
+        echo "$_usage"
+        exit 1
+    fi
+    BEACON_CONTRACT_ID="$ctr_id" BEACON_CONTRACT_DATE="$date" BEACON_CONTRACT_REF="$ref" \
+        python3 "$COMMANDS_PY" opportunity_contract_sign
+}
+
+cmd_opportunity_contract_list() {
+    local opp_id="" json_flag="" all_flag=""
+    local _usage="Usage: beacon opportunity contract list <opp-id> [--all] [--json]"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            --all)  all_flag="1"; shift ;;
+            -?*)    _guard_positional "$1" "$_usage" ;;
+            *)      opp_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ]; then
+        echo "$_usage"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" \
+        python3 "$COMMANDS_PY" opportunity_contract_list
+}
+
+cmd_opportunity_contract_cancel() {
+    local ctr_id="" reason=""
+    local _usage="Usage: beacon opportunity contract cancel <ctr-id> [--reason <text>]"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason) reason="${2:-}"; shift 2 ;;
+            -?*)      _guard_positional "$1" "$_usage" ;;
+            *)        ctr_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$ctr_id" ]; then
+        echo "$_usage"
+        exit 1
+    fi
+    BEACON_CONTRACT_ID="$ctr_id" BEACON_REASON="$reason" \
+        python3 "$COMMANDS_PY" opportunity_contract_cancel
+}
+
 cmd_opportunity_delete() {
     ensure_project
     local opp_id="" reason="" acknowledge=""

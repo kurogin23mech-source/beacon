@@ -10038,6 +10038,105 @@ def cmd_activity_update():
           f"(deadline={act.get('deadline', '')}, ball={act.get('who_has_the_ball', '')})")
 
 
+def cmd_opportunity_contract_add():
+    """契約 (契約締結の有無を第一級で持つ Opportunity 専用 work-item) を商談に追加する
+    — ms-174 e-6434。契約が「成約の前提」か (本契約 = 覚書 / 業務委託 / 法人契約) は
+    ``--gating`` で立てる。NDA 等の残すが前提でない契約は既定 (gating なし)。Env:
+    BEACON_OPP_ID, BEACON_CONTRACT_DESC, BEACON_CONTRACT_GATING ('1'=成約の前提),
+    BEACON_CONTRACT_REF (任意の署名済 doc URL)。"""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    desc = os.environ.get("BEACON_CONTRACT_DESC", "")
+    gating = os.environ.get("BEACON_CONTRACT_GATING", "") == "1"
+    ref = os.environ.get("BEACON_CONTRACT_REF", "")
+    data = load_project()
+    try:
+        ctr_id = sales_entities.contract_add(
+            data, opp_id, desc, gating=gating, ref=ref, created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    kind = "成約の前提 (gating)" if gating else "前提でない (NDA 等)"
+    print(f"Added contract {ctr_id} to {opp_id}: {desc} [{kind}] — 未締結")
+    print(f"  締結を記録するには: beacon opportunity contract sign {ctr_id} --date <YYYY-MM-DD>")
+
+
+def cmd_opportunity_contract_sign():
+    """契約を締結済み (signed) にする — ms-174 e-6434。締結日 (``--date``, 省略時は
+    本日) と、任意の署名済 doc URL (``--ref``) を記録する。Env: BEACON_CONTRACT_ID,
+    BEACON_CONTRACT_DATE (YYYY-MM-DD), BEACON_CONTRACT_REF。"""
+    import sales_entities
+    ctr_id = os.environ.get("BEACON_CONTRACT_ID", "")
+    date = os.environ.get("BEACON_CONTRACT_DATE", "")
+    ref = os.environ.get("BEACON_CONTRACT_REF", "")
+    data = load_project()
+    try:
+        ctr = sales_entities.contract_sign(
+            data, ctr_id, signed_date=date, ref=ref, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    gating = " [成約の前提]" if ctr.get("gating") else ""
+    print(f"contract {ctr_id} → 締結済み ({ctr.get('signed_date')}){gating}")
+
+
+def cmd_opportunity_contract_cancel():
+    """誤起票した契約を取消 (soft-cancel) する — ms-174 e-6434。削除せず監査印
+    (誰・いつ・なぜ) つきで cancelled にする (data-immutability-principle)。Env:
+    BEACON_CONTRACT_ID, BEACON_REASON."""
+    import sales_entities
+    ctr_id = os.environ.get("BEACON_CONTRACT_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    data = load_project()
+    try:
+        ctr = sales_entities.contract_cancel(data, ctr_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"contract {ctr_id} → {ctr['status']}")
+
+
+def cmd_opportunity_contract_list():
+    """商談の契約一覧 — ms-174 e-6434。締結の有無・締結日・「成約の前提か」を出す
+    (activity とは別枠でレンダリングし、盤面で締結の有無が見える)。Env: BEACON_OPP_ID,
+    BEACON_JSON, BEACON_ALL ('1'=取消済も含む)。"""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    show_all = os.environ.get("BEACON_ALL", "") == "1"
+    data = load_project()
+    try:
+        contracts = sales_entities.contracts_of(
+            data, opp_id, include_cancelled=show_all)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if json_mode:
+        print(json.dumps(contracts, ensure_ascii=False, indent=2))
+        return
+    if not contracts:
+        print(f"No contracts on {opp_id} yet. Add one with: "
+              f"beacon opportunity contract add {opp_id} \"<desc>\" [--gating]")
+        return
+    import work_model
+    for c in contracts:
+        if work_model.is_cancelled(c):
+            reason = (c.get("meta", {}) or {}).get("cancel_reason", "")
+            print(f"[{c['id']}] ~~{c.get('description', '')}~~ (取消済"
+                  + (f": {reason}" if reason else "") + ")")
+            continue
+        gating = "成約の前提" if c.get("gating") else "前提でない"
+        if c.get("status") == sales_entities.CONTRACT_SIGNED:
+            state = f"締結済み {c.get('signed_date', '')}".rstrip()
+        else:
+            state = "未締結"
+        ref = f" / ref: {c['ref']}" if c.get("ref") else ""
+        print(f"[{c['id']}] {c.get('description', '')} — {state} / {gating}{ref}")
+
+
 def cmd_communication_add():
     # ms-107 e-3432 — 営業の Commit: source を辿れる事後記録型の証跡を target
     # (opp-… 優先 / acc-…) の子として append-only で残す。
@@ -10616,6 +10715,11 @@ if __name__ == "__main__":
         "activity_done": cmd_activity_done,
         "activity_cancel": cmd_activity_cancel,      # ms-139 e-4950
         "activity_update": cmd_activity_update,       # ms-139 e-4950
+        # ms-174 e-6434 — Contract (契約締結の有無を第一級で持つ Opportunity 専用 work-item)
+        "opportunity_contract_add": cmd_opportunity_contract_add,
+        "opportunity_contract_sign": cmd_opportunity_contract_sign,
+        "opportunity_contract_cancel": cmd_opportunity_contract_cancel,
+        "opportunity_contract_list": cmd_opportunity_contract_list,
         "sales_reply_watch_op_ensure": cmd_sales_reply_watch_op_ensure,
         "opportunity_delete": cmd_opportunity_delete,
         # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)
