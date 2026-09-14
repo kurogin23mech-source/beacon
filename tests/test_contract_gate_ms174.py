@@ -240,3 +240,24 @@ def test_sales_project_with_contracts_passes_validator():
     data, opp = _fresh()
     se.contract_add(data, opp, "覚書", gating=True)
     core.validate_project(data)  # 新 nested key があっても shared validator を通る
+
+
+# --- status / Web UI 投影 (e-6436, AC6) ------------------------------------
+
+def test_projection_surfaces_contracts_summary_not_as_work_items():
+    """status / session-start / Web UI が読む投影の detail に契約サマリが乗り、かつ
+    契約は activity(work_items)に混ざらない (別枠でレンダリングできる, AC6)。"""
+    data, opp = _fresh()
+    se.contract_sign(data, se.contract_add(data, opp, "覚書", gating=True),
+                     signed_date="2026-09-14")
+    se.contract_add(data, opp, "NDA", gating=False)  # unsigned NDA
+    row = next(t for t in se.project_targets(data) if t["id"] == opp)
+    assert row["detail"]["contracts"] == {"total": 2, "signed": 1, "gating_signed": True}
+    assert row["work_items_total"] == 0  # 契約は work_items に数えない
+
+
+def test_projection_contracts_excludes_cancelled():
+    data, opp = _fresh()
+    se.contract_cancel(data, se.contract_add(data, opp, "誤覚書", gating=True))
+    row = next(t for t in se.project_targets(data) if t["id"] == opp)
+    assert row["detail"]["contracts"] == {"total": 0, "signed": 0, "gating_signed": False}

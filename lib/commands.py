@@ -9271,6 +9271,18 @@ def cmd_opportunity_list():
               f"/ account: {acc}"
               f"{deadline} / ball: {ball}{td_str} "
               f"/ activities: {len(o.get('activities', []))}")
+        # ms-174: 契約 (締結の有無) を activity と別枠で盤面に出す。締結済み/総数と、
+        # gating (成約の前提) な締結済み契約の有無を 1 行で示す。契約がまだ無い商談は
+        # 行ごと省略 (ノイズ回避) — 締結の前提チェックは成約ガードが別途行う。
+        live_ctr = [c for c in o.get("contracts", [])
+                    if not work_model.is_cancelled(c)]
+        if live_ctr:
+            signed_n = sum(1 for c in live_ctr
+                           if c.get("status") == sales_entities.CONTRACT_SIGNED)
+            gating_mark = ("gating 締結済み ✓"
+                           if sales_entities.has_gating_signed_contract(data, o["id"])
+                           else "⚠ 成約の前提 (gating) の締結済み契約なし")
+            print(f"    契約: {signed_n}/{len(live_ctr)} 締結済み / {gating_mark}")
         # e-3584: 前進ゲート (advance gate) の状態を一貫した呼称で見せる。
         # 空 = 発火源を確保せよ / 確定 = 完了に向けて準備せよ (SPEC 方針5B)。
         gate = sales_entities.current_gate(data, o["id"])

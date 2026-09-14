@@ -3576,6 +3576,17 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .mtg-status.sched { color:var(--accent); background:var(--accent-glow); }
 .mtg-status.ended { color:var(--text-secondary); background:var(--bg-raised); }
 .mtg-status.cancd { color:var(--text-dim); background:var(--bg-raised); text-decoration:line-through; }
+/* ms-174: 契約 (Contract) — 締結の有無を activity と区別して見せる。 */
+.ent-type.ctr { color:#fbbf24; background:rgba(251,191,36,0.13); }
+.ctr-row { display:flex; align-items:baseline; gap:9px; padding:5px 0; border-bottom:1px solid var(--border-subtle); font-size:12px; }
+.ctr-row:last-child { border-bottom:none; }
+.ctr-desc { flex:1 1 auto; color:var(--text-primary); }
+.ctr-status { flex:0 0 auto; font-size:10px; padding:1px 7px; border-radius:9px; }
+.ctr-status.signed { color:#4ade80; background:rgba(74,222,128,0.15); }
+.ctr-status.unsigned { color:var(--text-dim); background:var(--bg-raised); }
+.ctr-gating { flex:0 0 auto; font-size:10px; padding:1px 7px; border-radius:9px; color:#fbbf24; background:rgba(251,191,36,0.13); }
+.ctr-gating.off { color:var(--text-dim); background:var(--bg-raised); }
+.opp-acts-head .warn { color:#f87171; }
 .mtg-when { flex:0 0 auto; font-size:11px; color:var(--text-primary); font-family:var(--font-mono, monospace); }
 .mtg-when.warn { color:#fbbf24; }
 .mtg-loc { flex:1; color:var(--text-dim); }
@@ -5743,7 +5754,7 @@ function _renderOppList(p) {
   const rows = opps.map(o => {
     const st = _salesOppStatusOf(o, phases, today);
     const expanded = state.expanded.has(o.id);
-    const body = expanded ? `<div class="opp-lbody">${_renderOppActivities(o)}${_renderMeetings(o)}${_renderCommunications(o)}</div>` : '';
+    const body = expanded ? `<div class="opp-lbody">${_renderOppActivities(o)}${_renderOppContracts(o)}${_renderMeetings(o)}${_renderCommunications(o)}</div>` : '';
     const acct = _salesAccountName(p, o.account_id);
     return `<div class="opp-lcard${expanded ? ' expanded' : ''}">
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
@@ -5925,6 +5936,35 @@ function _renderMeetings(o) {
   }).join('');
   const hidden = hiddenN > 0 ? ` <span class="text-dim">(終了 ${hiddenN} 件を非表示)</span>` : '';
   return `<div class="opp-acts-head">面談 (Meeting) (${mtgs.length})${hidden}</div>${rows}`;
+}
+// ms-174: 契約 (Contract) — 締結の有無を第一級で持つ work-item。activity とは別枠で
+// 出し、締結済み/未締結・締結日・「成約の前提 (gating) か」を見せる。取消済は畳む。
+// gating な締結済み契約が無ければ見出しに ⚠ を出す (= 成約の前提が未達, SPEC 方針1)。
+function _renderOppContracts(o) {
+  const all = (o.contracts || []).filter(c => c.status !== 'cancelled');
+  if (!all.length) return '';
+  const signedN = all.filter(c => c.status === 'signed').length;
+  const gatingSigned = all.some(c => c.gating && c.status === 'signed');
+  const rows = all.map(c => {
+    const state = c.status === 'signed'
+      ? `<span class="ctr-status signed">締結済み${c.signed_date ? ' ' + esc(c.signed_date) : ''}</span>`
+      : `<span class="ctr-status unsigned">未締結</span>`;
+    const gating = c.gating
+      ? `<span class="ctr-gating">成約の前提</span>`
+      : `<span class="ctr-gating off">前提でない</span>`;
+    const url = ((c.ref || '').match(/https?:\/\/[^\s)]+/) || [])[0] || '';
+    const refHtml = url ? `<a class="comm-src" href="${esc(url)}" target="_blank" rel="noopener">署名doc ↗</a>` : '';
+    return `<div class="ctr-row">
+      <span class="ent-type ctr">契約</span>
+      <span class="ent-id" title="${esc(c.id || '')}">${esc(c.id || '')}</span>
+      <span class="ctr-desc">${esc(c.description || '')}</span>
+      ${state}
+      ${gating}
+      ${refHtml}
+    </div>`;
+  }).join('');
+  const warn = gatingSigned ? '' : ` <span class="warn">⚠ 成約の前提 (gating) の締結済み契約なし</span>`;
+  return `<div class="opp-acts-head">契約 (Contract) (${signedN}/${all.length} 締結済み)${warn}</div>${rows}`;
 }
 // ms-107 e-3432: Communication (証跡・事後記録型 = 営業の Commit). Activity が
 // 「予定」なのに対し、これは source を辿れる「事実」の追記ログ。oldest→newest
@@ -6229,6 +6269,7 @@ function renderOpportunityModal(oppId) {
       ${detail}
       ${_renderAdvanceGate(o, phases)}
       ${_renderOppActivities(o)}
+      ${_renderOppContracts(o)}
       ${_renderMeetings(o)}
       ${_renderCommunications(o)}
       ${renderDecisionLog(decisionsForTarget(state.decisions, o), { loading: isDecisionsPending() })}

@@ -4159,6 +4159,19 @@ def project_targets(data: dict) -> list:
         total = len(activities)
         done = sum(1 for a in activities
                    if a.get("status") == work_model.DONE_STATUS)
+        # ms-174: 契約 (締結の有無) は activity とは別枠。work_items には数えず
+        # (締結の状態語彙は unsigned/signed で todo/done と別、e-6433 の設計判断)、
+        # detail の contracts summary として surface する — status / Web UI / cockpit が
+        # 「締結の有無が盤面に見える」よう活動と区別してレンダリングできる (AC6)。
+        live_contracts = [c for c in opp.get("contracts", [])
+                          if not work_model.is_cancelled(c)]
+        contracts_summary = {
+            "total": len(live_contracts),
+            "signed": sum(1 for c in live_contracts
+                          if c.get("status") == CONTRACT_SIGNED),
+            "gating_signed": any(c.get("gating") and c.get("status") == CONTRACT_SIGNED
+                                 for c in live_contracts),
+        }
         targets.append({
             "id": opp.get("id", ""),
             "label": work_model.target_label(opp),
@@ -4173,6 +4186,7 @@ def project_targets(data: dict) -> list:
                 "probability": opp.get("probability"),
                 "deadline": opp.get("deadline", ""),
                 "account_id": opp.get("account_id"),
+                "contracts": contracts_summary,
             },
         })
     # ms-115 e-3786: 顧客獲得ターゲット (Acquisition) を商談とは別レーンとして同じ
