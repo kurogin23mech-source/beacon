@@ -56,8 +56,16 @@ type SessionOverview struct {
 	Directory  string       `json:"directory"`
 	Branch     string       `json:"branch"`
 	LastActive string       `json:"last_active"`
+	// Running は **手元で観測したプロセス生存** (processAlive)。出自はローカル観測に
+	// 限る (e-6454 で TransportLive と分離。以前は名乗りの主で上書きしていたが、
+	// 「running=ローカルにプロセスがある」の意味を潰さないよう合成をやめた)。
 	Running     bool `json:"running"`
 	ToolRunning bool `json:"tool_running"`
+	// TransportLive は **サーバが判定した transport の live** (名簿に載っている =
+	// ws_live OR poll_health.healthy)。名乗りの主 (claimer) の行にだけ立つ。
+	// 「生きているか」の表示・停止隠しの判定は Running か TransportLive の **合成**
+	// (どちらかが真なら生存) で行う — 出自 (ローカル観測 / サーバ判定) を潰さない。
+	TransportLive bool `json:"transport_live"`
 	Project    *ProjectRef  `json:"project,omitempty"`
 	Target     *Attribution `json:"target,omitempty"`
 	Task       *Attribution `json:"task,omitempty"`
@@ -97,6 +105,12 @@ type SessionOverview struct {
 	// 無いものが出てくる。手元のものと混ぜると「このマシンで動いている」と
 	// 誤解させるため、区別できるようにする。
 	Remote bool `json:"remote"`
+	// CollapsedPeers は、この行と同じフォルダ + 道具に **他にも名乗っている live
+	// セッションが居るが、粒度不足で個別に出せていない** 数 (AX review finding
+	// 2026-09-14)。突合キーが (フォルダ, 道具) 粒度なので、同じフォルダで同じ道具の
+	// live が複数あると 1 行に畳まれる。畳んだ事実を隠さず開示する (session_id 粒度
+	// での個別表示は identity 突合の根治待ち = e-6446)。0 なら omit。
+	CollapsedPeers int `json:"collapsed_peers,omitempty"`
 }
 
 // SessionsView は一覧 1 面分。
@@ -114,7 +128,26 @@ type SessionsView struct {
 	// 差があれば「隠したものがある」と呼び出し側が機械的に検知できる。
 	Total int `json:"total"`
 	Shown int `json:"shown"`
+	// RosterStatus は名簿 (= 名乗っているセッションの一覧、生存の真値) を取れたか。
+	//
+	// **取得失敗を空名簿と混同してはいけない** (AX review high, 2026-09-14)。名簿は
+	// ms-171 で「生存の真値 + 24h カットオフ免除の根拠」に昇格したので、取得に失敗
+	// (未 login / token 失効 / 通信断) すると、bus-live なセッションが無信号で一覧から
+	// 消える (カットオフに落ち、稼働表示も失う) — この MS が直した cairn-sales 消失の
+	// 別経路での再発。値は:
+	//   ok          … 名簿を取得できた (空でも「誰も名乗っていない」で正しい)
+	//   unavailable … 取得に失敗した (名乗っているセッションが抜けている可能性)
+	//   n/a         … このプロジェクトはクラウドに結び付いておらず名簿が原理的に無い
+	// 画面は unavailable を空一覧と別表示にして、見えない事実を隠さない。
+	RosterStatus string `json:"roster_status"`
 }
+
+// roster status の値 (真実源はここ 1 つ)。
+const (
+	RosterOK          = "ok"
+	RosterUnavailable = "unavailable"
+	RosterNA          = "n/a"
+)
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
 //
@@ -131,43 +164,119 @@ func AllSessions(since time.Duration, now time.Time,
 	rows = append(rows, claudeSessions(home)...)
 	rows = append(rows, opencodeSessions(home)...)
 	rows = append(rows, codexSessions(home)...)
+	return assembleSessions(rows, named, since, now)
+}
 
-	// 全プロジェクト横断なので、場所では絞らない。古いものだけ落とす。
-	cutoff := now.Add(-since)
-	kept := []LocalSessionRow{}
+// keptRow は選別 (selectKept) を通ったローカル行 1 件と、それに対する名簿突合の結果。
+// claimer 規則 (キーあたり最新 1 行だけを名乗りの主にする) の判定を **1 か所で** 済ませ、
+// 組み立て側は再判定せずこの印を読むだけにする (真実源を 1 つに、e-6454)。
+type keptRow struct {
+	row     LocalSessionRow
+	named   SessionRow // isNamed のときだけ意味を持つ (突合した名簿エントリ)
+	isNamed bool       // この行がキーの名乗りの主 (claimer) か
+}
+
+// parseActive は LastActive (RFC3339) を時刻に。パースできなければ zero + false。
+func parseActive(s string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339, s)
+	return t, err == nil
+}
+
+// laterActive は a のほうが b より新しいか。**文字列比較でなく parse した時刻で比べる**
+// — セッション源 (claude/codex/opencode) で timezone offset 表記が混ざると辞書順 ≠
+// 時系列順になり、claimer (= 最新 1 行) の選定を誤るため (保守性レビュー finding
+// 2026-09-14)。両方パース不能なら文字列比較に退避 (決定性のため)。
+func laterActive(a, b string) bool {
+	ta, oka := parseActive(a)
+	tb, okb := parseActive(b)
+	if oka && okb {
+		return ta.After(tb)
+	}
+	if oka != okb {
+		return oka // パースできた側を新しい扱い (時刻不明を後ろへ)
+	}
+	return a > b
+}
+
+// indexNamedByDir は名簿を「作業フォルダ + 道具」で引ける map と、キーごとの件数を返す。
+//
+// **フォルダだけで引いてはいけない。** 同じフォルダで Codex や OpenCode を何本も
+// 動かしていると、その全部が bclaude セッションの識別子を貰ってしまい、名乗っていない
+// セッションが名乗っているように見える (2026-09-11 に観測)。件数は、同一キーに複数の
+// live が畳まれた事実を開示する (CollapsedPeers) ために持ち帰る。
+func indexNamedByDir(named []SessionRow) (map[string]SessionRow, map[string]int) {
+	byDir := map[string]SessionRow{}
+	counts := map[string]int{}
+	for _, n := range named {
+		if n.Cwd == "" {
+			continue
+		}
+		key := namedKey(n.Cwd, n.Agent)
+		byDir[key] = n // last-write-wins (畳まれた分は counts で開示)
+		counts[key]++
+	}
+	return byDir, counts
+}
+
+// selectKept は、新しい順のローカル行から表示に残す行を選び、各行に名乗りの主
+// (claimer) 判定を付けて返す。**claimer 規則の唯一の実装点** (e-6454):
+//
+//   - 名簿に居るキーは、最初に来た (= 最新の) 1 行だけを主 (isNamed=true) にする。
+//     残りの同キー行は名乗り扱いにしない (同フォルダの死んだ重複に live を漏らさない、
+//     思想レビュー finding 2026-09-14)。
+//   - 主でない行 (未名乗り or 同キーの重複) は会話時刻の 24h カットオフに従う。名乗りの
+//     主は transport live が生存の真値なので、会話が何時間前でも残す (ms-171 e-6431)。
+//
+// rows は laterActive で新しい順に並んでいる前提。
+func selectKept(rows []LocalSessionRow, namedByDir map[string]SessionRow,
+	cutoff time.Time) []keptRow {
+
+	claimed := map[string]bool{}
+	kept := []keptRow{}
 	for _, r := range rows {
 		if r.Directory == "" {
 			continue
 		}
-		if t, err := time.Parse(time.RFC3339, r.LastActive); err == nil {
-			if t.Before(cutoff) {
-				continue
-			}
+		key := namedKey(r.Directory, r.Tool)
+		n, inRoster := namedByDir[key]
+		isClaimer := inRoster && !claimed[key]
+		if isClaimer {
+			claimed[key] = true
+		} else if t, ok := parseActive(r.LastActive); ok && t.Before(cutoff) {
+			continue // 主でない古い行は落とす
 		}
-		kept = append(kept, r)
+		kept = append(kept, keptRow{row: r, named: n, isNamed: isClaimer})
 	}
-	sort.SliceStable(kept, func(i, j int) bool {
-		return kept[i].LastActive > kept[j].LastActive
-	})
+	return kept
+}
 
-	// 名簿を「作業フォルダ + 道具」で引けるようにする。
-	//
-	// **フォルダだけで引いてはいけない。** 同じフォルダで Codex や OpenCode を
-	// 何本も動かしていると、その全部が bclaude セッションの識別子を貰ってしまい、
-	// 名乗っていないセッションが名乗っているように見える。送信先にも選べてしまい、
-	// 押すと無関係のセッション宛に飛ぶ (2026-09-11 に観測)。
-	namedByDir := map[string]SessionRow{}
-	for _, n := range named {
-		if n.Cwd != "" {
-			namedByDir[namedKey(n.Cwd, n.Agent)] = n
-		}
-	}
+// assembleSessions は、集めたローカルの記録と名簿を紐づけて一覧を組み立てる純関数。
+//
+// ディスク走査 (AllSessions) から切り離してあるのは、**生存判定 (Gate A) を注入した
+// 入力で機械的に確かめられるようにするため** (ms-171 e-6431)。手元の記録は環境依存で
+// 実際の ~/.claude を用意しないと出せないので、ここを純関数にして試験可能にする。
+//
+// 段: (1) 名簿の索引化、(2) 新しい順に整列、(3) claimer/カットオフ選別 (selectKept)、
+// (4) 各行の組み立て、(5) 手元に無い名簿行 (別マシン) の追補、(6) 再整列。
+// 生存の真値は **transport の live** (名簿の live = ws_live OR poll_health、サーバ判定)。
+// 「heartbeat」(= heartbeat_fresh) は attention 次元の弱いシグナルで live に畳み込まない
+// (CORE doc liveness-three-dimensions §3、回帰防止)。
+func assembleSessions(rows []LocalSessionRow, named []SessionRow,
+	since time.Duration, now time.Time) SessionsView {
+
+	namedByDir, namedCounts := indexNamedByDir(named)
+
+	sort.SliceStable(rows, func(i, j int) bool {
+		return laterActive(rows[i].LastActive, rows[j].LastActive)
+	})
+	kept := selectKept(rows, namedByDir, now.Add(-since))
 
 	lookup := newProjectLookup()
 	// 手元の記録と突き合わせ済みの名簿を覚えておく (二重に並べないため)。
 	seenNamed := map[string]bool{}
 	out := SessionsView{Sessions: []SessionOverview{}}
-	for _, r := range kept {
+	for _, kr := range kept {
+		r := kr.row
 		o := SessionOverview{
 			Tool: r.Tool, Name: r.Name, State: r.State, Title: r.Title,
 			Directory: r.Directory, LastActive: r.LastActive,
@@ -184,11 +293,34 @@ func AllSessions(since time.Duration, now time.Time,
 
 		subject := gitHeadSubject(r.Directory)
 
-		// 名乗っているセッションかどうかは、担当の有無とは別に記録する。
-		n, isNamed := namedByDir[namedKey(r.Directory, r.Tool)]
-		o.Named = isNamed
-		if isNamed {
+		// 名乗り判定は selectKept が済ませた印 (kr.isNamed) を読むだけ (再判定しない)。
+		n := kr.named
+		o.Named = kr.isNamed
+		if kr.isNamed {
+			key := namedKey(r.Directory, r.Tool)
+			seenNamed[key] = true
 			o.SessionID = n.ID
+			// 名簿に居る = transport が live (サーバ判定)。ローカルの Running (プロセス
+			// 観測) は上書きせず、別フィールドで持つ — 出自を潰さない (e-6454)。表示・
+			// 停止隠しの判定は Running か TransportLive の合成で行う (画面側)。
+			o.TransportLive = true
+			// 同一キーに複数 live が畳まれていれば、その事実を開示する (AX finding
+			// 2026-09-14)。個別表示は identity 突合の根治待ち (e-6446)。
+			if extra := namedCounts[key] - 1; extra > 0 {
+				o.CollapsedPeers = extra
+			}
+			// DM の宛先はそのセッション自身のプロジェクト (e-6396)。名簿が持つ
+			// ProjectID を権威として載せる — 手元の .beacon から引けなかったり、
+			// 別プロジェクトのフォルダで作業していても、正しいプロジェクト宛に送れる。
+			if n.ProjectID != "" {
+				if o.Project == nil {
+					// 手元の .beacon から引けなかった (別マシン由来のフォルダ等)。
+					// 宛先に要る ProjectID だけでも載せる (名前は不明のまま)。
+					o.Project = &ProjectRef{ProjectID: n.ProjectID}
+				} else if o.Project.ProjectID == "" {
+					o.Project.ProjectID = n.ProjectID
+				}
+			}
 		}
 
 		// 担当は、サーバが解決した値があるときだけ「確か」として扱う。
@@ -196,7 +328,7 @@ func AllSessions(since time.Duration, now time.Time,
 		// **プロジェクトの進行中マイルストーン (focus) を担当にしてはいけない。**
 		// 全セッションが同じ値になり、別の対象で作業していても正しく見えてしまう。
 		// Beacon 自身も lib/working_target.py でそう戒めている。
-		if isNamed && n.Target != "" {
+		if kr.isNamed && n.Target != "" {
 			o.Target = &Attribution{
 				ID: n.Target, Label: n.TargetLabel, Source: "beacon"}
 		} else if id := targetFromBranch(o.Branch); id != "" {
@@ -211,7 +343,7 @@ func AllSessions(since time.Duration, now time.Time,
 			o.Task = &Attribution{ID: id, Source: "commit"}
 		}
 
-		if isNamed {
+		if kr.isNamed {
 			o.Machine = n.Machine
 			o.Who = n.Who
 			o.Activity = n.Activity
@@ -223,9 +355,6 @@ func AllSessions(since time.Duration, now time.Time,
 		// 分かった ID に、読める名前を与える。
 		lookup.decorate(proj, &o)
 		out.Sessions = append(out.Sessions, o)
-		if isNamed {
-			seenNamed[namedKey(r.Directory, r.Tool)] = true
-		}
 	}
 
 	// 名乗っているセッションのうち、手元の記録に無いものを足す。
@@ -242,14 +371,22 @@ func AllSessions(since time.Duration, now time.Time,
 			Directory:  n.Cwd,
 			Branch:     n.Branch,
 			LastActive: n.LastActive,
-			Running:    n.Live, // 名簿の稼働はサーバの心拍なので確か
-			Named:      true,
-			SessionID:  n.ID,
-			Machine:    n.Machine,
-			Who:        n.Who,
-			Activity:   n.Activity,
-			Harness:    n.Harness,
-			Remote:     true,
+			// 別マシンなので手元のプロセス観測は無い (Running=false)。生存はサーバの
+			// transport live で確か (e-6454 で Running と分離)。
+			TransportLive: n.Live,
+			Named:         true,
+			SessionID:     n.ID,
+			Machine:       n.Machine,
+			Who:           n.Who,
+			Activity:      n.Activity,
+			Harness:       n.Harness,
+			Remote:        true,
+		}
+		// 別マシンの名乗りセッションにも、宛先ルーティング用に自分のプロジェクトを
+		// 載せる (e-6396)。手元に痕跡が無いので名前は引けないが、ProjectID は名簿が
+		// 持っている。これが無いと DM が「今見ているプロジェクト」に誤ルートする。
+		if n.ProjectID != "" {
+			o.Project = &ProjectRef{ProjectID: n.ProjectID}
 		}
 		if n.Target != "" {
 			o.Target = &Attribution{
@@ -259,10 +396,19 @@ func AllSessions(since time.Duration, now time.Time,
 	}
 
 	// 新しい順に並べ直す (足した分が末尾に付いたままにならないように)。
+	// ソートは表示順専用 (identity 帰属は selectKept で確定済み)。時刻でなく文字列で
+	// 比べていた箇所も laterActive に寄せ、順序比較の真実源を 1 つにする (e-6454)。
 	sort.SliceStable(out.Sessions, func(i, j int) bool {
-		return out.Sessions[i].LastActive > out.Sessions[j].LastActive
+		return laterActive(out.Sessions[i].LastActive, out.Sessions[j].LastActive)
 	})
 	return out
+}
+
+// alive は「このセッションは生きているか」の合成。手元のプロセス観測 (Running) か
+// サーバの transport live (TransportLive) のどちらかが真なら生存 (e-6454 で出自を
+// 分離したので、判定は両者の OR で行う。片方だけ見て局所推論しない)。
+func alive(s SessionOverview) bool {
+	return s.Running || s.TransportLive
 }
 
 // namedKey は名簿と手元の記録を突き合わせる鍵。
@@ -417,14 +563,15 @@ type SessionFilter struct {
 
 // NeedsAttention は「人の手が要りそう」か。
 //
-// 生きている (Running) のに道具が動いていない (!ToolRunning) = 待機中で、返事待ちの
-// 可能性がある。名乗っているだけの別マシンのセッションは道具の状態が手元に無く、
-// 既定の false を「待機中」と取り違えて全部 要対応 に挙げてしまうため、対象外にする。
+// 生きている (alive = Running か TransportLive) のに道具が動いていない (!ToolRunning)
+// = 待機中で、返事待ちの可能性がある。名乗っているだけの別マシンのセッションは道具の
+// 状態が手元に無く、既定の false を「待機中」と取り違えて全部 要対応 に挙げてしまう
+// ため、対象外にする。
 //
 // **これは手がかりであって断定ではない。** ms-159 が activity を出し始めたら、
 // もっと確かな「返事待ち」の判定に寄せられる。それまでの近似。
 func NeedsAttention(s SessionOverview) bool {
-	return s.Running && !s.ToolRunning && !s.Remote
+	return alive(s) && !s.ToolRunning && !s.Remote
 }
 
 // isSelf は自分のセッションか。

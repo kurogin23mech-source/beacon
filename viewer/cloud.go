@@ -212,11 +212,44 @@ func (c *CloudSource) Load() (*Project, error) {
 	return &p, nil
 }
 
-// Sessions は Beacon に名乗っているセッションの名簿を返す。
+// RosterScope は名簿をどの範囲で引くか。**裸の bool を型で排除する** (e-6455): 呼び出し
+// 箇所が `true`/`false` でなく意味の名前で意図を示し、取り違えを型で防ぐ。scope 切替は
+// CloudSource と Server で同じこの型を使う (層で流儀を割らない)。
+//
+// 注: FilterSessions の表示範囲 (ScopeSelf / ScopeAttention / ScopeAll) とは別概念
+// (あちらは「誰のセッションを見せるか」、こちらは「どのプロジェクトの名簿を引くか」)。
+type RosterScope int
+
+const (
+	// ScopeCurrentProject は、いま見ているプロジェクトの名簿だけ (盤が使う)。
+	ScopeCurrentProject RosterScope = iota
+	// ScopeAllProjects は、参加中の全プロジェクトの名簿 (横断一覧が使う)。現在
+	// プロジェクトで絞ると、他プロジェクトに正しく名乗っているセッション (例:
+	// cairn-sales) が名簿から丸ごと落ち、運用室に出ない (2026-09-11/09-13 dogfood)。
+	ScopeAllProjects
+)
+
+// SessionsForCurrentProject は名簿を **いま見ているプロジェクトに絞って** 返す。盤
+// (1 プロジェクトを見る面) が使う。**名前で絞りを開示する** (旧 Sessions() は隠れ
+// フィルタで、無印の名前を『全体』と誤読して転移すると cairn-sales 消失と同型の
+// 再発経路になっていた、AX finding 2026-09-14)。
 //
 // **これがクラウドに繋ぐ最大の意味**。ローカルのデータだけでは、誰がどの対象を
 // 進めているかが分からない。他のマシンで動いているセッションもここに出る。
-func (c *CloudSource) Sessions() ([]SessionRow, error) {
+func (c *CloudSource) SessionsForCurrentProject() ([]SessionRow, error) {
+	return c.sessions(ScopeCurrentProject)
+}
+
+// SessionsAllProjects は名簿を **プロジェクトで絞らず** に返す。横断一覧 (ms-171) が
+// 使う。生存の真値は transport の live (Live=true) にし、プロジェクトの違いでは落とさない。
+func (c *CloudSource) SessionsAllProjects() ([]SessionRow, error) {
+	return c.sessions(ScopeAllProjects)
+}
+
+// sessions は名簿を読む共通処理。scope で現在プロジェクト絞り (盤用) か全件 (横断一覧用)
+// かを選ぶ。どちらも各行に自分の ProjectID を刻むので、呼び出し側は declared 判定・DM
+// ルーティングを「そのセッション自身のプロジェクト」で行える。
+func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 	var raw []struct {
 		SessionID string `json:"session_id"`
 		Cwd       string `json:"cwd"`
@@ -267,19 +300,22 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 	}
 	rows := []SessionRow{}
 	for _, s := range raw {
-		// 名簿は参加している全プロジェクト分が返るので、いま見ている盤のものに絞る。
-		if c.ProjectID != "" && s.ProjectID != c.ProjectID {
+		// 名簿は参加している全プロジェクト分が返る。盤 (ScopeCurrentProject) では
+		// いま見ているプロジェクトに絞るが、横断一覧 (ScopeAllProjects) では
+		// プロジェクトの違いで落とさない (生存の真値は下の Live 一本)。
+		if scope == ScopeCurrentProject && c.ProjectID != "" && s.ProjectID != c.ProjectID {
 			continue
 		}
 		if !s.Live {
 			continue
 		}
 		row := SessionRow{
-			ID:      s.SessionID,
-			Who:     s.Actor.Email,
-			Machine: s.Actor.Machine,
-			Agent:   s.Agent.Kind,
-			Cwd:     s.Cwd,
+			ID:          s.SessionID,
+			Who:         s.Actor.Email,
+			Machine:     s.Actor.Machine,
+			Agent:       s.Agent.Kind,
+			Cwd:         s.Cwd,
+			ProjectID:   s.ProjectID, // 各行に自分のプロジェクトを刻む (declared/DM の宛先)
 			Live:        s.Live,
 			Healthy:     s.PollHealth.Healthy,
 			LastActive:  s.LastActive,

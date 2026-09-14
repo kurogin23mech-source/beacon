@@ -300,7 +300,11 @@ const RECENT_MS = 10 * 60 * 1000;
 function liveness(s) {
   if (s.state === "busy") return {label: "作業中", on: true};
   if (s.state === "idle") return {label: "待機中", on: false};
-  if (s.running) return {label: "稼働中", on: true};
+  // 生存はローカルのプロセス観測 (running) か、サーバの transport live
+  // (transport_live) の合成 (e-6454)。どちらかが真なら「稼働中」= 停止隠しに
+  // 巻き込まれない。片方だけ見ない (名乗りの主はローカル観測が漏れても transport
+  // live で生きている)。
+  if (s.running || s.transport_live) return {label: "稼働中", on: true};
   const recent = s.last_active &&
     (Date.now() - new Date(s.last_active)) < RECENT_MS;
   if (s.tool_running && recent) {
@@ -1102,6 +1106,11 @@ async function openSessions() {
         </select>
       </div>
     </header>
+    ${d.roster_status === "unavailable" ? `<div class="notice">
+      ⚠ 名乗っているセッションの名簿を取得できませんでした (ログイン切れ・通信断の可能性)。
+      <b>名乗って動いているセッション (他のマシン・クラウド分を含む) が、ここに出ていない
+      恐れがあります。</b>空に見えても「誰も居ない」とは限りません。
+      <code>beacon auth login</code> でログインし直すと回復します。</div>` : ""}
     <p class="empty">担当は、Beacon に名乗っているセッションはその申告を、そうでないものは
       ブランチ名や直近のコミットから推し量っています。<b>推測は破線</b>で示します。
       <br>タスクは直近のコミット件名に含まれる番号 (e-NNNN) から辿ります。
@@ -1109,7 +1118,11 @@ async function openSessions() {
       という意味ではありません)。
       <br>Beacon に名乗っているセッションは、<b>他のマシンのものも含みます</b>
       (名簿はどのマシンからでも引けるため)。破線の札がそれです。
-      名乗っていないセッションは、このマシンの分しか分かりません。</p>
+      名乗っていないセッションは、このマシンの分しか分かりません。
+      <br><b>この一覧は「すべての作業」ではありません。</b>別のマシンで動いている、
+      Beacon に名乗っていない素の Claude / Codex は、何も送っていない以上こちらに届く
+      経路が無く、<b>原理的にここには出ません</b>。空いて見えても「誰も居ない」とは
+      限りません — こちらから見えていないだけのこともあります。</p>
     ${rows.length ? [...groups.entries()].map(([name, list]) => `
       <div class="section-title">${esc(name)} (${list.length})</div>
       <div class="grid">${list.map(s => {
@@ -1131,6 +1144,9 @@ async function openSessions() {
           ${s.remote ? `<div class="sub2 sub1 remote-note"
             title="Beacon の名簿から拾ったものです。このマシンには痕跡がありません"
             >別のマシン</div>` : ""}
+          ${s.collapsed_peers ? `<div class="sub2 sub1 remote-note"
+            title="同じフォルダ・同じ道具で名乗っている live セッションが他にもありますが、識別子の粒度が足りず個別に表示できていません (session_id 突合で解消予定)"
+            >⚠ 同フォルダに他 ${s.collapsed_peers} セッション (未表示)</div>` : ""}
           ${s.title ? `<div class="sub2">${esc(s.title)}</div>` : ""}
           <div class="card-attrs">
             <div>${attribution(s.target,
@@ -1147,14 +1163,18 @@ async function openSessions() {
               ${s.last_active ? `data-ts="${esc(s.last_active)}"` : ""}
               >${s.last_active ? ago(s.last_active) : ""}</span>
           </div>
-          ${s.named && s.session_id
-            ? `<button class="linkish send" style="margin-top:8px; width:100%;"
-                 data-sid="${esc(s.session_id)}"
-                 data-pid="${esc((s.project || {}).project_id || "")}"
-                >プロンプトを送る</button>`
-            : `<div class="sub2 sub1" style="margin-top:8px;"
+          ${!(s.named && s.session_id)
+            ? `<div class="sub2 sub1" style="margin-top:8px;"
                  title="Beacon に名乗っているセッションにしか文面を渡せません">
-                 送信不可 — Beacon に名乗っていません</div>`}
+                 送信不可 — Beacon に名乗っていません</div>`
+            : s.collapsed_peers
+              ? `<div class="sub2 sub1" style="margin-top:8px;"
+                   title="同じフォルダ・道具で複数の live セッションが1行に畳まれており、この行の識別子 (session_id) が畳まれたどのセッションを指すか一意に定まりません。押した相手と違うセッションに届く誤配を防ぐため、送信口を出していません (session_id 粒度の突合 e-6446 で解消予定)">
+                   送信不可 — 宛先が一意に定まりません (同フォルダに他 ${s.collapsed_peers} セッション)</div>`
+              : `<button class="linkish send" style="margin-top:8px; width:100%;"
+                   data-sid="${esc(s.session_id)}"
+                   data-pid="${esc((s.project || {}).project_id || "")}"
+                  >プロンプトを送る</button>`}
           ${viewerState.jump_available && s.pid
             ? (s.jumpable
               ? `<button class="linkish jump" style="margin-top:6px; width:100%;"

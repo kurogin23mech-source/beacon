@@ -135,6 +135,12 @@ type SessionRow struct {
 	Machine     string `json:"machine"`
 	Agent       string `json:"agent"`
 	Cwd         string `json:"cwd"`
+	// ProjectID はそのセッションが名乗っているプロジェクト。**横断一覧で必須。**
+	// 名簿は参加している全プロジェクト分が返る (ms-171 Gate B) ので、各行が自分の
+	// プロジェクトを持っていないと、declared 判定 (e-6395) も DM の宛先ルーティング
+	// (e-6396) も「今見ているプロジェクト 1 つ」に固定され、他プロジェクトのセッションを
+	// 名乗っていない扱いにしたり、無関係なプロジェクト宛に送ったりする。
+	ProjectID   string `json:"project_id"`
 	// Target はそのセッションが取り組んでいる対象。サーバが解決した
 	// working_target のみを使う。空なら「分からない」であって「無い」ではない。
 	Target      string `json:"target"`

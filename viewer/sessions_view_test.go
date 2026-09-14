@@ -92,8 +92,10 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 	if !found.Remote {
 		t.Error("別のマシンであることが分からない")
 	}
-	if !found.Named || !found.Running {
-		t.Errorf("名乗り/稼働が落ちている: %+v", found)
+	// 別マシンは手元のプロセス観測が無い (Running=false) が、サーバの transport live
+	// で生きている (TransportLive=true)。生存判定は合成 alive() で見る (e-6454)。
+	if !found.Named || found.Running || !found.TransportLive || !alive(*found) {
+		t.Errorf("名乗り/生存 (transport live) が落ちている: %+v", found)
 	}
 	if found.Target == nil || found.Target.ID != "ms-42" ||
 		found.Target.Source != "beacon" {
@@ -106,6 +108,217 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 	// ここが落ちると運用室の activity 欄が常に空になり「分からない」と区別が付かない。
 	if found.Activity != "テストを書いている" {
 		t.Errorf("activity が名簿から引き継がれていない: %q", found.Activity)
+	}
+}
+
+// 生存の真値は bus heartbeat 一本 (ms-171 e-6431)。
+//
+// 会話ログが 24h カットオフより古くても、名簿に居る (= サーバの心拍が続いている)
+// セッションは運用室に残る。会話が止まっているだけの armed / 受信待ちのセッションを
+// 取りこぼさない (cairn-sales が運用室に出なかった実バグ、2026-09-13)。
+// 一方、名乗っていない古い痕跡は従来どおりカットオフで落とす (痕跡ログで溢れさせない)。
+func TestBusLiveSurvivesConversationCutoff(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-36 * time.Hour).Format(time.RFC3339) // 会話は 36h 前 = カットオフ外
+
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/cairn-sales", LastActive: old},
+		{Tool: "claude-code", Directory: "/Users/x/orphan", LastActive: old},
+	}
+	// cairn-sales だけが名簿に居る (別プロジェクトだが cross-project 名簿なので入る)。
+	named := []SessionRow{{
+		ID: "sv-cairn", Who: "me@example.com", Agent: "claude-code",
+		Cwd: "/Users/x/cairn-sales", ProjectID: "cairn-abc",
+		Live: true, LastActive: old,
+	}}
+
+	view := assembleSessions(local, named, 24*time.Hour, now)
+
+	var cairn, orphan *SessionOverview
+	for i := range view.Sessions {
+		switch view.Sessions[i].Directory {
+		case "/Users/x/cairn-sales":
+			cairn = &view.Sessions[i]
+		case "/Users/x/orphan":
+			orphan = &view.Sessions[i]
+		}
+	}
+	if cairn == nil {
+		t.Fatal("bus-live なのに会話時刻カットオフで運用室から落ちている (e-6431 の実バグ)")
+	}
+	if !cairn.Named || cairn.SessionID != "sv-cairn" {
+		t.Errorf("名乗り/識別子が落ちている: %+v", cairn)
+	}
+	// 生存は transport live で確定 (会話ログ由来でない)。Running (ローカルプロセス
+	// 観測) は上書きされず false のまま、alive() は真 (e-6454 の出自分離)。
+	if !cairn.TransportLive || cairn.Running || !alive(*cairn) {
+		t.Errorf("transport live による生存が落ちている / Running を誤上書き: %+v", cairn)
+	}
+	// 宛先ルーティング用に、そのセッション自身のプロジェクトが載っていること (e-6396)。
+	if cairn.Project == nil || cairn.Project.ProjectID != "cairn-abc" {
+		t.Errorf("DM 宛先のプロジェクトが載っていない: %+v", cairn.Project)
+	}
+	if orphan != nil {
+		t.Error("名乗っていない古い痕跡はカットオフで落ちるべき (溢れ防止)")
+	}
+}
+
+// 名乗っていないセッションは、会話時刻が新しければ従来どおり出ること (回帰防止)。
+// Gate A は「名乗っている古いもの」を救うだけで、名乗っていないものの規則は変えない。
+func TestUnnamedRecentSessionStillShown(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	local := []LocalSessionRow{
+		{Tool: "codex", Directory: "/Users/x/fresh", LastActive: recent},
+	}
+	view := assembleSessions(local, nil, 24*time.Hour, now)
+	found := false
+	for _, s := range view.Sessions {
+		if s.Directory == "/Users/x/fresh" {
+			found = true
+			if s.Named {
+				t.Error("名簿が空なのに名乗り扱いになっている")
+			}
+		}
+	}
+	if !found {
+		t.Error("新しい未名乗りセッションが落ちている")
+	}
+}
+
+// 別マシンの名乗りセッションが、宛先ルーティング用に自分のプロジェクトを運ぶこと
+// (ms-171 e-6396)。これが無いと、横断一覧からの DM が「今見ているプロジェクト」に
+// 誤ルートして、別プロジェクトの live セッションに構造的に届かない (2026-09-11 dogfood)。
+func TestRemoteSessionCarriesOwnProjectForDM(t *testing.T) {
+	named := []SessionRow{{
+		ID: "sv-remote", Who: "peer@example.com", Machine: "Mac-mini",
+		Agent: "claude-code", Cwd: "/Users/peer/other-proj",
+		ProjectID: "other-xyz", Live: true, LastActive: "2030-01-01T00:00:00Z",
+	}}
+	view := assembleSessions(nil, named, 24*time.Hour, time.Now())
+	var found *SessionOverview
+	for i := range view.Sessions {
+		if view.Sessions[i].SessionID == "sv-remote" {
+			found = &view.Sessions[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("別マシンの名乗りセッションが一覧から抜けている")
+	}
+	if found.Project == nil || found.Project.ProjectID != "other-xyz" {
+		t.Errorf("宛先ルーティング用のプロジェクトが載っていない: %+v", found.Project)
+	}
+}
+
+// 同じフォルダ + 道具の重複痕跡に、live 名簿の識別子や稼働を漏らさないこと
+// (思想レビュー finding 2026-09-14)。突合キーはフォルダ + 道具粒度なので、1 つの
+// live セッションが居るフォルダに古い死んだ痕跡があると、素朴に突合すると死んだ
+// 痕跡まで「稼働中」+ live の SessionID を貰い、偽の稼働に見える。**キーあたり最新
+// 1 行だけ** を名乗りの主にすることで、これを防ぐ。
+func TestDuplicateLocalTraceDoesNotInheritLiveIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	newer := now.Add(-1 * time.Hour).Format(time.RFC3339) // live セッションの主
+	// 同フォルダの重複痕跡 (プロセスは死んでいる)。カットオフ内 (3h < 24h) にして
+	// 「主でないから名乗り扱いされない」ことを確かめる (カットオフで消えるのとは別の経路)。
+	older := now.Add(-3 * time.Hour).Format(time.RFC3339)
+
+	local := []LocalSessionRow{
+		// 入力順をわざと古い→新しいにして、並べ替え (新しい順) が効いて主が正しく
+		// 選ばれることも確かめる。古い方はプロセスが死んでいる (Running:false)。
+		{Tool: "claude-code", Directory: "/Users/x/proj", LastActive: older, Running: false},
+		{Tool: "claude-code", Directory: "/Users/x/proj", LastActive: newer, Running: true},
+	}
+	named := []SessionRow{{
+		ID: "sv-live", Who: "me@example.com", Agent: "claude-code",
+		Cwd: "/Users/x/proj", ProjectID: "proj-abc",
+		Live: true, LastActive: newer,
+	}}
+
+	view := assembleSessions(local, named, 24*time.Hour, now)
+
+	namedCount := 0
+	for _, s := range view.Sessions {
+		if s.Directory != "/Users/x/proj" {
+			continue
+		}
+		if s.Named {
+			namedCount++
+			if s.LastActive != newer {
+				t.Errorf("名乗りの主が最新行でない: last_active=%s", s.LastActive)
+			}
+			if s.SessionID != "sv-live" {
+				t.Errorf("主の SessionID が名簿と一致しない: %q", s.SessionID)
+			}
+		} else {
+			// 名乗りの主でない古い重複は、live の識別子を貰わず、実際のプロセス生存
+			// (false) のまま = 稼働中に見えない。
+			if s.SessionID != "" {
+				t.Errorf("重複行が live の SessionID を継いでいる: %q", s.SessionID)
+			}
+			if s.Running {
+				t.Error("死んだ重複行が稼働中に見えている (偽稼働)")
+			}
+		}
+	}
+	if namedCount != 1 {
+		t.Errorf("名乗りの主はキーあたり 1 行のはずが %d 行", namedCount)
+	}
+}
+
+// claimedCutoff 側の規則を単独で殺すケース (保守性レビュー finding 2026-09-14):
+// 同一キーの重複痕跡が **両方ともカットオフより古い** とき、最新 1 行 (claimer) だけが
+// transport live で残り、残りは落ちること。cutoff loop の claimer 規則が「roster に
+// 居る行は全部カットオフ免除」へ退化していないかを pin する (退化すると古い死んだ
+// 重複が溢れて並ぶ = selectKept の存在理由そのものが silent に壊れる)。
+func TestAllDuplicatesBeyondCutoffKeepOnlyClaimer(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	newer := now.Add(-30 * time.Hour).Format(time.RFC3339) // 主だがカットオフ外
+	older := now.Add(-40 * time.Hour).Format(time.RFC3339) // さらに古い重複
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/p", LastActive: older, Running: false},
+		{Tool: "claude-code", Directory: "/Users/x/p", LastActive: newer, Running: false},
+	}
+	named := []SessionRow{{
+		ID: "sv-live", Agent: "claude-code", Cwd: "/Users/x/p",
+		ProjectID: "p-abc", Live: true, LastActive: newer,
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	rows := 0
+	for _, s := range view.Sessions {
+		if s.Directory == "/Users/x/p" {
+			rows++
+			if !s.Named || s.LastActive != newer {
+				t.Errorf("残ったのが最新の主でない: %+v", s)
+			}
+		}
+	}
+	if rows != 1 {
+		t.Errorf("カットオフ外の重複が畳まれず %d 行残った (退化)", rows)
+	}
+}
+
+// 同一キーに複数の live 名簿が畳まれたら、その事実を CollapsedPeers で開示すること
+// (AX review finding 2026-09-14)。粒度不足で個別に出せないが、黙って消さない。
+func TestCollapsedPeersDisclosed(t *testing.T) {
+	named := []SessionRow{
+		{ID: "sv-a", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p", Live: true, LastActive: "2030-01-01T00:00:00Z"},
+		{ID: "sv-b", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p", Live: true, LastActive: "2030-01-01T00:00:00Z"},
+	}
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/p", LastActive: "2030-01-01T00:00:00Z", Running: true},
+	}
+	view := assembleSessions(local, named, 24*time.Hour, time.Now())
+	var claimer *SessionOverview
+	for i := range view.Sessions {
+		if view.Sessions[i].Named && view.Sessions[i].Directory == "/Users/x/p" {
+			claimer = &view.Sessions[i]
+		}
+	}
+	if claimer == nil {
+		t.Fatal("名乗りの主が出ていない")
+	}
+	if claimer.CollapsedPeers != 1 {
+		t.Errorf("畳まれた live の開示が誤り: CollapsedPeers=%d (want 1)", claimer.CollapsedPeers)
 	}
 }
 
