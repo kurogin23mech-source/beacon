@@ -2797,12 +2797,24 @@ def won_terminal_contract_block_reason(data: dict, opportunity_id: str,
         return None
     if has_gating_signed_contract(data, opportunity_id):
         return None
-    return (
-        "成約にするには「成約の前提 (gating)」の締結済み契約が 1 つ以上必要です "
-        "(商談は合意済みのまま留まります)。契約の締結を記録してから再判定してください: "
-        f"未締結の契約があれば `beacon opportunity contract sign <ctr-id> --date <YYYY-MM-DD>`、"
-        f"契約がまだ無ければ `beacon opportunity contract add {opportunity_id} \"<契約名>\" --gating` "
-        "で本契約を起票してから締結してください。")
+    # AX review (親レビュー #746 misleading): 旧文言は「未締結の契約があれば sign」と
+    # gating 条件を落としていたため、未締結が NDA (gating=False) だけの商談で「sign → 再判定
+    # → 同じ block」の無限ループを誘発した。実状態で分岐し、次に打つべき 1 コマンドだけを出す。
+    opp = find_opportunity(data, opportunity_id) or {}
+    unsigned_gating = [c for c in live_contracts(opp)
+                       if c.get("gating") and c.get("status") != CONTRACT_SIGNED]
+    head = ("成約にするには「成約の前提 (gating)」の締結済み契約が 1 つ以上必要です "
+            "(商談は合意済みのまま留まります)。")
+    if unsigned_gating:
+        ids = " / ".join(c.get("id", "") for c in unsigned_gating)
+        first = unsigned_gating[0].get("id", "<ctr-id>")
+        return (head + "成約の前提となる本契約は起票済みですが未締結です。締結を記録してから"
+                f"再判定してください: `beacon opportunity contract sign {first} "
+                f"--date <YYYY-MM-DD>` (未締結の本契約: {ids})。")
+    return (head + "成約の前提となる本契約 (gating) がまだありません。起票して締結してください: "
+            f"`beacon opportunity contract add {opportunity_id} \"<契約名>\" --gating` "
+            "→ 起票後に `beacon opportunity contract sign <ctr-id> --date <YYYY-MM-DD>`。"
+            "(NDA 等 gating でない契約は成約の前提になりません)")
 
 
 def instantiate_phase_activities(data: dict, target_id: str, *,

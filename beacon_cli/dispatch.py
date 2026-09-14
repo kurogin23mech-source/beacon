@@ -2771,6 +2771,33 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
     if cmd == "contract":
         # ms-174 e-6434: 契約の add/sign/list/cancel (bash parity)。
         verb = args.verb
+        # AX review (親レビュー #746 high): union パーサが全 verb のフラグを受理するため、
+        # verb に属さないフラグ (例 add に --date、sign に --gating) が黙って捨てられ、
+        # 「締結を記録したつもりで実は未締結」という silent 誤記録を生んでいた。bash の
+        # _guard_positional と同じ契約で、verb 非対応フラグが明示されたら Usage つきで拒否する。
+        _flag_set = {
+            "--gating": args.gating,
+            "--ref": bool(args.ref),
+            "--date": bool(args.date),
+            "--reason": bool(args.reason),
+            "--all": args.all,
+            "--json": args.json,
+        }
+        _allowed_flags = {
+            "add": {"--gating", "--ref"},
+            "sign": {"--date", "--ref"},
+            "list": {"--all", "--json"},
+            "ls": {"--all", "--json"},
+            "cancel": {"--reason"},
+        }
+        if verb in _allowed_flags:
+            _stray = [f for f, on in _flag_set.items()
+                      if on and f not in _allowed_flags[verb]]
+            if _stray:
+                _ok = ", ".join(sorted(_allowed_flags[verb])) or "なし"
+                print(f"Error: contract {verb} は {', '.join(_stray)} を受け付けません "
+                      f"(この verb で使えるフラグ: {_ok})。", file=sys.stderr)
+                return 2
         if verb == "add":
             if not args.a1 or not args.a2:
                 print('Usage: beacon opportunity contract add <opp-id> "<desc>" '
