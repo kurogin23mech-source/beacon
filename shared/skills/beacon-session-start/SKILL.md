@@ -599,12 +599,13 @@ python3 "$(beacon _install-root)/scripts/open-board.py" 2>/dev/null
 
 このスクリプトは **プロジェクト形態 (cloud / local) で起動先を選び分けない**。盤を見る導線は 1 つ = `beacon view` (統合ビューワー) に畳まれている (ms-170 e-6347)。取得元 (ローカル `.beacon` / クラウド API) は変換層が吸収するので、cloud でも local でも同じ盤が見える。`beacon view` の起動先 (Go 版 / Python 版) やブラウザ起動の詳細は `beacon view --help` を参照 (このスクリプトはそれを再記述しない = 知識の所有者は 1 箇所)。
 
-スクリプトは `beacon view` を detached で起動し (前面で待ち受け続けるビューワーなので session-start を塞がない)、**起動を観測してから名乗る** (spawn が例外を出さなかっただけで成功と断定しない)。stdout の marker を Step 3 ヘッダにそのまま転記する:
+スクリプトは `beacon view` を detached で起動し (前面で待ち受け続けるビューワーなので session-start を塞がない)、**起動を観測してから名乗る** (spawn が例外を出さなかっただけで成功と断定しない)。marker は全て `KEY=VALUE` 形。stdout の marker を Step 3 ヘッダにそのまま転記する:
 
-- `VIEWER_URL=<url>`: 盤の URL を実際に観測できた (= 立ち上がった)。この URL を表示する。ブラウザはビューワー自身が開くが、開かない環境 (SSH / headless 等) ではこの URL を手で開けば見られる。
+- `VIEWER_URL=<url>`: 盤の URL を観測できた (子プロセスの生存も確認済)。この URL を表示する。ブラウザはビューワー自身が開くが、開かない環境 (SSH / headless 等) ではこの URL を手で開けば見られる。
+- `VIEWER_LAUNCH_FAILED=spawn (<理由>)`: `beacon view` を spawn できなかった (beacon 未検出等)。log が無いので理由を inline で運ぶ。
 - `VIEWER_LAUNCH_FAILED=exited-<rc> (log: <path>)`: 子プロセスが即終了した (起動失敗)。log path を添えて「盤の起動に失敗」と伝える。
-- `VIEWER_LAUNCHED_UNCONFIRMED (log: <path>)`: 生きているが待ち時間内に URL を確認できなかった。「起動したが URL 未確認」と伝える (成功と断定しない)。
-- 何も出ない: `beacon view` を spawn すらできなかった (beacon 未検出等)。best-effort、session-start を止めない。
+- `VIEWER_LAUNCH_UNCONFIRMED=alive (log: <path>)`: 生きているが待ち時間内に URL を確認できなかった。「起動したが URL 未確認」と伝える (成功と断定しない)。
+- 何も出ない (marker 皆無): スクリプト自体が走らなかった (install-root 解決失敗 / python 不在 / 版ズレで script 不在)。best-effort、session-start を止めない。
 
 **cloud プロジェクトでもホスト型 Web UI (beacon-ai.dev) の自動オープンは行わない** (手動では従来どおり開ける。Go 同梱 + サーバ側統合が入るまでの暫定として、cloud の自動オープンは統合ビューワーに寄せている)。
 
@@ -671,7 +672,7 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 ```
 Beacon: [name]
 🖥 盤: [VIEWER_URL] を開きました (統合ビューワー beacon view)  ← VIEWER_URL が出た場合 (ms-170 e-6347)
-🖥 盤: 起動を確認できませんでした — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_FAILED / VIEWER_LAUNCHED_UNCONFIRMED の場合
+🖥 盤: 起動を確認できませんでした — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_FAILED / VIEWER_LAUNCH_UNCONFIRMED の場合
 🔗 fork from: [target_ms_id] [target_ms_title]  ← Step 1m / .beacon/fork.json があれば
    parent: [parent_session_id 短縮] (branch=[parent_branch], repo=[parent_repo_path basename])
    child:  [child_branch] (この worktree)

@@ -24,12 +24,22 @@ Contract of THIS launcher (only):
     Ctrl+C) and would hang session-start otherwise — capturing its startup
     output to a log file.
   * **Observe before announcing** (AX review, 2026-09-15): poll the log briefly
-    for the board URL and emit ``VIEWER_URL=<url>`` only once we actually see
-    it. If the child dies, emit ``VIEWER_LAUNCH_FAILED=<phase> (log: <path>)``;
-    if it is alive but hasn't announced a URL within the wait, emit
-    ``VIEWER_LAUNCHED_UNCONFIRMED (log: <path>)``. Never print a success marker
-    we didn't observe, and keep stderr in the log so a non-opening board can be
-    diagnosed.
+    for the board URL and emit ``VIEWER_URL=<url>`` only once we see it *and*
+    the child is still alive. Never print a success marker we didn't observe,
+    and keep stderr in the log so a non-opening board can be diagnosed. All
+    markers share one ``KEY=VALUE`` grammar so a reader can split them uniformly:
+
+      * ``VIEWER_URL=<url>``                          — board observed serving
+      * ``VIEWER_LAUNCH_FAILED=spawn (<why>)``        — could not spawn (inline
+        reason; no log because the child never started)
+      * ``VIEWER_LAUNCH_FAILED=exited-<rc> (log: <path>)`` — child died at start
+      * ``VIEWER_LAUNCH_UNCONFIRMED=alive (log: <path>)``  — alive but no URL
+        seen within the wait
+
+    The launcher always prints exactly one marker (it does not fall silent).
+    True silence therefore means the *script itself* never ran (install-root
+    unresolved / python missing / a version-skewed install without this file) —
+    a distinct condition the caller can rely on.
 
 ``beacon view`` itself decides delegation (bundled Go viewer vs Python
 fallback) and opens the browser — see ``beacon view --help``. This launcher
@@ -117,6 +127,11 @@ def _scan_url(log_path: str) -> str:
         return ""
 
 
+def _spawn_why(exc: BaseException) -> str:
+    """One-line reason for an inline spawn-failure marker (no newlines)."""
+    return f"{type(exc).__name__}: {exc}".replace("\n", " ").strip()
+
+
 def launch_and_observe(
     beacon_bin: str,
     log_path: str,
@@ -128,40 +143,43 @@ def launch_and_observe(
 ) -> str:
     """Spawn the viewer, observe its startup, return the marker line to print.
 
-    Returns one of:
-      * ``VIEWER_URL=<url>``                              — board is serving
-      * ``VIEWER_LAUNCH_FAILED=exited-<rc> (log: <path>)``— child died
-      * ``VIEWER_LAUNCHED_UNCONFIRMED (log: <path>)``     — alive, URL not seen
-      * ``""``                                            — could not spawn
+    Always returns a non-empty marker (see module docstring for the KEY=VALUE
+    grammar). A dead child never yields ``VIEWER_URL`` even if a URL reached the
+    log first — liveness is checked before the URL, so a child that printed a
+    URL and then exited is reported as a failure, not a false success.
     """
     try:
         log_fd = open(log_path, "w", encoding="utf-8")
     except OSError:
-        # No place to log — fall back to a silent detached spawn (best-effort);
-        # we cannot observe, so we do not claim success.
+        # No place to log — best-effort detached spawn; we cannot observe, so we
+        # report unconfirmed (never a success we didn't see).
         try:
             _spawn(beacon_bin, subprocess.DEVNULL)
-        except Exception:
-            return ""
-        return "VIEWER_LAUNCHED_UNCONFIRMED (log: unavailable)"
+        except Exception as e:
+            return f"VIEWER_LAUNCH_FAILED=spawn ({_spawn_why(e)})"
+        return "VIEWER_LAUNCH_UNCONFIRMED=alive (log: unavailable)"
 
     with log_fd:
         try:
             proc = _spawn(beacon_bin, log_fd)
-        except Exception:
-            return ""
+        except Exception as e:
+            # Don't fall silent: name the reason inline (there is no log to
+            # point at because the child never started).
+            return f"VIEWER_LAUNCH_FAILED=spawn ({_spawn_why(e)})"
 
     deadline = monotonic() + wait_seconds
     while monotonic() < deadline:
+        # Liveness first: a dead child is a failure regardless of any URL it may
+        # have printed on its way out.
         rc = proc.poll()
+        if rc is not None:
+            return f"VIEWER_LAUNCH_FAILED=exited-{rc} (log: {log_path})"
         url = _scan_url(log_path)
         if url:
             return f"VIEWER_URL={url}"
-        if rc is not None:
-            return f"VIEWER_LAUNCH_FAILED=exited-{rc} (log: {log_path})"
         sleep(poll_interval)
     # Alive but hasn't announced a URL yet — don't assert success we didn't see.
-    return f"VIEWER_LAUNCHED_UNCONFIRMED (log: {log_path})"
+    return f"VIEWER_LAUNCH_UNCONFIRMED=alive (log: {log_path})"
 
 
 def main() -> int:

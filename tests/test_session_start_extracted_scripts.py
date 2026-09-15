@@ -135,8 +135,8 @@ def test_view_announces_observed_url(tmp_path, monkeypatch, capsys):
 def test_view_reports_failure_when_child_dies(tmp_path, monkeypatch):
     """Child exits before printing a URL -> explicit failure, not fake success.
 
-    This is the AX-1 fix: we must not print a success marker just because the
-    spawn call itself did not raise.
+    We must not print a success marker just because the spawn call itself did
+    not raise.
     """
     monkeypatch.chdir(tmp_path)
     log = tmp_path / "view.log"
@@ -150,6 +150,25 @@ def test_view_reports_failure_when_child_dies(tmp_path, monkeypatch):
     assert "log:" in marker
 
 
+def test_view_failure_when_url_present_but_child_dead(tmp_path, monkeypatch):
+    """A URL in the log does NOT beat a dead child (AX748-1 liveness-first).
+
+    A child that prints a URL and then exits must be reported as a failure, not
+    a false VIEWER_URL success — liveness is checked before the URL.
+    """
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn",
+        _fake_spawn_writing("盤を開きました: http://127.0.0.1:8973/\n", rc_seq=(1,)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    assert marker.startswith("VIEWER_LAUNCH_FAILED=exited-1")
+    assert not marker.startswith("VIEWER_URL")
+
+
 def test_view_unconfirmed_when_alive_but_no_url(tmp_path, monkeypatch):
     """Alive but no URL within the wait -> unconfirmed, never a success claim."""
     monkeypatch.chdir(tmp_path)
@@ -160,14 +179,21 @@ def test_view_unconfirmed_when_alive_but_no_url(tmp_path, monkeypatch):
     marker = BOARD.launch_and_observe(
         "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
     )
-    assert marker.startswith("VIEWER_LAUNCHED_UNCONFIRMED")
+    # KEY=VALUE grammar, same family as the others (AX748-3 / M748-3 consensus).
+    assert marker.startswith("VIEWER_LAUNCH_UNCONFIRMED=alive")
     assert "log:" in marker
-    # crucially, not a bare success marker
+    assert "=" in marker.split(" ", 1)[0]  # first token is KEY=VALUE
+    # crucially, not a success marker
     assert not marker.startswith("VIEWER_URL")
 
 
-def test_view_silent_when_spawn_raises(tmp_path, monkeypatch, capsys):
-    """beacon view can't even be spawned -> print nothing, never block."""
+def test_view_reports_spawn_failure_inline(tmp_path, monkeypatch, capsys):
+    """Can't even spawn -> inline VIEWER_LAUNCH_FAILED=spawn, not silence.
+
+    AX748-2: silence must not collapse "beacon view couldn't start" together
+    with "the launcher script itself never ran". A spawn failure names its
+    reason inline (there is no log to point at).
+    """
     monkeypatch.chdir(tmp_path)
 
     def _boom(beacon_bin, log_fd):
@@ -176,7 +202,9 @@ def test_view_silent_when_spawn_raises(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(BOARD, "_spawn", _boom)
     rc = BOARD.main()
     assert rc == 0
-    assert capsys.readouterr().out == ""
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("VIEWER_LAUNCH_FAILED=spawn (")
+    assert "OSError" in out
 
 
 def test_beacon_bin_prefers_install_sibling():

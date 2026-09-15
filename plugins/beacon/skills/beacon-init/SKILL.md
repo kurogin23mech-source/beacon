@@ -304,7 +304,7 @@ cloud プロジェクトの盤も session-start と同じ統合ビューワー `
 python3 "$(beacon _install-root)/scripts/open-board.py" 2>/dev/null
 ```
 
-stdout の marker (`VIEWER_URL=<url>` / `VIEWER_LAUNCH_FAILED=... (log: ...)` / `VIEWER_LAUNCHED_UNCONFIRMED (log: ...)`) を Step 5d の完了報告に転記する (contract は session-start Step 2.7 と同一)。
+stdout の marker (`VIEWER_URL=<url>` / `VIEWER_LAUNCH_FAILED=spawn (<理由>)` / `VIEWER_LAUNCH_FAILED=exited-<rc> (log: <path>)` / `VIEWER_LAUNCH_UNCONFIRMED=alive (log: <path>)`、全て `KEY=VALUE` 形) を Step 5d の完了報告に転記する (contract は session-start Step 2.7 と同一)。
 
 ### Step 5d: 完了報告
 
@@ -333,9 +333,12 @@ mkdir 有無 (= Step 5a が走ったか) と storage で内容を変える。tar
 ```
 「[name]」のスペース (cloud sync 有効) を準備しました (場所: $PROJECT_DIR)。
 
+[VIEWER_URL が出た場合]
 🖥 盤ビューワーを開きました: [VIEWER_URL] (統合ビューワー beacon view)
    ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
-   (URL 未確認 / 起動失敗の marker が出た場合はその全文を log path 付きで伝える)
+
+[VIEWER_LAUNCH_FAILED / VIEWER_LAUNCH_UNCONFIRMED が出た場合]
+🖥 盤ビューワーの起動を確認できませんでした — [marker 全文 (log path を含む)]
 
 [target/notes が入力されていた場合の /beacon-vision 誘導 1 行]
 
