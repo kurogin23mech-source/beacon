@@ -3,10 +3,11 @@
 守っているもの:
 - ユーザーの入口 ``beacon view`` が、運用室を持つ Go 版 ``beacon-view`` を **探して**、
   在れば委譲用の argv を組み立てられること
-- 探索順が PATH 優先で、無ければ同梱 / 手元ビルドの候補を当たり、どれも無ければ
-  None を返すこと (= 素朴盤へフォールバックする合図)
-- フォールバック時の案内が「Go 同梱 (e-6476) までの暫定」と読めること
-  (= 恒久保持と誤読させない、親方針)
+- 探索順が PATH 優先で (配布は e-6476 で beacon-view を PATH に同梱するため)、
+  無ければ dev / 手元ビルドの候補を当たり、どれも無ければ None を返すこと
+  (= 素朴盤へフォールバックする合図)
+- フォールバック時の案内が再ビルドでなく配布版アップグレードを示すこと
+  (e-6476 で同梱済みのため、PR #751 レビュー F1/F2/M5)
 - 案内文が Windows 既定文字コード (cp932) で出せること
 
 探索は差し替え可能な純関数なので、実ファイル / PATH / 実行 OS に依存しない。
@@ -60,6 +61,17 @@ def test_bundled_dist_binary_is_found_when_not_on_path():
         system="Darwin", machine="arm64",
         is_exec=lambda p: p == dist)
     assert found == dist
+
+
+def test_path_is_the_canonical_delivery_no_bundled_dir_candidate():
+    """配布の正式な届け方は PATH (e-6476, PATH 方式)。resolve は which() で拾い、
+    候補リストに install 済み wheel/brew を『正式同梱先』として重複させない
+    (= 偽 canonical を作らない)。dev 用の viewer/dist / bin / viewer だけを返す。"""
+    cand = cmd_view._bundled_viewer_candidates("/root", "Darwin", "arm64")
+    # _bundled_viewer/ を canonical として持たない (PATH が正)。
+    assert not any("_bundled_viewer" in c for c in cand)
+    assert any(c.endswith(os.path.join(
+        "viewer", "dist", "beacon-view-darwin-arm64")) for c in cand)
 
 
 def test_windows_bundled_name_has_exe_suffix():
@@ -140,12 +152,17 @@ def test_project_root_follows_beacon_project_file(monkeypatch):
 
 # --- フォールバック案内 -----------------------------------------------------
 
-def test_fallback_notice_marks_itself_as_interim():
-    """案内は『暫定』であることと入手方法を含む (恒久保持と誤読させない)。"""
+def test_fallback_notice_advises_upgrade_not_source_build():
+    """e-6476 で beacon-view は配布に同梱されるので、案内は再ビルドでなく
+    アップグレードを第一に示す (『同梱前の暫定 / build.sh でビルド』の旧文言が
+    残っていないこと = 誤診ループ防止、PR #751 レビュー F1/F2/M5)。"""
     notice = cmd_view.FALLBACK_NOTICE
-    assert "暫定" in notice
-    assert "e-6476" in notice          # Go 同梱タスクへの導線
-    assert "beacon-view" in notice     # 何を入手すればよいか
+    assert "beacon-view" in notice          # 何が見えるか
+    assert "upgrade" in notice.lower()      # 回復 = アップグレード
+    assert "beacon-ai" in notice or "brew upgrade" in notice
+    # この PR が e-6476 そのものなので、「e-6476 までの暫定」等の旧導線は残さない。
+    assert "e-6476" not in notice
+    assert "暫定" not in notice
 
 
 def test_fallback_notice_is_encodable_on_windows_legacy_codepage():
