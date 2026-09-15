@@ -91,7 +91,7 @@ jobs:
             ext=""; [ "$os" = "windows" ] && ext=".exe"
             staged="viewer/dist/beacon-view${ext}"
             cp "viewer/dist/beacon-view-${os}-${arch}${ext}" "$staged"
-            BEACON_BUNDLE_VIEWER="$staged" BEACON_WHEEL_PLAT="$tag" \
+            BEACON_BUILD_VIEWER="$staged" BEACON_WHEEL_PLAT="$tag" \
               python -m build --wheel --outdir dist
             rm -f "$staged"
           done

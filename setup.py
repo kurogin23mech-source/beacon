@@ -29,16 +29,29 @@ import os
 
 from setuptools import setup
 
+# BEACON_BUILD_VIEWER is a BUILD-TIME variable (the path to the staged
+# beacon-view binary for THIS wheel's target platform). It is deliberately NOT
+# named BEACON_VIEW_* — those are RUNTIME flags read by `beacon view`
+# (port/host/no-open). Renamed from BEACON_BUNDLE_VIEWER per PR #751 review (M2)
+# to keep build vs runtime unmistakably separate.
+#
 # setuptools requires script paths relative to this setup.py directory (never
 # absolute), so the release build stages the binary inside the repo tree (e.g.
 # viewer/dist/beacon-view) and we relativize it here.
 _here = os.path.dirname(os.path.abspath(__file__))
-_staged = os.environ.get("BEACON_BUNDLE_VIEWER", "").strip()
+_staged = os.environ.get("BEACON_BUILD_VIEWER", "").strip()
 _scripts = []
 if _staged:
     _abs = os.path.abspath(_staged)
-    if os.path.isfile(_abs):
-        _scripts = [os.path.relpath(_abs, _here).replace(os.sep, "/")]
+    if not os.path.isfile(_abs):
+        # Set-but-missing = a typo / wrong path in the release build. Fail loud
+        # rather than silently emitting a viewer-less pure wheel (M2/F4). Unset
+        # the var (not a bad value) to intentionally build a pure wheel.
+        raise SystemExit(
+            "setup.py: BEACON_BUILD_VIEWER is set but points at a missing file: "
+            f"{_staged!r} (resolved {_abs!r}). Stage the beacon-view binary "
+            "there, or unset BEACON_BUILD_VIEWER to build a pure wheel.")
+    _scripts = [os.path.relpath(_abs, _here).replace(os.sep, "/")]
 
 _cmdclass: dict = {}
 if _scripts:
@@ -49,11 +62,13 @@ if _scripts:
     except ImportError:  # older toolchains: fall back to the wheel package
         from wheel.bdist_wheel import bdist_wheel as _base_bdist_wheel
 
-    try:
-        from setuptools.command.build_scripts import build_scripts as _base_build_scripts
-    except ImportError:
-        # build_scripts is a distutils command (setuptools vendors distutils).
-        from distutils.command.build_scripts import build_scripts as _base_build_scripts
+    # build_scripts is a distutils command; setuptools does NOT provide a
+    # setuptools.command.build_scripts (M3). Importing `setuptools` first (done
+    # at the top of this module) activates setuptools' distutils shim, so this
+    # import resolves to setuptools' vendored distutils even on Python 3.12+
+    # where stdlib distutils is removed. The release build isolation pulls
+    # setuptools>=68 per pyproject's build-system.requires.
+    from distutils.command.build_scripts import build_scripts as _base_build_scripts
 
     _plat = os.environ.get("BEACON_WHEEL_PLAT", "").strip()
 

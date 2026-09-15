@@ -213,8 +213,9 @@ def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
 # 同梱作業は別タスク e-6476 (ms-170) が持つ。同梱が入るまでの間、beacon-view が手元
 # に無い環境では運用室に到達できないため、簡易盤を出しつつ入手方法を 1 行案内する。
 
-# フォールバック時に出す案内。Go 同梱 (e-6476) が入るまでの暫定である旨を明記し、
-# 「素朴盤が最終形」と読めないようにする。Windows 既定文字コード (cp932) で出せるよう
+# フォールバック時に出す案内。beacon-view は e-6476 で beacon 配布 (pipx wheel / brew)
+# に per-platform 同梱されるので、見つからない主因は「配布版が古い / 同梱前」であり、
+# 回復は再ビルドではなく **アップグレード**。Windows 既定文字コード (cp932) で出せるよう
 # 記号は使わない (serve の起動出力と同じ制約)。
 #
 # **not-found と exec-failed を surface で区別する** (AX + 保守性 独立レビュー consensus):
@@ -222,15 +223,17 @@ def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
 # 違う。同じ「見つからない」文言を両方に出すと、壊れたバイナリが PATH に居座ったまま
 # 「入手せよ」の案内に従っても状況が変わらない誤診ループに入る。理由ごとに別文言を出す。
 
-# 見つからなかったとき (= 素朴盤へ縮退)。入手経路にはリポジトリ文脈を添える (配布利用者の
-# 環境には viewer/ が無いため、どこの build.sh かを明示しないと actionable でない)。
+# 見つからなかったとき (= 素朴盤へ縮退)。回復は配布版のアップグレードを第一に案内する
+# (e-6476 で beacon-view は配布に同梱されるので、ソース再ビルドは通常不要)。
 FALLBACK_NOTICE = (
     "運用室 (セッション一覧・状態・端末ジャンプ) は Go 版ビューワー beacon-view で"
     "見られます。\n"
     "  この端末には beacon-view が見つからないので、簡易版の盤を表示します。\n"
-    "  (これは Go 版ビューワーが beacon 配布に同梱される [e-6476] までの暫定です。)\n"
-    "  入手: beacon リポジトリの viewer/build.sh でビルドするか、ビルド済みの"
-    " beacon-view を PATH に置いてください。"
+    "  beacon-view は beacon の配布 (pipx / brew) に同梱されています。最新版に更新すると"
+    "入ります:\n"
+    "    pipx upgrade beacon-ai   (pip なら pip install --upgrade beacon-ai)\n"
+    "    brew upgrade beacon\n"
+    "  それでも出ない場合は、ビルド済みの beacon-view を PATH に置いてください。"
 )
 
 
@@ -266,31 +269,28 @@ def _go_os_arch(system: str, machine: str) -> tuple[str, str]:
 
 def _bundled_viewer_candidates(install_root: str, system: str,
                                machine: str) -> list:
-    """同梱 / 手元ビルドの beacon-view を探す候補パス (探索順)。
+    """PATH に無いときに当たる、dev / 手元ビルドの beacon-view 候補 (探索順)。
 
-    **正式な同梱先は ``_bundled_viewer/beacon-view[.exe]`` (e-6476 / ms-170 で確定)**。
-    per-platform wheel の build 時に、その OS/arch 向けにビルドした 1 つの binary を
-    パッケージの ``beacon_cli/_bundled_viewer/`` に入れる (wheel 自体が platform 固有
-    なので per-platform 名の suffix は不要、``beacon-view[.exe]`` 固定)。install 後の
-    wheel では install_root が ``site-packages/beacon_cli/`` を指すので、ここが最初に
-    当たる。brew は ``bin/beacon-view`` を PATH に入れるので resolve_viewer_binary の
-    PATH 探索 (which) が先に拾う (この関数の候補には来ない)。
+    **配布物での正式な届け方は PATH** (e-6476 / ms-170、2026-09-15 に PATH 方式で確定):
+    pip の per-platform wheel は beacon-view を wheel の script として ``bin`` /
+    ``Scripts`` に +x 付きで置き、brew は ``bin/beacon-view`` を置く。どちらも PATH に
+    載るので、``resolve_viewer_binary`` は ``shutil.which("beacon-view")`` で先に拾う
+    (= 正式配布はこの関数の候補には来ない)。
 
-    残りは dev clone / 手元ビルド用の後方互換候補: build.sh の出力先 (viewer/dist/) と、
-    素直に置かれうる場所。
+    したがってここは **PATH に無い環境 = dev clone / 手元ビルド 専用** の候補だけを
+    返す: build.sh の出力先 (viewer/dist/、per-platform 名) と、素直に手で置かれうる
+    場所。install 済み wheel / brew を「正式同梱先」として当てる候補は持たない
+    (それは PATH 経由で解決されるため、ここに重複させると偽の canonical になる)。
     """
     goos, goarch = _go_os_arch(system, machine)
     ext = ".exe" if goos == "windows" else ""
     name = "beacon-view" + ext
     dist_name = f"beacon-view-{goos}-{goarch}{ext}"
     return [
-        # 正式な同梱先 (per-platform wheel が入れる、e-6476)。suffix 無しの固定名。
-        os.path.join(install_root, "_bundled_viewer", name),
-        # build.sh の配布物 (per-platform 名、dev clone の手元ビルド)
+        # dev clone の手元ビルド (build.sh の per-platform 名)
         os.path.join(install_root, "viewer", "dist", dist_name),
-        # 素直な置き場所 (後方互換)
+        # 素直な置き場所 (手動配置 / 後方互換)
         os.path.join(install_root, "bin", name),
-        # 手元ビルド (viewer/ 直下、.gitignore 済)
         os.path.join(install_root, "viewer", name),
     ]
 
