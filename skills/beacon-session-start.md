@@ -692,7 +692,8 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 ```
 Beacon: [name]
 🖥 盤: [VIEWER_URL] を開きました (統合ビューワー beacon view)  ← VIEWER_URL が出た場合 (ms-170 e-6347)
-🖥 盤: 起動を確認できませんでした — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_FAILED / VIEWER_LAUNCH_UNCONFIRMED の場合
+🖥 盤: 起動に失敗しました — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_FAILED の場合 (回復: log を見て原因を直す)
+🖥 盤: 起動中 (URL 未確認) — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_UNCONFIRMED の場合 (回復: 数秒後に log の URL を再確認)
 🔗 fork from: [target_ms_id] [target_ms_title]  ← Step 1m / .beacon/fork.json があれば
    parent: [parent_session_id 短縮] (branch=[parent_branch], repo=[parent_repo_path basename])
    child:  [child_branch] (この worktree)

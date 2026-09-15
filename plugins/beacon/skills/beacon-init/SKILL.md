@@ -337,8 +337,11 @@ mkdir 有無 (= Step 5a が走ったか) と storage で内容を変える。tar
 🖥 盤ビューワーを開きました: [VIEWER_URL] (統合ビューワー beacon view)
    ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
 
-[VIEWER_LAUNCH_FAILED / VIEWER_LAUNCH_UNCONFIRMED が出た場合]
-🖥 盤ビューワーの起動を確認できませんでした — [marker 全文 (log path を含む)]
+[VIEWER_LAUNCH_FAILED が出た場合]
+🖥 盤ビューワーの起動に失敗しました — [marker 全文 (log path を含む)] (回復: log を見て原因を直す)
+
+[VIEWER_LAUNCH_UNCONFIRMED が出た場合]
+🖥 盤ビューワーは起動中ですが URL 未確認 — [marker 全文 (log path を含む)] (回復: 数秒後に log の URL を再確認)
 
 [target/notes が入力されていた場合の /beacon-vision 誘導 1 行]
 

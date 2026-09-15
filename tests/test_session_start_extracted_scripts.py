@@ -243,6 +243,56 @@ def test_spawn_is_detached_and_streams_to_log(monkeypatch, tmp_path):
     assert calls["kw"].get("stdin") == BOARD.subprocess.DEVNULL
 
 
+# --- launcher <-> `beacon view` stdout contract (PR #748 review, high) --------
+# The launcher reads the board URL out of beacon view's log. That is a stringly
+# cross-process seam: if either producer's serving line changes wording, the
+# launcher silently mis-parses (wrong URL) or degrades to UNCONFIRMED. These
+# tests pin the seam against BOTH language sources so a change to either side
+# fails here instead of in the field.
+
+SERVING_PREFIX = "盤を開きました: "
+
+
+def test_scan_url_anchors_to_serving_line(tmp_path):
+    """_scan_url extracts ONLY the URL on beacon view's serving line, not any
+    other http string that reached the merged stdout+stderr log first."""
+    log = tmp_path / "view.log"
+    log.write_text(
+        # An unrelated URL (e.g. an error/help line) printed BEFORE the board is
+        # up must not be mistaken for the board URL.
+        "参考: https://github.com/kurogin23mech-source/beacon (help)\n"
+        f"{SERVING_PREFIX}http://127.0.0.1:8973/\n"
+        "  取得元: ローカル\n"
+    )
+    assert BOARD._scan_url(str(log)) == "http://127.0.0.1:8973/"
+
+
+def test_scan_url_ignores_non_serving_urls(tmp_path):
+    """A log with URLs but no serving line yields no URL (→ UNCONFIRMED)."""
+    log = tmp_path / "view.log"
+    log.write_text("エラー: https://example.com/oops was unreachable\n")
+    assert BOARD._scan_url(str(log)) == ""
+
+
+def test_python_cmd_view_serving_line_matches_anchor():
+    """Source-level pin: lib/cmd_view.py must print the exact serving prefix the
+    launcher anchors on. If someone rewords cmd_view's line, this fails."""
+    src = (REPO / "lib" / "cmd_view.py").read_text()
+    assert 'f"盤を開きました: {url}"' in src, (
+        "cmd_view.py serving line drifted from the launcher's anchor "
+        f"({SERVING_PREFIX!r}); update both together"
+    )
+    # And the launcher actually extracts the URL from a line built that way.
+    assert BOARD._URL_RE.search(f"盤を開きました: {'http://127.0.0.1:8080/'}")
+
+
+def test_open_webui_py_stays_deleted():
+    """open-webui.py was renamed to open-board.py (PR #748). Guard against a
+    revert/merge resurrecting the old file, which would give two launchers."""
+    assert not (REPO / "scripts" / "open-webui.py").exists()
+    assert (REPO / "scripts" / "open-board.py").exists()
+
+
 # ---------------------------------------------------------------------------
 # Step 1n-2: user-scoped DM catch-up filter + format (lib/dm_pending)
 # ---------------------------------------------------------------------------

@@ -66,10 +66,16 @@ import sys
 import tempfile
 import time
 
-# The board URL appears in `beacon view`'s startup line ("盤を開きました:
-# http://127.0.0.1:PORT/", or the Go viewer's own address line). We only need
-# the first http(s) URL it prints.
-_URL_RE = re.compile(r"https?://[^\s]+")
+# The board URL appears on `beacon view`'s fixed serving line, printed
+# identically by the Python fallback (lib/cmd_view.py) and the Go viewer
+# (viewer/main.go):
+#     盤を開きました: <url>
+# Anchor to that exact prefix so an error URL or any other http string elsewhere
+# in the merged stdout+stderr log can't be mistaken for the board URL
+# (AX/maintainability review, PR #748 — the launcher↔beacon view stdout contract
+# is pinned by tests against both language sources).
+_SERVING_PREFIX = "盤を開きました: "
+_URL_RE = re.compile(r"盤を開きました:\s*(https?://\S+)")
 
 # Bounded wait so session-start is never held for long. beacon view flushes its
 # URL line at startup, so this is normally satisfied in well under a second.
@@ -122,7 +128,7 @@ def _scan_url(log_path: str) -> str:
     try:
         with open(log_path, encoding="utf-8", errors="replace") as f:
             m = _URL_RE.search(f.read())
-        return m.group(0) if m else ""
+        return m.group(1) if m else ""
     except OSError:
         return ""
 
