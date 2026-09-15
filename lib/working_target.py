@@ -201,3 +201,81 @@ def derive_activity(declared_activity, *, head_subject="") -> str:
     if declared:
         return declared
     return _clean(head_subject)
+
+
+# ---------------------------------------------------------------------------
+# Row enrichment (ms-159 / e-6399) — turn a server directory row into the
+# derive-function inputs, and attach the results.
+#
+# The pure derive functions above take already-extracted signals. But the CLI
+# fetch path (cmd_attention / cmd_bus_directory) gets whole directory rows from
+# the server, which never carry ``working_target``/``activity`` (the server
+# stamp is not deployed, and the derive fallback was never wired — e-6399). The
+# fallback signals the bridge DOES stamp on every row are ``git.branch`` +
+# ``cwd`` + ``focus.milestone``, and ``git.head_subject`` for the activity. This
+# maps a row → those inputs and attaches the derived answer, so the roster shows
+# a real target/activity instead of an empty ``(no target)/—`` shell.
+#
+# ``fork_json`` is intentionally NOT sourced here: a row describes a *remote*
+# session, whose ``.beacon/fork.json`` lives on that session's machine and is
+# not readable from here. If a fork session declares its working_target (the
+# server-stamp path, when it lands), that declaration rides in ``row[
+# "working_target"]`` and still wins inside ``derive_working_target``.
+# ---------------------------------------------------------------------------
+
+def working_target_for_row(row) -> dict:
+    """Derive ``{"root", "target", "source"}`` for a server directory row.
+
+    Declaration/existing-authoritative: a ``row["working_target"]`` that already
+    carries content (a ``root`` or a ``target``) is the answer already — the
+    server stamped it, or a session declared it — so it is returned VERBATIM and
+    never clobbered by a guess (even a declared root with no specific target must
+    survive). Only when it is absent or an empty shell do we derive from the
+    signals the bridge stamps: ``git.branch`` → ``cwd`` → the project's active MS
+    (``focus.milestone``), in that priority. ``root`` on the derived path is the
+    row's own project (``project_id`` / ``project_name``)."""
+    row = row if isinstance(row, dict) else {}
+    existing = row.get("working_target")
+    if isinstance(existing, dict) and (existing.get("root") or existing.get("target")):
+        return existing
+    git = row.get("git") if isinstance(row.get("git"), dict) else {}
+    focus = row.get("focus") if isinstance(row.get("focus"), dict) else {}
+    project = {
+        "kind": "project",
+        "id": _clean(row.get("project_id")),
+        "label": _clean(row.get("project_name")) or _clean(row.get("project_id")),
+    }
+    return derive_working_target(
+        None,
+        branch=git.get("branch") or "",
+        cwd=row.get("cwd") or "",
+        fork_json=None,
+        focus_milestone=focus.get("milestone"),
+        project=project,
+    )
+
+
+def activity_for_row(row) -> str:
+    """Derive the 1-line activity for a server directory row: a declared
+    ``row["activity"]`` wins, else the row's ``git.head_subject``."""
+    row = row if isinstance(row, dict) else {}
+    git = row.get("git") if isinstance(row.get("git"), dict) else {}
+    return derive_activity(row.get("activity"), head_subject=git.get("head_subject") or "")
+
+
+def enrich_row(row):
+    """Return a shallow copy of ``row`` with ``working_target`` / ``activity``
+    filled in from the derive fallback (declaration still wins inside the derive
+    fns). Non-dict rows pass through unchanged. Non-mutating so callers can pass
+    server rows without surprising aliasing."""
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+    out["working_target"] = working_target_for_row(row)
+    out["activity"] = activity_for_row(row)
+    return out
+
+
+def enrich_rows(rows) -> list:
+    """``enrich_row`` over a list of directory rows (``None`` → ``[]``)."""
+    return [enrich_row(r) for r in (rows or [])]

@@ -55,6 +55,7 @@ from commands_shared import (
     _bus_recent_send_record,
     dm_sent_rows,
 )
+import working_target
 
 
 def _bus_resolve_recipient(default_fallback: str = "") -> str:
@@ -1871,6 +1872,10 @@ def cmd_bus_directory():
                 " --cwd-only を追加してください。",
                 file=sys.stderr,
             )
+    # e-6399: attach the derived working_target/activity so scripts consuming
+    # `bus directory --json` (and the ops面 that reads this shape) see a real
+    # target instead of a bare row. Declaration still wins inside the derive fns.
+    sessions = working_target.enrich_rows(sessions)
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps(sessions, ensure_ascii=False))
         return
