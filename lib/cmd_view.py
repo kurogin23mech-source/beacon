@@ -268,18 +268,27 @@ def _bundled_viewer_candidates(install_root: str, system: str,
                                machine: str) -> list:
     """同梱 / 手元ビルドの beacon-view を探す候補パス (探索順)。
 
-    ここは best-effort の推測であって正典ではない。**同梱の正式な置き場所は e-6476
-    (ms-170) が決める**。それが入るまでは、build.sh の出力先 (dist/) と、素朴に
-    置かれうる場所を当たる。
+    **正式な同梱先は ``_bundled_viewer/beacon-view[.exe]`` (e-6476 / ms-170 で確定)**。
+    per-platform wheel の build 時に、その OS/arch 向けにビルドした 1 つの binary を
+    パッケージの ``beacon_cli/_bundled_viewer/`` に入れる (wheel 自体が platform 固有
+    なので per-platform 名の suffix は不要、``beacon-view[.exe]`` 固定)。install 後の
+    wheel では install_root が ``site-packages/beacon_cli/`` を指すので、ここが最初に
+    当たる。brew は ``bin/beacon-view`` を PATH に入れるので resolve_viewer_binary の
+    PATH 探索 (which) が先に拾う (この関数の候補には来ない)。
+
+    残りは dev clone / 手元ビルド用の後方互換候補: build.sh の出力先 (viewer/dist/) と、
+    素直に置かれうる場所。
     """
     goos, goarch = _go_os_arch(system, machine)
     ext = ".exe" if goos == "windows" else ""
     name = "beacon-view" + ext
     dist_name = f"beacon-view-{goos}-{goarch}{ext}"
     return [
-        # build.sh の配布物 (per-platform 名)
+        # 正式な同梱先 (per-platform wheel が入れる、e-6476)。suffix 無しの固定名。
+        os.path.join(install_root, "_bundled_viewer", name),
+        # build.sh の配布物 (per-platform 名、dev clone の手元ビルド)
         os.path.join(install_root, "viewer", "dist", dist_name),
-        # beacon 同梱を想定した素直な置き場所 (e-6476 が確定させる)
+        # 素直な置き場所 (後方互換)
         os.path.join(install_root, "bin", name),
         # 手元ビルド (viewer/ 直下、.gitignore 済)
         os.path.join(install_root, "viewer", name),

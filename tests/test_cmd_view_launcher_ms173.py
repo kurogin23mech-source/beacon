@@ -62,6 +62,35 @@ def test_bundled_dist_binary_is_found_when_not_on_path():
     assert found == dist
 
 
+def test_wheel_bundled_viewer_is_the_canonical_location():
+    """per-platform wheel の同梱先 _bundled_viewer/beacon-view が見つかる (e-6476)。
+
+    wheel は platform 固有なので suffix 無しの固定名 beacon-view[.exe] を
+    install_root/_bundled_viewer/ に入れる。install 後は install_root が
+    site-packages/beacon_cli/ を指す。
+    """
+    bundled = os.path.join("/sp/beacon_cli", "_bundled_viewer", "beacon-view")
+    found = cmd_view.resolve_viewer_binary(
+        which=lambda name: None, install_root="/sp/beacon_cli",
+        system="Darwin", machine="arm64",
+        is_exec=lambda p: p == bundled)
+    assert found == bundled
+
+
+def test_wheel_bundled_viewer_preferred_over_dev_candidates():
+    """_bundled_viewer (正式同梱) が dev の viewer/dist より先に当たる。"""
+    cand = cmd_view._bundled_viewer_candidates("/root", "Darwin", "arm64")
+    bundled = os.path.join("/root", "_bundled_viewer", "beacon-view")
+    dist = os.path.join("/root", "viewer", "dist", "beacon-view-darwin-arm64")
+    assert cand.index(bundled) < cand.index(dist)
+
+
+def test_wheel_bundled_viewer_windows_has_exe():
+    """Windows の同梱先も .exe 固定名。"""
+    cand = cmd_view._bundled_viewer_candidates("C:\\pkg", "Windows", "AMD64")
+    assert os.path.join("C:\\pkg", "_bundled_viewer", "beacon-view.exe") in cand
+
+
 def test_windows_bundled_name_has_exe_suffix():
     """Windows では配布物名に .exe が付く (GOOS/GOARCH 写像)。"""
     exe = os.path.join(
