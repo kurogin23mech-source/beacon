@@ -301,12 +301,18 @@ def activity_for_row(row) -> str:
     EMPTY when none is known, while any other state falls back to the row's
     ``git.head_subject``.
 
-    NOTE (e-6488, not-yet-wired): the server does NOT stamp ``row["state_detail"]``
-    yet — the Notification→marker→bridge→server capture of the wait detail is the
-    follow-up e-6488, pending the production state-stamp deploy. Until then the
-    ``awaiting_human`` / ``blocked`` branch resolves to EMPTY (no detail known),
-    which is the intended, correct behaviour — NOT a bug. A future editor seeing
-    "waiting rows show blank activity" should reach for e-6488, not patch this."""
+    NOTE (e-6488 wiring status, #750 AX3): the CARRY path for ``state_detail`` IS
+    wired — beacon-state-hook.py writes it to the marker, the bridge piggybacks it
+    on the heartbeat, and ``SessionUpsert`` stores it, so a deployed server exposes
+    it on the row (via storage pass-through, not the liveness projection —
+    ``server/app.py::_stamp_session_liveness`` deliberately does NOT stamp
+    ``state_detail``; it only derives ``state``/``state_since``). What remains is a
+    DEPLOY gap, not a code gap: the production server predates these fields, so
+    until it ships, live rows carry no ``state_detail`` (and no ``state``), and the
+    ``awaiting_human`` / ``blocked`` branch resolves to EMPTY. That empty is the
+    intended, correct behaviour (no fabrication) — NOT a bug. A future editor
+    seeing "waiting rows show blank activity" pre-deploy should NOT patch this;
+    post-deploy the value flows through unchanged."""
     row = row if isinstance(row, dict) else {}
     git = row.get("git") if isinstance(row.get("git"), dict) else {}
     return derive_activity(

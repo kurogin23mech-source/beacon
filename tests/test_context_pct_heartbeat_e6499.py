@@ -118,9 +118,41 @@ class TestJsReader:
 # --------------------------------------------------------------------------- #
 # Drift guard (Layer 2) — both heartbeat-body twins carry context_pct
 # --------------------------------------------------------------------------- #
+#
+# #750 review (M3): the earlier guard text-grepped the sources ("contextPct" in
+# src). That false-passes on a condition rewrite or a dead branch — a match on
+# the string is not proof the value flows. Replaced with BEHAVIORAL parity: push
+# the SAME value through each twin and compare the emitted body. If either twin
+# stops emitting context_pct (drops the param, inverts the guard, dead-branches),
+# the outputs diverge and this fails — the drift is caught by behaviour, not text.
+
+def _py_body(**kw):
+    sys.path.insert(0, str(REPO / "lib"))
+    import bus_protocol  # noqa: E402
+    return bus_protocol.heartbeat_body("2026-09-15T00:00:00Z", poll_interval_ms=2000, **kw)
+
+
+def _js_body_kwargs_json(js_kwargs_json: str):
+    """Run buildHeartbeatBody(nowIso, pollIntervalMs, ...<js_kwargs>) via node and
+    return the emitted body dict."""
+    hb = (REPO / "channel" / "bus-heartbeat.mjs").as_posix()
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{hb}'
+        const body = buildHeartbeatBody(Object.assign(
+          {{ nowIso: '2026-09-15T00:00:00Z', pollIntervalMs: 2000 }},
+          {js_kwargs_json}))
+        process.stdout.write(JSON.stringify(body))
+    """)
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
 
 class TestTwinParity:
     def test_python_body_builder_has_context_pct_param(self):
+        # Structural check kept per #750 review — sig.parameters is a real symbol
+        # lookup (not a text grep), so it can't false-pass on a rename.
         import inspect
         sys.path.insert(0, str(REPO / "lib"))
         import bus_protocol  # noqa: E402
@@ -128,16 +160,42 @@ class TestTwinParity:
         assert "context_pct" in sig.parameters, (
             "lib/bus_protocol.heartbeat_body lost context_pct — edit both twins")
 
-    def test_js_body_builder_references_context_pct(self):
-        # The JS twin must both accept contextPct and emit body.context_pct, or it
-        # silently drops the value the bridge reads (the drift the task warns of).
-        src = (REPO / "channel" / "bus-heartbeat.mjs").read_text(encoding="utf-8")
-        assert "contextPct" in src, "buildHeartbeatBody lost the contextPct param"
-        assert "body.context_pct" in src, "buildHeartbeatBody stopped emitting context_pct"
+    @jsmark
+    def test_twins_emit_same_context_pct_value(self):
+        # The behavioral heart of the guard: same input value → identical emitted
+        # context_pct on both twins.
+        py = _py_body(context_pct=73)
+        js = _js_body_kwargs_json('{ contextPct: 73 }')
+        assert py["context_pct"] == 73
+        assert js["context_pct"] == 73
+        assert py["context_pct"] == js["context_pct"]
 
-    def test_server_model_declares_context_pct(self):
-        # SessionUpsert drops undeclared fields; context_pct must be explicit or the
-        # value the bridge sends is silently discarded before persistence.
-        src = (REPO / "server" / "routers_projects.py").read_text(encoding="utf-8")
-        assert "context_pct: Optional[int]" in src, (
-            "SessionUpsert lost the context_pct field — the value would be dropped")
+    @jsmark
+    def test_twins_both_omit_when_absent(self):
+        py = _py_body()
+        js = _js_body_kwargs_json('{}')
+        assert "context_pct" not in py
+        assert "context_pct" not in js
+
+    @jsmark
+    def test_twins_both_keep_zero(self):
+        # 0 is a legit fresh-session value — both twins must send it, not drop it.
+        py = _py_body(context_pct=0)
+        js = _js_body_kwargs_json('{ contextPct: 0 }')
+        assert py["context_pct"] == 0
+        assert js["context_pct"] == 0
+
+    def test_server_model_round_trips_context_pct(self):
+        # Behavioral (not grep): instantiate the model and confirm the field
+        # survives model_dump — proves SessionUpsert actually persists it, and
+        # would fail if the field were removed or renamed.
+        sys.path.insert(0, str(REPO / "server"))
+        os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
+        import routers_projects  # noqa: E402
+        body = routers_projects.SessionUpsert(last_active="x", context_pct=73)
+        payload = {k: v for k, v in body.model_dump().items() if v is not None}
+        assert payload["context_pct"] == 73
+        # and absent when not provided (back-compat)
+        empty = routers_projects.SessionUpsert(last_active="x")
+        assert "context_pct" not in {
+            k: v for k, v in empty.model_dump().items() if v is not None}

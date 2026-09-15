@@ -341,3 +341,120 @@ class TestWaitDetail:
         body = routers_projects.SessionUpsert(last_active="2026-09-15T00:00:00Z")
         payload = {k: v for k, v in body.model_dump().items() if v is not None}
         assert "state_detail" not in payload
+
+
+# ===========================================================================
+# 5. e-6488 — state_detail drift guard (single behavioral class, #750 M1).
+#
+# Consolidates the state_detail parity across ALL layers into ONE class so a
+# failure points to the whole carry path at once (rather than scattered per-file
+# asserts). BEHAVIORAL, not text-grep (#750 M3): the same value is pushed through
+# each layer and compared — a condition rewrite / dead branch / dropped field in
+# any layer diverges the value and fails here.
+# ===========================================================================
+
+import shutil  # noqa: E402
+import textwrap  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REPO = Path(__file__).resolve().parents[1]
+_STATE_MARKER_MJS = _REPO / "channel" / "bus-state-marker.mjs"
+_HEARTBEAT_MJS = _REPO / "channel" / "bus-heartbeat.mjs"
+_jsmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+
+
+def _node_json(script: str):
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+_DETAIL = "Claude needs your permission to use Bash"
+
+
+class TestStateDetailParity:
+    """One value (`_DETAIL`) through every layer of the state_detail carry."""
+
+    def test_layer1_hook_marker_attaches_detail(self):
+        # Python: build_state_marker writes state_detail for awaiting_human.
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-15T00:00:00.000Z", detail=_DETAIL)
+        assert m["state_detail"] == _DETAIL
+
+    @_jsmark
+    def test_layer2_js_reader_reads_detail(self, tmp_path):
+        # JS: readStateMarker carries state_detail out of the marker file.
+        marker = tmp_path / "session-state.json"
+        marker.write_text(json.dumps({
+            "declared_state": "awaiting_human",
+            "declared_at": "2026-09-15T00:00:00.000Z",
+            "state_detail": _DETAIL}))
+        out = _node_json(textwrap.dedent(f"""
+            import {{ readStateMarker }} from '{_STATE_MARKER_MJS.as_posix()}'
+            process.stdout.write(JSON.stringify(readStateMarker({json.dumps(str(marker))})))
+        """))
+        assert out["stateDetail"] == _DETAIL
+
+    @_jsmark
+    def test_layer3_js_body_emits_detail_with_declaration(self):
+        # JS: buildHeartbeatBody emits state_detail alongside a declaration.
+        out = _node_json(textwrap.dedent(f"""
+            import {{ buildHeartbeatBody }} from '{_HEARTBEAT_MJS.as_posix()}'
+            process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+              nowIso: '2026-09-15T00:00:00.000Z', pollIntervalMs: 2000,
+              declaredState: 'awaiting_human', declaredAt: '2026-09-15T00:00:00.000Z',
+              stateDetail: {json.dumps(_DETAIL)} }})))
+        """))
+        assert out["state_detail"] == _DETAIL
+
+    def test_layer4_server_model_round_trips_detail(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
+        import routers_projects  # noqa: E402
+        body = routers_projects.SessionUpsert(
+            last_active="x", declared_state="awaiting_human",
+            declared_at="2026-09-15T00:00:00Z", state_detail=_DETAIL)
+        payload = {k: v for k, v in body.model_dump().items() if v is not None}
+        assert payload["state_detail"] == _DETAIL
+
+    def test_layer5_consumer_shows_detail_as_activity(self):
+        # Python: the consumer surfaces state_detail as the awaiting_human activity.
+        sys.path.insert(0, str(_REPO / "lib"))
+        import working_target as wt  # noqa: E402
+        row = {"state": "awaiting_human", "state_detail": _DETAIL,
+               "git": {"head_subject": "Merge pull request #999"}}
+        assert wt.activity_for_row(row) == _DETAIL
+
+
+class TestEmptyHandlingSymmetry:
+    """#750 AX4 — make the empty-value rules of the two piggybacked fields
+    explicit and symmetric where they should be, and different where they must:
+
+      * state_detail: TRUTHY-gated — an empty/blank detail is DROPPED (an unknown
+        wait reason must stay absent, ms-173 方針2 = no fabrication; "" carries no
+        information, so it is treated as absent).
+      * context_pct: NULL/UNDEFINED-gated — 0 is a legitimate value (fresh
+        session) and is KEPT; only "unknown" (None/undefined) omits it.
+
+    The asymmetry is intentional (0% is real data; "" is not), and pinned so a
+    future edit can't silently flip one to the other's rule."""
+
+    def test_state_detail_blank_is_dropped(self):
+        for blank in ("", "   "):
+            m = session_state_hook.build_state_marker(
+                "Notification", "2026-09-15T00:00:00.000Z", detail=blank)
+            assert "state_detail" not in m, blank
+
+    @_jsmark
+    def test_context_pct_zero_kept_state_detail_blank_dropped_in_js_body(self):
+        # Both rules, side by side, in the emitted JS body.
+        out = _node_json(textwrap.dedent(f"""
+            import {{ buildHeartbeatBody }} from '{_HEARTBEAT_MJS.as_posix()}'
+            process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+              nowIso: '2026-09-15T00:00:00.000Z', pollIntervalMs: 2000,
+              declaredState: 'awaiting_human', declaredAt: '2026-09-15T00:00:00.000Z',
+              stateDetail: '', contextPct: 0 }})))
+        """))
+        assert out["context_pct"] == 0        # 0 kept (real value)
+        assert "state_detail" not in out       # "" dropped (no information)
