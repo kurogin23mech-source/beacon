@@ -26,25 +26,25 @@ class TestDeriveActivityStateAware:
         # An explicit self-report always wins, regardless of state.
         assert wt.derive_activity(
             "レビュー待ち中", head_subject="fix: x",
-            state=bl.STATE_AWAITING_HUMAN, wait_detail="別の待機") == "レビュー待ち中"
+            state=bl.STATE_AWAITING_HUMAN, state_detail="別の待機") == "レビュー待ち中"
 
     def test_awaiting_human_uses_wait_detail(self):
         assert wt.derive_activity(
             None, head_subject="feat: last commit",
             state=bl.STATE_AWAITING_HUMAN,
-            wait_detail="cmd_bus.py の編集許可待ち") == "cmd_bus.py の編集許可待ち"
+            state_detail="cmd_bus.py の編集許可待ち") == "cmd_bus.py の編集許可待ち"
 
     def test_awaiting_human_without_detail_is_empty_not_head_subject(self):
         # The crux: a waiting session with no known detail shows NOTHING, not its
         # last commit subject (no fabrication).
         assert wt.derive_activity(
             None, head_subject="Merge pull request #747",
-            state=bl.STATE_AWAITING_HUMAN, wait_detail="") == ""
+            state=bl.STATE_AWAITING_HUMAN, state_detail="") == ""
 
     def test_blocked_uses_wait_detail(self):
         assert wt.derive_activity(
             None, head_subject="fix: x", state=bl.STATE_BLOCKED,
-            wait_detail="外部 API レート制限") == "外部 API レート制限"
+            state_detail="外部 API レート制限") == "外部 API レート制限"
 
     def test_blocked_without_detail_is_empty(self):
         assert wt.derive_activity(
@@ -78,7 +78,7 @@ class TestDeriveActivityStateAware:
         # A stray wait_detail on a running row must not leak into the activity.
         assert wt.derive_activity(
             None, head_subject="hs", state=bl.STATE_RUNNING,
-            wait_detail="should be ignored") == "hs"
+            state_detail="should be ignored") == "hs"
 
 
 class TestActivityForRowStateAware:
