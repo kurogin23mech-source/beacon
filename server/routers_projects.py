@@ -2566,6 +2566,16 @@ class SessionUpsert(BaseModel):
     # long a session has been in its state, so this must not reset on every fire.
     state_since: Optional[str] = None
 
+    # ms-159 / e-6499 — the session's context-window usage % (0–100), computed by
+    # bin/context-usage-monitor (.claude/context-usage-state.json) and piggybacked
+    # onto the heartbeat by the receive loop (bus.mjs / bus_protocol.heartbeat_body).
+    # Stored merge=True on the session doc so the directory row exposes it, letting
+    # the roster surface which session is context-pressured (display = e-6500). Must
+    # be declared explicitly: the model drops undeclared fields, so an omitted field
+    # here would silently discard the value the bridge sends. Optional / merge=True:
+    # a heartbeat without it preserves the prior value (back-compat).
+    context_pct: Optional[int] = None
+
 class SessionIntentUpsert(BaseModel):
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
     (ms-54 / e-1369 Layer 4).

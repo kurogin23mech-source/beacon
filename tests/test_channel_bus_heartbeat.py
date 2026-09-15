@@ -149,6 +149,45 @@ def test_heartbeat_body_includes_transport_when_provided():
     assert body["transport"]["effective_poll_ms"] == 120000, body
 
 
+def test_heartbeat_body_omits_context_pct_by_default():
+    """ms-159 / e-6499: no contextPct arg → field absent (back-compat). Must match
+    lib/bus_protocol.heartbeat_body so both receive loops serialise identically."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000,
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert "context_pct" not in body, body
+
+
+def test_heartbeat_body_includes_context_pct_when_provided():
+    """ms-159 / e-6499: the bridge forwards the monitor's context usage % so the
+    roster can surface a context-pressured session."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000, contextPct: 73,
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert body["context_pct"] == 73, body
+
+
+def test_heartbeat_body_sends_context_pct_zero():
+    """ms-159 / e-6499: 0 is a legit value (fresh session) — sent, not dropped as
+    falsy. Only undefined/null omits the field. Mirrors the Python contract."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000, contextPct: 0,
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert body["context_pct"] == 0, body
+
+
 def test_heartbeat_body_clears_stale_shutdown_on_default_call():
     """The default ``shutdown`` value (= not passed) must also produce
     ``shutdown: false`` so cold-start heartbeats clear any stale flag.

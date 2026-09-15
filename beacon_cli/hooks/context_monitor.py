@@ -231,11 +231,35 @@ def _load_state(state_path: Path, current_session: str) -> Tuple[str, List[int]]
     return (prev_session, [])
 
 
-def _save_state(state_path: Path, session_id: str, notified: List[int]) -> None:
-    """Persist the merged notified list. Never raises."""
+def _save_state(
+    state_path: Path,
+    session_id: str,
+    notified: List[int],
+    *,
+    context_pct: Optional[int] = None,
+    context_used: Optional[int] = None,
+    context_limit: Optional[int] = None,
+) -> None:
+    """Persist the merged notified list + the current context usage. Never raises.
+
+    ms-159 / e-6499: the state file doubles as the read-point the beacon-bus
+    bridge (channel/bus.mjs) picks up on every poll to piggyback ``context_pct``
+    onto the heartbeat, so the roster (bus directory / attention) can show which
+    session is context-pressured. We therefore persist the latest ``context_pct``
+    (+ tokens/limit when known) on EVERY monitor run, not just on a threshold
+    cross — otherwise the bridge would read a stale or absent value between
+    crossings. Fields are omitted when not provided (back-compat: an older reader
+    ignores them, and a heartbeat with no value simply doesn't carry context_pct).
+    """
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"session_id": session_id, "notified_thresholds": sorted(set(notified))}
+        if context_pct is not None:
+            payload["context_pct"] = int(context_pct)
+        if context_used is not None:
+            payload["context_used"] = int(context_used)
+        if context_limit is not None:
+            payload["context_limit"] = int(context_limit)
         state_path.write_text(json.dumps(payload), encoding="utf-8")
     except OSError:
         pass
@@ -530,9 +554,13 @@ def _main_impl() -> int:
     triggered, all_crossed = _classify_thresholds(percent, notified)
 
     if triggered is None:
-        # session change should still bump the state file (matches bash).
-        if prev_session != session_id and not _is_dry_run():
-            _save_state(state_path, session_id, notified)
+        # No threshold crossed, but still persist the current context usage so the
+        # bridge reads a FRESH context_pct every poll (e-6499) — not just on a
+        # crossing. (A session change also resets/bumps the file, matching bash.)
+        if not _is_dry_run():
+            _save_state(state_path, session_id, notified,
+                        context_pct=percent, context_used=current_context,
+                        context_limit=context_limit)
         return 0
 
     # ─── enrichment + note ───────────────────────────────────────────────────
@@ -555,7 +583,9 @@ def _main_impl() -> int:
     if not _is_dry_run():
         # Persist state BEFORE invoking `beacon note` so a hanging beacon
         # call doesn't cause the same threshold to re-fire next time.
-        _save_state(state_path, session_id, sorted(set(notified) | set(all_crossed)))
+        _save_state(state_path, session_id, sorted(set(notified) | set(all_crossed)),
+                    context_pct=percent, context_used=current_context,
+                    context_limit=context_limit)
 
         if beacon:
             try:

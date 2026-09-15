@@ -47,7 +47,7 @@
 //   duplicated in lib/codex_receive_loop.py::heartbeat_to_server. Move
 //   the shape to lib/bus_protocol.py once that lands; this function
 //   becomes a thin Node wrapper.
-export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince }) {
+export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince, contextPct }) {
   const body = {
     last_active: nowIso,
     last_poll_at: nowIso,
@@ -80,6 +80,14 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
     // fallback here too. One place decides; no client↔server divergence.
     if (stateSince) body.state_since = stateSince
   }
+  // ms-159 e-6499 — piggyback this session's context-window usage % (written by
+  // bin/context-usage-monitor into .claude/context-usage-state.json, read by the
+  // bridge each poll) so the roster (bus directory / attention) can show which
+  // session is context-pressured. Shape MUST match lib/bus_protocol.py::
+  // heartbeat_body. Omitted when unknown (undefined/null) so an older client or
+  // an un-computed session keeps the row shape (back-compat). 0 is a legit value
+  // (fresh session) and IS sent — hence the null/undefined check, not falsy.
+  if (contextPct !== undefined && contextPct !== null) body.context_pct = contextPct
   return body
 }
 

@@ -52,6 +52,24 @@ class TestHeartbeatBody:
         )
         assert body["transport"] == {"ws_state": "poll-only", "effective_poll_ms": 2000}
 
+    def test_context_pct_omitted_by_default(self):
+        # ms-159 / e-6499: back-compat — no context_pct arg → field absent, so an
+        # old client / un-computed session keeps the row shape (server merge no-op).
+        body = bp.heartbeat_body("now", poll_interval_ms=1000)
+        assert "context_pct" not in body
+
+    def test_context_pct_included_when_provided(self):
+        # ms-159 / e-6499: the receive loop forwards the monitor's context usage %
+        # so the roster can surface a context-pressured session.
+        body = bp.heartbeat_body("now", poll_interval_ms=2000, context_pct=73)
+        assert body["context_pct"] == 73
+
+    def test_context_pct_zero_is_sent(self):
+        # 0 is a legitimate value (a fresh session) — it must NOT be dropped as
+        # falsy. Only None (unknown) omits the field.
+        body = bp.heartbeat_body("now", poll_interval_ms=2000, context_pct=0)
+        assert body["context_pct"] == 0
+
 
 class TestWsStateVocabulary:
     """ms-145 / e-5378: the ws_state value set is defined once here (canonical)

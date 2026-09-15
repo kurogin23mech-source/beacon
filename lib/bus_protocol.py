@@ -90,6 +90,7 @@ def heartbeat_body(
     poll_interval_ms: int,
     shutdown: bool = False,
     transport: dict | None = None,
+    context_pct: int | None = None,
 ) -> dict:
     """Return the canonical PUT /sessions/<sid> body.
 
@@ -104,6 +105,14 @@ def heartbeat_body(
     ごとに実装が違う (Node bridge = WS accelerator あり / Codex loop =
     poll-only) ので、どの実装がどの周期で回っているかを directory から
     引けるようにするのが狙い。省略時は body に載せない (後方互換)。
+
+    ms-159 / e-6499 — optional ``context_pct`` (= このセッションのコンテキスト
+    使用率 %) を載せる。bin/context-usage-monitor が算出して
+    ``.claude/context-usage-state.json`` に書いた値を受信ループが heartbeat に
+    相乗りさせ、サーバの session doc 経由で運用室 (bus directory / attention) の
+    行まで運ぶ。「どのセッションが context 逼迫か」を一目で見えるようにするため。
+    値が無い (古いクライアント / 未算出) ときは載せない (後方互換で行 shape を
+    壊さない)。JS 写し (buildHeartbeatBody) と同時に増やすこと (片方だけだと drift)。
     """
     body = {
         "last_active": now_iso,
@@ -113,6 +122,8 @@ def heartbeat_body(
     }
     if transport is not None:
         body["transport"] = transport
+    if context_pct is not None:
+        body["context_pct"] = int(context_pct)
     return body
 
 
