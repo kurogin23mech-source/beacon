@@ -2565,6 +2565,15 @@ class SessionUpsert(BaseModel):
     # Distinct from ``declared_at`` (last declared): the attention面 sorts by how
     # long a session has been in its state, so this must not reset on every fire.
     state_since: Optional[str] = None
+    # ms-159 / e-6488 — the awaiting_human WAIT DETAIL (what the human is being
+    # asked, e.g. the Notification permission message "Claude needs your
+    # permission to use Bash"). Written by beacon-state-hook.py into the state
+    # marker for awaiting_human only, piggybacked WITH declared_state by the
+    # bridge. Stored merge=True so the row exposes it; the consumer
+    # (lib/working_target.derive_activity) shows it as the awaiting_human row's
+    # activity, and renders empty when absent (no fabrication, ms-173 方針2). Must
+    # be declared explicitly or the model drops it before persistence.
+    state_detail: Optional[str] = None
 
     # ms-159 / e-6499 — the session's context-window usage % (0–100), computed by
     # bin/context-usage-monitor (.claude/context-usage-state.json) and piggybacked

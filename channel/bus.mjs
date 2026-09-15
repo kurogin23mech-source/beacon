@@ -1310,6 +1310,7 @@ if (!PROJECT_ID || !SESSION_ID) {
     let declaredState
     let declaredAt
     let stateSince
+    let stateDetail
     if (shutdown) {
       declaredState = STATE_TERMINATED  // shared constant (parity w/ lib/bus_liveness)
       declaredAt = nowIso
@@ -1320,6 +1321,7 @@ if (!PROJECT_ID || !SESSION_ID) {
         declaredState = marker.declaredState
         declaredAt = marker.declaredAt
         stateSince = marker.stateSince
+        stateDetail = marker.stateDetail  // e-6488: awaiting_human wait detail
       }
     }
     // ms-159 e-6499: piggyback this session's context usage % (whatever the
@@ -1336,6 +1338,7 @@ if (!PROJECT_ID || !SESSION_ID) {
         declaredState,
         declaredAt,
         stateSince,
+        stateDetail,
         contextPct,
       })
       await apiPut(

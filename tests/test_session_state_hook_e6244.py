@@ -274,3 +274,70 @@ class TestSessionUpsertDeclaredState:
             f"(Literal={sorted(literal_members)}, "
             f"canonical={sorted(bus_liveness.DECLARABLE_STATES)})"
         )
+
+
+# ===========================================================================
+# 4. e-6488 — the awaiting_human WAIT DETAIL (state_detail) end-to-end.
+# ===========================================================================
+
+class TestWaitDetail:
+    def test_awaiting_human_with_detail_attaches_state_detail(self):
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-15T00:00:00.000Z",
+            detail="Claude needs your permission to use Bash")
+        assert m["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert m["state_detail"] == "Claude needs your permission to use Bash"
+
+    def test_awaiting_human_without_detail_omits_state_detail(self):
+        # No message → no fabricated wait detail (ms-173 方針2).
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-15T00:00:00.000Z")
+        assert "state_detail" not in m
+
+    def test_awaiting_human_blank_detail_omitted(self):
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-15T00:00:00.000Z", detail="   ")
+        assert "state_detail" not in m
+
+    def test_detail_dropped_for_non_awaiting_states(self):
+        # A running/idle marker has no wait detail even if a detail string leaks in.
+        for event in ("PreToolUse", "Stop", "SessionEnd"):
+            m = session_state_hook.build_state_marker(
+                event, "2026-09-15T00:00:00.000Z", detail="stray message")
+            assert "state_detail" not in m, event
+
+    def test_hook_writes_state_detail_from_message(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        proc = _run_hook({
+            "hook_event_name": "Notification", "cwd": str(tmp_path),
+            "message": "Claude needs your permission to use Edit"})
+        assert proc.returncode == 0, proc.stderr
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert marker["state_detail"] == "Claude needs your permission to use Edit"
+
+    def test_hook_notification_without_message_omits_detail(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        proc = _run_hook({"hook_event_name": "Notification", "cwd": str(tmp_path)})
+        assert proc.returncode == 0, proc.stderr
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert "state_detail" not in marker
+
+    def test_model_accepts_state_detail(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        import routers_projects  # noqa: E402
+        body = routers_projects.SessionUpsert(
+            last_active="2026-09-15T00:00:00Z",
+            declared_state="awaiting_human", declared_at="2026-09-15T00:00:01Z",
+            state_detail="Claude needs your permission to use Bash")
+        payload = {k: v for k, v in body.model_dump().items() if v is not None}
+        assert payload["state_detail"] == "Claude needs your permission to use Bash"
+
+    def test_model_omits_state_detail_when_absent(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        import routers_projects  # noqa: E402
+        body = routers_projects.SessionUpsert(last_active="2026-09-15T00:00:00Z")
+        payload = {k: v for k, v in body.model_dump().items() if v is not None}
+        assert "state_detail" not in payload
