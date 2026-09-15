@@ -15,6 +15,12 @@ class Beacon < Formula
   # install` fails to wire up beacon-bus DM.
   depends_on "node"
 
+  # ms-170 e-6476: compile the Go 運用室 viewer at install time and put it on
+  # PATH as `beacon-view`, so `beacon view` reaches the operations room with no
+  # extra build or fetch. Build-only dependency (not needed at runtime).
+  # CGO_ENABLED=0 -> pure static Go, no C toolchain required.
+  depends_on "go" => :build
+
   # Optional cloud features require these at runtime (not installed automatically)
   # Users who want cloud sync / auth should run:
   #   pip install google-auth-oauthlib google-auth
@@ -23,6 +29,16 @@ class Beacon < Formula
   def install
     # Copy the shell entry-point
     bin.install "bin/beacon"
+
+    # ms-170 e-6476: build the Go viewer for THIS machine's OS/arch and install
+    # it as `beacon-view` on PATH. resolve_viewer_binary() finds it first via
+    # shutil.which("beacon-view"), so `beacon view` delegates to the Go
+    # operations room instead of the Python fallback board.
+    cd "viewer" do
+      ENV["CGO_ENABLED"] = "0"
+      system "go", "build", "-trimpath", "-ldflags", "-s -w",
+             "-o", bin/"beacon-view", "./..."
+    end
 
     # ms-54 e-1167: install the bclaude wrapper so users can launch
     # Claude Code with the Beacon DM channel pre-wired (or auto-disabled
@@ -123,5 +139,10 @@ class Beacon < Formula
     # ms-54 e-1167: bclaude wrapper is on PATH and looks like a script.
     assert_predicate bin/"bclaude", :exist?
     assert_predicate bin/"bclaude", :executable?
+
+    # ms-170 e-6476: the Go viewer is on PATH so `beacon view` reaches the
+    # operations room with no extra build/fetch.
+    assert_predicate bin/"beacon-view", :exist?
+    assert_predicate bin/"beacon-view", :executable?
   end
 end

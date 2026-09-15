@@ -44,7 +44,7 @@ jobs:
   # CLI: sdist + wheel on a single runner (pure Python)
   # --------------------------------------------------------------------------
   build-cli:
-    name: Build CLI (sdist + wheel)
+    name: Build CLI (per-platform wheels + sdist)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -54,13 +54,51 @@ jobs:
         with:
           python-version: '3.11'
 
+      # ms-170 e-6476: the Go viewer (beacon-view) is bundled into each
+      # per-platform wheel so `beacon view` finds it on PATH after
+      # `pipx install beacon-ai` — no extra build/fetch. CGO_ENABLED=0 static
+      # Go means every target cross-compiles from this one Linux runner.
+      - name: Setup Go (bundled beacon-view viewer, e-6476)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: viewer/go.mod
+
       - name: Install build deps
         run: |
           python -m pip install --upgrade pip
           python -m pip install build
 
-      - name: Build sdist + wheel
-        run: python -m build
+      - name: Build Go viewer (all targets)
+        run: bash viewer/build.sh   # -> viewer/dist/beacon-view-<os>-<arch>[.exe]
+
+      - name: Build per-platform wheels + pure sdist
+        run: |
+          set -euo pipefail
+          # build.sh os-arch  ->  PyPI-acceptable platform tag.
+          # linux MUST be manylinux (PyPI rejects raw linux_*); the static Go
+          # binary has no libc deps, so manylinux2014 is a safe floor.
+          map="
+          darwin-arm64:macosx_11_0_arm64
+          darwin-amd64:macosx_10_9_x86_64
+          linux-amd64:manylinux2014_x86_64
+          linux-arm64:manylinux2014_aarch64
+          windows-amd64:win_amd64
+          windows-arm64:win_arm64
+          "
+          for row in $map; do
+            key="${row%%:*}"; tag="${row##*:}"
+            os="${key%-*}"; arch="${key#*-}"
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+            staged="viewer/dist/beacon-view${ext}"
+            cp "viewer/dist/beacon-view-${os}-${arch}${ext}" "$staged"
+            BEACON_BUNDLE_VIEWER="$staged" BEACON_WHEEL_PLAT="$tag" \
+              python -m build --wheel --outdir dist
+            rm -f "$staged"
+          done
+          # Pure sdist (no binary): platforms without a matching wheel install
+          # from this and fall back to the Python board.
+          python -m build --sdist --outdir dist
+          echo "=== built distributions ==="; ls -la dist/
 
       - name: Upload CLI artifacts
         uses: actions/upload-artifact@v5
@@ -102,7 +140,10 @@ jobs:
           path: dist
 
       - name: Install via pip (cross-platform proxy for pipx)
-        run: python -m pip install --upgrade dist/*.whl
+        # --find-links + name (not dist/*.whl): there are now several
+        # per-platform wheels in dist/, so let pip pick the one matching this
+        # runner's OS/arch (e-6476). --no-index keeps it offline/hermetic.
+        run: python -m pip install --upgrade --no-index --find-links dist beacon-ai
         shell: bash
 
       - name: Verify entry point
@@ -115,6 +156,11 @@ jobs:
           beacon --version
           beacon --help
           beacon doctor || true   # doctor exits non-zero when project missing — acceptable here
+          # e-6476: the platform wheel must drop beacon-view onto PATH so
+          # `beacon view` can delegate to the Go 運用室 with no extra fetch.
+          # (ubuntu/macos/windows-latest are all in the built platform set.)
+          command -v beacon-view
+          echo "beacon-view resolved on PATH ✓"
         shell: bash
   build-desktop:
     name: Build Desktop (${{ matrix.label }})
