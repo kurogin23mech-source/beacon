@@ -120,3 +120,29 @@ class TestStampState:
                              state_since=_iso(now - datetime.timedelta(seconds=5)))
         _app._stamp_session_liveness(row, "proj", now)
         assert row["state"] == bus_liveness.STATE_TERMINATED
+
+    # e-6488 / #750 M2: machine-check the prose claim "the liveness projection
+    # does NOT stamp state_detail". state_detail reaches the row via STORAGE
+    # pass-through (SessionUpsert merge), NOT via this projection — so the
+    # function must neither fabricate it (absent → stays absent) nor alter a
+    # stored one (present → preserved verbatim). DELETE these two if a server-side
+    # state_detail projection is ever added here (then the contract changes).
+    def test_liveness_does_not_fabricate_state_detail(self, _app):
+        now = _now()
+        row = self._live_row(now, declared_state="awaiting_human",
+                             declared_at=_iso(now - datetime.timedelta(seconds=5)),
+                             state_since=_iso(now - datetime.timedelta(seconds=5)))
+        assert "state_detail" not in row  # precondition: input carries none
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert "state_detail" not in row  # projection did not invent one
+
+    def test_liveness_preserves_stored_state_detail(self, _app):
+        now = _now()
+        row = self._live_row(now, declared_state="awaiting_human",
+                             declared_at=_iso(now - datetime.timedelta(seconds=5)),
+                             state_since=_iso(now - datetime.timedelta(seconds=5)),
+                             state_detail="Claude needs your permission to use Bash")
+        _app._stamp_session_liveness(row, "proj", now)
+        # stored value passes through untouched (it came from SessionUpsert merge)
+        assert row["state_detail"] == "Claude needs your permission to use Bash"

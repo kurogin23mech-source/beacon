@@ -47,6 +47,7 @@ import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
 import { readStateMarker, STATE_TERMINATED } from './bus-state-marker.mjs'
+import { readContextUsage } from './bus-context-usage.mjs'
 import { isPidAlive, detectOtherAliveBridges } from './bridge_detect.mjs'
 import {
   buildAutonomousActionContent,
@@ -66,6 +67,9 @@ const SESSION_JSON = path.join(CWD, '.beacon', 'session.json')
 // ms-159 e-6244: where beacon-state-hook.py writes this session's declared
 // execution state; the poll heartbeat piggybacks it (see writePollHeartbeat).
 const STATE_MARKER_JSON = path.join(CWD, '.beacon', 'session-state.json')
+// ms-159 e-6499: where bin/context-usage-monitor writes this session's context
+// usage %; the poll heartbeat piggybacks context_pct (see writePollHeartbeat).
+const CONTEXT_USAGE_JSON = path.join(CWD, '.claude', 'context-usage-state.json')
 
 // ms-64 / e-1459: profile-aware credentials + api_url resolution.
 // MUST stay behavior-equivalent to lib/profile.py — pinned by
@@ -1306,6 +1310,7 @@ if (!PROJECT_ID || !SESSION_ID) {
     let declaredState
     let declaredAt
     let stateSince
+    let stateDetail
     if (shutdown) {
       declaredState = STATE_TERMINATED  // shared constant (parity w/ lib/bus_liveness)
       declaredAt = nowIso
@@ -1316,8 +1321,14 @@ if (!PROJECT_ID || !SESSION_ID) {
         declaredState = marker.declaredState
         declaredAt = marker.declaredAt
         stateSince = marker.stateSince
+        stateDetail = marker.stateDetail  // e-6488: awaiting_human wait detail
       }
     }
+    // ms-159 e-6499: piggyback this session's context usage % (whatever the
+    // monitor last wrote for this cwd). Read every poll so the roster reflects
+    // the freshest value; null when the monitor never ran / wrote no percent.
+    const contextUsage = readContextUsage(CONTEXT_USAGE_JSON)
+    const contextPct = contextUsage ? contextUsage.contextPct : undefined
     try {
       const body = buildHeartbeatBody({
         nowIso,
@@ -1327,6 +1338,8 @@ if (!PROJECT_ID || !SESSION_ID) {
         declaredState,
         declaredAt,
         stateSince,
+        stateDetail,
+        contextPct,
       })
       await apiPut(
         `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,

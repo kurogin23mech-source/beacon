@@ -116,7 +116,13 @@ def main() -> int:
             prev_marker = json.load(f)
     except Exception:
         prev_marker = None
-    marker = mod.build_state_marker(event_name, now_iso, prev_marker=prev_marker)
+    # e-6488: the Notification hook stdin carries a ``message`` (e.g. "Claude
+    # needs your permission to use Bash") — the wait detail for awaiting_human.
+    # Pass it through; build_state_marker attaches it as ``state_detail`` only for
+    # awaiting_human and only when non-empty (other events carry no message).
+    detail = hook_input.get("message") or ""
+    marker = mod.build_state_marker(
+        event_name, now_iso, prev_marker=prev_marker, detail=detail)
     if marker is None:  # defensive: mapping already checked above, but re-guard
         return 0
     try:

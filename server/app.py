@@ -1996,6 +1996,12 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
         project={"kind": "project", "id": project_id,
                  "label": session.get("project_name") or project_id},
     )
+    # Not state-aware ON PURPOSE (e-6488, #749 review): the state-aware branch of
+    # derive_activity keys off `state` + `state_detail`, but this projection does
+    # not yet stamp `state_detail` (the Notification→wait-detail capture is the
+    # pending e-6488, gated on the production state-stamp deploy). Passing only
+    # (intent.text, head_subject) keeps the pre-e-6484 behaviour; when e-6488
+    # lands the state stamp, thread `state=`/`state_detail=` through here too.
     session["activity"] = working_target.derive_activity(
         intent.get("text"), head_subject=str(git.get("head_subject") or ""))
     # user_id identifies the row's owner so the ops面 can default to "just mine"

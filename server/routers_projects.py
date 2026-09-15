@@ -2565,6 +2565,25 @@ class SessionUpsert(BaseModel):
     # Distinct from ``declared_at`` (last declared): the attention面 sorts by how
     # long a session has been in its state, so this must not reset on every fire.
     state_since: Optional[str] = None
+    # ms-159 / e-6488 — the awaiting_human WAIT DETAIL (what the human is being
+    # asked, e.g. the Notification permission message "Claude needs your
+    # permission to use Bash"). Written by beacon-state-hook.py into the state
+    # marker for awaiting_human only, piggybacked WITH declared_state by the
+    # bridge. Stored merge=True so the row exposes it; the consumer
+    # (lib/working_target.derive_activity) shows it as the awaiting_human row's
+    # activity, and renders empty when absent (no fabrication, ms-173 方針2). Must
+    # be declared explicitly or the model drops it before persistence.
+    state_detail: Optional[str] = None
+
+    # ms-159 / e-6499 — the session's context-window usage % (0–100), computed by
+    # bin/context-usage-monitor (.claude/context-usage-state.json) and piggybacked
+    # onto the heartbeat by the receive loop (bus.mjs / bus_protocol.heartbeat_body).
+    # Stored merge=True on the session doc so the directory row exposes it, letting
+    # the roster surface which session is context-pressured (display = e-6500). Must
+    # be declared explicitly: the model drops undeclared fields, so an omitted field
+    # here would silently discard the value the bridge sends. Optional / merge=True:
+    # a heartbeat without it preserves the prior value (back-compat).
+    context_pct: Optional[int] = None
 
 class SessionIntentUpsert(BaseModel):
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent

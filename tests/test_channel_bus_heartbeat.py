@@ -67,6 +67,44 @@ def _run_scenario(script: str) -> dict:
     return json.loads(proc.stdout)
 
 
+STATE_MARKER_MJS = REPO_ROOT / "channel" / "bus-state-marker.mjs"
+
+
+def test_read_state_marker_passes_through_state_detail(tmp_path):
+    """ms-159 / e-6488: readStateMarker carries state_detail verbatim (undefined
+    when absent) so the bridge can piggyback the awaiting_human wait detail."""
+    marker = tmp_path / "session-state.json"
+    marker.write_text(json.dumps({
+        "declared_state": "awaiting_human",
+        "declared_at": "2026-09-15T01:00:00.000Z",
+        "state_since": "2026-09-15T01:00:00.000Z",
+        "state_detail": "Claude needs your permission to use Bash",
+    }))
+    script = textwrap.dedent(f"""
+        import {{ readStateMarker }} from '{STATE_MARKER_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(readStateMarker({json.dumps(str(marker))})))
+    """)
+    out = _run_scenario(script)
+    assert out["stateDetail"] == "Claude needs your permission to use Bash", out
+
+
+def test_read_state_marker_state_detail_undefined_when_absent(tmp_path):
+    marker = tmp_path / "session-state.json"
+    marker.write_text(json.dumps({
+        "declared_state": "running",
+        "declared_at": "2026-09-15T01:00:00.000Z",
+    }))
+    script = textwrap.dedent(f"""
+        import {{ readStateMarker }} from '{STATE_MARKER_MJS.as_posix()}'
+        const m = readStateMarker({json.dumps(str(marker))})
+        process.stdout.write(JSON.stringify('stateDetail' in m ? m.stateDetail ?? null : 'MISSING'))
+    """)
+    out = _run_scenario(script)
+    # key present but undefined serialises to null (JSON.stringify drops undefined
+    # in objects, but we coerce to null above); the point: no detail leaked.
+    assert out in (None, "MISSING"), out
+
+
 # ---------------------------------------------------------------------------
 # Body builder
 # ---------------------------------------------------------------------------
@@ -147,6 +185,75 @@ def test_heartbeat_body_includes_transport_when_provided():
     body = _run_scenario(script)
     assert body["transport"]["ws_state"] == "open", body
     assert body["transport"]["effective_poll_ms"] == 120000, body
+
+
+def test_heartbeat_body_omits_context_pct_by_default():
+    """ms-159 / e-6499: no contextPct arg → field absent (back-compat). Must match
+    lib/bus_protocol.heartbeat_body so both receive loops serialise identically."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000,
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert "context_pct" not in body, body
+
+
+def test_heartbeat_body_includes_context_pct_when_provided():
+    """ms-159 / e-6499: the bridge forwards the monitor's context usage % so the
+    roster can surface a context-pressured session."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000, contextPct: 73,
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert body["context_pct"] == 73, body
+
+
+def test_heartbeat_body_sends_context_pct_zero():
+    """ms-159 / e-6499: 0 is a legit value (fresh session) — sent, not dropped as
+    falsy. Only undefined/null omits the field. Mirrors the Python contract."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000, contextPct: 0,
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert body["context_pct"] == 0, body
+
+
+def test_heartbeat_body_includes_state_detail_with_declaration():
+    """ms-159 / e-6488: the awaiting_human wait detail rides WITH the state
+    declaration (declared_state + declared_at present) so it lands on the row the
+    consumer reads."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-09-15T01:00:00.000Z', pollIntervalMs: 2000,
+          declaredState: 'awaiting_human', declaredAt: '2026-09-15T01:00:00.000Z',
+          stateDetail: 'Claude needs your permission to use Bash',
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert body["state_detail"] == "Claude needs your permission to use Bash", body
+
+
+def test_heartbeat_body_omits_state_detail_without_declaration():
+    """No declaration → the whole declared block is skipped, so state_detail is
+    never emitted on its own (back-compat / no orphan field)."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-09-15T01:00:00.000Z', pollIntervalMs: 2000,
+          stateDetail: 'orphan detail with no state',
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert "state_detail" not in body, body
 
 
 def test_heartbeat_body_clears_stale_shutdown_on_default_call():

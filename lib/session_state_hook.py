@@ -57,12 +57,13 @@ def event_to_declared_state(event_name) -> Optional[str]:
     return _EVENT_STATE_MAP.get(str(event_name))
 
 
-def build_state_marker(event_name, now_iso, prev_marker=None) -> Optional[dict]:
+def build_state_marker(event_name, now_iso, prev_marker=None, *, detail="") -> Optional[dict]:
     """Build the ``.beacon/session-state.json`` marker payload for an event.
 
     Returns ``None`` when the event declares nothing (see
     ``event_to_declared_state``) so the caller writes nothing. Otherwise returns
-    ``{declared_state, declared_at, state_since, source_event}``.
+    ``{declared_state, declared_at, state_since, source_event}`` (+ optional
+    ``state_detail``).
 
     Two timestamps, deliberately distinct (ms-159 e-6245):
 
@@ -75,6 +76,15 @@ def build_state_marker(event_name, now_iso, prev_marker=None) -> Optional[dict]:
       re-fires ``running`` on every tool call, or an ``awaiting_human`` whose
       Notification re-fires, must not keep resetting its "waiting since" clock.
 
+    ``detail`` (ms-159 / e-6488) is the wait detail — WHAT the human is being
+    asked (e.g. the Notification message "Claude needs your permission to use
+    Bash"). It is attached as ``state_detail`` ONLY for ``awaiting_human`` (the
+    one state whose activity is the wait content, 判断3), and ONLY when non-empty:
+    an unknown wait reason stays absent rather than fabricated (ms-173 方針2). For
+    every other state the detail is dropped (a ``running`` marker has no wait
+    detail). The consumer (``lib/working_target.derive_activity``) shows this on
+    the ``awaiting_human`` row and renders empty when it is absent.
+
     ``prev_marker`` is the previously-written marker (or ``None`` on first
     write). When the incoming state equals the previous ``declared_state``, the
     prior ``state_since`` is carried forward; otherwise this is a transition and
@@ -86,9 +96,13 @@ def build_state_marker(event_name, now_iso, prev_marker=None) -> Optional[dict]:
     state_since = now_iso
     if isinstance(prev_marker, dict) and prev_marker.get("declared_state") == state:
         state_since = prev_marker.get("state_since") or now_iso
-    return {
+    marker = {
         "declared_state": state,
         "declared_at": now_iso,
         "state_since": state_since,
         "source_event": str(event_name),
     }
+    clean_detail = detail.strip() if isinstance(detail, str) else ""
+    if state == bus_liveness.STATE_AWAITING_HUMAN and clean_detail:
+        marker["state_detail"] = clean_detail
+    return marker

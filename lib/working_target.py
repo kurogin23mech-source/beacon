@@ -203,7 +203,7 @@ def derive_working_target(
 
 
 def derive_activity(declared_activity, *, head_subject="", state="",
-                    wait_detail="") -> str:
+                    state_detail="") -> str:
     """Return the session's activity (作業概要, 1 line), declared-or-derived.
 
     Precedence:
@@ -212,7 +212,7 @@ def derive_activity(declared_activity, *, head_subject="", state="",
        wins — it knows best what it is doing / waiting for.
     2. Otherwise the answer is STATE-AWARE (ms-159 / e-6484):
        * ``awaiting_human`` / ``blocked`` (``_WAIT_DETAIL_STATES``) → the
-         ``wait_detail`` (what it is waiting for / blocked on). When that is
+         ``state_detail`` (what it is waiting for / blocked on). When that is
          empty, return EMPTY — never the git head subject, which would
          misrepresent a stalled session as actively working on its last commit
          (判定できない待機理由は素直に空、ms-173 方針2 = no fabrication).
@@ -220,7 +220,14 @@ def derive_activity(declared_activity, *, head_subject="", state="",
          commit subject (``git.head_subject``), the best proxy for "what it is
          doing".
 
-    ``state``/``wait_detail`` default to "" so callers that don't know the state
+    ``state_detail`` is named to match the directory row field of the same name
+    (#749 review, maintainability): the wait detail lives on the row as
+    ``row["state_detail"]`` (the field ``lib/attention`` reads too), so aligning
+    the parameter name removes the wait_detail↔state_detail rename step at the
+    call site and the positional-arg confusion an AI hits when it reads the row
+    schema and calls this by shape.
+
+    ``state``/``state_detail`` default to "" so callers that don't know the state
     (e.g. the server projection, older call sites) keep the pre-e-6484 behaviour
     exactly: declared-or-head_subject. The provenance is intentionally not
     returned — unlike the working target, a wrong activity guess is low-stakes.
@@ -229,7 +236,7 @@ def derive_activity(declared_activity, *, head_subject="", state="",
     if declared:
         return declared
     if _clean(state) in _WAIT_DETAIL_STATES:
-        return _clean(wait_detail)
+        return _clean(state_detail)
     return _clean(head_subject)
 
 
@@ -292,14 +299,27 @@ def activity_for_row(row) -> str:
     an ``awaiting_human`` / ``blocked`` row shows its wait detail
     (``row["state_detail"]`` — the same field ``lib/attention`` reads) and is
     EMPTY when none is known, while any other state falls back to the row's
-    ``git.head_subject``."""
+    ``git.head_subject``.
+
+    NOTE (e-6488 wiring status, #750 AX3): the CARRY path for ``state_detail`` IS
+    wired — beacon-state-hook.py writes it to the marker, the bridge piggybacks it
+    on the heartbeat, and ``SessionUpsert`` stores it, so a deployed server exposes
+    it on the row (via storage pass-through, not the liveness projection —
+    ``server/app.py::_stamp_session_liveness`` deliberately does NOT stamp
+    ``state_detail``; it only derives ``state``/``state_since``). What remains is a
+    DEPLOY gap, not a code gap: the production server predates these fields, so
+    until it ships, live rows carry no ``state_detail`` (and no ``state``), and the
+    ``awaiting_human`` / ``blocked`` branch resolves to EMPTY. That empty is the
+    intended, correct behaviour (no fabrication) — NOT a bug. A future editor
+    seeing "waiting rows show blank activity" pre-deploy should NOT patch this;
+    post-deploy the value flows through unchanged."""
     row = row if isinstance(row, dict) else {}
     git = row.get("git") if isinstance(row.get("git"), dict) else {}
     return derive_activity(
         row.get("activity"),
         head_subject=git.get("head_subject") or "",
         state=row.get("state") or "",
-        wait_detail=row.get("state_detail") or "",
+        state_detail=row.get("state_detail") or "",
     )
 
 

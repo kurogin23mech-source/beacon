@@ -38,6 +38,11 @@ export const STATE_TERMINATED = 'terminated'
  *   declared_at ← last_poll_at ← last_active). A back-compat marker therefore
  *   omits state_since from the heartbeat, and the server's own fallback resolves
  *   it to declared_at — identical result, but only one place decides.
+ *
+ *   ms-159 e-6488: stateDetail (the awaiting_human wait detail, e.g. the
+ *   Notification permission message) is likewise passed through verbatim,
+ *   undefined when absent. The hook only writes state_detail for awaiting_human,
+ *   so the reader carries whatever is there without re-deciding.
  */
 export function readStateMarker(markerPath) {
   let raw
@@ -54,7 +59,9 @@ export function readStateMarker(markerPath) {
         typeof declaredAt === 'string' && declaredAt) {
       const rawSince = obj && obj.state_since
       const stateSince = (typeof rawSince === 'string' && rawSince) ? rawSince : undefined
-      return { declaredState, declaredAt, stateSince }
+      const rawDetail = obj && obj.state_detail
+      const stateDetail = (typeof rawDetail === 'string' && rawDetail) ? rawDetail : undefined
+      return { declaredState, declaredAt, stateSince, stateDetail }
     }
   } catch (e) {
     // malformed JSON → treat as no declaration (never throw into the poll loop)
