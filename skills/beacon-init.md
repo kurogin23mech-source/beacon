@@ -301,36 +301,14 @@ echo "   ※ cloud mode で初期化した場合のみ)"
 
 #### cloud mode (明示的 opt-in、cloud.json あり)
 
+cloud プロジェクトの盤も session-start と同じ統合ビューワー `beacon view` で開く (ms-170 e-6347)。盤を開く処理の定義は `scripts/open-board.py` 1 箇所が所有し、beacon-init はそれを呼ぶだけ (以前ここにあった beacon-ai.dev URL 組み立て + Beacon.app handler 回避 + ブラウザ起動連鎖のインライン写しは、session-start と二重メンテになるため廃止した)。**ホスト型 Web UI (beacon-ai.dev) の自動オープンは行わない** (手動では従来どおり開ける):
+
 ```bash
 # Bash 呼び出し (cwd=$PROJECT_DIR)
-if [ -f .beacon/cloud.json ]; then
-  PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
-  if [ -n "$PROJECT_ID" ]; then
-    WEBUI_URL="https://beacon-ai.dev/?project=$PROJECT_ID"
-    # ms-46 e-737: macOS が Beacon.app を URL handler に登録するケースを避け、
-    # ブラウザを明示的に指定 (Tauri 起動防止)。
-    DEFAULT_BROWSER=$(python3 -c "
-import subprocess, plistlib, os, sys
-p = os.path.expanduser('~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist')
-try:
-    with open(p, 'rb') as f: d = plistlib.load(f)
-    for h in d.get('LSHandlers', []):
-        if h.get('LSHandlerURLScheme') == 'https':
-            r = h.get('LSHandlerRoleAll', '')
-            if r and 'beacon' not in r.lower():
-                print(r); sys.exit(0)
-except Exception: pass
-print('com.apple.Safari')
-" 2>/dev/null || echo 'com.apple.Safari')
-    (open -b "$DEFAULT_BROWSER" "$WEBUI_URL" 2>/dev/null \
-      || open -a Safari "$WEBUI_URL" 2>/dev/null \
-      || xdg-open "$WEBUI_URL" 2>/dev/null \
-      || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
-      || powershell.exe -Command "Start-Process '$WEBUI_URL'" 2>/dev/null) &
-    echo "WEBUI_URL=$WEBUI_URL"
-  fi
-fi
+python3 "$(beacon _install-root)/scripts/open-board.py" 2>/dev/null
 ```
+
+stdout の marker (`VIEWER_URL=<url>` / `VIEWER_LAUNCH_FAILED=spawn (<理由>)` / `VIEWER_LAUNCH_FAILED=exited-<rc> (log: <path>)` / `VIEWER_LAUNCH_UNCONFIRMED=alive (log: <path>)`、全て `KEY=VALUE` 形) を Step 5d の完了報告に転記する (contract は session-start Step 2.7 と同一)。
 
 ### Step 5d: 完了報告
 
@@ -359,8 +337,15 @@ mkdir 有無 (= Step 5a が走ったか) と storage で内容を変える。tar
 ```
 「[name]」のスペース (cloud sync 有効) を準備しました (場所: $PROJECT_DIR)。
 
-📊 Web UI を別ウィンドウで開きました: $WEBUI_URL
+[VIEWER_URL が出た場合]
+🖥 盤ビューワーを開きました: [VIEWER_URL] (統合ビューワー beacon view)
    ターミナルの隣に並べておくと、これからの状態変化が常に見られます。
+
+[VIEWER_LAUNCH_FAILED が出た場合]
+🖥 盤ビューワーの起動に失敗しました — [marker 全文 (log path を含む)] (回復: log を見て原因を直す)
+
+[VIEWER_LAUNCH_UNCONFIRMED が出た場合]
+🖥 盤ビューワーは起動中ですが URL 未確認 — [marker 全文 (log path を含む)] (回復: 数秒後に log の URL を再確認)
 
 [target/notes が入力されていた場合の /beacon-vision 誘導 1 行]
 

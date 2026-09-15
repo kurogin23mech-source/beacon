@@ -4,7 +4,9 @@ e-3178 moved three embedded ``python3`` heredocs out of the session-start
 Skill markdown into tested scripts/lib:
 
   * Step 1i (beacon-bus receive capability) -> scripts/check-mcp-receive-capability.py
-  * Step 2.7 (Web UI open)                 -> scripts/open-webui.py
+  * Step 2.7 (board open)                  -> scripts/open-board.py
+    (ms-170 e-6347 folded its cloud/local branch into one `beacon view`,
+     and renamed open-webui.py -> open-board.py per AX/maintainability review)
   * Step 1n-2 (user-scoped DM catch-up)    -> lib/dm_pending formatters
     (fetch orchestration later merged into scripts/session-start-dm-inbox.py
      by ms-85 e-3180; the pure filter/format helpers tested here are shared)
@@ -74,62 +76,221 @@ def test_mcp_warning_band_empty_for_ok_and_unknown():
 
 
 # ---------------------------------------------------------------------------
-# Step 2.7: Web UI open — local mode skip + browser resolver avoids Beacon.app
+# Step 2.7: board open — one unified viewer (ms-170 e-6347)
+#
+# The folded contract: the launcher spawns `beacon view` (the unified viewer
+# whose conversion layer absorbs local vs cloud) detached, with NO
+# per-project-form branch and NO Tauri desktop / hosted-Web-UI switch, and
+# announces only what it OBSERVES (AX review 2026-09-15): VIEWER_URL once the
+# board's URL is seen, an explicit failure/unconfirmed marker otherwise —
+# never a success marker for an unobserved launch. These tests pin that fold.
 # ---------------------------------------------------------------------------
 
-WEBUI = _load_script("open-webui.py")
+BOARD = _load_script("open-board.py")
 
 
-def test_webui_local_mode_launches_desktop(tmp_path, monkeypatch, capsys):
-    """No .beacon/cloud.json -> launch the Tauri desktop app, announce it."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: True)
-    rc = WEBUI.main()
-    assert rc == 0
-    assert capsys.readouterr().out.strip() == "DESKTOP_LAUNCHED=Beacon"
+def _fake_spawn_writing(url_line, *, rc_seq=(None, None)):
+    """Build a fake _spawn that writes url_line to the log and a fake process.
+
+    rc_seq drives successive poll() returns (None = alive, int = exited-rc).
+    """
+    rc_iter = iter(rc_seq)
+
+    def _spawn(beacon_bin, log_fd):
+        if url_line is not None:
+            log_fd.write(url_line)
+            log_fd.flush()
+
+        class _P:
+            def poll(self):
+                try:
+                    return next(rc_iter)
+                except StopIteration:
+                    return None
+
+        return _P()
+
+    return _spawn
 
 
-def test_webui_local_mode_silent_when_desktop_absent(tmp_path, monkeypatch, capsys):
-    """Local mode but no desktop app installed -> print nothing, never block."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: False)
-    rc = WEBUI.main()
-    assert rc == 0
-    assert capsys.readouterr().out == ""
+def test_view_announces_observed_url(tmp_path, monkeypatch, capsys):
+    """Once the board's URL is seen in the log, announce VIEWER_URL=<url>.
 
-
-def test_webui_no_project_id_falls_back_to_desktop(tmp_path, monkeypatch, capsys):
-    """cloud.json without a project_id is not a live cloud project -> desktop."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".beacon").mkdir()
-    (tmp_path / ".beacon" / "cloud.json").write_text(json.dumps({}))
-    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: True)
-    rc = WEBUI.main()
-    assert rc == 0
-    assert capsys.readouterr().out.strip() == "DESKTOP_LAUNCHED=Beacon"
-
-
-def test_webui_cloud_mode_prints_url_without_launching(tmp_path, monkeypatch, capsys):
-    """cloud mode -> build URL, print WEBUI_URL=..., never boot Beacon.app.
-
-    The browser launch is stubbed so the test is hermetic; we assert the URL
-    shape and that the default-browser resolver never returns a beacon handler.
+    Same for cloud and local — the launcher never reads cloud.json, so project
+    form does not change what opens (the fold's core contract).
     """
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".beacon").mkdir()
-    (tmp_path / ".beacon" / "cloud.json").write_text(
-        json.dumps({"project_id": "proj-xyz"})
-    )
-    launched = {}
+    log = tmp_path / "view.log"
     monkeypatch.setattr(
-        WEBUI, "_launch", lambda browser, url: launched.update(browser=browser, url=url)
+        BOARD, "_spawn",
+        _fake_spawn_writing("盤を開きました: http://127.0.0.1:8973/\n"),
     )
-    rc = WEBUI.main()
+    marker = BOARD.launch_and_observe("/bin/beacon", str(log))
+    assert marker == "VIEWER_URL=http://127.0.0.1:8973/"
+    # No cloud URL / desktop marker / handler survive the fold.
+    assert "beacon-ai.dev" not in marker
+    assert "WEBUI_URL" not in marker and "DESKTOP_LAUNCHED" not in marker
+
+
+def test_view_reports_failure_when_child_dies(tmp_path, monkeypatch):
+    """Child exits before printing a URL -> explicit failure, not fake success.
+
+    We must not print a success marker just because the spawn call itself did
+    not raise.
+    """
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn", _fake_spawn_writing(None, rc_seq=(1, 1)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    assert marker.startswith("VIEWER_LAUNCH_FAILED=exited-1")
+    assert "log:" in marker
+
+
+def test_view_failure_when_url_present_but_child_dead(tmp_path, monkeypatch):
+    """A URL in the log does NOT beat a dead child (AX748-1 liveness-first).
+
+    A child that prints a URL and then exits must be reported as a failure, not
+    a false VIEWER_URL success — liveness is checked before the URL.
+    """
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn",
+        _fake_spawn_writing("盤を開きました: http://127.0.0.1:8973/\n", rc_seq=(1,)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    assert marker.startswith("VIEWER_LAUNCH_FAILED=exited-1")
+    assert not marker.startswith("VIEWER_URL")
+
+
+def test_view_unconfirmed_when_alive_but_no_url(tmp_path, monkeypatch):
+    """Alive but no URL within the wait -> unconfirmed, never a success claim."""
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn", _fake_spawn_writing(None, rc_seq=(None, None, None)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    # KEY=VALUE grammar, same family as the others (AX748-3 / M748-3 consensus).
+    assert marker.startswith("VIEWER_LAUNCH_UNCONFIRMED=alive")
+    assert "log:" in marker
+    assert "=" in marker.split(" ", 1)[0]  # first token is KEY=VALUE
+    # crucially, not a success marker
+    assert not marker.startswith("VIEWER_URL")
+
+
+def test_view_reports_spawn_failure_inline(tmp_path, monkeypatch, capsys):
+    """Can't even spawn -> inline VIEWER_LAUNCH_FAILED=spawn, not silence.
+
+    AX748-2: silence must not collapse "beacon view couldn't start" together
+    with "the launcher script itself never ran". A spawn failure names its
+    reason inline (there is no log to point at).
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def _boom(beacon_bin, log_fd):
+        raise OSError("no such binary")
+
+    monkeypatch.setattr(BOARD, "_spawn", _boom)
+    rc = BOARD.main()
     assert rc == 0
-    out = capsys.readouterr().out
-    assert out.strip() == "WEBUI_URL=https://beacon-ai.dev/?project=proj-xyz"
-    assert launched["url"] == "https://beacon-ai.dev/?project=proj-xyz"
-    assert "beacon" not in launched["browser"].lower()
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("VIEWER_LAUNCH_FAILED=spawn (")
+    assert "OSError" in out
+
+
+def test_beacon_bin_prefers_install_sibling():
+    """Resolve the CLI belonging to this install (bin/beacon sibling), not PATH.
+
+    Guards against a shadowing `beacon` earlier on PATH launching a different
+    viewer than the one that started the session.
+    """
+    resolved = BOARD._beacon_bin()
+    assert resolved == str(REPO / "bin" / "beacon")
+    assert os.path.isfile(resolved)
+
+
+def test_spawn_is_detached_and_streams_to_log(monkeypatch, tmp_path):
+    """Drift guard on the actual spawn: argv is `<bin> view`, detached, logged.
+
+    `beacon view` runs a foreground server; if we ever stop detaching or start
+    waiting on it, session-start would hang. stdout+stderr go to the log file
+    (not a pipe) so the child can't block, and stderr is preserved for
+    diagnosing a non-opening board.
+    """
+    calls = {}
+
+    def fake_popen(argv, **kw):
+        calls["argv"] = argv
+        calls["kw"] = kw
+        return object()
+
+    monkeypatch.setattr(BOARD.subprocess, "Popen", fake_popen)
+    log_fd = (tmp_path / "log").open("w")
+    BOARD._spawn("/some/where/bin/beacon", log_fd)
+    assert calls["argv"] == ["/some/where/bin/beacon", "view"]
+    assert calls["kw"].get("start_new_session") is True
+    assert calls["kw"].get("stdout") is log_fd
+    assert calls["kw"].get("stderr") == BOARD.subprocess.STDOUT
+    assert calls["kw"].get("stdin") == BOARD.subprocess.DEVNULL
+
+
+# --- launcher <-> `beacon view` stdout contract (PR #748 review, high) --------
+# The launcher reads the board URL out of beacon view's log. That is a stringly
+# cross-process seam: if either producer's serving line changes wording, the
+# launcher silently mis-parses (wrong URL) or degrades to UNCONFIRMED. These
+# tests pin the seam against BOTH language sources so a change to either side
+# fails here instead of in the field.
+
+SERVING_PREFIX = "盤を開きました: "
+
+
+def test_scan_url_anchors_to_serving_line(tmp_path):
+    """_scan_url extracts ONLY the URL on beacon view's serving line, not any
+    other http string that reached the merged stdout+stderr log first."""
+    log = tmp_path / "view.log"
+    log.write_text(
+        # An unrelated URL (e.g. an error/help line) printed BEFORE the board is
+        # up must not be mistaken for the board URL.
+        "参考: https://github.com/kurogin23mech-source/beacon (help)\n"
+        f"{SERVING_PREFIX}http://127.0.0.1:8973/\n"
+        "  取得元: ローカル\n"
+    )
+    assert BOARD._scan_url(str(log)) == "http://127.0.0.1:8973/"
+
+
+def test_scan_url_ignores_non_serving_urls(tmp_path):
+    """A log with URLs but no serving line yields no URL (→ UNCONFIRMED)."""
+    log = tmp_path / "view.log"
+    log.write_text("エラー: https://example.com/oops was unreachable\n")
+    assert BOARD._scan_url(str(log)) == ""
+
+
+def test_python_cmd_view_serving_line_matches_anchor():
+    """Source-level pin: lib/cmd_view.py must print the exact serving prefix the
+    launcher anchors on. If someone rewords cmd_view's line, this fails."""
+    src = (REPO / "lib" / "cmd_view.py").read_text()
+    assert 'f"盤を開きました: {url}"' in src, (
+        "cmd_view.py serving line drifted from the launcher's anchor "
+        f"({SERVING_PREFIX!r}); update both together"
+    )
+    # And the launcher actually extracts the URL from a line built that way.
+    assert BOARD._URL_RE.search(f"盤を開きました: {'http://127.0.0.1:8080/'}")
+
+
+def test_open_webui_py_stays_deleted():
+    """open-webui.py was renamed to open-board.py (PR #748). Guard against a
+    revert/merge resurrecting the old file, which would give two launchers."""
+    assert not (REPO / "scripts" / "open-webui.py").exists()
+    assert (REPO / "scripts" / "open-board.py").exists()
 
 
 # ---------------------------------------------------------------------------

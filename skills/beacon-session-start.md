@@ -608,21 +608,28 @@ stdout の JSON から:
 
 session-start で取得済みの `beacon status --json` 結果と CORE doc (Step 1a/1d/1e) はそのまま渡してよい。`/beacon-archaeology` の後は Step 4（トリガーチェック）に戻る。通常の Step 3 出力は不要。
 
-## Step 2.7: フロントエンドを自動オープン（cloud=Web UI / local=Desktop）
+## Step 2.7: 盤ビューワーを自動オープン（統合ビューワー beacon view / ms-170 e-6347）
 
-Beacon の作業形態は「ターミナル + フロントエンド 並列表示」が前提。  
-session-start 時にフロントエンドを立ち上げ直す（既に開かれていれば既存ウィンドウ / タブが focus する）。
+Beacon の作業形態は「ターミナル + 盤ビューワー 並列表示」が前提。  
+session-start 時に盤ビューワーを立ち上げ直す。
 
 ```bash
-python3 "$(beacon _install-root)/scripts/open-webui.py" 2>/dev/null
+python3 "$(beacon _install-root)/scripts/open-board.py" 2>/dev/null
 ```
 
-このスクリプトは **プロジェクトのモード (= どこにデータの真値があるか) に応じて起動先を選ぶ**。cloud プロジェクトの生きた front-end は Web UI (真値はサーバ)、local プロジェクトは desktop アプリ (サーバ URL が無い) — データを持つ側が、それを描画する front-end を決める (背景・macOS の URL handler 回避策は `scripts/open-webui.py` の docstring と ms-46 e-737 を参照):
+このスクリプトは **プロジェクト形態 (cloud / local) で起動先を選び分けない**。盤を見る導線は 1 つ = `beacon view` (統合ビューワー) に畳まれている (ms-170 e-6347)。取得元 (ローカル `.beacon` / クラウド API) は変換層が吸収するので、cloud でも local でも同じ盤が見える。`beacon view` の起動先 (Go 版 / Python 版) やブラウザ起動の詳細は `beacon view --help` を参照 (このスクリプトはそれを再記述しない = 知識の所有者は 1 箇所)。
 
-- **cloud mode** (`.beacon/cloud.json` に `project_id` あり): ブラウザで Web UI を開き (Beacon.app への URL handler 誤ルーティングを回避して default browser / Safari を明示指定)、`WEBUI_URL=<url>` を stdout に出す。
-- **local mode** (`.beacon/cloud.json` 無し / project_id 無し): Beacon Tauri desktop アプリ (= ローカルの `.beacon/project.json` を読む) を起動し、`DESKTOP_LAUNCHED=<name>` を stdout に出す。desktop アプリ未インストールなら何も出さない (best-effort, session-start を止めない)。
+スクリプトは `beacon view` を detached で起動し (前面で待ち受け続けるビューワーなので session-start を塞がない)、**起動を観測してから名乗る** (spawn が例外を出さなかっただけで成功と断定しない)。marker は全て `KEY=VALUE` 形。stdout の marker を Step 3 ヘッダにそのまま転記する:
 
-取得した `WEBUI_URL` / `DESKTOP_LAUNCHED` は Step 3 の出力ヘッダに表示する。
+- `VIEWER_URL=<url>`: 盤の URL を観測できた (子プロセスの生存も確認済)。この URL を表示する。ブラウザはビューワー自身が開くが、開かない環境 (SSH / headless 等) ではこの URL を手で開けば見られる。
+- `VIEWER_LAUNCH_FAILED=spawn (<理由>)`: `beacon view` を spawn できなかった (beacon 未検出等)。log が無いので理由を inline で運ぶ。
+- `VIEWER_LAUNCH_FAILED=exited-<rc> (log: <path>)`: 子プロセスが即終了した (起動失敗)。log path を添えて「盤の起動に失敗」と伝える。
+- `VIEWER_LAUNCH_UNCONFIRMED=alive (log: <path>)`: 生きているが待ち時間内に URL を確認できなかった。「起動したが URL 未確認」と伝える (成功と断定しない)。
+- 何も出ない (marker 皆無): スクリプト自体が走らなかった (install-root 解決失敗 / python 不在 / 版ズレで script 不在)。best-effort、session-start を止めない。
+
+**cloud プロジェクトでもホスト型 Web UI (beacon-ai.dev) の自動オープンは行わない** (手動では従来どおり開ける。Go 同梱 + サーバ側統合が入るまでの暫定として、cloud の自動オープンは統合ビューワーに寄せている)。
+
+> 既知の限界 (AX-4, follow-up): 再実行のたびに新しい `beacon view` を spawn する (既存ビューワーの再利用はまだ無い)。冪等な再利用はビューワー側 (portfile / 生存確認) が持つべきで、Go 同梱 (e-6476) に畳む。
 
 ## Step 2.9: 次セッション最初の作業の特定 (ms-43 e-568)
 
@@ -684,8 +691,9 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 
 ```
 Beacon: [name]
-📊 Web UI: $WEBUI_URL  ← cloud mode で WEBUI_URL が出た場合のみ
-🖥 Desktop: $DESKTOP_LAUNCHED (Tauri) を起動  ← local mode で DESKTOP_LAUNCHED が出た場合のみ
+🖥 盤: [VIEWER_URL] を開きました (統合ビューワー beacon view)  ← VIEWER_URL が出た場合 (ms-170 e-6347)
+🖥 盤: 起動に失敗しました — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_FAILED の場合 (回復: log を見て原因を直す)
+🖥 盤: 起動中 (URL 未確認) — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_UNCONFIRMED の場合 (回復: 数秒後に log の URL を再確認)
 🔗 fork from: [target_ms_id] [target_ms_title]  ← Step 1m / .beacon/fork.json があれば
    parent: [parent_session_id 短縮] (branch=[parent_branch], repo=[parent_repo_path basename])
    child:  [child_branch] (この worktree)
