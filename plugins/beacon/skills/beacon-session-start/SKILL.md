@@ -588,21 +588,22 @@ stdout の JSON から:
 
 session-start で取得済みの `beacon status --json` 結果と CORE doc (Step 1a/1d/1e) はそのまま渡してよい。`/beacon-archaeology` の後は Step 4（トリガーチェック）に戻る。通常の Step 3 出力は不要。
 
-## Step 2.7: フロントエンドを自動オープン（cloud=Web UI / local=Desktop）
+## Step 2.7: 盤ビューワーを自動オープン（統合ビューワー beacon view / ms-170 e-6347）
 
-Beacon の作業形態は「ターミナル + フロントエンド 並列表示」が前提。  
-session-start 時にフロントエンドを立ち上げ直す（既に開かれていれば既存ウィンドウ / タブが focus する）。
+Beacon の作業形態は「ターミナル + 盤ビューワー 並列表示」が前提。  
+session-start 時に盤ビューワーを立ち上げ直す。
 
 ```bash
 python3 "$(beacon _install-root)/scripts/open-webui.py" 2>/dev/null
 ```
 
-このスクリプトは **プロジェクトのモード (= どこにデータの真値があるか) に応じて起動先を選ぶ**。cloud プロジェクトの生きた front-end は Web UI (真値はサーバ)、local プロジェクトは desktop アプリ (サーバ URL が無い) — データを持つ側が、それを描画する front-end を決める (背景・macOS の URL handler 回避策は `scripts/open-webui.py` の docstring と ms-46 e-737 を参照):
+このスクリプトは **プロジェクト形態 (cloud / local) で起動先を選び分けない**。盤を見る導線は 1 つ = `beacon view` (統合ビューワー) に畳まれている (ms-170 e-6347)。取得元 (ローカル `.beacon` / クラウド API) は変換層が吸収するので、cloud でも local でも同じ盤が見える:
 
-- **cloud mode** (`.beacon/cloud.json` に `project_id` あり): ブラウザで Web UI を開き (Beacon.app への URL handler 誤ルーティングを回避して default browser / Safari を明示指定)、`WEBUI_URL=<url>` を stdout に出す。
-- **local mode** (`.beacon/cloud.json` 無し / project_id 無し): Beacon Tauri desktop アプリ (= ローカルの `.beacon/project.json` を読む) を起動し、`DESKTOP_LAUNCHED=<name>` を stdout に出す。desktop アプリ未インストールなら何も出さない (best-effort, session-start を止めない)。
+- `beacon view` を detached で起動し (前面で待ち受け続けるビューワーなので session-start を塞がない)、`VIEWER_LAUNCHED=beacon view` を stdout に出す。ビューワー自身がブラウザを開く。
+- `beacon view` は Go 版運用室が同梱 (e-6476) されていればそれに委譲、無ければ Python 素朴盤にフォールバックする。**cloud プロジェクトでもホスト型 Web UI (beacon-ai.dev) の自動オープンは行わない** (手動では従来どおり開ける。Go 同梱 + サーバ側統合が入るまでの暫定として、cloud の自動オープンは統合ビューワーに寄せている)。
+- 起動できない場合 (beacon 未検出 / spawn 失敗) は何も出さない (best-effort、session-start を止めない)。
 
-取得した `WEBUI_URL` / `DESKTOP_LAUNCHED` は Step 3 の出力ヘッダに表示する。
+取得した `VIEWER_LAUNCHED` を Step 3 の出力ヘッダに表示する。
 
 ## Step 2.9: 次セッション最初の作業の特定 (ms-43 e-568)
 
@@ -664,8 +665,7 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 
 ```
 Beacon: [name]
-📊 Web UI: $WEBUI_URL  ← cloud mode で WEBUI_URL が出た場合のみ
-🖥 Desktop: $DESKTOP_LAUNCHED (Tauri) を起動  ← local mode で DESKTOP_LAUNCHED が出た場合のみ
+🖥 盤: beacon view を起動 (統合ビューワー、ブラウザが開きます)  ← VIEWER_LAUNCHED が出た場合のみ (ms-170 e-6347)
 🔗 fork from: [target_ms_id] [target_ms_title]  ← Step 1m / .beacon/fork.json があれば
    parent: [parent_session_id 短縮] (branch=[parent_branch], repo=[parent_repo_path basename])
    child:  [child_branch] (この worktree)

@@ -4,7 +4,8 @@ e-3178 moved three embedded ``python3`` heredocs out of the session-start
 Skill markdown into tested scripts/lib:
 
   * Step 1i (beacon-bus receive capability) -> scripts/check-mcp-receive-capability.py
-  * Step 2.7 (Web UI open)                 -> scripts/open-webui.py
+  * Step 2.7 (board open)                  -> scripts/open-webui.py
+    (ms-170 e-6347 folded its cloud/local branch into one `beacon view`)
   * Step 1n-2 (user-scoped DM catch-up)    -> lib/dm_pending formatters
     (fetch orchestration later merged into scripts/session-start-dm-inbox.py
      by ms-85 e-3180; the pure filter/format helpers tested here are shared)
@@ -74,62 +75,99 @@ def test_mcp_warning_band_empty_for_ok_and_unknown():
 
 
 # ---------------------------------------------------------------------------
-# Step 2.7: Web UI open — local mode skip + browser resolver avoids Beacon.app
+# Step 2.7: board open — one unified viewer (ms-170 e-6347)
+#
+# The folded contract: main() launches `beacon view` (the unified viewer whose
+# conversion layer absorbs local vs cloud) and returns immediately, with NO
+# per-project-form branch and NO Tauri desktop / hosted-Web-UI switch. These
+# tests pin that fold so a future edit can't silently reintroduce the branch.
 # ---------------------------------------------------------------------------
 
 WEBUI = _load_script("open-webui.py")
 
 
-def test_webui_local_mode_launches_desktop(tmp_path, monkeypatch, capsys):
-    """No .beacon/cloud.json -> launch the Tauri desktop app, announce it."""
+def test_view_launches_in_local_mode(tmp_path, monkeypatch, capsys):
+    """No .beacon/cloud.json -> still launch the one viewer, announce it."""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: True)
+    seen = {}
+    monkeypatch.setattr(
+        WEBUI, "_launch_viewer", lambda b: seen.update(bin=b) or True
+    )
     rc = WEBUI.main()
     assert rc == 0
-    assert capsys.readouterr().out.strip() == "DESKTOP_LAUNCHED=Beacon"
+    assert capsys.readouterr().out.strip() == "VIEWER_LAUNCHED=beacon view"
+    assert seen["bin"]  # a beacon binary path was resolved and passed
 
 
-def test_webui_local_mode_silent_when_desktop_absent(tmp_path, monkeypatch, capsys):
-    """Local mode but no desktop app installed -> print nothing, never block."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: False)
-    rc = WEBUI.main()
-    assert rc == 0
-    assert capsys.readouterr().out == ""
+def test_view_launches_identically_in_cloud_mode(tmp_path, monkeypatch, capsys):
+    """cloud.json + project_id -> same launch, same output (no branch).
 
-
-def test_webui_no_project_id_falls_back_to_desktop(tmp_path, monkeypatch, capsys):
-    """cloud.json without a project_id is not a live cloud project -> desktop."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".beacon").mkdir()
-    (tmp_path / ".beacon" / "cloud.json").write_text(json.dumps({}))
-    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: True)
-    rc = WEBUI.main()
-    assert rc == 0
-    assert capsys.readouterr().out.strip() == "DESKTOP_LAUNCHED=Beacon"
-
-
-def test_webui_cloud_mode_prints_url_without_launching(tmp_path, monkeypatch, capsys):
-    """cloud mode -> build URL, print WEBUI_URL=..., never boot Beacon.app.
-
-    The browser launch is stubbed so the test is hermetic; we assert the URL
-    shape and that the default-browser resolver never returns a beacon handler.
+    The whole point of the fold: project form no longer changes what opens.
+    The launcher does not read cloud.json at all, so cloud and local produce a
+    byte-identical announcement.
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".beacon").mkdir()
     (tmp_path / ".beacon" / "cloud.json").write_text(
         json.dumps({"project_id": "proj-xyz"})
     )
-    launched = {}
-    monkeypatch.setattr(
-        WEBUI, "_launch", lambda browser, url: launched.update(browser=browser, url=url)
-    )
+    monkeypatch.setattr(WEBUI, "_launch_viewer", lambda b: True)
     rc = WEBUI.main()
     assert rc == 0
-    out = capsys.readouterr().out
-    assert out.strip() == "WEBUI_URL=https://beacon-ai.dev/?project=proj-xyz"
-    assert launched["url"] == "https://beacon-ai.dev/?project=proj-xyz"
-    assert "beacon" not in launched["browser"].lower()
+    out = capsys.readouterr().out.strip()
+    assert out == "VIEWER_LAUNCHED=beacon view"
+    # No cloud URL, no Beacon.app handler, no desktop marker survive the fold.
+    assert "beacon-ai.dev" not in out
+    assert "WEBUI_URL" not in out and "DESKTOP_LAUNCHED" not in out
+
+
+def test_view_silent_when_launch_fails(tmp_path, monkeypatch, capsys):
+    """beacon view can't be spawned -> print nothing, never block."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(WEBUI, "_launch_viewer", lambda b: False)
+    rc = WEBUI.main()
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_beacon_bin_prefers_install_sibling():
+    """Resolve the CLI belonging to this install (bin/beacon sibling), not PATH.
+
+    Guards against a shadowing `beacon` earlier on PATH launching a different
+    viewer than the one that started the session.
+    """
+    resolved = WEBUI._beacon_bin()
+    assert resolved == str(REPO / "bin" / "beacon")
+    assert os.path.isfile(resolved)
+
+
+def test_launch_viewer_spawns_detached_beacon_view(monkeypatch):
+    """Drift guard on the actual spawn: argv is `<bin> view`, detached, silent.
+
+    `beacon view` runs a foreground server; if we ever stop detaching or start
+    waiting on it, session-start would hang. Pin the Popen call shape.
+    """
+    import subprocess as _sp
+
+    calls = {}
+
+    def fake_popen(argv, **kw):
+        calls["argv"] = argv
+        calls["kw"] = kw
+
+        class _P:
+            pass
+
+        return _P()
+
+    monkeypatch.setattr(WEBUI.subprocess, "Popen", fake_popen)
+    ok = WEBUI._launch_viewer("/some/where/bin/beacon")
+    assert ok is True
+    assert calls["argv"] == ["/some/where/bin/beacon", "view"]
+    assert calls["kw"].get("start_new_session") is True
+    assert calls["kw"].get("stdout") == _sp.DEVNULL
+    assert calls["kw"].get("stderr") == _sp.DEVNULL
+    assert calls["kw"].get("stdin") == _sp.DEVNULL
 
 
 # ---------------------------------------------------------------------------
