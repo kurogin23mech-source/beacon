@@ -156,3 +156,166 @@ def test_fallback_notice_is_encodable_on_windows_legacy_codepage():
         cmd_view.FALLBACK_NOTICE.encode("cp932")
     except UnicodeEncodeError as e:
         raise AssertionError(f"cp932 で出せない文字が案内にある: {e}")
+
+
+# --- exec 失敗案内 (not-found と区別する / 独立レビュー consensus) ------------
+
+def test_exec_failed_notice_distinguishes_from_not_found():
+    """『在るが起動できなかった』は『無い』と別文言で伝える。
+
+    同じ「見つからない」を両方に出すと、壊れたバイナリが居座ったまま『入手せよ』の
+    案内に従っても状況が変わらない誤診ループに入る (AX misleading + 保守性 §5 consensus)。
+    """
+    notice = cmd_view.exec_failed_notice("/usr/local/bin/beacon-view",
+                                         OSError("Exec format error"))
+    # 起動できなかった対象 (path) と理由 (error) が surface に出ている
+    assert "/usr/local/bin/beacon-view" in notice
+    assert "Exec format error" in notice
+    # not-found 案内の「見つからない」とは異なる主張であること
+    assert "見つからない" not in notice
+    assert "起動できませんでした" in notice
+
+
+def test_exec_failed_notice_is_encodable_on_windows_legacy_codepage():
+    try:
+        cmd_view.exec_failed_notice("C:\\beacon-view.exe",
+                                    OSError("boom")).encode("cp932")
+    except UnicodeEncodeError as e:
+        raise AssertionError(f"cp932 で出せない文字が案内にある: {e}")
+
+
+# --- cmd_view() の配線 (純関数の seam を繋ぐ経路 / 保守性 finding #5) --------
+#
+# 純関数群は上でテスト済み。ここは「その seam を繋ぐ配線」= 分岐順序と
+# フォールバック連鎖を押さえる。os.execv / resolve_viewer_binary / serve /
+# build_view を差し替えて、cmd_view() を実際に 1 度通す。
+
+
+class _ExecCalled(Exception):
+    """os.execv が『戻らない』のを試験内で模す (実 execv はプロセスを置換する)。"""
+
+    def __init__(self, argv):
+        self.argv = argv
+
+
+def _wire(monkeypatch, *, binary, execv_error=None):
+    """cmd_view() の外部依存を差し替え、呼び出し記録を返す。"""
+    calls = {"execv": None, "serve": False, "printed": []}
+
+    monkeypatch.setattr(cmd_view, "resolve_viewer_binary",
+                        lambda **kw: binary)
+
+    def _fake_execv(path, argv):
+        calls["execv"] = (path, argv)
+        if execv_error is not None:
+            raise execv_error
+        raise _ExecCalled(argv)  # 成功時は戻らない、を模す
+
+    monkeypatch.setattr(cmd_view.os, "execv", _fake_execv)
+    monkeypatch.setattr(cmd_view, "serve",
+                        lambda *a, **k: calls.__setitem__("serve", True))
+    monkeypatch.setattr(cmd_view, "build_view", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(cmd_view, "_project_root", lambda: ".")
+
+    import builtins
+    real_print = builtins.print
+    monkeypatch.setattr(
+        builtins, "print",
+        lambda *a, **k: calls["printed"].append(" ".join(str(x) for x in a))
+        if a else real_print(*a, **k))
+    return calls
+
+
+def _clear_view_env(monkeypatch):
+    for k in ("BEACON_JSON", "BEACON_VIEW_PORT", "BEACON_VIEW_NO_OPEN",
+              "BEACON_VIEW_HOST", "BEACON_VIEW_EXPOSE"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_json_mode_does_not_delegate(monkeypatch):
+    """--json は盤のみで運用室を含まないため Go 版に委譲しない (順序不変条件)。"""
+    _clear_view_env(monkeypatch)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    calls = _wire(monkeypatch, binary="/x/beacon-view")
+    cmd_view.cmd_view()
+    assert calls["execv"] is None       # 委譲していない
+    assert calls["serve"] is False      # サーバも立てていない (JSON 出して return)
+
+
+def test_binary_found_delegates_via_execv(monkeypatch):
+    """beacon-view が在れば viewer_argv の結果で execv に委譲する。"""
+    _clear_view_env(monkeypatch)
+    calls = _wire(monkeypatch, binary="/x/beacon-view")
+    try:
+        cmd_view.cmd_view()
+    except _ExecCalled as e:
+        assert e.argv[0] == "/x/beacon-view"
+        assert "--path" in e.argv
+    else:
+        raise AssertionError("execv に委譲していない")
+    assert calls["serve"] is False      # 委譲成功時は素朴盤を立てない
+    # 委譲を名乗る 1 行が出ている (silent narrowing 防止)
+    assert any("委譲します" in line for line in calls["printed"])
+
+
+def test_exec_failure_falls_back_to_simple_board(monkeypatch):
+    """execv が OSError なら exec 失敗案内を出して素朴盤に落ちる。"""
+    _clear_view_env(monkeypatch)
+    calls = _wire(monkeypatch, binary="/x/beacon-view",
+                  execv_error=OSError("Exec format error"))
+    cmd_view.cmd_view()
+    assert calls["execv"] is not None   # 委譲は試みた
+    assert calls["serve"] is True       # 素朴盤にフォールバックした
+    assert any("起動できませんでした" in line for line in calls["printed"])
+
+
+def test_binary_absent_falls_back_with_notice(monkeypatch):
+    """beacon-view が無ければ not-found 案内を出して素朴盤を立てる。"""
+    _clear_view_env(monkeypatch)
+    calls = _wire(monkeypatch, binary=None)
+    cmd_view.cmd_view()
+    assert calls["execv"] is None
+    assert calls["serve"] is True
+    assert any("見つからない" in line for line in calls["printed"])
+
+
+# --- プロセス境界の写しの drift ガード (保守性 finding #4 / #6) --------------
+#
+# 配布バイナリの命名と Go 版フラグ名は Python 側に写しとして存在する。写しは
+# 1 箇所に固めてあるが、真実源 (build.sh / main.go) が変わったとき Python 側の
+# 写しが silent に取り残されると委譲が黙って効かなくなる。repo 内で閉じる軽量な
+# 突き合わせで drift を検出可能にする (Go 一本化 = ms-170 終着でこの写し自体が消える)。
+
+_VIEWER_DIR = os.path.join(os.path.dirname(__file__), "..", "viewer")
+
+
+def test_bundled_dist_name_matches_build_sh():
+    """resolver が探す dist 名が build.sh の出力規約と一致していること。"""
+    with open(os.path.join(_VIEWER_DIR, "build.sh"), encoding="utf-8") as f:
+        build = f.read()
+    # build.sh は NAME="beacon-view" を "$NAME-$os-$arch$ext" で dist に吐く。
+    assert 'NAME="beacon-view"' in build, \
+        "build.sh の出力名が変わった。_bundled_viewer_candidates の dist 名も直すこと"
+    assert "$NAME-$os-$arch$ext" in build, \
+        "build.sh の dist 命名規約が変わった。resolver 側の写しを同期すること"
+    # resolver 側の写しがその規約通りに組まれていること
+    cand = cmd_view._bundled_viewer_candidates("/root", "Darwin", "arm64")
+    assert any(c.endswith(os.path.join(
+        "viewer", "dist", "beacon-view-darwin-arm64")) for c in cand)
+
+
+def test_viewer_argv_flags_exist_in_go_main():
+    """viewer_argv が組む全フラグが Go 版 main.go に定義されていること。
+
+    Go 側でフラグを改名すると exec は成功して Go 側のフラグエラーが直接出る
+    (Python fallback は発動しない)。repo 内でフラグ集合を突き合わせて改名を捕まえる。
+    """
+    with open(os.path.join(_VIEWER_DIR, "main.go"), encoding="utf-8") as f:
+        main_go = f.read()
+    argv = cmd_view.viewer_argv("beacon-view", project_root=".", port=7377,
+                                host="127.0.0.1", expose=True, no_open=True)
+    flags = [a[2:] for a in argv if a.startswith("--")]
+    assert flags, "viewer_argv がフラグを 1 つも組んでいない"
+    for flag in flags:
+        assert f'flag.' in main_go and f'"{flag}"' in main_go, \
+            f"viewer_argv が渡す --{flag} が Go 版 main.go に定義されていない (改名 drift)"

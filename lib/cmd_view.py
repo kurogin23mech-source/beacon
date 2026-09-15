@@ -213,17 +213,40 @@ def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
 # 同梱作業は別タスク e-6476 (ms-170) が持つ。同梱が入るまでの間、beacon-view が手元
 # に無い環境では運用室に到達できないため、簡易盤を出しつつ入手方法を 1 行案内する。
 
-# フォールバック時に出す 1 行案内。Go 同梱 (e-6476) が入るまでの暫定である旨を明記し、
+# フォールバック時に出す案内。Go 同梱 (e-6476) が入るまでの暫定である旨を明記し、
 # 「素朴盤が最終形」と読めないようにする。Windows 既定文字コード (cp932) で出せるよう
 # 記号は使わない (serve の起動出力と同じ制約)。
+#
+# **not-found と exec-failed を surface で区別する** (AX + 保守性 独立レビュー consensus):
+# 「beacon-view が無い」と「在るが起動できなかった (アーキ違い/壊れ)」は回復手段が
+# 違う。同じ「見つからない」文言を両方に出すと、壊れたバイナリが PATH に居座ったまま
+# 「入手せよ」の案内に従っても状況が変わらない誤診ループに入る。理由ごとに別文言を出す。
+
+# 見つからなかったとき (= 素朴盤へ縮退)。入手経路にはリポジトリ文脈を添える (配布利用者の
+# 環境には viewer/ が無いため、どこの build.sh かを明示しないと actionable でない)。
 FALLBACK_NOTICE = (
     "運用室 (セッション一覧・状態・端末ジャンプ) は Go 版ビューワー beacon-view で"
     "見られます。\n"
     "  この端末には beacon-view が見つからないので、簡易版の盤を表示します。\n"
     "  (これは Go 版ビューワーが beacon 配布に同梱される [e-6476] までの暫定です。)\n"
-    "  入手: viewer/build.sh でビルドするか、配布物の beacon-view を PATH に置いて"
-    "ください。"
+    "  入手: beacon リポジトリの viewer/build.sh でビルドするか、ビルド済みの"
+    " beacon-view を PATH に置いてください。"
 )
+
+
+def exec_failed_notice(binary: str, error: object) -> str:
+    """beacon-view は見つかったが起動できなかったときの案内 (not-found とは別文言)。
+
+    「無い」ではなく「在るが動かない」を正しく伝え、回復行動を正しい対象 (壊れた
+    バイナリの削除 / 差し替え) に向ける。cp932 で出せるよう記号は使わない。
+    """
+    return (
+        f"beacon-view ({binary}) を起動できませんでした: {error}\n"
+        "  簡易版の盤にフォールバックします。\n"
+        "  このファイルが壊れているか、この端末とは別のプラットフォーム向けの"
+        "可能性があります。\n"
+        "  削除するか、この端末に合う beacon-view に差し替えてください。"
+    )
 
 
 def _go_os_arch(system: str, machine: str) -> tuple[str, str]:
@@ -347,14 +370,20 @@ def cmd_view() -> None:
     if binary:
         argv = viewer_argv(binary, project_root=_project_root(), port=port,
                            host=host, expose=expose, no_open=no_open)
+        # どの実体に委譲したかを名乗る (silent narrowing を防ぐ)。同じ `beacon view`
+        # が環境によって Go 運用室 / Python 素朴盤 のどちらを出したか、出力から辿れる
+        # ようにする。execv は成功すれば戻らないので、事前に 1 行出しておく。
+        print(f"運用室 beacon-view に委譲します: {binary}", flush=True)
         try:
             os.execv(binary, argv)  # 成功すれば戻らない (Go 版が住所も自分で出す)
-        except OSError:
-            # アーキ違い / 壊れたファイル等で起動できなかった。素朴盤に落ちる。
-            pass
-    # ここに到達 = 運用室へ委譲できなかった。暫定の素朴盤を出しつつ入手方法を案内する
-    # (Go 同梱 e-6476 が入れば、この経路は最終的に不要になる)。
-    print(FALLBACK_NOTICE, flush=True)
+        except OSError as e:
+            # 見つかったが起動できなかった (アーキ違い / 壊れ)。not-found とは別文言を
+            # 出してから素朴盤に落ちる (回復行動を壊れたバイナリ側へ向ける)。
+            print(exec_failed_notice(binary, e), flush=True)
+    else:
+        # beacon-view が無い。暫定の素朴盤を出しつつ入手方法を案内する
+        # (Go 同梱 e-6476 が入れば、この経路は最終的に不要になる)。
+        print(FALLBACK_NOTICE, flush=True)
     try:
         serve(port, open_browser=not no_open, host=host, expose=expose)
     except ValueError as e:
