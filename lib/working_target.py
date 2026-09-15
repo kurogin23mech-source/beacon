@@ -26,6 +26,20 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+import bus_liveness
+
+# States whose "activity" (作業概要) is the WAIT/STOP detail — what the session is
+# waiting for or blocked on — NOT the git head subject (ms-159 / e-6484). For a
+# session that is `awaiting_human` / `blocked`, its last commit subject would
+# misrepresent it as "doing" that commit; the human wants "レビュー待ち / 許可待ち /
+# 相手の返信待ち". When no detail is known we return EMPTY rather than falling back
+# to the head subject — 判定できない待機理由は素直に空にする (ms-173 SPEC 方針2 =
+# データはでっち上げず消費側は空欄で正しく描画する)。
+_WAIT_DETAIL_STATES = frozenset({
+    bus_liveness.STATE_AWAITING_HUMAN,
+    bus_liveness.STATE_BLOCKED,
+})
+
 # A milestone id embedded in a branch or worktree name, e.g.
 # "ms-159-fork-361e58", "ms-159", "ms-159-backoffice-stub". First match wins.
 _MS_ID_RE = re.compile(r"(ms-\d+)", re.IGNORECASE)
@@ -188,16 +202,120 @@ def derive_working_target(
     return {"root": root, "target": None, "source": SOURCE_NONE}
 
 
-def derive_activity(declared_activity, *, head_subject="") -> str:
+def derive_activity(declared_activity, *, head_subject="", state="",
+                    wait_detail="") -> str:
     """Return the session's activity (作業概要, 1 line), declared-or-derived.
 
-    A declared activity wins; otherwise the last commit subject
-    (``git.head_subject``) is the best available proxy for "what it is doing".
-    Returns "" when neither is known (the ops面 renders a placeholder). The
-    provenance is intentionally *not* returned here — unlike the working target,
-    a wrong activity guess is low-stakes, and callers only need the text.
+    Precedence:
+
+    1. An explicit ``declared_activity`` (the session's own self-report) always
+       wins — it knows best what it is doing / waiting for.
+    2. Otherwise the answer is STATE-AWARE (ms-159 / e-6484):
+       * ``awaiting_human`` / ``blocked`` (``_WAIT_DETAIL_STATES``) → the
+         ``wait_detail`` (what it is waiting for / blocked on). When that is
+         empty, return EMPTY — never the git head subject, which would
+         misrepresent a stalled session as actively working on its last commit
+         (判定できない待機理由は素直に空、ms-173 方針2 = no fabrication).
+       * every other state (``running`` / ``idle`` / … / unknown) → the last
+         commit subject (``git.head_subject``), the best proxy for "what it is
+         doing".
+
+    ``state``/``wait_detail`` default to "" so callers that don't know the state
+    (e.g. the server projection, older call sites) keep the pre-e-6484 behaviour
+    exactly: declared-or-head_subject. The provenance is intentionally not
+    returned — unlike the working target, a wrong activity guess is low-stakes.
     """
     declared = _clean(declared_activity)
     if declared:
         return declared
+    if _clean(state) in _WAIT_DETAIL_STATES:
+        return _clean(wait_detail)
     return _clean(head_subject)
+
+
+# ---------------------------------------------------------------------------
+# Row enrichment (ms-159 / e-6399) — turn a server directory row into the
+# derive-function inputs, and attach the results.
+#
+# The pure derive functions above take already-extracted signals. But the CLI
+# fetch path (cmd_attention / cmd_bus_directory) gets whole directory rows from
+# the server, which never carry ``working_target``/``activity`` (the server
+# stamp is not deployed, and the derive fallback was never wired — e-6399). The
+# fallback signals the bridge DOES stamp on every row are ``git.branch`` +
+# ``cwd`` + ``focus.milestone``, and ``git.head_subject`` for the activity. This
+# maps a row → those inputs and attaches the derived answer, so the roster shows
+# a real target/activity instead of an empty ``(no target)/—`` shell.
+#
+# ``fork_json`` is intentionally NOT sourced here: a row describes a *remote*
+# session, whose ``.beacon/fork.json`` lives on that session's machine and is
+# not readable from here. If a fork session declares its working_target (the
+# server-stamp path, when it lands), that declaration rides in ``row[
+# "working_target"]`` and still wins inside ``derive_working_target``.
+# ---------------------------------------------------------------------------
+
+def working_target_for_row(row) -> dict:
+    """Derive ``{"root", "target", "source"}`` for a server directory row.
+
+    Declaration/existing-authoritative: a ``row["working_target"]`` that already
+    carries content (a ``root`` or a ``target``) is the answer already — the
+    server stamped it, or a session declared it — so it is returned VERBATIM and
+    never clobbered by a guess (even a declared root with no specific target must
+    survive). Only when it is absent or an empty shell do we derive from the
+    signals the bridge stamps: ``git.branch`` → ``cwd`` → the project's active MS
+    (``focus.milestone``), in that priority. ``root`` on the derived path is the
+    row's own project (``project_id`` / ``project_name``)."""
+    row = row if isinstance(row, dict) else {}
+    existing = row.get("working_target")
+    if isinstance(existing, dict) and (existing.get("root") or existing.get("target")):
+        return existing
+    git = row.get("git") if isinstance(row.get("git"), dict) else {}
+    focus = row.get("focus") if isinstance(row.get("focus"), dict) else {}
+    project = {
+        "kind": "project",
+        "id": _clean(row.get("project_id")),
+        "label": _clean(row.get("project_name")) or _clean(row.get("project_id")),
+    }
+    return derive_working_target(
+        None,
+        branch=git.get("branch") or "",
+        cwd=row.get("cwd") or "",
+        fork_json=None,
+        focus_milestone=focus.get("milestone"),
+        project=project,
+    )
+
+
+def activity_for_row(row) -> str:
+    """Derive the 1-line activity for a server directory row.
+
+    A declared ``row["activity"]`` wins; otherwise it is state-aware (e-6484):
+    an ``awaiting_human`` / ``blocked`` row shows its wait detail
+    (``row["state_detail"]`` — the same field ``lib/attention`` reads) and is
+    EMPTY when none is known, while any other state falls back to the row's
+    ``git.head_subject``."""
+    row = row if isinstance(row, dict) else {}
+    git = row.get("git") if isinstance(row.get("git"), dict) else {}
+    return derive_activity(
+        row.get("activity"),
+        head_subject=git.get("head_subject") or "",
+        state=row.get("state") or "",
+        wait_detail=row.get("state_detail") or "",
+    )
+
+
+def enrich_row(row):
+    """Return a shallow copy of ``row`` with ``working_target`` / ``activity``
+    filled in from the derive fallback (declaration still wins inside the derive
+    fns). Non-dict rows pass through unchanged. Non-mutating so callers can pass
+    server rows without surprising aliasing."""
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+    out["working_target"] = working_target_for_row(row)
+    out["activity"] = activity_for_row(row)
+    return out
+
+
+def enrich_rows(rows) -> list:
+    """``enrich_row`` over a list of directory rows (``None`` → ``[]``)."""
+    return [enrich_row(r) for r in (rows or [])]

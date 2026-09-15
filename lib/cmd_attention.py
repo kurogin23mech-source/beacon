@@ -22,19 +22,24 @@ import os
 import sys
 
 import attention
+import working_target
 from commands_shared import (
     _get_api_client, _resolve_bus_project_id, _read_credentials_for_identity)
 
 
 def _fetch_sessions(client, config, all_projects: bool):
-    """Fetch directory rows (cross-project or cwd). No ``live_only`` filter: a
+    """Fetch directory rows (cross-project or cwd), enriched with the derived
+    ``working_target`` / ``activity`` (e-6399) so the roster shows a real target
+    instead of an empty ``(no target)/—`` shell. No ``live_only`` filter: a
     ``terminated:failed`` session is not live but is attention-worthy, and the
     pure filter drops everything non-attention anyway (a stale live-less session
     projects to ``unknown``/``terminated`` and is folded out)."""
     if all_projects:
-        return client.list_user_sessions() or []
-    project_id = _resolve_bus_project_id(config)
-    return client.list_sessions(project_id) or []
+        rows = client.list_user_sessions() or []
+    else:
+        project_id = _resolve_bus_project_id(config)
+        rows = client.list_sessions(project_id) or []
+    return working_target.enrich_rows(rows)
 
 
 def _sid_short(sid: str) -> str:
