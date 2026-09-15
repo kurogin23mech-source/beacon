@@ -13,6 +13,7 @@
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -312,10 +313,19 @@ def test_viewer_argv_flags_exist_in_go_main():
     """
     with open(os.path.join(_VIEWER_DIR, "main.go"), encoding="utf-8") as f:
         main_go = f.read()
+    # main.go の「実際のフラグ定義」だけを集合として抽出する。
+    # 旧実装は `'flag.' in main_go and '"<name>"' in main_go` という緩い包含判定で、
+    # (1) 'flag.' はファイルに 1 つでもあれば全フラグで真、(2) '"<name>"' は help 文・
+    # JSON タグ・URL パス等どこかにあれば真、となり「Go 側でフラグを改名しても旧名の
+    # 文字列がどこかに残っていれば素通り」する false-pass だった (親レビュー #747 保守性
+    # medium)。flag.String/Int/Bool(...) の第1引数だけを拾い、定義集合との包含で突き合わせる。
+    defined = set(re.findall(r'flag\.\w+\(\s*"([\w-]+)"', main_go))
+    assert defined, "main.go から flag 定義を 1 つも抽出できていない (抽出正規表現が古い?)"
     argv = cmd_view.viewer_argv("beacon-view", project_root=".", port=7377,
                                 host="127.0.0.1", expose=True, no_open=True)
-    flags = [a[2:] for a in argv if a.startswith("--")]
+    flags = {a[2:] for a in argv if a.startswith("--")}
     assert flags, "viewer_argv がフラグを 1 つも組んでいない"
-    for flag in flags:
-        assert f'flag.' in main_go and f'"{flag}"' in main_go, \
-            f"viewer_argv が渡す --{flag} が Go 版 main.go に定義されていない (改名 drift)"
+    missing = flags - defined
+    assert not missing, (
+        f"viewer_argv が渡す {sorted('--' + f for f in missing)} が Go 版 main.go の "
+        f"flag 定義に無い (改名 drift)。main.go 定義済み: {sorted(defined)}")
