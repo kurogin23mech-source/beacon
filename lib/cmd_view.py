@@ -30,6 +30,8 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import platform
+import shutil
 import socket
 import threading
 import webbrowser
@@ -199,6 +201,144 @@ def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
     return server, url
 
 
+# --- 運用室への委譲 (ms-173 e-6430) -----------------------------------------
+# 並列セッションの運用室 (セッション一覧 / scope フィルタ / activity / 端末ジャンプ)
+# は Go 版ビューワー ``beacon-view`` (viewer/*.go) にしかない。ここ (ユーザーの入口
+# ``beacon view``) はそれを **探して、在れば委譲** する。無ければ従来の素朴な盤に
+# フォールバックする。
+#
+# **これは暫定の縮退経路である。** ms-170 の終着は Go 一本化で、この Python 盤は
+# 最終的に撤去される (恒久保持ではない)。ゼロ依存の下限は「Go バイナリを beacon
+# 配布 (pipx wheel / brew) に per-platform で同梱する」ことで担保する予定で、その
+# 同梱作業は別タスク e-6476 (ms-170) が持つ。同梱が入るまでの間、beacon-view が手元
+# に無い環境では運用室に到達できないため、簡易盤を出しつつ入手方法を 1 行案内する。
+
+# フォールバック時に出す案内。Go 同梱 (e-6476) が入るまでの暫定である旨を明記し、
+# 「素朴盤が最終形」と読めないようにする。Windows 既定文字コード (cp932) で出せるよう
+# 記号は使わない (serve の起動出力と同じ制約)。
+#
+# **not-found と exec-failed を surface で区別する** (AX + 保守性 独立レビュー consensus):
+# 「beacon-view が無い」と「在るが起動できなかった (アーキ違い/壊れ)」は回復手段が
+# 違う。同じ「見つからない」文言を両方に出すと、壊れたバイナリが PATH に居座ったまま
+# 「入手せよ」の案内に従っても状況が変わらない誤診ループに入る。理由ごとに別文言を出す。
+
+# 見つからなかったとき (= 素朴盤へ縮退)。入手経路にはリポジトリ文脈を添える (配布利用者の
+# 環境には viewer/ が無いため、どこの build.sh かを明示しないと actionable でない)。
+FALLBACK_NOTICE = (
+    "運用室 (セッション一覧・状態・端末ジャンプ) は Go 版ビューワー beacon-view で"
+    "見られます。\n"
+    "  この端末には beacon-view が見つからないので、簡易版の盤を表示します。\n"
+    "  (これは Go 版ビューワーが beacon 配布に同梱される [e-6476] までの暫定です。)\n"
+    "  入手: beacon リポジトリの viewer/build.sh でビルドするか、ビルド済みの"
+    " beacon-view を PATH に置いてください。"
+)
+
+
+def exec_failed_notice(binary: str, error: object) -> str:
+    """beacon-view は見つかったが起動できなかったときの案内 (not-found とは別文言)。
+
+    「無い」ではなく「在るが動かない」を正しく伝え、回復行動を正しい対象 (壊れた
+    バイナリの削除 / 差し替え) に向ける。cp932 で出せるよう記号は使わない。
+    """
+    return (
+        f"beacon-view ({binary}) を起動できませんでした: {error}\n"
+        "  簡易版の盤にフォールバックします。\n"
+        "  このファイルが壊れているか、この端末とは別のプラットフォーム向けの"
+        "可能性があります。\n"
+        "  削除するか、この端末に合う beacon-view に差し替えてください。"
+    )
+
+
+def _go_os_arch(system: str, machine: str) -> tuple[str, str]:
+    """Python の platform 表記を Go の GOOS / GOARCH に写す。
+
+    配布バイナリ (build.sh が ``beacon-view-<goos>-<goarch>[.exe]`` で吐く) を手元で
+    探すための対応表。知らない値は素通しする (探索が空振りするだけで害はない)。
+    """
+    goos = {"darwin": "darwin", "windows": "windows", "linux": "linux"}.get(
+        system.lower(), system.lower())
+    goarch = {
+        "x86_64": "amd64", "amd64": "amd64",
+        "arm64": "arm64", "aarch64": "arm64",
+    }.get(machine.lower(), machine.lower())
+    return goos, goarch
+
+
+def _bundled_viewer_candidates(install_root: str, system: str,
+                               machine: str) -> list:
+    """同梱 / 手元ビルドの beacon-view を探す候補パス (探索順)。
+
+    ここは best-effort の推測であって正典ではない。**同梱の正式な置き場所は e-6476
+    (ms-170) が決める**。それが入るまでは、build.sh の出力先 (dist/) と、素朴に
+    置かれうる場所を当たる。
+    """
+    goos, goarch = _go_os_arch(system, machine)
+    ext = ".exe" if goos == "windows" else ""
+    name = "beacon-view" + ext
+    dist_name = f"beacon-view-{goos}-{goarch}{ext}"
+    return [
+        # build.sh の配布物 (per-platform 名)
+        os.path.join(install_root, "viewer", "dist", dist_name),
+        # beacon 同梱を想定した素直な置き場所 (e-6476 が確定させる)
+        os.path.join(install_root, "bin", name),
+        # 手元ビルド (viewer/ 直下、.gitignore 済)
+        os.path.join(install_root, "viewer", name),
+    ]
+
+
+def resolve_viewer_binary(*, which=None, install_root=None, system=None,
+                          machine=None, is_exec=None):
+    """委譲できる beacon-view の実行ファイルを 1 つ返す (無ければ None)。
+
+    探索順は PATH が先。配布 (brew / pipx) は PATH に置けるので、そこに在れば
+    手元ビルドの詮索より優先する。副作用ゼロの純関数にしてあるのは、探索規則そのものを
+    ネットワーク / 実ファイルに依存せず試験できるようにするため (依存は全て差し替え可能)。
+    """
+    which = which or shutil.which
+    install_root = install_root if install_root is not None else _install_root()
+    system = system if system is not None else platform.system()
+    machine = machine if machine is not None else platform.machine()
+    is_exec = is_exec or (
+        lambda p: os.path.isfile(p) and os.access(p, os.X_OK))
+
+    on_path = which("beacon-view")
+    if on_path:
+        return on_path
+    for cand in _bundled_viewer_candidates(install_root, system, machine):
+        if is_exec(cand):
+            return cand
+    return None
+
+
+def _install_root() -> str:
+    """この beacon 一式が置かれた根 (lib/ の 1 つ上)。"""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _project_root() -> str:
+    """--path で Go 版に渡す、.beacon を含むフォルダ。
+
+    取得元の分岐はしない (Go 版が .beacon/cloud.json を見てローカル / クラウドを
+    自分で判定する)。cloud プロジェクトでも、Go 版はローカル起動のまま名簿だけ
+    クラウドから取る設計なので、運用室は機能する。
+    """
+    project_file = os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
+    beacon_dir = os.path.dirname(project_file) or ".beacon"
+    return os.path.dirname(beacon_dir) or "."
+
+
+def viewer_argv(binary: str, *, project_root: str, port: int, host: str,
+                expose: bool, no_open: bool) -> list:
+    """beacon-view を起動する argv を組み立てる (フラグ写像を 1 箇所に固める)。"""
+    argv = [binary, "--path", project_root, "--port", str(port),
+            "--host", host]
+    if expose:
+        argv.append("--expose")
+    if no_open:
+        argv.append("--no-open")
+    return argv
+
+
 def cmd_view() -> None:
     """CLI 入口。環境変数は他の commands.py の verb と同じ渡し方に揃える。"""
     # --port の入口検証 (ms-170 #742 AX review): 非数値だと素の traceback で
@@ -219,8 +359,31 @@ def cmd_view() -> None:
     expose = os.environ.get("BEACON_VIEW_EXPOSE") == "1"
     if os.environ.get("BEACON_JSON") == "1":
         # 画面を立てずに、いまの盤をそのまま出す (別の道具に渡したいとき用)。
+        # --json は盤だけで運用室 (セッション一覧) を含まないため、Go 版に委譲せず
+        # ここで返す (Python 版と Go 版の盤は parity テストで一致を担保済み)。
         print(json.dumps(build_view(), ensure_ascii=False))
         return
+    # 運用室 (ms-173 e-6430): Go 版 beacon-view が在れば画面をそちらに委譲する。
+    # 委譲できれば os.execv で Go 版が丸ごと引き継ぐ (戻らない)。見つからない、または
+    # 実行できなかったときだけ、下の素朴盤にフォールバックする。
+    binary = resolve_viewer_binary()
+    if binary:
+        argv = viewer_argv(binary, project_root=_project_root(), port=port,
+                           host=host, expose=expose, no_open=no_open)
+        # どの実体に委譲したかを名乗る (silent narrowing を防ぐ)。同じ `beacon view`
+        # が環境によって Go 運用室 / Python 素朴盤 のどちらを出したか、出力から辿れる
+        # ようにする。execv は成功すれば戻らないので、事前に 1 行出しておく。
+        print(f"運用室 beacon-view に委譲します: {binary}", flush=True)
+        try:
+            os.execv(binary, argv)  # 成功すれば戻らない (Go 版が住所も自分で出す)
+        except OSError as e:
+            # 見つかったが起動できなかった (アーキ違い / 壊れ)。not-found とは別文言を
+            # 出してから素朴盤に落ちる (回復行動を壊れたバイナリ側へ向ける)。
+            print(exec_failed_notice(binary, e), flush=True)
+    else:
+        # beacon-view が無い。暫定の素朴盤を出しつつ入手方法を案内する
+        # (Go 同梱 e-6476 が入れば、この経路は最終的に不要になる)。
+        print(FALLBACK_NOTICE, flush=True)
     try:
         serve(port, open_browser=not no_open, host=host, expose=expose)
     except ValueError as e:
