@@ -614,16 +614,21 @@ Beacon の作業形態は「ターミナル + 盤ビューワー 並列表示」
 session-start 時に盤ビューワーを立ち上げ直す。
 
 ```bash
-python3 "$(beacon _install-root)/scripts/open-webui.py" 2>/dev/null
+python3 "$(beacon _install-root)/scripts/open-board.py" 2>/dev/null
 ```
 
-このスクリプトは **プロジェクト形態 (cloud / local) で起動先を選び分けない**。盤を見る導線は 1 つ = `beacon view` (統合ビューワー) に畳まれている (ms-170 e-6347)。取得元 (ローカル `.beacon` / クラウド API) は変換層が吸収するので、cloud でも local でも同じ盤が見える:
+このスクリプトは **プロジェクト形態 (cloud / local) で起動先を選び分けない**。盤を見る導線は 1 つ = `beacon view` (統合ビューワー) に畳まれている (ms-170 e-6347)。取得元 (ローカル `.beacon` / クラウド API) は変換層が吸収するので、cloud でも local でも同じ盤が見える。`beacon view` の起動先 (Go 版 / Python 版) やブラウザ起動の詳細は `beacon view --help` を参照 (このスクリプトはそれを再記述しない = 知識の所有者は 1 箇所)。
 
-- `beacon view` を detached で起動し (前面で待ち受け続けるビューワーなので session-start を塞がない)、`VIEWER_LAUNCHED=beacon view` を stdout に出す。ビューワー自身がブラウザを開く。
-- `beacon view` は Go 版運用室が同梱 (e-6476) されていればそれに委譲、無ければ Python 素朴盤にフォールバックする。**cloud プロジェクトでもホスト型 Web UI (beacon-ai.dev) の自動オープンは行わない** (手動では従来どおり開ける。Go 同梱 + サーバ側統合が入るまでの暫定として、cloud の自動オープンは統合ビューワーに寄せている)。
-- 起動できない場合 (beacon 未検出 / spawn 失敗) は何も出さない (best-effort、session-start を止めない)。
+スクリプトは `beacon view` を detached で起動し (前面で待ち受け続けるビューワーなので session-start を塞がない)、**起動を観測してから名乗る** (spawn が例外を出さなかっただけで成功と断定しない)。stdout の marker を Step 3 ヘッダにそのまま転記する:
 
-取得した `VIEWER_LAUNCHED` を Step 3 の出力ヘッダに表示する。
+- `VIEWER_URL=<url>`: 盤の URL を実際に観測できた (= 立ち上がった)。この URL を表示する。ブラウザはビューワー自身が開くが、開かない環境 (SSH / headless 等) ではこの URL を手で開けば見られる。
+- `VIEWER_LAUNCH_FAILED=exited-<rc> (log: <path>)`: 子プロセスが即終了した (起動失敗)。log path を添えて「盤の起動に失敗」と伝える。
+- `VIEWER_LAUNCHED_UNCONFIRMED (log: <path>)`: 生きているが待ち時間内に URL を確認できなかった。「起動したが URL 未確認」と伝える (成功と断定しない)。
+- 何も出ない: `beacon view` を spawn すらできなかった (beacon 未検出等)。best-effort、session-start を止めない。
+
+**cloud プロジェクトでもホスト型 Web UI (beacon-ai.dev) の自動オープンは行わない** (手動では従来どおり開ける。Go 同梱 + サーバ側統合が入るまでの暫定として、cloud の自動オープンは統合ビューワーに寄せている)。
+
+> 既知の限界 (AX-4, follow-up): 再実行のたびに新しい `beacon view` を spawn する (既存ビューワーの再利用はまだ無い)。冪等な再利用はビューワー側 (portfile / 生存確認) が持つべきで、Go 同梱 (e-6476) に畳む。
 
 ## Step 2.9: 次セッション最初の作業の特定 (ms-43 e-568)
 
@@ -685,7 +690,8 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 
 ```
 Beacon: [name]
-🖥 盤: beacon view を起動 (統合ビューワー、ブラウザが開きます)  ← VIEWER_LAUNCHED が出た場合のみ (ms-170 e-6347)
+🖥 盤: [VIEWER_URL] を開きました (統合ビューワー beacon view)  ← VIEWER_URL が出た場合 (ms-170 e-6347)
+🖥 盤: 起動を確認できませんでした — [marker 全文 (log path を含む)]  ← VIEWER_LAUNCH_FAILED / VIEWER_LAUNCHED_UNCONFIRMED の場合
 🔗 fork from: [target_ms_id] [target_ms_title]  ← Step 1m / .beacon/fork.json があれば
    parent: [parent_session_id 短縮] (branch=[parent_branch], repo=[parent_repo_path basename])
    child:  [child_branch] (この worktree)

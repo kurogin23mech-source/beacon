@@ -4,8 +4,9 @@ e-3178 moved three embedded ``python3`` heredocs out of the session-start
 Skill markdown into tested scripts/lib:
 
   * Step 1i (beacon-bus receive capability) -> scripts/check-mcp-receive-capability.py
-  * Step 2.7 (board open)                  -> scripts/open-webui.py
-    (ms-170 e-6347 folded its cloud/local branch into one `beacon view`)
+  * Step 2.7 (board open)                  -> scripts/open-board.py
+    (ms-170 e-6347 folded its cloud/local branch into one `beacon view`,
+     and renamed open-webui.py -> open-board.py per AX/maintainability review)
   * Step 1n-2 (user-scoped DM catch-up)    -> lib/dm_pending formatters
     (fetch orchestration later merged into scripts/session-start-dm-inbox.py
      by ms-85 e-3180; the pure filter/format helpers tested here are shared)
@@ -77,55 +78,103 @@ def test_mcp_warning_band_empty_for_ok_and_unknown():
 # ---------------------------------------------------------------------------
 # Step 2.7: board open — one unified viewer (ms-170 e-6347)
 #
-# The folded contract: main() launches `beacon view` (the unified viewer whose
-# conversion layer absorbs local vs cloud) and returns immediately, with NO
-# per-project-form branch and NO Tauri desktop / hosted-Web-UI switch. These
-# tests pin that fold so a future edit can't silently reintroduce the branch.
+# The folded contract: the launcher spawns `beacon view` (the unified viewer
+# whose conversion layer absorbs local vs cloud) detached, with NO
+# per-project-form branch and NO Tauri desktop / hosted-Web-UI switch, and
+# announces only what it OBSERVES (AX review 2026-09-15): VIEWER_URL once the
+# board's URL is seen, an explicit failure/unconfirmed marker otherwise —
+# never a success marker for an unobserved launch. These tests pin that fold.
 # ---------------------------------------------------------------------------
 
-WEBUI = _load_script("open-webui.py")
+BOARD = _load_script("open-board.py")
 
 
-def test_view_launches_in_local_mode(tmp_path, monkeypatch, capsys):
-    """No .beacon/cloud.json -> still launch the one viewer, announce it."""
-    monkeypatch.chdir(tmp_path)
-    seen = {}
-    monkeypatch.setattr(
-        WEBUI, "_launch_viewer", lambda b: seen.update(bin=b) or True
-    )
-    rc = WEBUI.main()
-    assert rc == 0
-    assert capsys.readouterr().out.strip() == "VIEWER_LAUNCHED=beacon view"
-    assert seen["bin"]  # a beacon binary path was resolved and passed
+def _fake_spawn_writing(url_line, *, rc_seq=(None, None)):
+    """Build a fake _spawn that writes url_line to the log and a fake process.
+
+    rc_seq drives successive poll() returns (None = alive, int = exited-rc).
+    """
+    rc_iter = iter(rc_seq)
+
+    def _spawn(beacon_bin, log_fd):
+        if url_line is not None:
+            log_fd.write(url_line)
+            log_fd.flush()
+
+        class _P:
+            def poll(self):
+                try:
+                    return next(rc_iter)
+                except StopIteration:
+                    return None
+
+        return _P()
+
+    return _spawn
 
 
-def test_view_launches_identically_in_cloud_mode(tmp_path, monkeypatch, capsys):
-    """cloud.json + project_id -> same launch, same output (no branch).
+def test_view_announces_observed_url(tmp_path, monkeypatch, capsys):
+    """Once the board's URL is seen in the log, announce VIEWER_URL=<url>.
 
-    The whole point of the fold: project form no longer changes what opens.
-    The launcher does not read cloud.json at all, so cloud and local produce a
-    byte-identical announcement.
+    Same for cloud and local — the launcher never reads cloud.json, so project
+    form does not change what opens (the fold's core contract).
     """
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".beacon").mkdir()
-    (tmp_path / ".beacon" / "cloud.json").write_text(
-        json.dumps({"project_id": "proj-xyz"})
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn",
+        _fake_spawn_writing("盤を開きました: http://127.0.0.1:8973/\n"),
     )
-    monkeypatch.setattr(WEBUI, "_launch_viewer", lambda b: True)
-    rc = WEBUI.main()
-    assert rc == 0
-    out = capsys.readouterr().out.strip()
-    assert out == "VIEWER_LAUNCHED=beacon view"
-    # No cloud URL, no Beacon.app handler, no desktop marker survive the fold.
-    assert "beacon-ai.dev" not in out
-    assert "WEBUI_URL" not in out and "DESKTOP_LAUNCHED" not in out
+    marker = BOARD.launch_and_observe("/bin/beacon", str(log))
+    assert marker == "VIEWER_URL=http://127.0.0.1:8973/"
+    # No cloud URL / desktop marker / handler survive the fold.
+    assert "beacon-ai.dev" not in marker
+    assert "WEBUI_URL" not in marker and "DESKTOP_LAUNCHED" not in marker
 
 
-def test_view_silent_when_launch_fails(tmp_path, monkeypatch, capsys):
-    """beacon view can't be spawned -> print nothing, never block."""
+def test_view_reports_failure_when_child_dies(tmp_path, monkeypatch):
+    """Child exits before printing a URL -> explicit failure, not fake success.
+
+    This is the AX-1 fix: we must not print a success marker just because the
+    spawn call itself did not raise.
+    """
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(WEBUI, "_launch_viewer", lambda b: False)
-    rc = WEBUI.main()
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn", _fake_spawn_writing(None, rc_seq=(1, 1)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    assert marker.startswith("VIEWER_LAUNCH_FAILED=exited-1")
+    assert "log:" in marker
+
+
+def test_view_unconfirmed_when_alive_but_no_url(tmp_path, monkeypatch):
+    """Alive but no URL within the wait -> unconfirmed, never a success claim."""
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn", _fake_spawn_writing(None, rc_seq=(None, None, None)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    assert marker.startswith("VIEWER_LAUNCHED_UNCONFIRMED")
+    assert "log:" in marker
+    # crucially, not a bare success marker
+    assert not marker.startswith("VIEWER_URL")
+
+
+def test_view_silent_when_spawn_raises(tmp_path, monkeypatch, capsys):
+    """beacon view can't even be spawned -> print nothing, never block."""
+    monkeypatch.chdir(tmp_path)
+
+    def _boom(beacon_bin, log_fd):
+        raise OSError("no such binary")
+
+    monkeypatch.setattr(BOARD, "_spawn", _boom)
+    rc = BOARD.main()
     assert rc == 0
     assert capsys.readouterr().out == ""
 
@@ -136,38 +185,34 @@ def test_beacon_bin_prefers_install_sibling():
     Guards against a shadowing `beacon` earlier on PATH launching a different
     viewer than the one that started the session.
     """
-    resolved = WEBUI._beacon_bin()
+    resolved = BOARD._beacon_bin()
     assert resolved == str(REPO / "bin" / "beacon")
     assert os.path.isfile(resolved)
 
 
-def test_launch_viewer_spawns_detached_beacon_view(monkeypatch):
-    """Drift guard on the actual spawn: argv is `<bin> view`, detached, silent.
+def test_spawn_is_detached_and_streams_to_log(monkeypatch, tmp_path):
+    """Drift guard on the actual spawn: argv is `<bin> view`, detached, logged.
 
     `beacon view` runs a foreground server; if we ever stop detaching or start
-    waiting on it, session-start would hang. Pin the Popen call shape.
+    waiting on it, session-start would hang. stdout+stderr go to the log file
+    (not a pipe) so the child can't block, and stderr is preserved for
+    diagnosing a non-opening board.
     """
-    import subprocess as _sp
-
     calls = {}
 
     def fake_popen(argv, **kw):
         calls["argv"] = argv
         calls["kw"] = kw
+        return object()
 
-        class _P:
-            pass
-
-        return _P()
-
-    monkeypatch.setattr(WEBUI.subprocess, "Popen", fake_popen)
-    ok = WEBUI._launch_viewer("/some/where/bin/beacon")
-    assert ok is True
+    monkeypatch.setattr(BOARD.subprocess, "Popen", fake_popen)
+    log_fd = (tmp_path / "log").open("w")
+    BOARD._spawn("/some/where/bin/beacon", log_fd)
     assert calls["argv"] == ["/some/where/bin/beacon", "view"]
     assert calls["kw"].get("start_new_session") is True
-    assert calls["kw"].get("stdout") == _sp.DEVNULL
-    assert calls["kw"].get("stderr") == _sp.DEVNULL
-    assert calls["kw"].get("stdin") == _sp.DEVNULL
+    assert calls["kw"].get("stdout") is log_fd
+    assert calls["kw"].get("stderr") == BOARD.subprocess.STDOUT
+    assert calls["kw"].get("stdin") == BOARD.subprocess.DEVNULL
 
 
 # ---------------------------------------------------------------------------
