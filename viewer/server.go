@@ -176,13 +176,17 @@ func (s *Server) handler() http.Handler {
 		// 開く対象は実在するパスに限る (e-6526)。存在しないパスを OpenLocal に渡すと
 		// filepath.Abs が cwd に接ぎ木し walk-up が無関係な既存プロジェクトを誤って掴む
 		// path traversal 気味の穴になるため、入口で理由付きに拒否する (元の盤は差し替えない)。
-		if _, err := resolveOpenTarget(body.Path); err != nil {
+		// 検証済みの abs パスをそのまま OpenLocal に渡す — 戻り値を捨てて raw を再解決すると
+		// resolveOpenTarget の契約 (abs 解決済み) が破れ、Abs を 2 度引く無駄と cwd 変化時の
+		// 食い違いを招く (ax/保守性 review #754 consensus)。
+		absPath, err := resolveOpenTarget(body.Path)
+		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-		src, err := OpenLocal(body.Path)
+		src, err := OpenLocal(absPath)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
