@@ -1,19 +1,21 @@
-"""`beacon view` の単体テスト (ms-170 e-6344 / SPEC KIGmqQTIanqUypbtmrTs)。
+"""`beacon view` の変換層入口 build_view の単体テスト (ms-170)。
 
-守っているもの:
-- 手元起動の受け口が、盤の JSON と画面を返し、知らない道は 404 で断ること
-- 待ち受けが **自分の機械の中だけ** に閉じていること (手元起動で外に開かない)
-- 表示層が取得元を知らないこと — 画面のコードに「ローカルなら / クラウドなら」の
-  分岐が無く、盤の JSON にも source 以外の痕跡が無いこと (親 SPEC 受入条件 2)
+**Go 一本化 (e-6518)**: Python 素朴盤 (serve / PAGE / host / expose / 起動出力) は
+撤去され、盤 / 運用室の描画は Go 版 beacon-view が唯一の実装になった。よって serve の
+HTTP 挙動・画面・待ち受け境界のテストはここから外し (それらの挙動は
+tests/test_go_viewer_parity_ms170.py が Go 側で担う)、Python 側に残る唯一の盤ロジック =
+``build_view`` (= ``beacon view --json`` の headless 経路) の不変条件だけを守る:
 
-ネットワークには出ない。替え玉の store を渡して受け口だけを立てる。
+- 変換層が組み立てた形がそのまま出ること (schema / project / targets / progress)
+- 取得元 (source) 以外に「ローカル / クラウド」の痕跡が漏れないこと (親 SPEC 受入条件 2)
+- 同じデータならローカルでもクラウドでも中身が同一になること
+- ドキュメント / 名簿が取れなくても盤は成立すること、名簿は差し替え可能なこと
+
+ネットワークには出ない。替え玉の store を渡す。
 """
 
-import json
 import os
 import sys
-import urllib.error
-import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
@@ -52,40 +54,10 @@ class _FakeStore:
         return self._docs
 
 
-class _ServedBoard:
-    """受け口を立てて、終わったら必ず畳む入れ物。
+# --- build_view = 変換層の出力そのもの (--json / headless 経路) ---------------
 
-    ``sessions`` は既定で空を渡す。省略すると名簿を取りに行って **実際の通信が
-    発生する** ため、試験がネットワークと本番データに依存してしまう (この落とし穴は
-    実際に踏んで、``build_view`` に差し替え口を足す設計変更につながった)。
-    """
-
-    def __init__(self, store, sessions=()):
-        self._store = store
-        self._sessions = list(sessions)
-
-    def __enter__(self):
-        self._server, self.url = cmd_view.serve(
-            port=0, open_browser=False, store=self._store, forever=False,
-            sessions=self._sessions)
-        return self
-
-    def __exit__(self, *exc):
-        self._server.shutdown()
-        self._server.server_close()
-
-    def get(self, path=""):
-        with urllib.request.urlopen(self.url + path) as r:
-            return r.status, r.read().decode("utf-8")
-
-
-# --- 受け口の振る舞い -------------------------------------------------------
-
-def test_board_json_is_the_view_schema():
-    with _ServedBoard(_FakeStore()) as s:
-        status, body = s.get("api/board")
-    assert status == 200
-    board = json.loads(body)
+def test_build_view_is_the_view_schema():
+    board = cmd_view.build_view(_FakeStore(), sessions=[])
     # 変換層が組み立てたものが、加工されずそのまま出ている。
     assert board["schema_version"] == view_model.SCHEMA_VERSION
     assert board["project"]["name"] == "Beacon"
@@ -93,92 +65,20 @@ def test_board_json_is_the_view_schema():
     assert board["progress"] == {"total": 2, "done": 1, "open": 1}
 
 
-def test_root_serves_the_page():
-    with _ServedBoard(_FakeStore()) as s:
-        status, body = s.get("")
-    assert status == 200
-    assert "<title>Beacon 盤</title>" in body
-    # 画面は盤を自分で取りに行く (埋め込みではない = 再読み込みで最新が出る)。
-    assert "/api/board" in body
+# --- 取得元が source 以外に漏れない (親 SPEC 受入条件 2) ----------------------
 
-
-def test_unknown_path_is_404():
-    with _ServedBoard(_FakeStore()) as s:
-        try:
-            s.get("nope")
-        except urllib.error.HTTPError as e:
-            assert e.code == 404
-        else:
-            raise AssertionError("404 になっていない")
-
-
-# --- 手元起動の境界 ---------------------------------------------------------
-
-def test_listens_on_loopback_only():
-    """手元起動は自分の機械の中だけに閉じる。外に開いたら事故になる。"""
-    store = _FakeStore()
-    server, url = cmd_view.serve(
-        port=0, open_browser=False, store=store, forever=False, sessions=[])
-    try:
-        assert server.server_address[0] == "127.0.0.1"
-        assert url.startswith("http://127.0.0.1:")
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def test_port_falls_back_when_preferred_is_busy():
-    """既定の口が塞がっていても、空きを借りて立ち上がる (併走できる)。"""
-    first, url1 = cmd_view.serve(
-        port=0, open_browser=False, store=_FakeStore(), forever=False,
-        sessions=[])
-    try:
-        busy = first.server_address[1]
-        second, url2 = cmd_view.serve(
-            port=busy, open_browser=False, store=_FakeStore(), forever=False,
-            sessions=[])
-        try:
-            assert second.server_address[1] != busy
-        finally:
-            second.shutdown()
-            second.server_close()
-    finally:
-        first.shutdown()
-        first.server_close()
-
-
-# --- 表示層が取得元を知らない (親 SPEC 受入条件 2) --------------------------
-
-def test_page_has_no_source_branching():
-    """画面のコードに『ローカルなら / クラウドなら』の分岐が無い。
-
-    ここが破られると、畳もうとしている二重メンテが表示層の中に再建される。
-    """
-    page = cmd_view.PAGE
-    # 出所は見出しに表示するだけ (source.kind をそのまま出す) で、
-    # 値を比較して描き分けてはいけない。
-    for forbidden in ('=== "cloud"', "=== 'cloud'", '== "cloud"',
-                      '=== "local"', "=== 'local'", '== "local"',
-                      'is_cloud', 'isCloud'):
-        assert forbidden not in page, f"表示層に取得元の分岐がある: {forbidden}"
-
-
-def test_board_json_carries_no_source_trace_outside_source():
-    with _ServedBoard(_FakeStore(cloud=True)) as s:
-        _, body = s.get("api/board")
-    board = json.loads(body)
+def test_board_carries_no_source_trace_outside_source():
+    board = cmd_view.build_view(_FakeStore(cloud=True), sessions=[])
     rest = {k: v for k, v in board.items() if k != "source"}
     blob = repr(rest)
     assert "beacon-test" not in blob
     assert "cloud" not in blob
 
 
-def test_local_and_cloud_serve_the_same_board():
-    """同じデータなら、ローカル起動でもクラウド起動でも盤の中身は同一。"""
-    with _ServedBoard(_FakeStore(cloud=False)) as s:
-        local = json.loads(s.get("api/board")[1])
-    with _ServedBoard(_FakeStore(cloud=True)) as s:
-        cloud = json.loads(s.get("api/board")[1])
+def test_local_and_cloud_produce_the_same_board():
+    """同じデータなら、ローカルでもクラウドでも盤の中身 (source 以外) は同一。"""
+    local = cmd_view.build_view(_FakeStore(cloud=False), sessions=[])
+    cloud = cmd_view.build_view(_FakeStore(cloud=True), sessions=[])
     assert {k: v for k, v in local.items() if k != "source"} \
         == {k: v for k, v in cloud.items() if k != "source"}
 
@@ -206,9 +106,7 @@ def test_local_store_has_no_session_roster():
 def test_sessions_can_be_injected_so_the_board_does_not_reach_the_network():
     """名簿は差し替えられる。
 
-    ここが固定できないと「盤を組み立てる」試験が実通信に依存する。実際、最初の
-    実装では替え玉の store を渡しても本番のセッション名簿を拾ってしまい、
-    ローカル / クラウドの盤が一致しない形で表面化した。
+    ここが固定できないと「盤を組み立てる」試験が実通信に依存する。
     """
     given = [{
         "session_id": "sv-1", "actor": {"email": "a@example.com"},
@@ -218,131 +116,14 @@ def test_sessions_can_be_injected_so_the_board_does_not_reach_the_network():
     assert [s["id"] for s in view["sessions"]] == ["sv-1"]
 
 
-# --- サーバ設置 (e-6345) ---------------------------------------------------
+# --- Python 素朴盤は撤去された (e-6518) — 退行ガード -------------------------
 
-def test_default_stays_loopback_without_host():
-    """既定は今まで通り自分の機械の中だけ。設置機能を足しても変わらない。"""
-    server, url = cmd_view.serve(
-        port=0, open_browser=False, store=_FakeStore(), forever=False,
-        sessions=[])
-    try:
-        assert server.server_address[0] == "127.0.0.1"
-    finally:
-        server.shutdown()
-        server.server_close()
+def test_python_simple_board_is_removed():
+    """serve / PAGE / _handler_class 等の Python 素朴盤が復活していないこと。
 
-
-def test_exposing_without_acknowledgement_is_refused():
-    """外に開くには明示が要る。盤は認証を持たないので黙って公開させない。"""
-    try:
-        cmd_view.serve(port=0, open_browser=False, store=_FakeStore(),
-                       forever=False, sessions=[], host="0.0.0.0")
-    except ValueError as e:
-        # 何が起きるかと、どうすればよいかが文面に出ていること。
-        assert "全員が盤を読めます" in str(e)
-        assert "--expose" in str(e)
-    else:
-        raise AssertionError("外に開く指定が素通りした")
-
-
-def test_exposing_with_acknowledgement_binds_to_the_given_host():
-    server, url = cmd_view.serve(
-        port=0, open_browser=False, store=_FakeStore(), forever=False,
-        sessions=[], host="0.0.0.0", expose=True)
-    try:
-        assert server.server_address[0] == "0.0.0.0"
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def test_localhost_is_treated_as_loopback():
-    """名前で書いても自分の機械の中なら明示は要らない。"""
-    server, url = cmd_view.serve(
-        port=0, open_browser=False, store=_FakeStore(), forever=False,
-        sessions=[], host="localhost")
-    try:
-        assert url.startswith("http://localhost:")
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def test_server_install_serves_the_identical_page():
-    """設置モードでも表示層は同一。ここが違ったら『同じ画面』が嘘になる。"""
-    local, _ = cmd_view.serve(port=0, open_browser=False, store=_FakeStore(),
-                              forever=False, sessions=[])
-    exposed, _ = cmd_view.serve(port=0, open_browser=False,
-                                store=_FakeStore(cloud=True), forever=False,
-                                sessions=[], host="0.0.0.0", expose=True)
-    try:
-        a = urllib.request.urlopen(
-            f"http://127.0.0.1:{local.server_address[1]}/").read()
-        b = urllib.request.urlopen(
-            f"http://127.0.0.1:{exposed.server_address[1]}/").read()
-        assert a == b  # 1 バイトも違わない
-    finally:
-        for s in (local, exposed):
-            s.shutdown()
-            s.server_close()
-
-
-# --- Windows の既定文字コードで落ちない ------------------------------------
-
-def test_startup_output_is_encodable_on_windows_legacy_codepage():
-    """起動時に出す文字は cp932 (Windows 日本語環境の既定) で表現できること。
-
-    表現できない記号を混ぜると、日本語 Windows では出力時に例外が出る。実際に
-    警告文の U+26A0 (⚠) がこれに該当し、**よりによって「外に開いています」という
-    安全上の警告そのものが出せない** 状態になっていた (2026-09-09 に発見)。
+    e-6518 で盤描画は Go 一本化した。これらが戻ると畳んだ二重メンテが再建される。
     """
-    import io as _io
-    import contextlib
-
-    for host, expose in (("127.0.0.1", False), ("0.0.0.0", True)):
-        buf = _io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            server, _ = cmd_view.serve(
-                port=0, open_browser=False, store=_FakeStore(), forever=False,
-                sessions=[], host=host, expose=expose)
-        server.shutdown()
-        server.server_close()
-        out = buf.getvalue()
-        assert out.strip(), "起動時に何も出ていない (住所が分からない)"
-        try:
-            out.encode("cp932")
-        except UnicodeEncodeError as e:
-            raise AssertionError(
-                f"cp932 で出せない文字が起動出力にある ({host}): {e}")
-
-
-def test_startup_output_tells_the_url_and_source():
-    """利用者が最低限知る必要があるのは『どこを開くか』と『何を見ているか』。"""
-    import io as _io
-    import contextlib
-
-    buf = _io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        server, url = cmd_view.serve(
-            port=0, open_browser=False, store=_FakeStore(), forever=False,
-            sessions=[])
-    server.shutdown()
-    server.server_close()
-    out = buf.getvalue()
-    assert url in out
-    assert "ローカル" in out
-
-
-def test_exposed_startup_warns_that_it_is_open_to_others():
-    """外に開いた設置では、その事実を毎回伝える。"""
-    import io as _io
-    import contextlib
-
-    buf = _io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        server, _ = cmd_view.serve(
-            port=0, open_browser=False, store=_FakeStore(), forever=False,
-            sessions=[], host="0.0.0.0", expose=True)
-    server.shutdown()
-    server.server_close()
-    assert "外にも開いています" in buf.getvalue()
+    for gone in ("serve", "PAGE", "_handler_class", "_pick_port",
+                 "_is_loopback"):
+        assert not hasattr(cmd_view, gone), \
+            f"撤去したはずの Python 素朴盤 {gone} が cmd_view に復活している"

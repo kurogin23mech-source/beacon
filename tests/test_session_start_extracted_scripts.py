@@ -274,16 +274,16 @@ def test_scan_url_ignores_non_serving_urls(tmp_path):
     assert BOARD._scan_url(str(log)) == ""
 
 
-def test_python_cmd_view_serving_line_matches_anchor():
-    """Source-level pin: lib/cmd_view.py must print the exact serving prefix the
-    launcher anchors on. If someone rewords cmd_view's line, this fails."""
-    src = (REPO / "lib" / "cmd_view.py").read_text()
-    assert 'f"盤を開きました: {url}"' in src, (
-        "cmd_view.py serving line drifted from the launcher's anchor "
-        f"({SERVING_PREFIX!r}); update both together"
-    )
-    # And the launcher actually extracts the URL from a line built that way.
-    assert BOARD._URL_RE.search(f"盤を開きました: {'http://127.0.0.1:8080/'}")
+def test_launcher_anchor_matches_the_serving_format():
+    """The launcher extracts the URL from the fixed serving-line format.
+
+    After Go 一本化 (ms-170 e-6518) the Python serve() is gone, so the serving
+    line's sole producer is the Go viewer (viewer/main.go). That Go-side pin
+    lives in viewer/serving_line_test.go; here we pin the launcher half — its
+    anchor regex must match a line in the canonical `盤を開きました: <url>` form.
+    """
+    m = BOARD._URL_RE.search("盤を開きました: http://127.0.0.1:8080/")
+    assert m and m.group(1) == "http://127.0.0.1:8080/"
 
 
 def test_open_webui_py_stays_deleted():

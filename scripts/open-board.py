@@ -41,9 +41,10 @@ Contract of THIS launcher (only):
     unresolved / python missing / a version-skewed install without this file) —
     a distinct condition the caller can rely on.
 
-``beacon view`` itself decides delegation (bundled Go viewer vs Python
-fallback) and opens the browser — see ``beacon view --help``. This launcher
-does not re-describe that (single source of truth).
+``beacon view`` delegates to the bundled Go viewer and opens the browser — see
+``beacon view --help``. (The Python fallback board was removed in the Go
+consolidation, ms-170 e-6518; the Go viewer is now the sole board producer.)
+This launcher does not re-describe that (single source of truth).
 
 Known limitation (AX-4, deferred): re-running session-start spawns a fresh
 ``beacon view`` each time — there is no reuse of an already-running viewer yet.
@@ -66,9 +67,9 @@ import sys
 import tempfile
 import time
 
-# The board URL appears on `beacon view`'s fixed serving line, printed
-# identically by the Python fallback (lib/cmd_view.py) and the Go viewer
-# (viewer/main.go):
+# The board URL appears on `beacon view`'s fixed serving line, printed by the
+# Go viewer (viewer/main.go) — its sole producer after the Go consolidation
+# (ms-170 e-6518 removed the Python serve fallback):
 #     盤を開きました: <url>
 # Anchor to that exact prefix so an error URL or any other http string elsewhere
 # in the merged stdout+stderr log can't be mistaken for the board URL

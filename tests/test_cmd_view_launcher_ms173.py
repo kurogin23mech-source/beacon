@@ -204,9 +204,10 @@ def test_exec_failed_notice_is_encodable_on_windows_legacy_codepage():
 
 # --- cmd_view() の配線 (純関数の seam を繋ぐ経路 / 保守性 finding #5) --------
 #
-# 純関数群は上でテスト済み。ここは「その seam を繋ぐ配線」= 分岐順序と
-# フォールバック連鎖を押さえる。os.execv / resolve_viewer_binary / serve /
-# build_view を差し替えて、cmd_view() を実際に 1 度通す。
+# 純関数群は上でテスト済み。ここは「その seam を繋ぐ配線」= 分岐順序を押さえる。
+# e-6518 (Go 一本化) 後は: --json→build_view / 在→execv 委譲 / 無・失敗→SystemExit
+# 案内 (素朴盤フォールバックは撤去)。os.execv / resolve_viewer_binary / build_view を
+# 差し替えて cmd_view() を 1 度通す。
 
 
 class _ExecCalled(Exception):
@@ -217,8 +218,12 @@ class _ExecCalled(Exception):
 
 
 def _wire(monkeypatch, *, binary, execv_error=None):
-    """cmd_view() の外部依存を差し替え、呼び出し記録を返す。"""
-    calls = {"execv": None, "serve": False, "printed": []}
+    """cmd_view() の外部依存を差し替え、呼び出し記録を返す。
+
+    e-6518 で Python 素朴盤 (serve) は撤去されたので serve の差し替えは無い。
+    見つからない / 起動失敗は SystemExit で終わる (呼び出し側が pytest.raises で受ける)。
+    """
+    calls = {"execv": None, "printed": []}
 
     monkeypatch.setattr(cmd_view, "resolve_viewer_binary",
                         lambda **kw: binary)
@@ -230,8 +235,6 @@ def _wire(monkeypatch, *, binary, execv_error=None):
         raise _ExecCalled(argv)  # 成功時は戻らない、を模す
 
     monkeypatch.setattr(cmd_view.os, "execv", _fake_execv)
-    monkeypatch.setattr(cmd_view, "serve",
-                        lambda *a, **k: calls.__setitem__("serve", True))
     monkeypatch.setattr(cmd_view, "build_view", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(cmd_view, "_project_root", lambda: ".")
 
@@ -251,13 +254,12 @@ def _clear_view_env(monkeypatch):
 
 
 def test_json_mode_does_not_delegate(monkeypatch):
-    """--json は盤のみで運用室を含まないため Go 版に委譲しない (順序不変条件)。"""
+    """--json は盤のみで運用室を含まないため Go 版に委譲しない (build_view を返す)。"""
     _clear_view_env(monkeypatch)
     monkeypatch.setenv("BEACON_JSON", "1")
     calls = _wire(monkeypatch, binary="/x/beacon-view")
-    cmd_view.cmd_view()
+    cmd_view.cmd_view()                 # JSON を出して正常 return (SystemExit しない)
     assert calls["execv"] is None       # 委譲していない
-    assert calls["serve"] is False      # サーバも立てていない (JSON 出して return)
 
 
 def test_binary_found_delegates_via_execv(monkeypatch):
@@ -271,30 +273,31 @@ def test_binary_found_delegates_via_execv(monkeypatch):
         assert "--path" in e.argv
     else:
         raise AssertionError("execv に委譲していない")
-    assert calls["serve"] is False      # 委譲成功時は素朴盤を立てない
     # 委譲を名乗る 1 行が出ている (silent narrowing 防止)
     assert any("委譲します" in line for line in calls["printed"])
 
 
-def test_exec_failure_falls_back_to_simple_board(monkeypatch):
-    """execv が OSError なら exec 失敗案内を出して素朴盤に落ちる。"""
+def test_exec_failure_exits_with_notice(monkeypatch):
+    """execv が OSError なら exec 失敗案内を出して終了する (e-6518: 素朴盤に落ちない)。"""
+    import pytest
     _clear_view_env(monkeypatch)
     calls = _wire(monkeypatch, binary="/x/beacon-view",
                   execv_error=OSError("Exec format error"))
-    cmd_view.cmd_view()
-    assert calls["execv"] is not None   # 委譲は試みた
-    assert calls["serve"] is True       # 素朴盤にフォールバックした
-    assert any("起動できませんでした" in line for line in calls["printed"])
+    with pytest.raises(SystemExit) as ei:
+        cmd_view.cmd_view()
+    assert calls["execv"] is not None                 # 委譲は試みた
+    assert "起動できませんでした" in str(ei.value)     # 案内が終了メッセージに乗る
 
 
-def test_binary_absent_falls_back_with_notice(monkeypatch):
-    """beacon-view が無ければ not-found 案内を出して素朴盤を立てる。"""
+def test_binary_absent_exits_with_notice(monkeypatch):
+    """beacon-view が無ければ not-found 案内を出して終了する (e-6518: 素朴盤を立てない)。"""
+    import pytest
     _clear_view_env(monkeypatch)
     calls = _wire(monkeypatch, binary=None)
-    cmd_view.cmd_view()
+    with pytest.raises(SystemExit) as ei:
+        cmd_view.cmd_view()
     assert calls["execv"] is None
-    assert calls["serve"] is True
-    assert any("見つからない" in line for line in calls["printed"])
+    assert "見つかり" in str(ei.value)
 
 
 # --- プロセス境界の写しの drift ガード (保守性 finding #4 / #6) --------------
