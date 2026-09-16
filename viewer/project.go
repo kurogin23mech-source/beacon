@@ -156,17 +156,27 @@ func OpenLocal(path string) (*LocalSource, error) {
 // (ビューワー自身の repo 等) を誤って掴む — 「開けない場所が受理される」path traversal 気味の
 // 穴になる。開く対象は **実在するフォルダ/ファイル** に限る、を入口で強制する。
 //
-// 戻り値は表示用の abs パス。存在しなければ「見つかりません」を含む理由付きエラー。
+// 戻り値は表示用の abs パス。実在するフォルダでなければ「見つかりません」等の理由付き
+// エラー。/api/open ハンドラと CLI 起動 (main.go) の両方がこれを通ることで、不正パスの
+// 拒否が入口で対称になる (#754 review M3: 片側だけ塞ぐと CLI 起動に同一クラスの穴が残る)。
 func resolveOpenTarget(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("開く場所が指定されていません")
+		// 空指定は正しい形の例を添えて断る (#754 review AX1: 何を渡せばよいか示す)。
+		return "", fmt.Errorf("開く場所が指定されていません。実在するフォルダの絶対パスまたは相対パスを指定してください (例: /Users/you/myproject または ./myproject)")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("%s を解決できません: %v", path, err)
+		// OS 生エラーを文脈と回復手がかりで包む (#754 review AX2)。
+		return "", fmt.Errorf("パス %q を絶対パスに解決できませんでした (%v)。正しいフォルダのパスを指定してください", path, err)
 	}
-	if _, err := os.Stat(abs); err != nil {
+	info, err := os.Stat(abs)
+	if err != nil {
 		return "", fmt.Errorf("%s が見つかりません。実在するフォルダを指定してください。", abs)
+	}
+	// os.Stat はファイルも通すが、開く対象は Beacon プロジェクトのフォルダ。フォルダ契約を
+	// 実装と一致させる (#754 review M1: 契約とコードのズレを塞ぐ)。
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s はフォルダではありません。Beacon プロジェクトのフォルダ (.beacon を含む場所) を指定してください。", abs)
 	}
 	return abs, nil
 }

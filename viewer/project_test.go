@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,6 +51,20 @@ func TestResolveOpenTarget(t *testing.T) {
 		_, err := resolveOpenTarget("   ")
 		if err == nil {
 			t.Fatal("空パスを受理してしまった")
+		}
+	})
+
+	t.Run("ファイルはフォルダ契約に反するので拒否 (#754 M1)", func(t *testing.T) {
+		f := filepath.Join(existing, "file.txt")
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatalf("テスト用ファイル作成失敗: %v", err)
+		}
+		_, err := resolveOpenTarget(f)
+		if err == nil {
+			t.Fatal("ファイルを受理してしまった (os.Stat はファイルも通す)")
+		}
+		if !strings.Contains(err.Error(), "フォルダではありません") {
+			t.Errorf("拒否理由に『フォルダではありません』が無い: %v", err)
 		}
 	})
 }

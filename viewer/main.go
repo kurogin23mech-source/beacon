@@ -63,7 +63,20 @@ func main() {
 
 	// プロジェクトが見つからなくても止めない。画面から場所を選んでもらう
 	// (実行ファイルを配ってもらった人には、起動場所に .beacon が無いのが普通)。
-	src, openErr := OpenLocal(*path)
+	//
+	// ただし **実在しないパスを渡されたら walk-up させない** (#754 review M3)。OpenLocal は
+	// filepath.Abs で相対パスを cwd に接ぎ木し親へ walk-up するため、存在しない --path を
+	// 直接渡すと cwd 側の無関係な既存プロジェクトを誤って掴んで silent open する。/api/open で
+	// 塞いだのと同一クラスの穴なので、CLI 起動も同じ入口 guard (resolveOpenTarget) を通して
+	// 対称にする。実在すれば OpenLocal に検証済み abs を渡す (walk-up はそこで従来どおり働く)。
+	// 実在しなければ openErr を立て、GUI では画面から選び直し / --json ではその場で断る。
+	var src *LocalSource
+	var openErr error
+	if absPath, err := resolveOpenTarget(*path); err != nil {
+		openErr = err
+	} else {
+		src, openErr = OpenLocal(absPath)
+	}
 
 	if *asJSON {
 		// 中身をそのまま出す用途では選ばせる相手が居ないので、その場で断る。
