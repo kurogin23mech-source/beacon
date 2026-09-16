@@ -111,6 +111,12 @@ type SessionOverview struct {
 	// live が複数あると 1 行に畳まれる。畳んだ事実を隠さず開示する (session_id 粒度
 	// での個別表示は identity 突合の根治待ち = e-6446)。0 なら omit。
 	CollapsedPeers int `json:"collapsed_peers,omitempty"`
+	// ContextPct はコンテキスト窓の使用率 (0–100)。名簿 (SessionRow) が持っていれば
+	// 運ぶ (ms-159 e-6499 が produce)。**このビューワーは作らない。消費するだけ。**
+	// 運用室が「どのセッションが圧縮に近いか」を一目で出すための表示源 (e-6500)。
+	// 名乗っているセッションだけが持つ (未名乗り / 未申告は nil = バッジを出さない)。
+	// 0 と未申告を区別するためポインタ — 0 は「使いたて」の正当な値。
+	ContextPct *int `json:"context_pct,omitempty"`
 }
 
 // SessionsView は一覧 1 面分。
@@ -348,6 +354,8 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			o.Who = n.Who
 			o.Activity = n.Activity
 			o.Harness = n.Harness
+			// コンテキスト使用率も名簿から運ぶ (未申告なら nil のまま = バッジ非表示)。
+			o.ContextPct = n.ContextPct
 		}
 
 		// 端末へ飛べるかを Go 側で確定させる (画面は結果を読むだけ)。
@@ -380,6 +388,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			Who:           n.Who,
 			Activity:      n.Activity,
 			Harness:       n.Harness,
+			ContextPct:    n.ContextPct, // 別マシンのセッションもコンテキスト使用率を運ぶ
 			Remote:        true,
 		}
 		// 別マシンの名乗りセッションにも、宛先ルーティング用に自分のプロジェクトを

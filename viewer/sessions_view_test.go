@@ -111,6 +111,70 @@ func TestRemoteNamedSessionsAreIncluded(t *testing.T) {
 	}
 }
 
+// コンテキスト使用率 (context_pct) が名簿から運用室の各行へ運ばれること (e-6500)。
+//
+// 圧縮が近いセッションを一目で出すための表示源なので、**両方の組み立て経路**
+// (手元にも痕跡がある名乗りセッション / 別マシンだけの名乗りセッション) で落ちない
+// ことを確かめる。落ちると運用室のバッジが常に出ず「圧迫されている」を見逃す。
+// 未申告 (nil) と 0% (使いたて) は別物なので、0 が nil に化けないことも確かめる。
+func TestContextPctCarriedToOverview(t *testing.T) {
+	now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	ts := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	pct57 := 57
+	pct0 := 0
+
+	// (1) 手元にも痕跡がある名乗りセッション + (2) 別マシンだけの名乗りセッション。
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/local", LastActive: ts},
+	}
+	named := []SessionRow{
+		{ID: "sv-local", Agent: "claude-code", Cwd: "/Users/x/local",
+			Live: true, LastActive: ts, ContextPct: &pct57},
+		{ID: "sv-remote", Agent: "claude-code", Cwd: "/Users/y/remote",
+			Who: "other@example.com", Live: true, LastActive: ts, ContextPct: &pct0},
+	}
+
+	view := assembleSessions(local, named, 24*time.Hour, now)
+
+	byID := map[string]*SessionOverview{}
+	for i := range view.Sessions {
+		byID[view.Sessions[i].SessionID] = &view.Sessions[i]
+	}
+
+	loc := byID["sv-local"]
+	if loc == nil || loc.ContextPct == nil {
+		t.Fatalf("手元に痕跡のある名乗りセッションに context_pct が運ばれていない: %+v", loc)
+	}
+	if *loc.ContextPct != 57 {
+		t.Errorf("context_pct の値がずれている: got %d, want 57", *loc.ContextPct)
+	}
+
+	rem := byID["sv-remote"]
+	if rem == nil || rem.ContextPct == nil {
+		t.Fatalf("別マシンの名乗りセッションに context_pct が運ばれていない: %+v", rem)
+	}
+	if *rem.ContextPct != 0 {
+		t.Errorf("0%% (使いたて) が nil に化けている / 値がずれている: got %d, want 0", *rem.ContextPct)
+	}
+}
+
+// 名乗っていないセッションには context_pct が付かないこと (nil = バッジ非表示)。
+// context_pct はサーバの名簿にしか無い値なので、手がかり推測の行にでっち上げない。
+func TestUnnamedSessionHasNoContextPct(t *testing.T) {
+	now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	local := []LocalSessionRow{
+		{Tool: "codex", Directory: "/Users/x/fresh",
+			LastActive: now.Add(-time.Hour).Format(time.RFC3339)},
+	}
+	view := assembleSessions(local, nil, 24*time.Hour, now)
+	for _, s := range view.Sessions {
+		if !s.Named && s.ContextPct != nil {
+			t.Errorf("名乗っていないセッションに context_pct が付いている: %v (%s)",
+				*s.ContextPct, s.Directory)
+		}
+	}
+}
+
 // 生存の真値は bus heartbeat 一本 (ms-171 e-6431)。
 //
 // 会話ログが 24h カットオフより古くても、名簿に居る (= サーバの心拍が続いている)

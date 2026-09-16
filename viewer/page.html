@@ -119,6 +119,18 @@
   .badge.s-done, .badge.s-closed, .badge.s-cancelled,
   .badge.s-merged, .badge.s-approved { opacity: .55; border-color: var(--line); }
   .badge.s-in_review   { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+  /* コンテキスト使用率バッジ (e-6500)。使用率が高いほど圧縮 (要約) が近いので、
+     60% 以上で注意色、80% 以上で警告色にして「圧迫されているセッション」を一目で分かるようにする。
+     クラス名は表示ラベル "context" と揃える (略語 ctx を使わない — ax review #753)。 */
+  .context-badge {
+    display: inline-block; font-size: 11px; padding: 1px 7px;
+    border-radius: 4px; white-space: nowrap;
+    border: 1px solid var(--line); opacity: .8;
+  }
+  .context-badge.context-mid  { background: color-mix(in srgb, var(--warn) 18%, transparent);
+                        border-color: transparent; opacity: 1; }
+  .context-badge.context-high { background: color-mix(in srgb, #f85149 22%, transparent);
+                        border-color: transparent; opacity: 1; }
 
   /* 詳細のうち、済んだ分は畳んでおく。 */
   .donebox { margin-top: 8px; }
@@ -254,6 +266,9 @@ let lastFilter = "";
 // scope: "self" / "attention" / "all"、root: プロジェクト名 (空なら全部)。
 let sessionScope = "self";
 let sessionRoot = "";
+// 運用室を最後に描いたときの内容の指紋 (e-6483)。自動更新で「中身が変わったときだけ
+// 作り直す」判定に使う。盤の lastBoardJSON と同じ役割。
+let lastSessionsSig = "";
 // 開いている組 (未着手 / 完了 / ドキュメント)。**画面を作り直しても開いたままにする。**
 // ローカルセッションの最終活動時刻は数秒ごとに変わるため盤は頻繁に更新される。
 // 状態を引き継がないと、読んでいる最中に組が閉じてしまう (2026-09-09 の指摘)。
@@ -1039,6 +1054,24 @@ function attribution(a, hint) {
     (a.label ? `<div class="sub2">${esc(a.label)}</div>` : "");
 }
 
+// 内容の指紋の共通ルール (保守性 review #753 M2)。刻々と変わる最終活動時刻
+// (last_active) は外す — 入れると中身が何も変わっていなくても毎回作り直すことになり、
+// 読んでいる最中にスクロールが飛ぶ。時刻の表示だけは updateTimes が作り直さずに書き換える。
+// **盤 (refresh) と運用室 (sessionsSignature) で同じ除外ルールを使う** ため、除外キーと
+// stringify をここ 1 か所に寄せた (以前は盤側が inline の JSON.stringify で別実装だった)。
+const FINGERPRINT_EXCLUDE_KEYS = ["last_active"];
+function contentFingerprint(data, extra) {
+  const body = JSON.stringify(data,
+    (k, v) => FINGERPRINT_EXCLUDE_KEYS.includes(k) ? undefined : v);
+  return extra != null ? body + "|" + extra : body;
+}
+
+// 運用室の内容の指紋。共通の contentFingerprint に、端末へ飛べるか (jump_available) を
+// 追加で混ぜる — 札の「端末へ飛ぶ」出し分けに効くので、これが変わったら作り直す。
+function sessionsSignature(d, st) {
+  return contentFingerprint(d, st && st.jump_available ? "1" : "0");
+}
+
 async function openSessions() {
   sessionsOpen = true;
   const app = document.getElementById("app");
@@ -1054,6 +1087,39 @@ async function openSessions() {
     app.innerHTML = `<p class="err">読めませんでした: ${esc(e)}</p>`;
     return;
   }
+  renderSessions(d, viewerState);
+}
+
+// 運用室を、手動リロードなしで最新に保つ (e-6483)。盤の refresh と同じ作法で、
+// **中身が変わったときだけ** 作り直す (点滅・スクロール飛び・開いた送信欄の消失を防ぐ)。
+// 一覧を見ている最中だけ動き、取得に失敗しても今出ている一覧は消さない。
+async function refreshSessions() {
+  // 盤・選ぶ画面を見ている間は触らない (画面を奪わない)。
+  if (!sessionsOpen || pickerOpen) return;
+  let d, st;
+  try {
+    st = await (await fetch("/api/state")).json();
+    d = await (await fetch("/api/sessions?scope=" +
+      encodeURIComponent(sessionScope))).json();
+  } catch (e) {
+    return; // 一時的に取れなくても、今出ている一覧は消さない
+  }
+  // 中身が前と同じなら画面に触らない。ここが点滅とスクロール飛びを止める要。
+  if (sessionsSignature(d, st) === lastSessionsSig) return;
+  viewerState = st; // 盤など他経路も global を読むので更新は保つ
+  renderSessions(d, st); // が、renderSessions へは明示引数で渡す (隠れ依存を作らない)
+}
+
+// 運用室の一覧を実際に組み立てる。open (手動) と refresh (自動) の両方から呼ぶので
+// 「作る」処理はここ 1 か所に寄せる (真実源を 1 つに)。絞り (scope/root/stopped) は
+// 呼び出し時点の globals を読む = ユーザーの今の選択をそのまま反映する。
+//
+// state (= /api/state の結果) は **明示引数で受ける** (ax/保守性 review #753)。以前は
+// global viewerState を暗黙に読んでいたため、呼び出し側が viewerState を更新する前に
+// renderSessions を呼ぶと「端末へ飛ぶ」ボタンが古い jump_available で描かれる隠れ依存が
+// あった。引数にすることで「この関数は state を要る」ことが呼び出し側から見える。
+function renderSessions(d, state) {
+  const app = document.getElementById("app");
   const scoped = d.sessions || [];
   // プロジェクト名は 3 箇所 (選択肢 / 絞り / グルーピング) で使うので 1 か所に寄せる。
   // ここを変えれば 3 箇所が揃って変わる (= 真実源を 1 つに)。
@@ -1133,6 +1199,10 @@ async function openSessions() {
             <span class="card-name">${esc(s.name || s.tool)}</span>
             <span class="badge ${l.on ? "s-open" : "s-todo"}"
               title="${esc(l.hint || "")}">${esc(l.label)}</span>
+            ${s.context_pct != null ? `<span class="context-badge ${
+              s.context_pct >= 80 ? "context-high" : s.context_pct >= 60 ? "context-mid" : ""}"
+              title="このセッションのコンテキスト窓の使用率 (0–100%)。高いほど圧縮 (要約) が近づいています。60% 以上で注意色、80% 以上で警告色 (Beacon が申告しているセッションのみ)"
+              >context ${s.context_pct}%</span>` : ""}
           </div>
           <div class="sub2 sub1">${esc(s.tool || "不明")}${s.branch
             ? " · " + esc(s.branch) : ""}</div>
@@ -1175,7 +1245,7 @@ async function openSessions() {
                    data-sid="${esc(s.session_id)}"
                    data-pid="${esc((s.project || {}).project_id || "")}"
                   >プロンプトを送る</button>`}
-          ${viewerState.jump_available && s.pid
+          ${state.jump_available && s.pid
             ? (s.jumpable
               ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
                    data-process-pid="${esc(String(s.pid))}"
@@ -1207,6 +1277,8 @@ async function openSessions() {
   document.getElementById("to-board").onclick = () => {
     sessionsOpen = false; lastBoardJSON = ""; refresh();
   };
+  // 指紋を控える。次の自動更新 (refreshSessions) が「変わっていない」を判定できる。
+  lastSessionsSig = sessionsSignature(d, state);
 }
 
 async function refresh() {
@@ -1235,7 +1307,7 @@ async function refresh() {
     // これを含めると **中身が何も変わっていなくても毎回作り直す** ことになり、
     // 読んでいる最中に開いた組が閉じたり、表示位置が飛んだりする。
     // 時刻の表示だけは、下の updateTimes が作り直さずに書き換える。
-    const json = JSON.stringify(b, (k, v) => k === "last_active" ? undefined : v);
+    const json = contentFingerprint(b); // 共通の指紋ルール (last_active 除外) を使う (#753 M2)
     if (json === lastBoardJSON) return;
     // 内容が変わった対象だけ、詳細の覚えを捨てる (次に開いたとき取り直す)。
     if (lastBoard) {
@@ -1258,6 +1330,10 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 5000);
+// 運用室 (セッション一覧) も、開いている間は手動リロードなしで最新に保つ (e-6483)。
+// refreshSessions は一覧を見ていないときは自分で bail するので、盤の refresh とは
+// 画面を奪い合わない (それぞれ自分の担当画面のときだけ働く)。
+setInterval(refreshSessions, 5000);
 // 経過時間の表示だけは、盤が変わらなくても進める (作り直しは伴わない)。
 setInterval(updateTimes, 10000);
 </script>

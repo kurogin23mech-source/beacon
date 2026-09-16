@@ -2583,6 +2583,13 @@ class SessionUpsert(BaseModel):
     # be declared explicitly: the model drops undeclared fields, so an omitted field
     # here would silently discard the value the bridge sends. Optional / merge=True:
     # a heartbeat without it preserves the prior value (back-compat).
+    #
+    # CO-WRITER (ax/maintainability review #753 M1): the JSON name "context_pct" is a
+    # cross-language contract with the Go viewer's roster consumers. Renaming this key
+    # would make the Go decode silently fall to nil (badge vanishes) with no compile
+    # error. If you rename it, also update all of: viewer/cloud.go rosterSessionDTO,
+    # viewer/board.go SessionRow, viewer/sessions_view.go SessionOverview (the Go side
+    # pins the tag via a receive-unmarshal test in viewer/cloud_test.go).
     context_pct: Optional[int] = None
 
 class SessionIntentUpsert(BaseModel):

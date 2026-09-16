@@ -246,55 +246,95 @@ func (c *CloudSource) SessionsAllProjects() ([]SessionRow, error) {
 	return c.sessions(ScopeAllProjects)
 }
 
+// rosterSessionDTO は /api/me/sessions の 1 行を decode する受信専用の型。
+//
+// **無名 struct にせず名前を付けてある理由** (ax/保守性 review #753 M1): 名簿行の
+// JSON 形は server (server/routers_projects.py の SessionUpsert)・この DTO・SessionRow・
+// SessionOverview の 4 箇所に跨る。無名 struct だと grep で辿れず、server が field 名を
+// 変えたとき「Go 受信が silent に nil 化 → バッジ等が黙って消える」経路が見えない。
+// 名前付きにして (1) grep 可能にし、(2) cloud_test.go の受信 unmarshal テストで
+// JSON tag → field の対応を pin する (server rename は producer 側でしか防げないが、
+// Go 側 tag の誤変更はこのテストが赤くする)。
+//
+// **同一概念フィールドの JSON 名は 4 箇所で必ず揃える** (context_pct が代表例):
+//   - server/routers_projects.py: SessionUpsert.context_pct (produce)
+//   - この rosterSessionDTO.ContextPct (decode)
+//   - SessionRow.ContextPct (board.go, 名簿の内部表現)
+//   - SessionOverview.ContextPct (sessions_view.go, 運用室の表示行)
+// どれか 1 つの名前を変えるときは 4 箇所すべてを直す (co-writer 関係)。
+type rosterSessionDTO struct {
+	SessionID  string `json:"session_id"`
+	Cwd        string `json:"cwd"`
+	ProjectID  string `json:"project_id"`
+	Live       bool   `json:"live"`
+	LastActive string `json:"last_active"`
+	Actor      struct {
+		Email   string `json:"email"`
+		Machine string `json:"machine"`
+	} `json:"actor"`
+	Agent struct {
+		Kind string `json:"kind"`
+	} `json:"agent"`
+	Git struct {
+		Branch      string `json:"branch"`
+		HeadSubject string `json:"head_subject"`
+	} `json:"git"`
+	Focus struct {
+		Milestone struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"milestone"`
+	} `json:"focus"`
+	// サーバが解決した「そのセッションの作業対象」。宣言 → fork → ブランチ →
+	// cwd の順で決まる。**これが本当の担当**。
+	WorkingTarget *struct {
+		Target struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+		} `json:"target"`
+		Source string `json:"source"`
+	} `json:"working_target"`
+	PollHealth struct {
+		Healthy bool `json:"healthy"`
+	} `json:"poll_health"`
+	// サーバが出す「今何をしているか」の要約 (ms-159)。まだ出していなければ空。
+	Activity string `json:"activity"`
+	// コンテキスト窓の使用率 (0–100)。サーバが名簿行に運ぶ (ms-159 e-6499)。
+	// 0 と未申告を区別するためポインタで受ける — 0 は正当な値、未申告は nil。
+	// tag は SessionRow / SessionOverview と同じ `,omitempty` に揃える (受信専用
+	// struct なので omitempty は unmarshal に影響しない no-op だが、同一概念フィールドの
+	// tag が4箇所で揃っていないと将来のコピーで誤 variant を写す — ax/保守性 review #753)。
+	ContextPct *int `json:"context_pct,omitempty"`
+	// 端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶときに、どの端末アプリを
+	// 前面化するかの分岐に使う (ms-173 e-6403)。空なら不明。
+	Runtime struct {
+		Harness struct {
+			Kind string `json:"kind"`
+		} `json:"harness"`
+	} `json:"runtime"`
+}
+
+// clampPct は受信したコンテキスト使用率を 0–100 に収める (ax review #753 AX5)。
+// 外部 producer が範囲外 (負値 / 100 超) を送っても、バッジの閾値判定 (60/80%) が
+// 壊れないよう受信境界で正す。nil (未申告) はそのまま nil で返す (0 と区別)。
+func clampPct(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	if v < 0 {
+		v = 0
+	} else if v > 100 {
+		v = 100
+	}
+	return &v
+}
+
 // sessions は名簿を読む共通処理。scope で現在プロジェクト絞り (盤用) か全件 (横断一覧用)
 // かを選ぶ。どちらも各行に自分の ProjectID を刻むので、呼び出し側は declared 判定・DM
 // ルーティングを「そのセッション自身のプロジェクト」で行える。
 func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
-	var raw []struct {
-		SessionID string `json:"session_id"`
-		Cwd       string `json:"cwd"`
-		ProjectID string `json:"project_id"`
-		Live      bool   `json:"live"`
-		LastActive string `json:"last_active"`
-		Actor     struct {
-			Email   string `json:"email"`
-			Machine string `json:"machine"`
-		} `json:"actor"`
-		Agent struct {
-			Kind string `json:"kind"`
-		} `json:"agent"`
-		Git struct {
-			Branch      string `json:"branch"`
-			HeadSubject string `json:"head_subject"`
-		} `json:"git"`
-		Focus struct {
-			Milestone struct {
-				ID    string `json:"id"`
-				Title string `json:"title"`
-			} `json:"milestone"`
-		} `json:"focus"`
-		// サーバが解決した「そのセッションの作業対象」。宣言 → fork → ブランチ →
-		// cwd の順で決まる。**これが本当の担当**。
-		WorkingTarget *struct {
-			Target struct {
-				ID    string `json:"id"`
-				Label string `json:"label"`
-			} `json:"target"`
-			Source string `json:"source"`
-		} `json:"working_target"`
-		PollHealth struct {
-			Healthy bool `json:"healthy"`
-		} `json:"poll_health"`
-		// サーバが出す「今何をしているか」の要約 (ms-159)。まだ出していなければ空。
-		Activity string `json:"activity"`
-		// 端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶときに、どの端末アプリを
-		// 前面化するかの分岐に使う (ms-173 e-6403)。空なら不明。
-		Runtime struct {
-			Harness struct {
-				Kind string `json:"kind"`
-			} `json:"harness"`
-		} `json:"runtime"`
-	}
+	var raw []rosterSessionDTO
 	if err := c.get("/api/me/sessions?live=true", &raw); err != nil {
 		return nil, err
 	}
@@ -338,6 +378,9 @@ func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 		row.ProjectFocus = s.Focus.Milestone.ID
 		// 「今何をしているか」はサーバの申告をそのまま運ぶ (無ければ空のまま)。
 		row.Activity = s.Activity
+		// コンテキスト使用率を運ぶ (未申告なら nil のまま = バッジを出さない)。
+		// 受信境界で 0–100 に clamp し、外部 producer の範囲外値でバッジ閾値が壊れないようにする。
+		row.ContextPct = clampPct(s.ContextPct)
 		// 端末の種類も運ぶ (端末へ飛ぶときの分岐に使う)。
 		row.Harness = s.Runtime.Harness.Kind
 		rows = append(rows, row)
