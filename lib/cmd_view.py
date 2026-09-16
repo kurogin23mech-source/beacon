@@ -26,6 +26,7 @@ import json
 import os
 import platform
 import shutil
+import sys
 
 import store as store_mod
 import view_model
@@ -99,7 +100,8 @@ def build_view(store=None, *, sessions=None) -> dict:
 # 違う。同じ文言を両方に出すと、壊れたバイナリが PATH に居座ったまま「入手せよ」の
 # 案内に従っても状況が変わらない誤診ループに入る。理由ごとに別文言を出す。
 FALLBACK_NOTICE = (
-    "運用室 (セッション一覧・状態・端末ジャンプ) は Go 版ビューワー beacon-view で"
+    # 冒頭を Error: に統一 (SystemExit 全経路で揃える、PR #752 AX2)。
+    "Error: 運用室 (セッション一覧・状態・端末ジャンプ) は Go 版ビューワー beacon-view で"
     "見られますが、この端末には beacon-view が見つかりません。\n"
     "  beacon-view は beacon の配布 (pipx / brew) に同梱されています。最新版に更新すると"
     "入ります:\n"
@@ -117,7 +119,8 @@ def exec_failed_notice(binary: str, error: object) -> str:
     バイナリの削除 / 差し替え) に向ける。cp932 で出せるよう記号は使わない。
     """
     return (
-        f"beacon-view ({binary}) を起動できませんでした: {error}\n"
+        # 冒頭を Error: に統一 (SystemExit 全経路で揃える、PR #752 AX2)。
+        f"Error: beacon-view ({binary}) を起動できませんでした: {error}\n"
         "  このファイルが壊れているか、この端末とは別のプラットフォーム向けの"
         "可能性があります。\n"
         "  削除するか、この端末に合う beacon-view に差し替えてください "
@@ -257,7 +260,10 @@ def cmd_view() -> None:
                        host=host, expose=expose, no_open=no_open)
     # どの実体に委譲したかを名乗る (silent narrowing を防ぐ)。execv は成功すれば
     # 戻らないので、事前に 1 行出しておく。
-    print(f"運用室 beacon-view に委譲します: {binary}", flush=True)
+    # 診断ログは stderr へ (PR #752 AX1)。stdout は Go 盤の出力用に空けておく —
+    # execv 失敗時 (下の SystemExit は stderr) に stdout だけ読む側が「委譲成功」と
+    # 誤認しないため。委譲が成功すれば execv でこのプロセスは Go 版に置き換わる。
+    print(f"運用室 beacon-view に委譲します: {binary}", file=sys.stderr, flush=True)
     try:
         os.execv(binary, argv)  # 成功すれば戻らない (Go 版が住所も自分で出す)
     except OSError as e:
