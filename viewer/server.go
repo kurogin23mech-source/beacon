@@ -173,6 +173,15 @@ func (s *Server) handler() http.Handler {
 			writeJSONError(w, err)
 			return
 		}
+		// 開く対象は実在するパスに限る (e-6526)。存在しないパスを OpenLocal に渡すと
+		// filepath.Abs が cwd に接ぎ木し walk-up が無関係な既存プロジェクトを誤って掴む
+		// path traversal 気味の穴になるため、入口で理由付きに拒否する (元の盤は差し替えない)。
+		if _, err := resolveOpenTarget(body.Path); err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 		src, err := OpenLocal(body.Path)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -147,6 +147,30 @@ func OpenLocal(path string) (*LocalSource, error) {
 		"    viewer --path <.beacon があるフォルダ>", abs)
 }
 
+// resolveOpenTarget は /api/open が開こうとするパスを受理してよいか検証する (e-6526)。
+//
+// **なぜ存在チェックが要るか**: OpenLocal は `filepath.Abs` で相対パスを cwd に接ぎ木し、
+// そこから親へ walk-up して .beacon を探す (深いフォルダ / 実行ファイルの場所から起動しても
+// プロジェクトを見つけるための機能)。だが存在しないパス (例: "Z:/存在しない場所") を渡すと、
+// Abs が `<cwd>/Z:/存在しない場所` に化け、walk-up が cwd 側の無関係な既存プロジェクト
+// (ビューワー自身の repo 等) を誤って掴む — 「開けない場所が受理される」path traversal 気味の
+// 穴になる。開く対象は **実在するフォルダ/ファイル** に限る、を入口で強制する。
+//
+// 戻り値は表示用の abs パス。存在しなければ「見つかりません」を含む理由付きエラー。
+func resolveOpenTarget(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("開く場所が指定されていません")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("%s を解決できません: %v", path, err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return "", fmt.Errorf("%s が見つかりません。実在するフォルダを指定してください。", abs)
+	}
+	return abs, nil
+}
+
 func hasProjectData(dir string) bool {
 	for _, name := range []string{"project.db", "project.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
