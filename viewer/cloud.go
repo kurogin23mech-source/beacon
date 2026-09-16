@@ -289,7 +289,10 @@ func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 		Activity string `json:"activity"`
 		// コンテキスト窓の使用率 (0–100)。サーバが名簿行に運ぶ (ms-159 e-6499)。
 		// 0 と未申告を区別するためポインタで受ける — 0 は正当な値、未申告は nil。
-		ContextPct *int `json:"context_pct"`
+		// tag は SessionRow / SessionOverview と同じ `,omitempty` に揃える (受信専用
+		// struct なので omitempty は unmarshal に影響しない no-op だが、同一概念フィールドの
+		// tag が3層で揃っていないと将来のコピーで誤 variant を写す — ax/保守性 review #753)。
+		ContextPct *int `json:"context_pct,omitempty"`
 		// 端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶときに、どの端末アプリを
 		// 前面化するかの分岐に使う (ms-173 e-6403)。空なら不明。
 		Runtime struct {

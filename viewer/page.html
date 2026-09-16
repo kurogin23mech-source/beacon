@@ -120,15 +120,16 @@
   .badge.s-merged, .badge.s-approved { opacity: .55; border-color: var(--line); }
   .badge.s-in_review   { background: color-mix(in srgb, var(--warn) 18%, transparent); }
   /* コンテキスト使用率バッジ (e-6500)。使用率が高いほど圧縮 (要約) が近いので、
-     60% 以上で注意色、80% 以上で警告色にして「圧迫されているセッション」を一目で分かるようにする。 */
-  .ctx-badge {
+     60% 以上で注意色、80% 以上で警告色にして「圧迫されているセッション」を一目で分かるようにする。
+     クラス名は表示ラベル "context" と揃える (略語 ctx を使わない — ax review #753)。 */
+  .context-badge {
     display: inline-block; font-size: 11px; padding: 1px 7px;
     border-radius: 4px; white-space: nowrap;
     border: 1px solid var(--line); opacity: .8;
   }
-  .ctx-badge.ctx-mid  { background: color-mix(in srgb, var(--warn) 18%, transparent);
+  .context-badge.context-mid  { background: color-mix(in srgb, var(--warn) 18%, transparent);
                         border-color: transparent; opacity: 1; }
-  .ctx-badge.ctx-high { background: color-mix(in srgb, #f85149 22%, transparent);
+  .context-badge.context-high { background: color-mix(in srgb, #f85149 22%, transparent);
                         border-color: transparent; opacity: 1; }
 
   /* 詳細のうち、済んだ分は畳んでおく。 */
@@ -1184,10 +1185,10 @@ function renderSessions(d) {
             <span class="card-name">${esc(s.name || s.tool)}</span>
             <span class="badge ${l.on ? "s-open" : "s-todo"}"
               title="${esc(l.hint || "")}">${esc(l.label)}</span>
-            ${s.context_pct != null ? `<span class="ctx-badge ${
-              s.context_pct >= 80 ? "ctx-high" : s.context_pct >= 60 ? "ctx-mid" : ""}"
+            ${s.context_pct != null ? `<span class="context-badge ${
+              s.context_pct >= 80 ? "context-high" : s.context_pct >= 60 ? "context-mid" : ""}"
               title="このセッションのコンテキスト窓の使用率。高いほど圧縮 (要約) が近づいています (Beacon が申告しているセッションのみ)"
-              >ctx ${s.context_pct}%</span>` : ""}
+              >context ${s.context_pct}%</span>` : ""}
           </div>
           <div class="sub2 sub1">${esc(s.tool || "不明")}${s.branch
             ? " · " + esc(s.branch) : ""}</div>
