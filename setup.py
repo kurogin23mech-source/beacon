@@ -5,7 +5,7 @@ the two dynamic things that a static manifest cannot:
 
 1. **Bundle the per-platform Go viewer as a wheel script.** When the release
    build stages a ``beacon-view`` binary for the wheel's target platform and
-   points ``BEACON_BUNDLE_VIEWER`` at it, we add it to ``scripts`` so pip
+   points ``BEACON_BUILD_VIEWER`` at it, we add it to ``scripts`` so pip
    installs it onto the user's PATH (bin/Scripts) with the executable bit set.
    ``beacon view`` then finds it via ``shutil.which("beacon-view")`` — no extra
    build or fetch needed (e-6476). Without the env var (normal ``pip install``
