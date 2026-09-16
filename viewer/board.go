@@ -162,6 +162,11 @@ type SessionRow struct {
 	// 画面で「具体的に今何を書いているか」を出すための項目 (doc lM9gHMOAm8VK2xZGKfEe)。
 	Branch      string `json:"branch"`
 	HeadSubject string `json:"head_subject"`
+	// ContextPct はそのセッションのコンテキスト窓の使用率 (0–100)。サーバが名簿行に
+	// 運ぶ (ms-159 e-6499)。運用室が「どのセッションがコンテキスト圧迫で圧縮が近いか」を
+	// 一目で出すための表示源 (e-6500)。**ポインタなのは 0 と未申告を区別するため** —
+	// 0 は「使いたて」の正当な値で、未申告 (古い bridge / まだ届いていない) は nil。
+	ContextPct *int `json:"context_pct,omitempty"`
 }
 
 type Source struct {

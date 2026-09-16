@@ -287,6 +287,9 @@ func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 		} `json:"poll_health"`
 		// サーバが出す「今何をしているか」の要約 (ms-159)。まだ出していなければ空。
 		Activity string `json:"activity"`
+		// コンテキスト窓の使用率 (0–100)。サーバが名簿行に運ぶ (ms-159 e-6499)。
+		// 0 と未申告を区別するためポインタで受ける — 0 は正当な値、未申告は nil。
+		ContextPct *int `json:"context_pct"`
 		// 端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶときに、どの端末アプリを
 		// 前面化するかの分岐に使う (ms-173 e-6403)。空なら不明。
 		Runtime struct {
@@ -338,6 +341,8 @@ func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 		row.ProjectFocus = s.Focus.Milestone.ID
 		// 「今何をしているか」はサーバの申告をそのまま運ぶ (無ければ空のまま)。
 		row.Activity = s.Activity
+		// コンテキスト使用率もそのまま運ぶ (未申告なら nil のまま = バッジを出さない)。
+		row.ContextPct = s.ContextPct
 		// 端末の種類も運ぶ (端末へ飛ぶときの分岐に使う)。
 		row.Harness = s.Runtime.Harness.Kind
 		rows = append(rows, row)
