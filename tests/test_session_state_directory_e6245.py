@@ -121,12 +121,15 @@ class TestStampState:
         _app._stamp_session_liveness(row, "proj", now)
         assert row["state"] == bus_liveness.STATE_TERMINATED
 
-    # e-6488 / #750 M2: machine-check the prose claim "the liveness projection
-    # does NOT stamp state_detail". state_detail reaches the row via STORAGE
-    # pass-through (SessionUpsert merge), NOT via this projection — so the
-    # function must neither fabricate it (absent → stays absent) nor alter a
-    # stored one (present → preserved verbatim). DELETE these two if a server-side
-    # state_detail projection is ever added here (then the contract changes).
+    # e-6488 / #750 M2 → e-6533: machine-check that the liveness projection does
+    # NOT stamp the `state_detail` FIELD. state_detail reaches the row via STORAGE
+    # pass-through (SessionUpsert merge), NOT via this projection — so the function
+    # must neither fabricate it (absent → stays absent) nor alter a stored one
+    # (present → preserved verbatim). Note (e-6533): the projection now READS
+    # state_detail to derive the state-aware `activity`, but it still never writes
+    # the `state_detail` field itself, so this contract is unchanged — these two
+    # stay. The state-aware activity behaviour is pinned separately in
+    # test_session_working_directory_e6292 (test_activity_state_aware_*).
     def test_liveness_does_not_fabricate_state_detail(self, _app):
         now = _now()
         row = self._live_row(now, declared_state="awaiting_human",

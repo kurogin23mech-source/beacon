@@ -1996,14 +1996,21 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
         project={"kind": "project", "id": project_id,
                  "label": session.get("project_name") or project_id},
     )
-    # Not state-aware ON PURPOSE (e-6488, #749 review): the state-aware branch of
-    # derive_activity keys off `state` + `state_detail`, but this projection does
-    # not yet stamp `state_detail` (the Notification→wait-detail capture is the
-    # pending e-6488, gated on the production state-stamp deploy). Passing only
-    # (intent.text, head_subject) keeps the pre-e-6484 behaviour; when e-6488
-    # lands the state stamp, thread `state=`/`state_detail=` through here too.
+    # State-aware activity (ms-159 / e-6533): thread the derived `state` (above)
+    # and the stored `state_detail` through so an awaiting_human / blocked row
+    # surfaces WHAT it is waiting on as its activity. The wiring was deferred at
+    # e-6488 (#749) until the production server persisted these fields; that deploy
+    # landed (SessionUpsert stores state_detail/context_pct via merge), so the
+    # server leg is now connected. `state_detail` arrives on the row via STORAGE
+    # pass-through (SessionUpsert merge), NOT stamped here — this projection only
+    # READS it to derive `activity`, never fabricates the field (unknown ⇒ empty,
+    # ms-173 方針2 = no fabrication; the two pin tests in
+    # test_session_state_directory_e6245 still guard that the field itself is
+    # neither invented nor clobbered). Non-wait states keep the pre-e-6484
+    # behaviour exactly (declared text → git.head_subject).
     session["activity"] = working_target.derive_activity(
-        intent.get("text"), head_subject=str(git.get("head_subject") or ""))
+        intent.get("text"), head_subject=str(git.get("head_subject") or ""),
+        state=state, state_detail=str(session.get("state_detail") or ""))
     # user_id identifies the row's owner so the ops面 can default to "just mine"
     # (方針3: model is multi-user, default view is self). Best-effort: the actor's
     # user_id when present, else its email (the identity sid_to_uid keys on).
