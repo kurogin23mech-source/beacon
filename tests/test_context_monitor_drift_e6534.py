@@ -23,6 +23,7 @@ that resolution so the same class of drift cannot silently return:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -114,3 +115,38 @@ def test_sh_delegates_not_reimplements():
             f"bash hook has executable code containing {reimpl_marker!r} — it "
             "looks like a reintroduced in-file reimplementation. Delegate to "
             "beacon_cli/hooks/context_monitor.py (the single canonical impl).")
+    # M-F5 (#755 review): the shim must resolve its own directory robustly, not
+    # rely on a bare `dirname "$0"` that returns "." under bare-name invocation.
+    assert "pwd -P" in code, (
+        "shim should resolve SCRIPT_DIR via `cd -- $(dirname -- $0) && pwd -P` "
+        "so delegation is location-independent (bare-name invocation edge).")
+
+
+def _load_standalone():
+    """Import bin/context-usage-monitor.py (hyphenated name) as a module."""
+    path = Path(__file__).resolve().parent.parent / "bin" / "context-usage-monitor.py"
+    spec = importlib.util.spec_from_file_location("cum_standalone_e6534", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_standalone_no_op_is_loud_not_silent(monkeypatch, capsys):
+    """AX-F3 (#755 review): when neither import path resolves beacon_cli, the
+    Stop hook can do nothing — but a SILENT no-op is the exact silent-non-function
+    class ms-159 fixes. It must (a) never block the Stop event (rc 0) and (b)
+    surface the breakage LOUDLY, both on stderr and in-band via the Stop hook's
+    own additionalContext channel."""
+    mod = _load_standalone()
+    monkeypatch.setattr(mod, "_try_package_import", lambda: None)
+    monkeypatch.setattr(mod, "_try_in_tree_import", lambda: None)
+
+    rc = mod.main()
+    captured = capsys.readouterr()
+
+    assert rc == 0  # never blocks the Stop event
+    assert "beacon_cli" in captured.err  # stderr line stays
+    # loud, in-band: a Stop hookSpecificOutput the AI/human actually sees
+    payload = json.loads(captured.out)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "Stop"
+    assert "beacon_cli" in payload["hookSpecificOutput"]["additionalContext"]

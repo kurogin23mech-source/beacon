@@ -61,8 +61,31 @@ def main() -> int:
     rc = _try_in_tree_import()
     if rc is not None:
         return rc
-    # Last-ditch: stay silent so the Stop event is never blocked.
-    sys.stderr.write("[context-monitor] beacon_cli not importable — skipping\n")
+    # Last-ditch: both imports failed, so the monitor can do nothing this Stop.
+    # Never BLOCK the Stop event (return 0), but do NOT let the no-op stay silent
+    # (#755 review AX-F3): a hook that quietly becomes a no-op is exactly the
+    # class of silent non-function ms-159 is fixing — a broken install would then
+    # drop context% / threshold notices forever with no visible signal. Surface
+    # it LOUDLY in-band via the Stop hook's own additionalContext channel (the
+    # same one the monitor uses to talk to Claude) in addition to stderr, so the
+    # breakage reaches the human/AI instead of being buried. This only fires when
+    # beacon_cli is genuinely unimportable (a broken install), never in the happy
+    # path where _try_package_import already returned above.
+    warn = ("⚠ Beacon context-usage monitor could not import beacon_cli — this "
+            "Stop hook is a no-op, so context-usage % and 20/40/60/80% notices "
+            "will NOT update until the install is repaired (reinstall beacon via "
+            "pipx, or check the hook command path in settings.json).")
+    sys.stderr.write(f"[context-monitor] {warn}\n")
+    try:
+        import json as _json
+        sys.stdout.write(_json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "Stop",
+                "additionalContext": warn,
+            }
+        }, ensure_ascii=False))
+    except Exception:  # pragma: no cover - stdout emit is best-effort
+        pass
     return 0
 
 

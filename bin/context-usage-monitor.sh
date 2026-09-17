@@ -26,8 +26,15 @@
 # stdin is inherited across `exec`, so the Python entry point reads the same Stop
 # payload. bin/context-usage-monitor.py resolves beacon_cli.hooks.context_monitor
 # whether run from a source checkout or a pipx install; both files are installed
-# side by side (manifest.json), so `dirname "$0"` locates it in either layout.
-# The Python main() is itself fail-safe (silent exit when there is no
-# .beacon/project.json, malformed payload, etc.), so the Stop event is never
-# blocked.
-exec python3 "$(dirname "$0")/context-usage-monitor.py"
+# side by side (manifest.json), so resolving this script's own directory locates
+# it in either layout. The Python main() is itself fail-safe (silent exit when
+# there is no .beacon/project.json, malformed payload, etc.), so the Stop event
+# is never blocked.
+#
+# Resolve the real directory of THIS script before exec (#755 review M-F5): a
+# bare `dirname "$0"` returns "." when the hook is invoked by bare name, which
+# would look for the sibling .py under the caller's cwd instead of the install
+# dir. `cd -- "$(dirname -- "$0")" && pwd -P` yields the absolute, symlink-
+# resolved directory so the delegation is location-independent.
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
+exec python3 "$SCRIPT_DIR/context-usage-monitor.py"
