@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -191,46 +192,70 @@ func (e errForTest) Error() string { return string(e) }
 // 特に **別マシンと未対応端末が同じ false に潰れない** こと (#744 独立レビューの核心)。
 func TestJumpVerdict(t *testing.T) {
 	cases := []struct {
-		envOK   bool
-		remote  bool
-		pid     int
-		harness string
-		wantOK  bool
-		wantWhy string
-		why     string
+		envBlocked string
+		remote     bool
+		pid        int
+		harness    string
+		wantOK     bool
+		wantWhy    string
+		why        string
 	}{
-		{true, false, 100, "apple-terminal", true, "", "このマシン・対応端末は飛べる"},
-		{true, false, 100, "", true, "", "harness 不明は Terminal.app 既定で飛べる"},
-		{false, false, 100, "apple-terminal", false, JumpBlockedExposed,
-			"環境 (公開中/非loopback/非macOS) が最優先で塞ぐ"},
-		{false, true, 0, "kitty", false, JumpBlockedExposed,
-			"環境起因は他のどの理由よりも優先"},
-		{true, true, 0, "apple-terminal", false, JumpBlockedRemoteMachine,
+		{"", false, 100, "apple-terminal", true, "", "このマシン・対応端末は飛べる"},
+		{"", false, 100, "", true, "", "harness 不明は Terminal.app 既定で飛べる"},
+		{JumpBlockedExposed, false, 100, "apple-terminal", false, JumpBlockedExposed,
+			"環境 (公開中/非loopback) が最優先で塞ぐ"},
+		{JumpBlockedUnsupportedOS, true, 0, "kitty", false, JumpBlockedUnsupportedOS,
+			"環境起因は他のどの理由よりも優先。OS 起因は exposed に潰れない (#756 AX)"},
+		{"", true, 0, "apple-terminal", false, JumpBlockedRemoteMachine,
 			"別マシンは pid 無しでも remote-machine と名乗る (no-pid に潰れない)"},
-		{true, false, 0, "apple-terminal", false, JumpBlockedNoPID,
+		{"", false, 0, "apple-terminal", false, JumpBlockedNoPID,
 			"このマシンで pid 不明"},
-		{true, false, 100, "kitty", false, JumpBlockedUnsupportedTerminal,
+		{"", false, 100, "kitty", false, JumpBlockedUnsupportedTerminal,
 			"未対応端末は fallback (パスのコピー) に回す理由として区別"},
 	}
 	for _, c := range cases {
-		ok, why := jumpVerdict(c.envOK, c.remote, c.pid, c.harness)
+		ok, why := jumpVerdict(c.envBlocked, c.remote, c.pid, c.harness)
 		if ok != c.wantOK || why != c.wantWhy {
-			t.Errorf("jumpVerdict(%v,%v,%d,%q) = (%v,%q), want (%v,%q) — %s",
-				c.envOK, c.remote, c.pid, c.harness, ok, why, c.wantOK, c.wantWhy, c.why)
+			t.Errorf("jumpVerdict(%q,%v,%d,%q) = (%v,%q), want (%v,%q) — %s",
+				c.envBlocked, c.remote, c.pid, c.harness, ok, why, c.wantOK, c.wantWhy, c.why)
 		}
 	}
 }
 
-// 飛べない理由が閉じた enum に収まっていること。値の綴りは画面 (page.html) が
-// 文字列比較で読むため、黙って変えると出し分けが silent に壊れる。変えるときは
-// このテストと page.html の両方を意図的に更新すること。
+// 環境ブロック理由の判定 (jumpEnvBlocked)。OS 起因と公開起因は直し方が違うので
+// 別の値で返ること (#756 独立 AX レビュー)。
+func TestJumpEnvBlocked(t *testing.T) {
+	cases := []struct {
+		goos, host string
+		expose     bool
+		want       string
+	}{
+		{"darwin", "127.0.0.1", false, ""},
+		{"linux", "127.0.0.1", false, JumpBlockedUnsupportedOS},
+		{"linux", "0.0.0.0", true, JumpBlockedUnsupportedOS}, // OS 起因が公開起因より先
+		{"darwin", "0.0.0.0", true, JumpBlockedExposed},
+		{"darwin", "192.168.1.10", false, JumpBlockedExposed},
+	}
+	for _, c := range cases {
+		if got := jumpEnvBlocked(c.goos, c.host, c.expose); got != c.want {
+			t.Errorf("jumpEnvBlocked(%q,%q,%v) = %q, want %q",
+				c.goos, c.host, c.expose, got, c.want)
+		}
+	}
+}
+
+// 飛べない理由が閉じた enum に収まっていること。値のうち画面 (page.html) が
+// 文字列比較で読むのは "unsupported-terminal" だけ (それ以外はボタン非表示のみで
+// 描画分岐を持たない — #756 独立 AX レビューで過大宣言を修正)。その 1 値は下の
+// TestJumpBlockedLiteralMatchesPage が Go 定数と page.html の一致を機械検証するので、
+// 定数の綴りを変えると即座に赤くなる。
 func TestJumpBlockedEnumClosed(t *testing.T) {
 	want := map[string]bool{
-		"exposed": true, "remote-machine": true,
+		"exposed": true, "unsupported-os": true, "remote-machine": true,
 		"no-pid": true, "unsupported-terminal": true,
 	}
-	got := []string{JumpBlockedExposed, JumpBlockedRemoteMachine,
-		JumpBlockedNoPID, JumpBlockedUnsupportedTerminal}
+	got := []string{JumpBlockedExposed, JumpBlockedUnsupportedOS,
+		JumpBlockedRemoteMachine, JumpBlockedNoPID, JumpBlockedUnsupportedTerminal}
 	if len(got) != len(want) {
 		t.Fatalf("enum の数が合わない: %d / %d", len(got), len(want))
 	}
@@ -241,6 +266,21 @@ func TestJumpBlockedEnumClosed(t *testing.T) {
 	}
 }
 
+// page.html が文字列比較で消費する enum 値が、Go 定数と一致していること (#756
+// 独立レビュー consensus: コメントで「両方更新せよ」と頼むのは構造ガードではない。
+// 定数の綴りを変えたら page.html の分岐が silent に壊れる前に、ここが赤くなる)。
+func TestJumpBlockedLiteralMatchesPage(t *testing.T) {
+	page, err := os.ReadFile("page.html")
+	if err != nil {
+		t.Fatalf("page.html が読めない: %v", err)
+	}
+	needle := `jump_blocked === "` + JumpBlockedUnsupportedTerminal + `"`
+	if !strings.Contains(string(page), needle) {
+		t.Errorf("page.html に %q が無い — Go 定数 JumpBlockedUnsupportedTerminal と"+
+			" 画面の文字列比較がずれている (fallback ボタンの出し分けが silent に壊れる)", needle)
+	}
+}
+
 // applyJumpVerdicts が全行に最終判定を書き込むこと (受け口はこれを呼ぶだけ)。
 func TestApplyJumpVerdicts(t *testing.T) {
 	rows := []SessionOverview{
@@ -248,7 +288,7 @@ func TestApplyJumpVerdicts(t *testing.T) {
 		{Remote: true},
 		{PID: 100, Harness: "kitty"},
 	}
-	applyJumpVerdicts(rows, true)
+	applyJumpVerdicts(rows, "")
 	if !rows[0].Jumpable || rows[0].JumpBlocked != "" {
 		t.Errorf("飛べる行が飛べる印になっていない: %+v", rows[0])
 	}
@@ -258,8 +298,8 @@ func TestApplyJumpVerdicts(t *testing.T) {
 	if rows[2].Jumpable || rows[2].JumpBlocked != JumpBlockedUnsupportedTerminal {
 		t.Errorf("未対応端末行の理由が違う: %+v", rows[2])
 	}
-	// 環境が塞がっていれば、飛べたはずの行も exposed で塞がる。
-	applyJumpVerdicts(rows, false)
+	// 環境が塞がっていれば、飛べたはずの行もその環境理由で塞がる。
+	applyJumpVerdicts(rows, JumpBlockedExposed)
 	if rows[0].Jumpable || rows[0].JumpBlocked != JumpBlockedExposed {
 		t.Errorf("環境起因の塞ぎが効いていない: %+v", rows[0])
 	}

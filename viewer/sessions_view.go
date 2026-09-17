@@ -103,8 +103,9 @@ type SessionOverview struct {
 	// Go という宣言が最後の AND で破れていた (#744 独立レビュー)。
 	Jumpable bool `json:"jumpable"`
 	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。値は jump.go の閉じた
-	// enum (exposed / remote-machine / no-pid / unsupported-terminal) が唯一の正典。
-	// 画面は unsupported-terminal のときだけ fallback (パスのコピー) を出す。
+	// enum (exposed / unsupported-os / remote-machine / no-pid /
+	// unsupported-terminal) が唯一の正典。画面は unsupported-terminal のときだけ
+	// fallback (パスのコピー) を出す (他の値は非表示のみで描画分岐を持たない)。
 	// 別マシンと未対応端末を同じ false に潰さないための描き分け源 (e-6427)。
 	JumpBlocked string `json:"jump_blocked,omitempty"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。

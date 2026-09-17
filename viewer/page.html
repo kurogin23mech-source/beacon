@@ -970,6 +970,10 @@ function wireSendButtons() {
 
 // 「端末へ飛ぶ」ボタン。押すとそのセッションの端末ウィンドウを前面化する。
 // 見つからない/未対応でも落とさず、ボタン脇に理由を出す (SPEC ms-173 方針4)。
+// /api/jump の HTTP status (400=入力起因 / 403,404,501=直しても無駄) はここでは
+// あえて分岐しない — 画面はサーバが返す文面 (res.error) をそのまま人に見せるだけで
+// 足りる。status の意味論は API を直接叩く自動化クライアント (AI 等) 向けの契約
+// (#756 独立 AX レビューで「宣言だけあり消費者不在」に見える点を明記)。
 function wireJumpButtons() {
   for (const btn of document.querySelectorAll("button.jump")) {
     btn.onclick = async e => {

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -33,13 +34,28 @@ func defaultRunner(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).Output()
 }
 
-// jumpSupported は「端末へ飛ぶ」が使える条件を **1 か所** で判定する (純関数)。
+// jumpEnvBlocked は「端末へ飛ぶ」が環境ごと使えない理由を **1 か所** で判定する
+// (純関数)。使えるなら空文字列を返す。
 //
-// macOS (osascript がある) かつ 自分の機械の中 (loopback) かつ 非公開 のときだけ。
+// macOS (osascript がある) かつ 自分の機械の中 (loopback) かつ 非公開 のときだけ
+// 使える。理由は 2 値に分かれる — OS 非対応 (unsupported-os) と外部公開・非
+// loopback (exposed)。同じ「環境起因」でも直し方が違う (OS は変えられない /
+// 公開は起動フラグ) ので、1 つの値に潰すと受け手が誤診する (#756 独立 AX レビュー)。
 // 対応 OS / 公開ポリシーを変えるときはこの関数 1 つを直せば、ボタンの表示可否
 // (jumpAvailable 経由) も揃って変わる (= 判定の真実源を 1 つに)。
+func jumpEnvBlocked(goos, host string, expose bool) string {
+	if goos != "darwin" {
+		return JumpBlockedUnsupportedOS
+	}
+	if !isLoopback(host) || expose {
+		return JumpBlockedExposed
+	}
+	return ""
+}
+
+// jumpSupported は「端末へ飛ぶ」が使えるか (= 環境ブロックが無いか)。
 func jumpSupported(goos, host string, expose bool) bool {
-	return goos == "darwin" && isLoopback(host) && !expose
+	return jumpEnvBlocked(goos, host, expose) == ""
 }
 
 // ttyFromPS は `ps -o tty= -p <pid>` の出力から制御端末名を取り出す (純関数)。
@@ -65,11 +81,15 @@ func resolveTTY(pid int) (string, error) {
 }
 
 // resolveTTYWith は実行器を差し替え可能にした本体 (テスト可能)。
+//
+// **pid の有効性検査はここが唯一のガード** (#756 独立保守性レビュー: 呼び出し側と
+// 二重に置くと、片方だけ直したときにエラー型・status が silent に割れる)。無効 pid
+// は入力起因 (400) なので *jumpFailure で返し、呼び出し側はそのまま status に写す。
 func resolveTTYWith(run commandRunner, pid int) (string, error) {
 	if pid <= 0 {
 		// pid が無効 / 欠落 (0 は Go の int ゼロ値)。「別マシン」とは別の失敗。
-		return "", fmt.Errorf(
-			"プロセス番号が指定されていないか無効です (pid=%d)", pid)
+		return "", &jumpFailure{http.StatusBadRequest, fmt.Sprintf(
+			"プロセス番号が指定されていないか無効です (pid=%d)", pid)}
 	}
 	out, err := run("ps", "-o", "tty=", "-p", strconv.Itoa(pid))
 	if err != nil {
@@ -162,9 +182,13 @@ func jumpableHarness(harness string) bool {
 // 「Go が唯一の正典」の宣言が最後の AND で破れ、別マシンと未対応端末が同じ
 // false に潰れて区別できなかった (#744 独立レビュー)。
 const (
-	// JumpBlockedExposed は環境起因で飛べない (外部公開中 / loopback でない /
-	// 対応 OS でない)。この盤からはどのセッションにも飛べない。
+	// JumpBlockedExposed は外部公開・非 loopback で飛べない (この盤からはどの
+	// セッションにも飛べない)。--expose を外して loopback で開き直せば直る。
 	JumpBlockedExposed = "exposed"
+	// JumpBlockedUnsupportedOS はこの盤の OS が前面化に未対応 (現状 macOS のみ)。
+	// exposed と違い、起動の仕方を変えても直らない (#756 独立 AX レビューで
+	// 「exposed に潰すと OS 起因を公開ポリシーの問題と誤診する」指摘を受け分離)。
+	JumpBlockedUnsupportedOS = "unsupported-os"
 	// JumpBlockedRemoteMachine は別マシンのセッション。そのマシンの端末は
 	// この盤からは前面化できない。
 	JumpBlockedRemoteMachine = "remote-machine"
@@ -177,11 +201,12 @@ const (
 
 // jumpVerdict は「このセッションへ飛べるか」の最終 1 値と、飛べない理由を返す
 // (純関数)。判定の真実源はここ 1 つで、画面は結果を読むだけ。
+// envBlocked はこの盤の環境ブロック (jumpEnvBlocked の結果、空 = 環境は OK)。
 // 理由は影響範囲の広い順に選ぶ: 環境 (盤全体) → マシン → プロセス → 端末種別。
-func jumpVerdict(envOK, remote bool, pid int, harness string) (bool, string) {
+func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool, string) {
 	switch {
-	case !envOK:
-		return false, JumpBlockedExposed
+	case envBlocked != "":
+		return false, envBlocked
 	case remote:
 		return false, JumpBlockedRemoteMachine
 	case pid <= 0:
@@ -192,13 +217,14 @@ func jumpVerdict(envOK, remote bool, pid int, harness string) (bool, string) {
 	return true, ""
 }
 
-// applyJumpVerdicts は一覧の全行に最終判定を書き込む。envOK はこの盤 (サーバ) の
-// 環境で飛べるか (= jumpSupported の結果)。組み立て (assembleSessions) はサーバの
-// 環境を知らない純関数なので、環境を知っている受け口側がここで確定させる。
-func applyJumpVerdicts(sessions []SessionOverview, envOK bool) {
+// applyJumpVerdicts は一覧の全行に最終判定を書き込む。envBlocked はこの盤 (サーバ)
+// の環境ブロック理由 (jumpEnvBlocked の結果、空 = 環境は OK)。組み立て
+// (assembleSessions) はサーバの環境を知らない純関数なので、環境を知っている
+// 受け口側がここで確定させる。
+func applyJumpVerdicts(sessions []SessionOverview, envBlocked string) {
 	for i := range sessions {
 		sessions[i].Jumpable, sessions[i].JumpBlocked = jumpVerdict(
-			envOK, sessions[i].Remote, sessions[i].PID, sessions[i].Harness)
+			envBlocked, sessions[i].Remote, sessions[i].PID, sessions[i].Harness)
 	}
 }
 
@@ -285,14 +311,15 @@ func jumpToTerminalWith(run commandRunner, goos string, pid int, harness string)
 	if err != nil {
 		return &jumpFailure{http.StatusNotImplemented, err.Error()}
 	}
-	if pid <= 0 {
-		// 入力起因はこれだけ = 400。直せば通るかもしれない。
-		return &jumpFailure{http.StatusBadRequest, fmt.Sprintf(
-			"プロセス番号が指定されていないか無効です (pid=%d)", pid)}
-	}
 	tty, err := resolveTTYWith(run, pid)
 	if err != nil {
-		// プロセスが消えている / 制御端末を持たない = 指した実体が見つからない。
+		// 無効 pid (入力起因 = 400) は resolveTTYWith が *jumpFailure で返す
+		// (ガードはあちらが唯一)。それ以外 = プロセスが消えている / 制御端末を
+		// 持たない = 指した実体が見つからない (404)。
+		var jf *jumpFailure
+		if errors.As(err, &jf) {
+			return jf
+		}
 		return &jumpFailure{http.StatusNotFound, err.Error()}
 	}
 	out, err := run("osascript", "-e", build(tty))

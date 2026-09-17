@@ -457,9 +457,10 @@ func (s *Server) handler() http.Handler {
 		view.Shown = len(view.Sessions)
 		view.RosterStatus = rosterStatus
 		// 「端末へ飛べるか」の最終 1 値をここで確定させる (e-6427)。組み立ては
-		// サーバの環境 (loopback / --expose) を知らないので、知っている受け口が
-		// 全行に書き込む。画面は jumpable / jump_blocked を読むだけ。
-		applyJumpVerdicts(view.Sessions, s.jumpAvailable())
+		// サーバの環境 (loopback / --expose / OS) を知らないので、知っている
+		// 受け口が全行に書き込む。画面は jumpable / jump_blocked を読むだけ。
+		applyJumpVerdicts(view.Sessions,
+			jumpEnvBlocked(runtime.GOOS, s.Host, s.expose))
 		writeJSON(w, view)
 	})
 
@@ -617,6 +618,10 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // writeJSONError は読めなかった理由をそのまま画面に届ける。
 // 「盤が出ない」だけで理由が分からない状態を作らないため。
+//
+// **使い分け** (#756 独立保守性レビューで明文化): これは「サーバ都合の失敗 = 500」
+// 専用の略記。status で「入力を直せば通るか / 直しても無駄か」を伝えたい経路は
+// writeJSONErrorCode を直接呼ぶ。
 func writeJSONError(w http.ResponseWriter, err error) {
 	writeJSONErrorCode(w, http.StatusInternalServerError, err.Error())
 }
@@ -628,7 +633,11 @@ func writeJSONError(w http.ResponseWriter, err error) {
 func writeJSONErrorCode(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	// エンコード方針は writeJSON と同じ (HTML エスケープしない)。片方だけ素の
+	// Encoder にすると、パスや < > を含むメッセージで応答表記が割れる。
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.Encode(map[string]string{"error": msg})
 }
 
 // Serve は受け口を動かし続ける。

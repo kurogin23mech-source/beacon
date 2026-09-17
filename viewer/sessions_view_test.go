@@ -631,7 +631,7 @@ func TestOpsRoomAtScale(t *testing.T) {
 		}
 	}
 	// 受け口 (/api/sessions) と同じく、最終判定をここで全行に書き込む (e-6427)。
-	applyJumpVerdicts(sessions, true)
+	applyJumpVerdicts(sessions, "")
 	total := projects * perProject
 
 	// (1) グルーピング: プロジェクト数ちょうどに束ね、取りこぼし/重複が無い。
