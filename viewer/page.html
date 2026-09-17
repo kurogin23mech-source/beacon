@@ -1143,6 +1143,19 @@ function renderSessions(d, state) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   }
+  // 並び順を安定させる (e-6535)。挿入順 = サーバ返却順は 5 秒ポーリングのたびに変わり、
+  // 描画順がコロコロ入れ替わって使いにくかった。ドロップダウンの rootNames と同じ規則
+  // (プロジェクト名の昇順) でグループを並べ、同一プロジェクト内のセッション行も安定キー
+  // (名前 → フォルダ → session_id、いずれも last_active のように毎回変わらない) で並べる。
+  // 指紋 (sessionsSignature) は d の中身から計算し描画順に依らないので、e-6483 の
+  // 「変わらなければ再描画しない」とは両立する (順序付けは描画時の見せ方だけ)。
+  const stableStr = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+  const sessionSortKey = s =>
+    [s.name || s.tool || "", s.directory || "", s.session_id || ""].join(" ");
+  for (const list of groups.values()) {
+    list.sort((a, b) => stableStr(sessionSortKey(a), sessionSortKey(b)));
+  }
+  const orderedGroups = [...groups.entries()].sort(([a], [b]) => stableStr(a, b));
 
   app.innerHTML = `
     <header>
@@ -1189,7 +1202,7 @@ function renderSessions(d, state) {
       Beacon に名乗っていない素の Claude / Codex は、何も送っていない以上こちらに届く
       経路が無く、<b>原理的にここには出ません</b>。空いて見えても「誰も居ない」とは
       限りません — こちらから見えていないだけのこともあります。</p>
-    ${rows.length ? [...groups.entries()].map(([name, list]) => `
+    ${rows.length ? orderedGroups.map(([name, list]) => `
       <div class="section-title">${esc(name)} (${list.length})</div>
       <div class="grid">${list.map(s => {
         const l = liveness(s);
