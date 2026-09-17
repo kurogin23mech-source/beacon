@@ -94,11 +94,19 @@ type SessionOverview struct {
 	// 唯一の正典 (apple-terminal / terminal / apple_terminal / iterm2 / iterm / iterm.app)。
 	// 空は不明 = Terminal.app 既定扱い。ここに無い値は前面化に未対応 (Jumpable=false)。
 	Harness string `json:"harness,omitempty"`
-	// Jumpable は「端末へ飛ぶ」に対応した端末か (= Go が harness から計算した判定)。
+	// Jumpable は「端末へ飛ぶ」の **最終 1 値** (= 環境・マシン・プロセス・端末種別を
+	// すべて織り込んだ、この行に飛べるかどうか)。受け口 (/api/sessions) が
+	// applyJumpVerdicts で確定させる (e-6427)。
 	//
-	// **画面はこの値を読むだけ。** 対応端末の許可集合を JS 側に複製すると Go と
-	// ドリフトするため、判定は Go (jump.go) を唯一の正典にして結果だけを渡す。
+	// **画面はこの値を読むだけ。** 以前は「対応端末か」だけを渡し、最終可否は画面が
+	// jump_available && pid && jumpable の 3 値 AND で再構成していた — 判定の正典が
+	// Go という宣言が最後の AND で破れていた (#744 独立レビュー)。
 	Jumpable bool `json:"jumpable"`
+	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。値は jump.go の閉じた
+	// enum (exposed / remote-machine / no-pid / unsupported-terminal) が唯一の正典。
+	// 画面は unsupported-terminal のときだけ fallback (パスのコピー) を出す。
+	// 別マシンと未対応端末を同じ false に潰さないための描き分け源 (e-6427)。
+	JumpBlocked string `json:"jump_blocked,omitempty"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
 	Machine string `json:"machine,omitempty"`
 	// Who は動かしている人 (名乗っているセッションのみ分かる)。
@@ -363,8 +371,9 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			o.ContextPct = n.ContextPct
 		}
 
-		// 端末へ飛べるかを Go 側で確定させる (画面は結果を読むだけ)。
-		o.Jumpable = jumpableHarness(o.Harness)
+		// 端末へ飛べるかの最終判定はここではしない。組み立てはサーバの環境
+		// (loopback / --expose) を知らない純関数なので、受け口 (/api/sessions) が
+		// applyJumpVerdicts で確定させる — 書き手を 1 か所にする (e-6427)。
 		// 分かった ID に、読める名前を与える。
 		lookup.decorate(proj, &o)
 		out.Sessions = append(out.Sessions, o)

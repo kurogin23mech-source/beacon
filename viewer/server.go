@@ -137,8 +137,9 @@ func (s *Server) handler() http.Handler {
 			// サーバに設置した場合、見ている人の手元ではなくサーバ側に出てしまい
 			// 何も起きないように見えるので、その場合は入口ごと出さない。
 			"picker_available": isLoopback(s.Host),
-			// 端末へ飛ぶは自分の機械の中でのみ有効 (外部公開時は無効)。
-			"jump_available": s.jumpAvailable(),
+			// 「端末へ飛べるか」はここでは出さない (e-6427)。飛べるかは行ごとの
+			// 最終 1 値として /api/sessions が jumpable / jump_blocked に織り込む。
+			// 読み手のいない旗を宣伝し続けると、実態と乖離したときに気づけない。
 		})
 	})
 
@@ -364,18 +365,19 @@ func (s *Server) handler() http.Handler {
 
 	// 端末へ飛ぶ (jump-to-terminal, ms-173 e-6402)。一覧から実物の端末ウィンドウ/
 	// タブを前面化する。自分の機械の中 (loopback) 限定、外部公開時は無効。
+	//
+	// エラーは全経路 writeJSONErrorCode で {error} JSON に統一 (e-6429)。status が
+	// 「入力を直しても無駄」(403=公開中 / 404=実体不在 / 501=OS・端末が未対応) か
+	// 「入力起因」(400) かを伝える。
 	mux.HandleFunc("/api/jump", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "POST してください", http.StatusMethodNotAllowed)
+			writeJSONErrorCode(w, http.StatusMethodNotAllowed, "POST してください")
 			return
 		}
 		if !s.jumpAvailable() {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": "端末へ飛ぶのは自分の機械の中 (loopback) でのみ有効です " +
-					"(外部公開中は無効)",
-			})
+			writeJSONErrorCode(w, http.StatusForbidden,
+				"端末へ飛ぶのは自分の機械の中 (loopback) でのみ有効です "+
+					"(外部公開中は無効)")
 			return
 		}
 		var body struct {
@@ -385,13 +387,17 @@ func (s *Server) handler() http.Handler {
 			Harness string `json:"harness"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSONError(w, err)
+			writeJSONErrorCode(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := jumpToTerminal(body.PID, body.Harness); err != nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			// 失敗理由ごとの status は jumpFailure (jump.go) が持っている。
+			var jf *jumpFailure
+			if errors.As(err, &jf) {
+				writeJSONErrorCode(w, jf.Status, jf.Msg)
+			} else {
+				writeJSONErrorCode(w, http.StatusInternalServerError, err.Error())
+			}
 			return
 		}
 		writeJSON(w, map[string]bool{"ok": true})
@@ -450,6 +456,10 @@ func (s *Server) handler() http.Handler {
 		view.Total = total
 		view.Shown = len(view.Sessions)
 		view.RosterStatus = rosterStatus
+		// 「端末へ飛べるか」の最終 1 値をここで確定させる (e-6427)。組み立ては
+		// サーバの環境 (loopback / --expose) を知らないので、知っている受け口が
+		// 全行に書き込む。画面は jumpable / jump_blocked を読むだけ。
+		applyJumpVerdicts(view.Sessions, s.jumpAvailable())
 		writeJSON(w, view)
 	})
 
@@ -608,9 +618,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 // writeJSONError は読めなかった理由をそのまま画面に届ける。
 // 「盤が出ない」だけで理由が分からない状態を作らないため。
 func writeJSONError(w http.ResponseWriter, err error) {
+	writeJSONErrorCode(w, http.StatusInternalServerError, err.Error())
+}
+
+// writeJSONErrorCode は status を選べるエラー応答の 1 ヘルパ (e-6429)。
+// エラーは常に {error} の JSON で返す — text/plain と手組み JSON が混在すると、
+// 画面側の res.json() が経路によって落ちる。status は「入力を直せば通るか
+// (400)、直しても無駄か (403/404/501 等)」を status 自体で伝えるために選ぶ。
+func writeJSONErrorCode(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusInternalServerError)
-	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // Serve は受け口を動かし続ける。

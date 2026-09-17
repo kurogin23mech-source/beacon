@@ -16,6 +16,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -154,6 +155,53 @@ func jumpableHarness(harness string) bool {
 	return driverForHarness(harness) != nil
 }
 
+// --- 飛べるかの最終判定 (e-6427) -------------------------------------------
+//
+// 飛べない理由の閉じた enum。画面はこの値を読むだけで、理由を再推論しない。
+// 以前は画面側が jump_available && pid && jumpable の 3 値 AND を再構成しており、
+// 「Go が唯一の正典」の宣言が最後の AND で破れ、別マシンと未対応端末が同じ
+// false に潰れて区別できなかった (#744 独立レビュー)。
+const (
+	// JumpBlockedExposed は環境起因で飛べない (外部公開中 / loopback でない /
+	// 対応 OS でない)。この盤からはどのセッションにも飛べない。
+	JumpBlockedExposed = "exposed"
+	// JumpBlockedRemoteMachine は別マシンのセッション。そのマシンの端末は
+	// この盤からは前面化できない。
+	JumpBlockedRemoteMachine = "remote-machine"
+	// JumpBlockedNoPID はプロセス番号が取れていない (端末を辿る起点が無い)。
+	JumpBlockedNoPID = "no-pid"
+	// JumpBlockedUnsupportedTerminal は前面化に未対応の端末 (kitty / VS Code 等)。
+	// 画面はこの値のときだけ fallback (パスのコピー) を出す。
+	JumpBlockedUnsupportedTerminal = "unsupported-terminal"
+)
+
+// jumpVerdict は「このセッションへ飛べるか」の最終 1 値と、飛べない理由を返す
+// (純関数)。判定の真実源はここ 1 つで、画面は結果を読むだけ。
+// 理由は影響範囲の広い順に選ぶ: 環境 (盤全体) → マシン → プロセス → 端末種別。
+func jumpVerdict(envOK, remote bool, pid int, harness string) (bool, string) {
+	switch {
+	case !envOK:
+		return false, JumpBlockedExposed
+	case remote:
+		return false, JumpBlockedRemoteMachine
+	case pid <= 0:
+		return false, JumpBlockedNoPID
+	case !jumpableHarness(harness):
+		return false, JumpBlockedUnsupportedTerminal
+	}
+	return true, ""
+}
+
+// applyJumpVerdicts は一覧の全行に最終判定を書き込む。envOK はこの盤 (サーバ) の
+// 環境で飛べるか (= jumpSupported の結果)。組み立て (assembleSessions) はサーバの
+// 環境を知らない純関数なので、環境を知っている受け口側がここで確定させる。
+func applyJumpVerdicts(sessions []SessionOverview, envOK bool) {
+	for i := range sessions {
+		sessions[i].Jumpable, sessions[i].JumpBlocked = jumpVerdict(
+			envOK, sessions[i].Remote, sessions[i].PID, sessions[i].Harness)
+	}
+}
+
 // jumpableHarnessKinds は対応端末の別名を全部並べる (テスト / ドキュメント用)。
 // テストはこれを回して網羅するので、テーブルに足した別名がテスト漏れしない。
 func jumpableHarnessKinds() []string {
@@ -206,31 +254,56 @@ func jumpScriptBuilder(harness string) (func(tty string) string, error) {
 		"この端末 (%s) への前面化は未対応です — 作業フォルダを手で開いてください", harness)
 }
 
+// jumpFailure は前面化に失敗した理由と、HTTP でどう伝えるべきかの status。
+//
+// 400 は「入力を直せば通るかもしれない」。それ以外は status 自体が
+// 「入力を直しても無駄」を伝える: 501 = 環境起因 (OS / 端末種別が未対応)、
+// 404 = 指した実体が見つからない (プロセス / タブ)、500 = 実行失敗 (e-6429)。
+type jumpFailure struct {
+	Status int
+	Msg    string
+}
+
+func (e *jumpFailure) Error() string { return e.Msg }
+
 // jumpToTerminal は pid のセッションが動いている端末ウィンドウを前面化する。
 //
 // harness は端末の種類。未対応の種類は **エラーで落とさず理由を返す** (SPEC 方針4)。
 func jumpToTerminal(pid int, harness string) error {
-	if runtime.GOOS != "darwin" {
-		return fmt.Errorf(
-			"端末の前面化はこの OS では未対応です (現状 macOS のみ)")
+	return jumpToTerminalWith(defaultRunner, runtime.GOOS, pid, harness)
+}
+
+// jumpToTerminalWith は実行器と OS を差し替え可能にした本体 (テスト可能)。
+// 失敗はすべて *jumpFailure で返し、受け口が HTTP status に写せるようにする。
+func jumpToTerminalWith(run commandRunner, goos string, pid int, harness string) error {
+	if goos != "darwin" {
+		return &jumpFailure{http.StatusNotImplemented,
+			"端末の前面化はこの OS では未対応です (現状 macOS のみ)"}
 	}
-	// 端末種別で前面化スクリプトを選ぶ。未対応端末は fallback として理由を返す。
+	// 端末種別で前面化スクリプトを選ぶ。未対応端末は環境起因 = 501。
 	build, err := jumpScriptBuilder(harness)
 	if err != nil {
-		return err
+		return &jumpFailure{http.StatusNotImplemented, err.Error()}
 	}
-	tty, err := resolveTTY(pid)
-	if err != nil {
-		return err
+	if pid <= 0 {
+		// 入力起因はこれだけ = 400。直せば通るかもしれない。
+		return &jumpFailure{http.StatusBadRequest, fmt.Sprintf(
+			"プロセス番号が指定されていないか無効です (pid=%d)", pid)}
 	}
-	out, err := exec.Command("osascript", "-e", build(tty)).Output()
+	tty, err := resolveTTYWith(run, pid)
 	if err != nil {
-		return fmt.Errorf("端末の前面化に失敗しました (osascript): %v", err)
+		// プロセスが消えている / 制御端末を持たない = 指した実体が見つからない。
+		return &jumpFailure{http.StatusNotFound, err.Error()}
+	}
+	out, err := run("osascript", "-e", build(tty))
+	if err != nil {
+		return &jumpFailure{http.StatusInternalServerError,
+			fmt.Sprintf("端末の前面化に失敗しました (osascript): %v", err)}
 	}
 	if strings.TrimSpace(string(out)) != "true" {
-		return fmt.Errorf(
+		return &jumpFailure{http.StatusNotFound, fmt.Sprintf(
 			"その端末 (tty %s) を持つ %s のタブが見つかりませんでした "+
-				"(別の端末アプリで開いている可能性)", tty, terminalAppName(harness))
+				"(別の端末アプリで開いている可能性)", tty, terminalAppName(harness))}
 	}
 	return nil
 }
