@@ -154,6 +154,11 @@ type SessionRow struct {
 	// **このビューワーは作らない。消費するだけ。** サーバが出し始めるまで空で、
 	// 空は「分からない」であって「何もしていない」ではない (運用室では空欄で描く)。
 	Activity string `json:"activity"`
+	// ActivityKind は Activity の意味 ("work"=作業要約 / "wait"=待機理由) を表す
+	// (ms-159 e-6533, #755 review AX-F1/F2)。これがあると消費側は state を併読せず
+	// に、空の Activity が「待機・理由不明」("wait") か「稼働・表示なし」("work") か
+	// を判別できる。サーバが出し始めるまで空。
+	ActivityKind string `json:"activity_kind,omitempty"`
 	// Harness は端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶ分岐に使う。
 	Harness string `json:"harness"`
 	Live        bool   `json:"live"`

@@ -73,6 +73,10 @@ type SessionOverview struct {
 	// **このビューワーは作らない。消費するだけ。** 空は「分からない」であって
 	// 「何もしていない」ではないので、運用室では空欄として描く (でっち上げない)。
 	Activity string `json:"activity,omitempty"`
+	// ActivityKind は Activity の意味 ("work" / "wait")。空の Activity を
+	// 「待機・理由不明」("wait") と「稼働・表示なし」("work") に判別するため
+	// (ms-159 e-6533, #755 review AX-F1/F2)。
+	ActivityKind string `json:"activity_kind,omitempty"`
 	// Named は Beacon に名乗っているか。
 	//
 	// **送れるのはこれが真のものだけ。** 名乗っていないセッションには、外から
@@ -353,6 +357,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			o.Machine = n.Machine
 			o.Who = n.Who
 			o.Activity = n.Activity
+			o.ActivityKind = n.ActivityKind
 			o.Harness = n.Harness
 			// コンテキスト使用率も名簿から運ぶ (未申告なら nil のまま = バッジ非表示)。
 			o.ContextPct = n.ContextPct
@@ -387,6 +392,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			Machine:       n.Machine,
 			Who:           n.Who,
 			Activity:      n.Activity,
+			ActivityKind:  n.ActivityKind,
 			Harness:       n.Harness,
 			ContextPct:    n.ContextPct, // 別マシンのセッションもコンテキスト使用率を運ぶ
 			Remote:        true,

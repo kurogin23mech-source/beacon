@@ -158,6 +158,38 @@ func TestContextPctCarriedToOverview(t *testing.T) {
 	}
 }
 
+// activity_kind (Activity の意味 work/wait) が名簿から運用室の各行へ運ばれること
+// (ms-159 e-6533, #755 review AX-F1/F2)。**両方の組み立て経路** (手元にも痕跡がある
+// 名乗り / 別マシンだけの名乗り) で落ちないことを確かめる。ここが落ちると、空の
+// activity を「待機・理由不明」と「稼働・表示なし」に描き分けられなくなる。
+func TestActivityKindCarriedToOverview(t *testing.T) {
+	now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	ts := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/local", LastActive: ts},
+	}
+	named := []SessionRow{
+		{ID: "sv-local", Agent: "claude-code", Cwd: "/Users/x/local",
+			Live: true, LastActive: ts, ActivityKind: "wait"},
+		{ID: "sv-remote", Agent: "claude-code", Cwd: "/Users/y/remote",
+			Who: "other@example.com", Live: true, LastActive: ts, ActivityKind: "work"},
+	}
+
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	byID := map[string]*SessionOverview{}
+	for i := range view.Sessions {
+		byID[view.Sessions[i].SessionID] = &view.Sessions[i]
+	}
+
+	if loc := byID["sv-local"]; loc == nil || loc.ActivityKind != "wait" {
+		t.Errorf("手元に痕跡のある名乗りセッションに activity_kind=wait が運ばれていない: %+v", loc)
+	}
+	if rem := byID["sv-remote"]; rem == nil || rem.ActivityKind != "work" {
+		t.Errorf("別マシンの名乗りセッションに activity_kind=work が運ばれていない: %+v", rem)
+	}
+}
+
 // 名乗っていないセッションには context_pct が付かないこと (nil = バッジ非表示)。
 // context_pct はサーバの名簿にしか無い値なので、手がかり推測の行にでっち上げない。
 func TestUnnamedSessionHasNoContextPct(t *testing.T) {

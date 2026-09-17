@@ -108,6 +108,85 @@ class TestStampWorkingTarget:
         _app._stamp_session_liveness(row, "proj", now)
         assert row["activity"] == ""
 
+    # --- activity: state-aware wait detail (ms-159 / e-6533) ----------------
+    # The projection is now state-aware: an awaiting_human / blocked row surfaces
+    # WHAT it is waiting on (state_detail) as its activity, instead of the stale
+    # git.head_subject that would misrepresent a stalled session as still working.
+
+    def test_activity_state_aware_awaiting_human_shows_wait_detail(self, _app):
+        now = _now()
+        row = self._row(
+            now, declared_state="awaiting_human",
+            declared_at=_iso(now - datetime.timedelta(seconds=5)),
+            state_detail="Claude needs your permission to use Bash",
+            git={"head_subject": "feat(ms-159): last commit"})
+        _app._stamp_session_liveness(row, "proj", now)
+        # wait state → the wait detail wins over head_subject
+        assert row["activity"] == "Claude needs your permission to use Bash"
+
+    def test_activity_state_aware_blocked_shows_wait_detail(self, _app):
+        now = _now()
+        row = self._row(
+            now, declared_state="blocked",
+            declared_at=_iso(now - datetime.timedelta(seconds=5)),
+            state_detail="waiting on CI to go green",
+            git={"head_subject": "feat: irrelevant"})
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["activity"] == "waiting on CI to go green"
+
+    def test_activity_state_aware_awaiting_human_empty_when_no_detail(self, _app):
+        # No fabrication (ms-173 方針2): a wait state with no known detail shows
+        # EMPTY, NOT the git head subject.
+        now = _now()
+        row = self._row(
+            now, declared_state="awaiting_human",
+            declared_at=_iso(now - datetime.timedelta(seconds=5)),
+            git={"head_subject": "feat(ms-159): last commit"})
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["activity"] == ""
+
+    def test_activity_declared_text_still_wins_over_wait_detail(self, _app):
+        # Precedence unchanged: the session's own self-report beats the derived
+        # wait detail.
+        now = _now()
+        row = self._row(
+            now, declared_state="awaiting_human",
+            declared_at=_iso(now - datetime.timedelta(seconds=5)),
+            state_detail="permission prompt",
+            intent={"text": "手動で調査中"})
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["activity"] == "手動で調査中"
+
+    # --- activity_kind: label the activity's meaning (ms-159 e-6533, #755 AX-F1/F2)
+    # so a consumer interprets the string — and its emptiness — without state.
+
+    def test_activity_kind_wait_for_awaiting_human(self, _app):
+        now = _now()
+        row = self._row(
+            now, declared_state="awaiting_human",
+            declared_at=_iso(now - datetime.timedelta(seconds=5)),
+            git={"head_subject": "feat: x"})
+        _app._stamp_session_liveness(row, "proj", now)
+        # empty activity + kind=wait ⇒ "waiting, reason unknown"
+        assert row["activity"] == ""
+        assert row["activity_kind"] == "wait"
+
+    def test_activity_kind_work_for_running(self, _app):
+        now = _now()
+        row = self._row(now, git={"head_subject": "feat: y"},
+                        declared_state="running",
+                        declared_at=_iso(now - datetime.timedelta(seconds=5)))
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["activity_kind"] == "work"
+
+    def test_activity_kind_work_for_undeclared_unknown(self, _app):
+        # A live-but-undeclared session derives state=unknown; its activity is the
+        # head-subject work proxy, so the kind is work (label matches string).
+        now = _now()
+        row = self._row(now, git={"head_subject": "feat: z"})
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["activity_kind"] == "work"
+
     # --- user_id ------------------------------------------------------------
 
     def test_user_id_prefers_actor_user_id(self, _app):

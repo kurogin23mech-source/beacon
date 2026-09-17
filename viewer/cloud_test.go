@@ -46,6 +46,32 @@ func TestRosterSessionDTOUnmarshalsContextPct(t *testing.T) {
 	}
 }
 
+// activity_kind の JSON 名も server (SessionUpsert 投影) ↔ Go の cross-language 契約
+// (ms-159 e-6533, #755 review AX-F1/F2)。Go 側 tag を誤って変えたら "wait" が field に
+// 載らず、空 activity の「待機・理由不明」描き分けが黙って壊れる。受信 unmarshal の leg
+// をここで固定する (context_pct と同じ守り方)。
+func TestRosterSessionDTOUnmarshalsActivityKind(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"wait", `{"session_id":"s1","activity_kind":"wait"}`, "wait"},
+		{"work", `{"session_id":"s1","activity_kind":"work"}`, "work"},
+		{"未申告はキー欠損 = 空", `{"session_id":"s1"}`, ""},
+	}
+	for _, c := range cases {
+		var dto rosterSessionDTO
+		if err := json.Unmarshal([]byte(c.body), &dto); err != nil {
+			t.Fatalf("%s: unmarshal 失敗: %v", c.name, err)
+		}
+		if dto.ActivityKind != c.want {
+			t.Errorf("%s: got %q, want %q (JSON 名 activity_kind → field の対応が壊れている)",
+				c.name, dto.ActivityKind, c.want)
+		}
+	}
+}
+
 // 受信境界の clamp が範囲外の使用率を 0–100 に収めること (ax review #753 AX5)。
 // 外部 producer が範囲外を送ってもバッジの閾値判定 (60/80%) が壊れない。nil は nil のまま。
 func TestClampPct(t *testing.T) {

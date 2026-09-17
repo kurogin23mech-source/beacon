@@ -1236,8 +1236,9 @@ function renderSessions(d, state) {
               "ブランチ名にもコミット件名にも対象 (ms-NN) が無いため分かりません")}</div>
             <div>${attribution(s.task,
               "直近のコミット件名にタスク番号 (e-NNNN) が無いため分かりません")}</div>
-            <div class="activity" title="このセッションが今何をしているか。Beacon (ms-159) が申告し始めるまでは空欄です (「何もしていない」ではありません)">${
-              s.activity ? esc(s.activity) : "活動 —"}</div>
+            <div class="activity" title="このセッションが今何をしているか。空欄は「分からない」であって「何もしていない」ではありません。待機中(activity_kind=wait)で理由が不明なときは「待機・理由不明」、稼働中(work)で表示する要約が無いときは「活動 —」と描き分けます (ms-159 e-6533)">${
+              s.activity ? esc(s.activity)
+                : (s.activity_kind === "wait" ? "待機・理由不明" : "活動 —")}</div>
           </div>
           <div class="card-foot">
             <span class="sub2 sub1" title="${esc(s.directory)}"

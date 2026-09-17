@@ -299,6 +299,9 @@ type rosterSessionDTO struct {
 	} `json:"poll_health"`
 	// サーバが出す「今何をしているか」の要約 (ms-159)。まだ出していなければ空。
 	Activity string `json:"activity"`
+	// Activity の意味 ("work" / "wait")。空の Activity が「待機・理由不明」か
+	// 「稼働・表示なし」かを state 併読なしで判別するため (ms-159 e-6533, #755 AX-F1/F2)。
+	ActivityKind string `json:"activity_kind"`
 	// コンテキスト窓の使用率 (0–100)。サーバが名簿行に運ぶ (ms-159 e-6499)。
 	// 0 と未申告を区別するためポインタで受ける — 0 は正当な値、未申告は nil。
 	// tag は SessionRow / SessionOverview と同じ `,omitempty` に揃える (受信専用
@@ -378,6 +381,8 @@ func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 		row.ProjectFocus = s.Focus.Milestone.ID
 		// 「今何をしているか」はサーバの申告をそのまま運ぶ (無ければ空のまま)。
 		row.Activity = s.Activity
+		// その Activity の意味 (work / wait) も運ぶ (空欄の解釈に使う)。
+		row.ActivityKind = s.ActivityKind
 		// コンテキスト使用率を運ぶ (未申告なら nil のまま = バッジを出さない)。
 		// 受信境界で 0–100 に clamp し、外部 producer の範囲外値でバッジ閾値が壊れないようにする。
 		row.ContextPct = clampPct(s.ContextPct)
