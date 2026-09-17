@@ -40,6 +40,12 @@ _WAIT_DETAIL_STATES = frozenset({
     bus_liveness.STATE_BLOCKED,
 })
 
+# ms-159 / e-6533 (#755 review AX-F1/AX-F2): the KIND of a row's ``activity`` —
+# what the 1-line string (and its emptiness) MEANS — so a consumer can interpret
+# it without also reading ``state``.
+ACTIVITY_KIND_WORK = "work"   # activity は「今やっている作業」の要約 (空=表示なし)
+ACTIVITY_KIND_WAIT = "wait"   # activity は「何を待っているか」(空=待機・理由不明)
+
 # A milestone id embedded in a branch or worktree name, e.g.
 # "ms-159-fork-361e58", "ms-159", "ms-159-backoffice-stub". First match wins.
 _MS_ID_RE = re.compile(r"(ms-\d+)", re.IGNORECASE)
@@ -240,6 +246,46 @@ def derive_activity(declared_activity, *, head_subject="", state="",
     return _clean(head_subject)
 
 
+def derive_activity_kind(declared_activity, *, state="") -> str:
+    """Classify what the derived ``activity`` MEANS, so a consumer can interpret
+    it — and its emptiness — WITHOUT co-reading ``state`` (#755 review AX-F1/F2).
+
+    Mirrors ``derive_activity``'s branch exactly, so the label never disagrees
+    with the string it describes:
+
+    * ``wait`` (:data:`ACTIVITY_KIND_WAIT`) — a wait state
+      (``awaiting_human`` / ``blocked``) with no explicit self-report. Here
+      ``activity`` is the wait detail, and an EMPTY activity means
+      "waiting, reason unknown" — NOT "working, nothing to show".
+    * ``work`` (:data:`ACTIVITY_KIND_WORK`) — everything else: the session's own
+      declared activity, or the git head-subject work proxy. An EMPTY activity
+      here means "working, nothing to show".
+
+    This resolves BOTH review findings with one field:
+
+    * AX-F1 (activity's meaning depends on state) — the kind states the meaning
+      directly, so a consumer need not read ``state`` to know how to read
+      ``activity``.
+    * AX-F2 (empty activity conflates two cases) — an empty ``activity`` is now
+      disambiguated by its kind: ``wait`` ⇒ "reason unknown", ``work`` ⇒
+      "nothing to show".
+
+    Two kinds are deliberate (not the three the review sketched):
+    ``derive_activity`` only ever returns a wait-detail or a work-proxy, so a
+    third ``unknown`` could never be returned CONSISTENTLY with the string it
+    labels (e.g. a live-but-undeclared session has ``state == "unknown"`` yet its
+    activity is the head-subject work proxy → ``work``). Labelling the kind off
+    anything other than which branch produced the string would let the label lie.
+    The ``state`` field itself still carries the orthogonal "we're unsure what
+    state" signal for any consumer that wants it.
+    """
+    if _clean(declared_activity):
+        return ACTIVITY_KIND_WORK
+    if _clean(state) in _WAIT_DETAIL_STATES:
+        return ACTIVITY_KIND_WAIT
+    return ACTIVITY_KIND_WORK
+
+
 # ---------------------------------------------------------------------------
 # Row enrichment (ms-159 / e-6399) — turn a server directory row into the
 # derive-function inputs, and attach the results.
@@ -323,16 +369,30 @@ def activity_for_row(row) -> str:
     )
 
 
+def activity_kind_for_row(row) -> str:
+    """Derive the ``activity_kind`` (``work`` / ``wait``) for a server directory
+    row (#755 review AX-F1/F2). A declared ``row["activity"]`` is a self-report
+    ⇒ ``work``; otherwise the kind follows ``row["state"]`` through
+    :func:`derive_activity_kind`. Consistent with :func:`activity_for_row` so the
+    label always matches the string that function returns for the same row."""
+    row = row if isinstance(row, dict) else {}
+    return derive_activity_kind(row.get("activity"), state=row.get("state") or "")
+
+
 def enrich_row(row):
-    """Return a shallow copy of ``row`` with ``working_target`` / ``activity``
-    filled in from the derive fallback (declaration still wins inside the derive
-    fns). Non-dict rows pass through unchanged. Non-mutating so callers can pass
-    server rows without surprising aliasing."""
+    """Return a shallow copy of ``row`` with ``working_target`` / ``activity`` /
+    ``activity_kind`` filled in from the derive fallback (declaration still wins
+    inside the derive fns). Non-dict rows pass through unchanged. Non-mutating so
+    callers can pass server rows without surprising aliasing."""
     if not isinstance(row, dict):
         return row
     out = dict(row)
     out["working_target"] = working_target_for_row(row)
     out["activity"] = activity_for_row(row)
+    # Derive the kind from the ORIGINAL row (its declared activity + state), not
+    # from the just-stamped out["activity"], so a fallback head-subject is not
+    # mistaken for a self-report.
+    out["activity_kind"] = activity_kind_for_row(row)
     return out
 
 

@@ -2011,6 +2011,12 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     session["activity"] = working_target.derive_activity(
         intent.get("text"), head_subject=str(git.get("head_subject") or ""),
         state=state, state_detail=str(session.get("state_detail") or ""))
+    # ms-159 / e-6533 (#755 review AX-F1/F2): stamp the KIND of that activity
+    # (work / wait) so a consumer can interpret the string — and an empty one —
+    # without also reading `state`. Derived from the same (declared text, state)
+    # inputs as `activity` above, so the label always matches the string.
+    session["activity_kind"] = working_target.derive_activity_kind(
+        intent.get("text"), state=state)
     # user_id identifies the row's owner so the ops面 can default to "just mine"
     # (方針3: model is multi-user, default view is self). Best-effort: the actor's
     # user_id when present, else its email (the identity sid_to_uid keys on).
