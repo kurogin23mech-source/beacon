@@ -121,8 +121,17 @@ def main() -> int:
     # Pass it through; build_state_marker attaches it as ``state_detail`` only for
     # awaiting_human and only when non-empty (other events carry no message).
     detail = hook_input.get("message") or ""
+    # ms-173 PR#758 QA: PreToolUse は tool_name を運ぶ。AskUserQuestion (選択肢の
+    # 提示) はそれ自体が「応答を要する待ち」なので、質問文を待機内容として渡す。
+    # 判別・状態決定は lib 側 (build_state_marker) が所管 — ここは入力を運ぶだけ。
+    tool_name = hook_input.get("tool_name") or ""
+    if not detail and tool_name == getattr(mod, "ASK_TOOL_NAME", "AskUserQuestion"):
+        extract = getattr(mod, "ask_question_detail", None)
+        if callable(extract):
+            detail = extract(hook_input.get("tool_input"))
     marker = mod.build_state_marker(
-        event_name, now_iso, prev_marker=prev_marker, detail=detail)
+        event_name, now_iso, prev_marker=prev_marker, detail=detail,
+        tool_name=tool_name)
     if marker is None:  # defensive: mapping already checked above, but re-guard
         return 0
     try:

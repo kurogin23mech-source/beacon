@@ -127,3 +127,76 @@ def test_python_simple_board_is_removed():
                  "_is_loopback"):
         assert not hasattr(cmd_view, gone), \
             f"撤去したはずの Python 素朴盤 {gone} が cmd_view に復活している"
+
+
+# --- ms-173 (e-6482): Go 委譲前の版握手 + 非標準 BEACON_PROJECT_FILE ガード ----
+
+class _FakeProc:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+class TestViewerHandshake:
+    def test_matching_version_passes(self):
+        ok, detail = cmd_view.viewer_handshake(
+            "/x/beacon-view", "0.63.4",
+            run=lambda argv: _FakeProc(0, "beacon-view 0.63.4\n"))
+        assert ok and detail == "0.63.4"
+
+    def test_dev_build_passes_and_is_named(self):
+        ok, detail = cmd_view.viewer_handshake(
+            "/x/beacon-view", "0.63.4",
+            run=lambda argv: _FakeProc(0, "beacon-view dev\n"))
+        assert ok and detail == "dev"
+
+    def test_version_mismatch_is_refused(self):
+        """古い beacon-view (版が食い違う) は委譲しない — 新しい欄が黙って欠けた
+        運用室を silent に出さない (e-6482 の本丸)。"""
+        ok, detail = cmd_view.viewer_handshake(
+            "/x/beacon-view", "0.63.4",
+            run=lambda argv: _FakeProc(0, "beacon-view 0.60.0\n"))
+        assert not ok
+        assert "0.60.0" in detail and "0.63.4" in detail
+
+    def test_pre_handshake_binary_is_refused(self):
+        """--version を持たない旧 beacon-view は flag パース失敗 (非 0) で終わる —
+        それ自体を「古い」の合図として拒む。"""
+        ok, detail = cmd_view.viewer_handshake(
+            "/x/beacon-view", "0.63.4",
+            run=lambda argv: _FakeProc(2, ""))
+        assert not ok and "応答しません" in detail
+
+    def test_unrunnable_binary_is_refused(self):
+        def _boom(argv):
+            raise OSError("exec format error")
+        ok, detail = cmd_view.viewer_handshake("/x/beacon-view", "0.63.4", run=_boom)
+        assert not ok and "実行できません" in detail
+
+    def test_garbage_output_is_refused(self):
+        ok, detail = cmd_view.viewer_handshake(
+            "/x/beacon-view", "0.63.4",
+            run=lambda argv: _FakeProc(0, "something else\n"))
+        assert not ok
+
+
+class TestNonstandardProjectFileGuard:
+    def test_unset_is_fine(self, monkeypatch):
+        monkeypatch.delenv("BEACON_PROJECT_FILE", raising=False)
+        assert cmd_view.nonstandard_project_file_notice() is None
+
+    def test_standard_layout_is_fine(self, monkeypatch):
+        monkeypatch.setenv("BEACON_PROJECT_FILE", "/Users/x/p/.beacon/project.json")
+        assert cmd_view.nonstandard_project_file_notice() is None
+
+    def test_nonstandard_path_is_refused_with_guidance(self, monkeypatch):
+        """Go 版は BEACON_PROJECT_FILE を解釈しない — 非標準指定のまま委譲すると
+        別プロジェクトを黙って開く。委譲を止めて --json 経路を案内する (e-6482)。"""
+        monkeypatch.setenv("BEACON_PROJECT_FILE", "/tmp/sandbox/custom.json")
+        notice = cmd_view.nonstandard_project_file_notice()
+        assert notice is not None
+        assert "--json" in notice and "/tmp/sandbox/custom.json" in notice
+
+    def test_nonstandard_dirname_is_refused(self, monkeypatch):
+        monkeypatch.setenv("BEACON_PROJECT_FILE", "/tmp/s/beacon2/project.json")
+        assert cmd_view.nonstandard_project_file_notice() is not None

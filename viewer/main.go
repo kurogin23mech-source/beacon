@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// viewerVersion は build.sh が -ldflags -X で刻む (beacon 本体と同じ版)。
+// 手元の素の go build では "dev" のまま — 版握手 (e-6482) は dev を通す。
+var viewerVersion = "dev"
+
 func main() {
 	path := flag.String("path", ".", "Beacon のフォルダ (.beacon、またはそれを含む場所)")
 	port := flag.Int("port", defaultPort, "待ち受ける口")
@@ -22,7 +26,17 @@ func main() {
 	expose := flag.Bool("expose", false, "自分の機械の外に開くことを承知して指定する")
 	noOpen := flag.Bool("no-open", false, "ブラウザを自動で開かない")
 	asJSON := flag.Bool("json", false, "画面を出さず、盤の中身をそのまま出力する")
+	showVersion := flag.Bool("version", false, "版を出して終わる (beacon 側の委譲前の版握手用)")
 	flag.Parse()
+
+	// 版握手 (ms-173 e-6482): beacon 本体 (Python 入口) が委譲前に
+	// `beacon-view --version` を叩いて版を照合する。この flag を持たない古い
+	// beacon-view は flag パースで失敗して非 0 で終わるので、それ自体が
+	// 「古い」の合図になる。出力形は 1 行固定 "beacon-view <版>"。
+	if *showVersion {
+		fmt.Printf("beacon-view %s\n", viewerVersion)
+		return
+	}
 
 	// Go 標準 flag は最初の非フラグ引数でパースを打ち切る。そのため
 	// `beacon-view <場所> --json` と打つと --json 以降が黙って捨てられ、意図と違う

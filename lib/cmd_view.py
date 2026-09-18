@@ -1,5 +1,11 @@
 """`beacon view` — 運用室 (Go 版 beacon-view) に委譲する入口 (ms-170)。
 
+環境変数 (dispatch 層が渡す BEACON_VIEW_PORT / HOST / EXPOSE / NO_OPEN のほか):
+  BEACON_VIEW_SKIP_HANDSHAKE=1 … 委譲前の版握手 (e-6482) を意図して飛ばす。
+    通常は不要 — 版が食い違う beacon-view へ黙って委譲しないための握手なので、
+    飛ばすのは「食い違いを承知で古い盤を見たい」ときだけ。
+
+
 **Go 一本化 (e-6518)**: 盤 / 運用室 (セッション一覧・状態・端末ジャンプ) の表示は
 Go 版ビューワー ``beacon-view`` (viewer/*.go) が唯一の実装。この Python モジュールは
 ユーザーの入口 ``beacon view`` として beacon-view を **探して委譲する** だけで、盤の
@@ -201,6 +207,88 @@ def _install_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def handshake_failed_notice(binary: str, detail: str) -> str:
+    """版握手 (e-6482) に失敗したときの案内。silent に古い盤を出す代わりに、
+    何が合っていないかと回復手順を明示する。cp932 で出せるよう記号は使わない。"""
+    return (
+        f"Error: beacon-view ({binary}) との版握手に失敗しました: {detail}\n"
+        "  古い beacon-view に委譲すると、新しい欄 (状態・担当・context% 等) が"
+        "黙って欠けた運用室が出ます。\n"
+        "  配布版を更新してください: pipx upgrade beacon-ai / brew upgrade beacon\n"
+        "  dev clone では viewer/build.sh で作り直して PATH の beacon-view を"
+        "差し替えてください。\n"
+        "  盤の中身だけなら beacon view --json で取得できます (画面は出ません)。\n"
+        "  この握手を意図して飛ばすには BEACON_VIEW_SKIP_HANDSHAKE=1 を指定します。"
+    )
+
+
+def viewer_handshake(binary: str, expected_version: str, *, run=None):
+    """委譲前の版握手 (ms-173 e-6482)。``(ok, detail)`` を返す。
+
+    ``beacon-view --version`` を叩き、beacon 本体の版と照合する:
+
+      * ``beacon-view <expected>`` → ok (配布同梱の正常ペア)
+      * ``beacon-view dev``        → ok (手元ビルド。版を刻まない dev を塞ぐと
+        開発が回らないので通す — 握手の狙いは「気づかず古い」の排除であり、
+        意図して作った手元ビルドは利用者が自分で把握している)
+      * 版が食い違う                → NG (古い / 別系列の beacon-view)
+      * --version 非対応 (非 0 終了) → NG (e-6482 以前の古い beacon-view)
+      * 起動できない (OSError 等)   → NG (壊れ / アーキ違い — exec 前に検出)
+
+    ``run`` は試験用の差し替え口 (subprocess.run 互換)。純粋な判定部を試験できる
+    ようにするための注入で、既定は実 subprocess。
+    """
+    import subprocess
+    runner = run or (lambda argv: subprocess.run(
+        argv, capture_output=True, text=True, timeout=10))
+    try:
+        proc = runner([binary, "--version"])
+    except Exception as e:  # OSError / timeout — 起動そのものができない
+        return False, f"--version を実行できませんでした ({e})"
+    if proc.returncode != 0:
+        return False, ("--version に応答しません (e-6482 の版握手より古い "
+                       "beacon-view です)")
+    out = (proc.stdout or "").strip()
+    parts = out.split()
+    got = parts[1] if len(parts) == 2 and parts[0] == "beacon-view" else ""
+    if not got:
+        return False, f"--version の応答を解釈できません: '{out}'"
+    if got == "dev":
+        return True, "dev"
+    if got != expected_version:
+        return False, (f"版が食い違っています (beacon-view {got} / "
+                       f"beacon {expected_version})")
+    return True, got
+
+
+def nonstandard_project_file_notice():
+    """非標準 ``BEACON_PROJECT_FILE`` での Go 委譲を止める案内 (無害なら None)。
+
+    Go 版 beacon-view は ``--path <root>`` から ``<root>/.beacon/project.json``
+    (と project.db) を自分で読む — ``BEACON_PROJECT_FILE`` は解釈しない。標準
+    配置 (``.../.beacon/project.json``) 以外を指している状態で委譲すると、Go 版は
+    別の (あるいは無い) プロジェクトを黙って開き、利用者は気づけない (e-6482)。
+    その場合は委譲せず、この案内で headless 経路 (--json は
+    ``BEACON_PROJECT_FILE`` を尊重する Python 側で返す) を示す。
+    """
+    pf = os.environ.get("BEACON_PROJECT_FILE", "")
+    if not pf:
+        return None
+    if (os.path.basename(pf) == "project.json"
+            and os.path.basename(os.path.dirname(pf)) == ".beacon"):
+        return None
+    return (
+        f"Error: BEACON_PROJECT_FILE ({pf}) が標準配置"
+        " (…/.beacon/project.json) ではありません。\n"
+        "  運用室 (Go 版 beacon-view) は場所 (--path) から .beacon/ を自分で読む"
+        "ため、この指定は届かず、別のプロジェクトを黙って開く恐れがあります。\n"
+        "  盤の中身だけなら beacon view --json が BEACON_PROJECT_FILE を尊重して"
+        "返します (画面は出ません)。\n"
+        "  画面で見るには、対象プロジェクトのフォルダに cd して beacon view を"
+        "実行してください。"
+    )
+
+
 def _project_root() -> str:
     """--path で Go 版に渡す、.beacon を含むフォルダ。
 
@@ -252,10 +340,30 @@ def cmd_view() -> None:
     # 運用室 (ms-173 e-6430 / Go 一本化 e-6518): Go 版 beacon-view に委譲する。
     # Python 素朴盤フォールバックは撤去済。見つからない / 起動できないときは、黙って
     # 別物を出さず案内を出して終了する (親 design 指示)。
+    #
+    # 委譲前に 2 つの握手 (ms-173 e-6482 — silent に壊れない):
+    #  1. 非標準 BEACON_PROJECT_FILE — Go 版はこの env を解釈しないため、標準配置
+    #     以外を指したまま委譲すると別プロジェクトを黙って開く。委譲せず案内。
+    #  2. 版握手 — 古い beacon-view は新しい欄が黙って欠けた運用室を出す。
+    #     --version で照合し、合わなければ委譲せず更新案内。
+    notice = nonstandard_project_file_notice()
+    if notice:
+        raise SystemExit(notice)
     binary = resolve_viewer_binary()
     if not binary:
         # beacon-view が無い。素朴盤に落とさず、入手 / 更新手順を出して終了する。
         raise SystemExit(FALLBACK_NOTICE)
+    if os.environ.get("BEACON_VIEW_SKIP_HANDSHAKE") != "1":
+        # __version__ の真実源は commands (lib/cmd_project._beacon_version と同じ
+        # 出所)。遅延 import なのは commands が重く、--json 経路では不要なため。
+        from commands import __version__ as _beacon_version
+        ok, detail = viewer_handshake(binary, _beacon_version)
+        if not ok:
+            raise SystemExit(handshake_failed_notice(binary, detail))
+        if detail == "dev":
+            # dev ビルドは通すが、その事実は名乗る (silent narrowing を防ぐ)。
+            print("beacon-view は dev ビルドです (版握手は素通し)",
+                  file=sys.stderr, flush=True)
     argv = viewer_argv(binary, project_root=_project_root(), port=port,
                        host=host, expose=expose, no_open=no_open)
     # どの実体に委譲したかを名乗る (silent narrowing を防ぐ)。execv は成功すれば

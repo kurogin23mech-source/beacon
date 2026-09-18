@@ -284,3 +284,56 @@ def test_both_directory_endpoints_agree_on_shutdown():
     proj = [r["session_id"] for r in client.get("/api/projects/p1/sessions?live_only=true").json()]
     assert "s-stopped" not in me
     assert "s-stopped" not in proj
+
+
+# --- ms-173 (e-6563): zombie-WS ガード ---------------------------------------
+# sid 再発番で置き去りになった旧 bridge が、poll loop を止めたまま WS keepalive
+# だけ 8 日間続け、live=true の幽霊行として運用室に残った (実測 2026-09-18)。
+# poll 履歴を持つ bridge が閾値 (既定 30 分) を超えて poll 沈黙している場合、
+# WS 単独では live を維持させない。短い poll 欠落 (10 分) は従来どおり WS が救う
+# (上の test_ws_connected_but_poll_stale_is_live が pin)。
+
+def _seed_zombie_session(pid: str, sid: str, *, poll_age_hours: float) -> None:
+    now = _now()
+    stale = _iso(now - datetime.timedelta(hours=poll_age_hours))
+    _sessions_store.setdefault(pid, []).append({
+        "session_id": sid,
+        "actor": {"email": "", "machine": "", "agent": ""},
+        "last_active": stale,
+        "poll_interval_ms": 5000,
+        "shutdown": False,
+        "last_poll_at": stale,
+    })
+
+
+def test_ws_alone_does_not_keep_long_poll_silent_bridge_live():
+    """poll が数日止まった bridge は、WS keepalive が生きていても live にしない。"""
+    _seed_project("p1")
+    _seed_zombie_session("p1", "s-zombie", poll_age_hours=48)
+    _ws_live_map["s-zombie"] = True  # 置き去りの旧プロセスが WS ping だけ続けている
+    row = _row("s-zombie")
+    assert row["ws_live"] is True
+    assert row["poll_health"]["healthy"] is False
+    assert row["live"] is False, (
+        "poll 履歴を持つ bridge が 30 分を超えて poll 沈黙しているのに WS だけで "
+        "live 維持されると、幽霊行が名簿に残り続ける (e-6563)"
+    )
+    # 抑止は silent にしない (PR#758 AX finding): 普通に止まった session と
+    # 見分けられるよう、理由が行に刻まれる。
+    assert row["live_suppressed_reason"] == "ws-zombie-poll-stale"
+
+
+def test_ws_zombie_guard_does_not_touch_bridgeless_sessions():
+    """poll を持たない旧版 bridge (last_poll_at 無し) は WS だけで live のまま。"""
+    now = _now()
+    _seed_project("p1")
+    _sessions_store.setdefault("p1", []).append({
+        "session_id": "s-nopoll",
+        "actor": {"email": "", "machine": "", "agent": ""},
+        "last_active": _iso(now - datetime.timedelta(hours=48)),
+        "shutdown": False,
+        # last_poll_at 無し = poll loop を持たない (bridge=False)
+    })
+    _ws_live_map["s-nopoll"] = True
+    row = _row("s-nopoll")
+    assert row["live"] is True  # ガードは poll 履歴を持つ行にだけ効く

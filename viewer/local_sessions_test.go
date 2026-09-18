@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -112,5 +114,52 @@ func TestPerSessionAndPerToolLivenessAreSeparate(t *testing.T) {
 	}
 	if !row.ToolRunning {
 		t.Error("道具が起動していることまで失われている")
+	}
+}
+
+// bridge の名乗り札 (<フォルダ>/.beacon/bridges/<sid>.json) の parent_pid と
+// ローカル行の PID を突き合わせて Beacon の識別子を引く経路 (e-6446)。
+func TestResolveBeaconSIDs(t *testing.T) {
+	dir := t.TempDir()
+	bridges := filepath.Join(dir, ".beacon", "bridges")
+	if err := os.MkdirAll(bridges, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(bridges, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("sv-aaa.json", `{"session_id":"sv-aaa","pid":900,"parent_pid":111}`)
+	write("sv-bbb.json", `{"session_id":"sv-bbb","pid":901,"parent_pid":222}`)
+	// 配信ジャーナル (.delivery.json) は名乗り札ではない — 読み飛ばすこと。
+	write("sv-aaa.delivery.json", `{"session_id":"sv-junk","parent_pid":111}`)
+	// 壊れた札は黙って無視 (best-effort)。
+	write("sv-broken.json", `{not json`)
+
+	rows := resolveBeaconSIDs([]LocalSessionRow{
+		{Tool: "claude-code", Directory: dir, PID: 111},
+		{Tool: "claude-code", Directory: dir, PID: 222},
+		{Tool: "claude-code", Directory: dir, PID: 333}, // 札なし → 空のまま
+		{Tool: "claude-code", Directory: dir},           // PID 不明 → 触らない
+	})
+	if rows[0].SessionID != "sv-aaa" {
+		t.Errorf("PID 111 の識別子: %q (want sv-aaa)", rows[0].SessionID)
+	}
+	if rows[1].SessionID != "sv-bbb" {
+		t.Errorf("PID 222 の識別子: %q (want sv-bbb)", rows[1].SessionID)
+	}
+	if rows[2].SessionID != "" || rows[3].SessionID != "" {
+		t.Error("札の無い行に識別子が付いた (推測してはいけない)")
+	}
+}
+
+// .beacon が無いフォルダでは何もしない (best-effort、素のプロジェクトを壊さない)。
+func TestResolveBeaconSIDsWithoutBeaconDir(t *testing.T) {
+	rows := resolveBeaconSIDs([]LocalSessionRow{
+		{Tool: "claude-code", Directory: t.TempDir(), PID: 111},
+	})
+	if rows[0].SessionID != "" {
+		t.Errorf(".beacon 無しで識別子が付いた: %q", rows[0].SessionID)
 	}
 }

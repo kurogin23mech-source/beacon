@@ -458,3 +458,112 @@ class TestEmptyHandlingSymmetry:
         """))
         assert out["context_pct"] == 0        # 0 kept (real value)
         assert "state_detail" not in out       # "" dropped (no information)
+
+
+# ===========================================================================
+# 5. ms-173 PR#758 QA — Notification 2 系統の判別 + AskUserQuestion 宣言点。
+#    アイドル通知 ("Claude is waiting for your input"、60秒放置で発火) を
+#    awaiting_human に写すと、放置セッションが運用室で「確認待ち」(橙) に
+#    過剰発火する (人間 user 実機観測 2026-09-18)。
+# ===========================================================================
+
+class TestNotificationTwoKinds:
+    def test_permission_notification_still_awaiting_human(self):
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-18T00:00:00.000Z",
+            detail="Claude needs your permission to use Bash")
+        assert m["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert m["state_detail"] == "Claude needs your permission to use Bash"
+
+    def test_idle_notification_becomes_idle_not_awaiting(self):
+        """放置の合図は「プロンプトに座っているだけ」— 確認待ちにしない。
+        (Stop 取り逃しの crash 経路でも running のまま凍らない保険で idle 宣言。)"""
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-18T00:00:00.000Z",
+            detail="Claude is waiting for your input")
+        assert m["declared_state"] == bus_liveness.STATE_IDLE
+        assert "state_detail" not in m  # アイドル文言は待機内容ではない
+
+    def test_idle_notification_preserves_prior_awaiting_human(self):
+        """本物の待ち (許可要求 / AskUserQuestion 提示) の後にも 60 秒でアイドル
+        通知は必ず後追い発火する — それが待ちを clobber したら、確認待ちは毎回
+        60 秒で消える。宣言なし (None) で保持すること。"""
+        prev = session_state_hook.build_state_marker(
+            "Notification", "2026-09-18T00:00:00.000Z",
+            detail="Claude needs your permission to use Bash")
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-18T00:01:00.000Z", prev_marker=prev,
+            detail="Claude is waiting for your input")
+        assert m is None
+
+    def test_idle_marker_matching_is_case_insensitive(self):
+        assert session_state_hook.is_idle_notification("Claude Is WAITING for your INPUT")
+        assert not session_state_hook.is_idle_notification("")
+        assert not session_state_hook.is_idle_notification(None)
+        assert not session_state_hook.is_idle_notification("Claude needs your permission")
+
+    def test_empty_message_notification_stays_awaiting_human(self):
+        """message 無しの Notification は分類できない — 保守側 (従来どおり
+        awaiting_human) に倒す。fail-safe の向きは過剰発火側で固定。"""
+        m = session_state_hook.build_state_marker("Notification", "2026-09-18T00:00:00.000Z")
+        assert m["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+
+
+class TestAskUserQuestionDeclares:
+    def test_pretooluse_ask_declares_awaiting_human_with_question(self):
+        """選択肢の提示そのものが「応答を要する待ち」の確定的な宣言点 (アイドル
+        通知の曖昧さに頼らない — e-6562 の橙が構造的に立つ)。"""
+        m = session_state_hook.build_state_marker(
+            "PreToolUse", "2026-09-18T00:00:00.000Z",
+            detail=session_state_hook.ask_question_detail(
+                {"questions": [{"question": "どの案で進めますか？"}]}),
+            tool_name=session_state_hook.ASK_TOOL_NAME)
+        assert m["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert m["state_detail"] == "どの案で進めますか？"
+
+    def test_pretooluse_other_tools_stay_running(self):
+        m = session_state_hook.build_state_marker(
+            "PreToolUse", "2026-09-18T00:00:00.000Z", tool_name="Bash")
+        assert m["declared_state"] == bus_liveness.STATE_RUNNING
+
+    def test_ask_question_detail_is_best_effort(self):
+        assert session_state_hook.ask_question_detail(None) == ""
+        assert session_state_hook.ask_question_detail({}) == ""
+        assert session_state_hook.ask_question_detail({"questions": []}) == ""
+        assert session_state_hook.ask_question_detail({"questions": [{}]}) == ""
+        long = "q" * 500
+        assert session_state_hook.ask_question_detail(
+            {"questions": [{"question": long}]}) == "q" * 200
+
+
+class TestHookCarriesAskSignals:
+    def test_hook_passes_tool_name_and_question(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        proc = _run_hook({
+            "hook_event_name": "PreToolUse", "cwd": str(tmp_path),
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "版握手を飛ばしますか？"}]},
+        })
+        assert proc.returncode == 0, proc.stderr
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert marker["state_detail"] == "版握手を飛ばしますか？"
+
+    def test_hook_idle_notification_keeps_prior_ask_marker(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        _run_hook({
+            "hook_event_name": "PreToolUse", "cwd": str(tmp_path),
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "続けますか？"}]},
+        })
+        proc = _run_hook({
+            "hook_event_name": "Notification", "cwd": str(tmp_path),
+            "message": "Claude is waiting for your input",
+        })
+        assert proc.returncode == 0, proc.stderr
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        # アイドル通知は選択肢待ちの宣言を clobber しない。
+        assert marker["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert marker["state_detail"] == "続けますか？"

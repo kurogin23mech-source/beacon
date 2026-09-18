@@ -102,6 +102,15 @@ def _prod_test_write_blocked(base_url: str) -> bool:
     return True
 
 
+def prod_test_write_blocked(base_url: str) -> bool:
+    """Public accessor for the single decision chain (ms-173 PR#758 maint
+    finding): a best-effort write path that wants a bool (refuse silently, not
+    raise) reads THIS instead of re-composing is_test_context × is_prod_api_url
+    by hand — a hand-rolled copy silently drops the ``BEACON_ALLOW_PROD_TEST_
+    WRITE`` hatch and forks the rule into a second truth source."""
+    return _prod_test_write_blocked(base_url)
+
+
 def guard_prod_project_write(base_url: str) -> None:
     """Raise if a test context is about to write a project to production.
 

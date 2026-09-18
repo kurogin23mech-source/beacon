@@ -215,7 +215,12 @@ def derive_activity(declared_activity, *, head_subject="", state="",
     Precedence:
 
     1. An explicit ``declared_activity`` (the session's own self-report) always
-       wins — it knows best what it is doing / waiting for.
+       wins — it knows best what it is doing / waiting for. NOTE: this is the
+       contract when calling THIS function directly. The row-level wrapper
+       ``activity_for_row`` runs its own upstream checks first (stamped kind /
+       wait state, ms-173 e-6562) and may not reach this function at all — a
+       row's ``activity`` field is not necessarily a self-report (a legacy
+       server stamps the head-subject proxy into it).
     2. Otherwise the answer is STATE-AWARE (ms-159 / e-6484):
        * ``awaiting_human`` / ``blocked`` (``_WAIT_DETAIL_STATES``) → the
          ``state_detail`` (what it is waiting for / blocked on). When that is
@@ -341,11 +346,16 @@ def working_target_for_row(row) -> dict:
 def activity_for_row(row) -> str:
     """Derive the 1-line activity for a server directory row.
 
-    A declared ``row["activity"]`` wins; otherwise it is state-aware (e-6484):
-    an ``awaiting_human`` / ``blocked`` row shows its wait detail
-    (``row["state_detail"]`` — the same field ``lib/attention`` reads) and is
-    EMPTY when none is known, while any other state falls back to the row's
-    ``git.head_subject``.
+    Precedence (3 tiers, ms-173 e-6562 — supersedes the pre-#758 "a declared
+    row activity always wins" contract):
+
+    1. A valid stamped ``row["activity_kind"]`` (e-6533+ server) → return
+       ``row["activity"]`` verbatim (the server derived the pair consistently).
+    2. No stamped kind + wait state (``awaiting_human`` / ``blocked``) → the
+       wait detail (``row["state_detail"]``), EMPTY when none is known. The
+       row's ``activity`` is deliberately IGNORED here — a legacy server may
+       have stamped the git head-subject proxy into it (see docstring below).
+    3. Otherwise → ``derive_activity`` (declared text → head-subject proxy).
 
     NOTE (e-6488 wiring status, #750 AX3): the CARRY path for ``state_detail`` IS
     wired — beacon-state-hook.py writes it to the marker, the bridge piggybacks it
@@ -358,25 +368,52 @@ def activity_for_row(row) -> str:
     ``awaiting_human`` / ``blocked`` branch resolves to EMPTY. That empty is the
     intended, correct behaviour (no fabrication) — NOT a bug. A future editor
     seeing "waiting rows show blank activity" pre-deploy should NOT patch this;
-    post-deploy the value flows through unchanged."""
+    post-deploy the value flows through unchanged.
+
+    Server-stamp precedence (ms-173 e-6562): a row that already carries a valid
+    ``activity_kind`` comes from an e-6533+ server whose (activity, kind) pair is
+    consistent — return its ``activity`` verbatim. A row WITHOUT the kind but WITH
+    an ``activity`` may come from an e-6292..e-6533 server that stamped the git
+    head-subject PROXY into ``activity`` — treating that as a self-report froze a
+    waiting session on its last commit subject (observed 2026-09-18: an
+    ``awaiting_human`` row showing "Merge pull request #757 …" as WORK). So in a
+    wait state with no stamped kind, the wait detail wins over ``row["activity"]``
+    (tradeoff: a TRUE self-report on such a legacy row is overridden while
+    waiting — indistinguishable on the row, and the wait truth matters more)."""
     row = row if isinstance(row, dict) else {}
     git = row.get("git") if isinstance(row.get("git"), dict) else {}
+    if _clean(row.get("activity_kind")) in (ACTIVITY_KIND_WORK, ACTIVITY_KIND_WAIT):
+        return _clean(row.get("activity"))
+    state = _clean(row.get("state") or "")
+    if state in _WAIT_DETAIL_STATES:
+        return _clean(row.get("state_detail") or "")
     return derive_activity(
         row.get("activity"),
         head_subject=git.get("head_subject") or "",
-        state=row.get("state") or "",
+        state=state,
         state_detail=row.get("state_detail") or "",
     )
 
 
 def activity_kind_for_row(row) -> str:
     """Derive the ``activity_kind`` (``work`` / ``wait``) for a server directory
-    row (#755 review AX-F1/F2). A declared ``row["activity"]`` is a self-report
-    ⇒ ``work``; otherwise the kind follows ``row["state"]`` through
-    :func:`derive_activity_kind`. Consistent with :func:`activity_for_row` so the
-    label always matches the string that function returns for the same row."""
+    row (#755 review AX-F1/F2). Consistent with :func:`activity_for_row` so the
+    label always matches the string that function returns for the same row:
+
+    1. A valid stamped ``row["activity_kind"]`` (e-6533+ server) is authoritative
+       — the server derived the pair consistently; re-deriving here mislabelled
+       a server-stamped wait detail as a self-report (ms-173 e-6562).
+    2. No stamped kind + wait state (``awaiting_human`` / ``blocked``) ⇒ ``wait``
+       — a legacy server's ``activity`` may be the head-subject proxy, not a
+       self-report, so it must not force ``work`` while the session waits.
+    3. Otherwise ⇒ ``work``."""
     row = row if isinstance(row, dict) else {}
-    return derive_activity_kind(row.get("activity"), state=row.get("state") or "")
+    stamped = _clean(row.get("activity_kind"))
+    if stamped in (ACTIVITY_KIND_WORK, ACTIVITY_KIND_WAIT):
+        return stamped
+    if _clean(row.get("state") or "") in _WAIT_DETAIL_STATES:
+        return ACTIVITY_KIND_WAIT
+    return ACTIVITY_KIND_WORK
 
 
 def enrich_row(row):

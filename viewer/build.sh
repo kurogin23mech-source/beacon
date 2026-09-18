@@ -16,9 +16,14 @@ cd "$(dirname "$0")"
 OUT="${OUT:-dist}"
 NAME="beacon-view"
 
+# 版握手 (ms-173 e-6482): beacon 本体と同じ版を実行ファイルに刻む。beacon 側の
+# 入口 (lib/cmd_view.py) が委譲前に --version で照合し、古い beacon-view への
+# silent 委譲を防ぐ。取れなければ dev のまま (握手は dev を通す)。
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' ../lib/commands.py | head -1)"
+
 # -trimpath   … 作った人の手元のパスを実行ファイルに残さない
 # -s -w       … デバッグ用の記号を落とす (17.6MB → 11.8MB)
-FLAGS=(-trimpath -ldflags=-s\ -w)
+FLAGS=(-trimpath "-ldflags=-s -w -X main.viewerVersion=${VERSION:-dev}")
 
 targets=(
   "windows amd64"

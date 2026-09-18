@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -721,5 +723,215 @@ func TestTargetSourceCarriedToOverview(t *testing.T) {
 	}
 	if byID["sv-remote"] != "declared" {
 		t.Errorf("別マシン経路で target_source が落ちている: %q", byID["sv-remote"])
+	}
+}
+
+// identity 突合 (e-6446): ローカル行が bridge の名乗り札から自分の識別子を引けたら、
+// 名簿とはフォルダ+道具の推測ではなく session_id で突合されること。実測シナリオ
+// (2026-09-18): 同キーに幽霊名簿行 (8日前の旧 sid・担当 ms-121 凍結) が live のまま
+// 残り、last-write-wins が幽霊を選ぶと「担当 ms-121 + context% 無し」の誤カードが出た。
+func TestIdentityJoinBySessionID(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	stale := now.Add(-8 * 24 * time.Hour).Format(time.RFC3339)
+	pct := 16
+	named := []SessionRow{
+		// 幽霊が index 上で後勝ちになる順にわざと置く (旧実装なら幽霊が主を奪う)。
+		{ID: "sv-current", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: true, LastActive: fresh, Target: "ms-173", TargetLabel: "運用室",
+			ContextPct: &pct},
+		{ID: "sv-ghost", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: true, LastActive: stale, Target: "ms-121"},
+	}
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh,
+		Running: true, PID: 111, SessionID: "sv-current",
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+
+	var joined, ghost *SessionOverview
+	for i := range view.Sessions {
+		switch view.Sessions[i].SessionID {
+		case "sv-current":
+			joined = &view.Sessions[i]
+		case "sv-ghost":
+			ghost = &view.Sessions[i]
+		}
+	}
+	if joined == nil {
+		t.Fatal("identity 突合されたカードが出ていない")
+	}
+	if joined.Target == nil || joined.Target.ID != "ms-173" {
+		t.Errorf("identity 突合の担当が誤り: %+v (幽霊の凍結値を拾った?)", joined.Target)
+	}
+	if joined.ContextPct == nil || *joined.ContextPct != 16 {
+		t.Error("identity 突合の context%% が運ばれていない")
+	}
+	if joined.CollapsedPeers != 0 {
+		t.Errorf("identity 突合は exact なのに CollapsedPeers=%d", joined.CollapsedPeers)
+	}
+	// 幽霊はローカル行に化けず、自分の行として独立に出る (黙って消さない)。
+	if ghost == nil {
+		t.Fatal("live な幽霊名簿行が黙って消えた (開示されるべき)")
+	}
+	if ghost.Target != nil && ghost.Target.ID == "ms-173" {
+		t.Error("幽霊行が identity 側の担当を継いだ")
+	}
+}
+
+// identity 突合が使えない行の fallback は、last-write-wins (入力順の偶然) ではなく
+// 最新 (laterActive) を主に選ぶこと (e-6563: 入力順で幽霊が勝つ経路の determinism 修正)。
+func TestFallbackPrefersFreshestNamedRow(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	stale := now.Add(-8 * 24 * time.Hour).Format(time.RFC3339)
+	named := []SessionRow{
+		// 新しい方を先、古い方を後に置く — last-write-wins なら古い方が勝ってしまう順。
+		{ID: "sv-new", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: true, LastActive: fresh},
+		{ID: "sv-old", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: true, LastActive: stale},
+	}
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh, Running: true,
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	for _, s := range view.Sessions {
+		if s.Named && s.Directory == "/Users/x/p" && !s.Remote {
+			if s.SessionID != "sv-new" {
+				t.Errorf("fallback の主が最新でない: %q (入力順の偶然で選ばれた)", s.SessionID)
+			}
+			return
+		}
+	}
+	t.Fatal("fallback 突合の主が出ていない")
+}
+
+// サーバの正典 state (awaiting_human 等) が名簿から運用室の行まで運ばれること
+// (e-6562)。これが欠けると「選択肢を出して答え待ち」のカードを確認待ち (橙) に
+// できない — 実測 (2026-09-18): awaiting_human の親セッションが activity_kind=work
+// (legacy server の head-subject 代理値) で作業中に見えた。
+func TestServerStateCarriedToOverview(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	named := []SessionRow{
+		{ID: "sv-here", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: true, LastActive: fresh, State: "awaiting_human"},
+		{ID: "sv-far", Agent: "claude-code", Cwd: "/other/q", ProjectID: "q",
+			Live: true, LastActive: fresh, State: "awaiting_human"},
+	}
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh,
+		Running: true, SessionID: "sv-here",
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	got := map[string]string{}
+	for _, s := range view.Sessions {
+		got[s.SessionID] = s.ServerState
+	}
+	if got["sv-here"] != "awaiting_human" {
+		t.Errorf("このマシンの行に server_state が運ばれていない: %q", got["sv-here"])
+	}
+	if got["sv-far"] != "awaiting_human" {
+		t.Errorf("別マシンの行に server_state が運ばれていない: %q", got["sv-far"])
+	}
+}
+
+// 画面の確認待ち判定がサーバの正典 state を読むこと (e-6562)。判定の文字列が
+// page.html から消えたら (リネーム / 条件の退化)、このテストが赤くなる —
+// TestJumpBlockedLiteralMatchesPage と同型の Go↔画面 drift ガード。
+func TestConfirmConditionReadsServerState(t *testing.T) {
+	page, err := os.ReadFile("page.html")
+	if err != nil {
+		t.Fatalf("page.html が読めない: %v", err)
+	}
+	if !strings.Contains(string(page), `s.server_state === "awaiting_human"`) {
+		t.Error("page.html の確認待ち判定が server_state (awaiting_human) を読んでいない — " +
+			"待機内容が空の選択肢待ちが「待機中」に落ちる回帰 (e-6562)")
+	}
+}
+
+// 名簿由来フィールドの転写が local (このマシンの行に紐づく) / remote (別マシンの
+// 追補) の両構築パスで一致すること (e-6428)。転写の書き手は applyNamed 1 関数 —
+// このテストは「どちらかのパスが applyNamed を迂回して手書き転写に戻る」退行を
+// 赤くする (context_pct #750 の取りこぼしの再発防止)。
+func TestNamedTranscriptionIdenticalAcrossBothPaths(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	pct := 42
+	n := SessionRow{
+		ID: "sv-full", Who: "me@example.com", Machine: "mac-1",
+		Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "proj-9",
+		Target: "opp-4", TargetLabel: "商談X", TargetSource: "declared",
+		ProjectFocus: "ms-1", Activity: "提案書ドラフト", ActivityKind: "work",
+		Harness: "iterm2", Live: true, Healthy: true, LastActive: fresh,
+		Branch: "main", HeadSubject: "feat: x", ContextPct: &pct,
+		State: "awaiting_human",
+	}
+
+	// パス A: このマシンの行と identity 突合。
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh,
+		Running: true, SessionID: "sv-full",
+	}}
+	viaLocal := assembleSessions(local, []SessionRow{n}, 24*time.Hour, now)
+
+	// パス B: 手元に痕跡が無い → remote 追補。
+	viaRemote := assembleSessions(nil, []SessionRow{n}, 24*time.Hour, now)
+
+	pick := func(v SessionsView) *SessionOverview {
+		for i := range v.Sessions {
+			if v.Sessions[i].SessionID == "sv-full" {
+				return &v.Sessions[i]
+			}
+		}
+		return nil
+	}
+	a, b := pick(viaLocal), pick(viaRemote)
+	if a == nil || b == nil {
+		t.Fatalf("両パスに行が出ていない: local=%v remote=%v", a != nil, b != nil)
+	}
+
+	// 名簿由来フィールドの射影 (転写対象の列挙はここ 1 箇所)。
+	type namedFields struct {
+		Named         bool
+		SessionID     string
+		TransportLive bool
+		Machine       string
+		Who           string
+		Activity      string
+		ActivityKind  string
+		ServerState   string
+		Harness       string
+		ContextPct    int // deref 済み (-1 = nil)
+		TargetSource  string
+		TargetID      string
+		TargetLabel   string
+		TargetOrigin  string
+		ProjectID     string
+	}
+	proj := func(o *SessionOverview) namedFields {
+		f := namedFields{
+			Named: o.Named, SessionID: o.SessionID,
+			TransportLive: o.TransportLive, Machine: o.Machine, Who: o.Who,
+			Activity: o.Activity, ActivityKind: o.ActivityKind,
+			ServerState: o.ServerState, Harness: o.Harness,
+			ContextPct: -1, TargetSource: o.TargetSource,
+		}
+		if o.ContextPct != nil {
+			f.ContextPct = *o.ContextPct
+		}
+		if o.Target != nil {
+			f.TargetID, f.TargetLabel, f.TargetOrigin =
+				o.Target.ID, o.Target.Label, o.Target.Source
+		}
+		if o.Project != nil {
+			f.ProjectID = o.Project.ProjectID
+		}
+		return f
+	}
+	if proj(a) != proj(b) {
+		t.Errorf("両構築パスの名簿転写が食い違う:\n local  = %+v\n remote = %+v",
+			proj(a), proj(b))
 	}
 }
