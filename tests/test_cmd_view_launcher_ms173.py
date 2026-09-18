@@ -237,6 +237,13 @@ def _wire(monkeypatch, *, binary, execv_error=None):
     monkeypatch.setattr(cmd_view.os, "execv", _fake_execv)
     monkeypatch.setattr(cmd_view, "build_view", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(cmd_view, "_project_root", lambda: ".")
+    # 版握手 (e-6482) はここでは常に成立扱いに差し替える。委譲 (execv 経路) の
+    # 試験と握手の試験は別関心で、握手自体の分岐は test_cmd_view_ms170.py の
+    # TestViewerHandshake が run 注入で網羅している。stub しないと偽バイナリ
+    # (/x/beacon-view) への実 subprocess --version が先に refuse して委譲に
+    # 到達しない (PR#758 CI red の実経路)。
+    monkeypatch.setattr(cmd_view, "viewer_handshake",
+                        lambda binary, expected, **kw: (True, expected))
 
     import builtins
     real_print = builtins.print
@@ -249,7 +256,8 @@ def _wire(monkeypatch, *, binary, execv_error=None):
 
 def _clear_view_env(monkeypatch):
     for k in ("BEACON_JSON", "BEACON_VIEW_PORT", "BEACON_VIEW_NO_OPEN",
-              "BEACON_VIEW_HOST", "BEACON_VIEW_EXPOSE"):
+              "BEACON_VIEW_HOST", "BEACON_VIEW_EXPOSE",
+              "BEACON_VIEW_SKIP_HANDSHAKE", "BEACON_PROJECT_FILE"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -287,6 +295,40 @@ def test_exec_failure_exits_with_notice(monkeypatch):
         cmd_view.cmd_view()
     assert calls["execv"] is not None                 # 委譲は試みた
     assert "起動できませんでした" in str(ei.value)     # 案内が終了メッセージに乗る
+
+
+def test_failed_handshake_refuses_delegation(monkeypatch):
+    """版握手が不成立なら execv に進まず、更新案内で終了する (e-6482)。
+    握手の分岐自体は TestViewerHandshake (test_cmd_view_ms170.py) が担い、
+    ここは cmd_view が握手の結果を尊重して委譲を止めることだけを pin する。"""
+    import pytest
+    _clear_view_env(monkeypatch)
+    calls = _wire(monkeypatch, binary="/x/beacon-view")
+    monkeypatch.setattr(cmd_view, "viewer_handshake",
+                        lambda binary, expected, **kw: (False, "版が食い違っています"))
+    with pytest.raises(SystemExit) as ei:
+        cmd_view.cmd_view()
+    assert calls["execv"] is None                    # 委譲していない
+    assert "版握手に失敗" in str(ei.value)
+
+
+def test_skip_handshake_env_bypasses(monkeypatch):
+    """BEACON_VIEW_SKIP_HANDSHAKE=1 は握手を呼ばずに委譲する (意図的な素通し口)。"""
+    _clear_view_env(monkeypatch)
+    calls = _wire(monkeypatch, binary="/x/beacon-view")
+
+    def _boom(*a, **kw):
+        raise AssertionError("skip 指定時に握手が呼ばれた")
+
+    monkeypatch.setattr(cmd_view, "viewer_handshake", _boom)
+    monkeypatch.setenv("BEACON_VIEW_SKIP_HANDSHAKE", "1")
+    try:
+        cmd_view.cmd_view()
+    except _ExecCalled:
+        pass
+    else:
+        raise AssertionError("execv に委譲していない")
+    assert calls["execv"] is not None
 
 
 def test_binary_absent_exits_with_notice(monkeypatch):
