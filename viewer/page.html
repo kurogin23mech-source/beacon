@@ -3,6 +3,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beacon 盤</title>
+<!-- 運用室のトンマナは Web UI (server/static/index.html) と同じ書体に統一 (e-6549)。
+     読めなくてもモノスペースに fallback するだけで、盤は壊れない (best-effort)。 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: light dark;
@@ -65,6 +70,9 @@
     margin-right: 5px; vertical-align: 1px; background: var(--idle);
   }
   .dot.on { background: var(--live); animation: pulse 2s ease-in-out infinite; }
+  /* 確認待ち (= あなたの応答待ち) は盤でも橙。緑ドット + 「確認待ち」ラベルが
+     同じ札で矛盾しないように (#757 独立 AX レビュー misleading)。 */
+  .dot.confirm { background: var(--warn); animation: pulse 1.3s ease-in-out infinite; opacity: 1; }
   @keyframes pulse { 50% { opacity: .35; } }
 
   /* --- 一覧 --- */
@@ -119,18 +127,6 @@
   .badge.s-done, .badge.s-closed, .badge.s-cancelled,
   .badge.s-merged, .badge.s-approved { opacity: .55; border-color: var(--line); }
   .badge.s-in_review   { background: color-mix(in srgb, var(--warn) 18%, transparent); }
-  /* コンテキスト使用率バッジ (e-6500)。使用率が高いほど圧縮 (要約) が近いので、
-     60% 以上で注意色、80% 以上で警告色にして「圧迫されているセッション」を一目で分かるようにする。
-     クラス名は表示ラベル "context" と揃える (略語 ctx を使わない — ax review #753)。 */
-  .context-badge {
-    display: inline-block; font-size: 11px; padding: 1px 7px;
-    border-radius: 4px; white-space: nowrap;
-    border: 1px solid var(--line); opacity: .8;
-  }
-  .context-badge.context-mid  { background: color-mix(in srgb, var(--warn) 18%, transparent);
-                        border-color: transparent; opacity: 1; }
-  .context-badge.context-high { background: color-mix(in srgb, #f85149 22%, transparent);
-                        border-color: transparent; opacity: 1; }
 
   /* 詳細のうち、済んだ分は畳んでおく。 */
   .donebox { margin-top: 8px; }
@@ -184,56 +180,153 @@
   .linkish:hover { opacity: 1; background: var(--faint); }
   .err { color: #f85149; }
   .empty { color: var(--dim); font-size: 12.5px; padding: 4px 0; }
-  /* 一覧の補足行。長い名前で行が高くなりすぎないよう 2 行で打ち切る。 */
-  .sub2 {
-    font-size: 11px; color: var(--dim); margin-top: 2px;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .sub1 { -webkit-line-clamp: 1; }
-  /* セッションは札を並べる。1 行 1 件だと縦に長くなりすぎる。 */
-  .grid {
-    display: grid; gap: 10px; margin-top: 6px;
-    grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
-  }
-  .card {
-    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
-    background: var(--faint); min-width: 0;
-  }
-  .card-head {
-    display: flex; align-items: center; gap: 6px; margin-bottom: 2px;
-  }
-  .card-name {
-    font-weight: 600; font-size: 13px; flex: 1; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  /* 他のマシンで動いているものは、手元のものと見分けが付くようにする。 */
-  .card.remote { border-style: dashed; }
-  .remote-note { color: var(--dim); font-style: italic; }
-  .card-attrs {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;
-  }
-  /* 「今何をしているか」は 1 行使って幅いっぱいに出す (対象 / タスクの下)。 */
-  .card-attrs .activity {
-    grid-column: 1 / -1; color: var(--dim); font-size: 11px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
   /* 運用室の絞り込み帯。選ばれている表示範囲を強調する。 */
   .filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .filters button.scope.on { font-weight: 600; text-decoration: underline; }
   .filters select { font-size: 11px; }
-  .card-foot {
-    display: flex; justify-content: space-between; gap: 8px; margin-top: 8px;
-    padding-top: 6px; border-top: 1px solid var(--line);
-  }
-  .card-foot span:first-child {
-    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .card-foot span:last-child { white-space: nowrap; }
   .section-title {
     font-size: 11px; letter-spacing: .08em; color: var(--dim);
     text-transform: uppercase; margin: 22px 0 4px;
   }
+
+  /* ==== 運用室 (セッション一覧) — Web UI トンマナ (e-6549) ==================
+     正典: mockups/beacon-ops-room-card.html (v3)。色・書体・質感を Web UI
+     (server/static/index.html) のトークンに統一: void 背景 / 緑アクセント +
+     グロー / 走査線 / モノスペース。html.ops が付いている間 (= 運用室表示中)
+     だけ効き、盤 (board) の見た目には影響しない。 */
+  html.ops {
+    --bg-void: #0a0a0c; --bg-surface: #111114; --bg-raised: #18181c;
+    --bg-hover: #1f1f24; --border: #2a2a30; --border-subtle: #1e1e24;
+    --text-primary: #e4e4e8; --text-secondary: #a1a1aa; --text-dim: #71717a;
+    --accent: #4ade80; --accent-dim: #166534;
+    --accent-glow: rgba(74, 222, 128, 0.08);
+    --warning: #fbbf24; --info: #60a5fa; --waiting: #f97316;
+    --cancelled: #ef4444;
+    --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+    --font-body: 'IBM Plex Mono', 'JetBrains Mono', monospace;
+    --scanline-opacity: 0.03;
+    /* 既存の共有トークン (--line / --dim / --faint) も暗色に寄せ、ヘッダや
+       絞り込み帯など基礎スタイルの部品が void 背景で読めるようにする。 */
+    color-scheme: dark;
+    --line: var(--border); --dim: var(--text-secondary);
+    --faint: var(--bg-raised);
+    background: var(--bg-void);
+  }
+  html.ops body {
+    background: var(--bg-void); color: var(--text-primary);
+    font: 13px/1.5 var(--font-body); max-width: 1180px;
+  }
+  /* 走査線オーバーレイ (Web UI と同じ CRT 質感)。 */
+  html.ops body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+    background: repeating-linear-gradient(0deg,
+      transparent, transparent 2px,
+      rgba(0,0,0,var(--scanline-opacity)) 2px,
+      rgba(0,0,0,var(--scanline-opacity)) 4px);
+  }
+
+  /* --- 状態ドット (作業中 = 緑鼓動 / 確認待ち = 橙鼓動 / 待機中 = 輪郭 / 停止 = 淡) --- */
+  html.ops .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  html.ops .dot.work { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: ops-pulse 2s ease-in-out infinite; }
+  html.ops .dot.confirm { background: var(--waiting); box-shadow: 0 0 9px var(--waiting); animation: ops-pulse 1.3s ease-in-out infinite; }
+  html.ops .dot.idle { background: transparent; border: 1.5px solid var(--text-dim); }
+  html.ops .dot.stop { background: var(--text-dim); opacity: .5; }
+  @keyframes ops-pulse { 50% { opacity: .4; } }
+
+  /* --- 状態札 (語が主・色は補助)。確認待ちだけ塗りで「あなた待ち」を目立たせる。 --- */
+  html.ops .st {
+    display: inline-block; font-size: 10px; padding: 0 6px; line-height: 17px;
+    border-radius: 3px; white-space: nowrap; border: 1px solid transparent;
+    letter-spacing: .02em; flex: none;
+  }
+  html.ops .st.work    { color: var(--accent);  background: var(--accent-glow); border-color: var(--accent-dim); }
+  html.ops .st.confirm { color: #0a0a0c;        background: var(--waiting);     border-color: var(--waiting); font-weight: 600; }
+  html.ops .st.idle    { color: var(--text-dim); border-color: var(--border); }
+  html.ops .st.stop    { color: var(--text-dim); opacity: .6; border-color: var(--border-subtle); }
+
+  /* コンテキスト使用率。60% 以上で注意色、80% 以上で警告色 (閾値は従来と同じ e-6500)。 */
+  html.ops .ctx {
+    font-size: 10px; padding: 0 5px; line-height: 17px; border-radius: 3px;
+    white-space: nowrap; border: 1px solid var(--border); color: var(--text-dim);
+    font-variant-numeric: tabular-nums; flex: none;
+  }
+  html.ops .ctx.mid  { color: var(--warning);   border-color: color-mix(in srgb, var(--warning) 50%, transparent); }
+  html.ops .ctx.high { color: var(--cancelled); border-color: color-mix(in srgb, var(--cancelled) 55%, transparent); }
+  html.ops .tgt {
+    font-size: 10.5px; padding: 0 6px; line-height: 17px; border-radius: 3px;
+    color: var(--info); background: color-mix(in srgb, var(--info) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--info) 30%, transparent);
+    white-space: nowrap; font-variant-numeric: tabular-nums; flex: none;
+  }
+  /* 推測の担当 (ブランチ / コミット由来) は破線で「宣言ではない」ことを示し続ける。 */
+  html.ops .tgt.guess { border-style: dashed; opacity: .85; }
+
+  /* --- 操作: 飛ぶボタンは無い。カード全体クリックで端末へ飛ぶ。送るのみ従ボタン --- */
+  html.ops button.send {
+    font: inherit; font-size: 10.5px; color: var(--text-secondary); opacity: .8;
+    background: transparent; border: 1px solid var(--border); border-radius: 5px;
+    padding: 2px 8px; cursor: pointer; flex: none; align-self: flex-start;
+  }
+  html.ops button.send:hover { opacity: 1; background: var(--bg-hover); }
+  html.ops .nosend { color: var(--text-dim); font-size: 10px; flex: none; margin-top: 4px; }
+
+  /* --- カード本体 (密度 + 折り返し)。文字は省略 (…) で隠さず折り返す。 --- */
+  html.ops .card {
+    border: 1px solid var(--border); border-radius: 7px; padding: 8px 11px;
+    background: var(--bg-surface); min-width: 0; display: grid; gap: 4px;
+    position: relative;
+  }
+  html.ops .card.jumpable { cursor: pointer; }
+  html.ops .card.jumpable:hover {
+    background: var(--bg-raised);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent),
+                0 0 16px -6px var(--accent);
+  }
+  html.ops .card.jumpable .jumphint {
+    color: var(--accent); font-size: 9.5px; letter-spacing: .04em;
+    opacity: 0; transition: opacity .12s; white-space: nowrap; flex: none; margin-top: 6px;
+  }
+  html.ops .card.jumpable:hover .jumphint { opacity: .9; }
+  html.ops .card:not(.jumpable):hover { background: var(--bg-raised); }
+  /* 親 (非 fork の母艦) は左の緑罫。語タグは付けない (エッジだけで関係を示す)。 */
+  html.ops .card.root {
+    border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    box-shadow: -6px 0 14px -10px var(--accent);
+  }
+  html.ops .card.remote { border-style: dashed; opacity: .82; }
+
+  html.ops .r1 { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+  html.ops .r1 .dot { margin-top: 5px; }
+  html.ops .name { font-weight: 600; font-size: 12.5px; flex: none; }
+  html.ops .idns { color: var(--text-dim); font-size: 10.5px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  html.ops .r2 { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+  html.ops .r2 .label { font-size: 11.5px; color: var(--text-secondary); min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  html.ops .r2 .branch { color: var(--text-dim); font-size: 10px; flex: none; overflow-wrap: anywhere; text-align: right; max-width: 42%; }
+  html.ops .r3 { display: flex; align-items: flex-start; gap: 9px; min-width: 0; margin-top: 1px; }
+  html.ops .r3 .act { color: var(--text-dim); font-size: 10.5px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  html.ops .r3 .when { color: var(--text-dim); font-size: 10px; white-space: nowrap; flex: none; margin-top: 6px; }
+  html.ops .r3 .ops-slot { display: flex; gap: 6px; flex: none; align-items: flex-start; }
+
+  /* --- 木: 親 → 子。エッジ (レール + 爪 + 字下げ) だけで関係を示す。 --- */
+  html.ops .tree { display: grid; gap: 6px; }
+  html.ops .kids {
+    position: relative; margin: 6px 0 0 12px; padding-left: 16px;
+    border-left: 1.5px solid var(--border); display: grid; gap: 6px;
+  }
+  html.ops .kids > .card { position: relative; }
+  html.ops .kids > .card::before {
+    content: ""; position: absolute; left: -16px; top: 16px;
+    width: 12px; height: 1.5px; background: var(--border);
+  }
+
+  /* 盤: 木を段組みで流す。1 画面で複数プロジェクトを俯瞰。 */
+  html.ops .ops-board {
+    display: grid; gap: 16px 22px;
+    grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+    align-items: start;
+  }
+  html.ops .section-title { letter-spacing: .12em; font-size: 10.5px; color: var(--text-dim); margin: 20px 0 8px; }
 </style>
 
 <div id="app"><p class="loading">読み込み中…</p></div>
@@ -302,34 +395,44 @@ const TYPE_LABEL = {
 };
 function typeLabel(t) { return esc(TYPE_LABEL[t] || t || ""); }
 
-// セッションが動いているかの表し方。**確かめられないものを「稼働中」と言わない。**
+// セッションの状態は 3 つ + 停止に整理する (e-6549、正典 = ops-room mockup v3)。
 //
-//  作業中 / 待機中 … その道具が申告している状態 (Claude Code の台帳)
-//  稼働中          … このセッションのプロセスが生きていることを確かめた
-//  最近動いた      … 道具は起動しているが、このセッションかは確かめられない
-//  停止            … 上のどれでもない
+//  作業中   … 実際に手が動いている (道具の申告 busy、または activity_kind=work)
+//  確認待ち … 質問・選択肢・許可で止まって **あなたを待っている**
+//             (activity_kind=wait + 待機内容あり。ms-159 が produce する)
+//  待機中   … 生きているが手待ち・保留中 (理由は分からないものも含む)
+//  停止     … 生存を確かめられない (淡色で残す)
 //
-// 「道具が起動しているか」だけで全セッションを稼働中と呼んでいた頃は、
-// 「稼働中 · 15 時間前」という矛盾した表示が出ていた (2026-09-10 に修正)。
-const RECENT_MS = 10 * 60 * 1000;
+// 以前あった「稼働中 / 最近動いた」は廃止 — 「生きているのは分かるが何を
+// しているかは不明」は全部「待機中」に畳む (曖昧な中間ラベルは走査の邪魔)。
+// 生存はローカルのプロセス観測 (running) か、サーバの transport live
+// (transport_live)、または道具の台帳申告 (state) の合成 (e-6454)。
+// 状態の語彙 (3 状態 + 停止) の唯一の定義。label は liveness() が読む。
+// legend は各状態の意味の定義文 (現在は画面に描画しない — 凡例表示は説明過多として
+// 2026-09-18 に人間判断で撤去。語彙の意味はこの定義文が正で、復活時もここを読む)。
+const OPS_STATES = {
+  work:    {label: "作業中",   legend: "手が動いている"},
+  confirm: {label: "確認待ち", legend: "質問・選択肢・許可で止まってあなたを待っている"},
+  idle:    {label: "待機中",   legend: "手待ち・保留"},
+  stop:    {label: "停止",     legend: null},
+};
 function liveness(s) {
-  if (s.state === "busy") return {label: "作業中", on: true};
-  if (s.state === "idle") return {label: "待機中", on: false};
-  // 生存はローカルのプロセス観測 (running) か、サーバの transport live
-  // (transport_live) の合成 (e-6454)。どちらかが真なら「稼働中」= 停止隠しに
-  // 巻き込まれない。片方だけ見ない (名乗りの主はローカル観測が漏れても transport
-  // live で生きている)。
-  if (s.running || s.transport_live) return {label: "稼働中", on: true};
-  const recent = s.last_active &&
-    (Date.now() - new Date(s.last_active)) < RECENT_MS;
-  if (s.tool_running && recent) {
-    return {label: "最近動いた", on: false,
-            hint: `${s.tool} は起動していますが、このセッションかどうかは確かめられません`};
+  const aliveNow = s.state === "busy" || s.state === "idle" ||
+    s.running || s.transport_live;
+  if (!aliveNow) {
+    return {key: "stop", label: OPS_STATES.stop.label, on: false,
+            hint: s.tool_running
+              ? `${s.tool} は起動していますが、このセッションは最近動いていません`
+              : ""};
   }
-  return {label: "停止", on: false,
-          hint: s.tool_running
-            ? `${s.tool} は起動していますが、このセッションは最近動いていません`
-            : ""};
+  if (s.activity_kind === "wait" && s.activity) {
+    return {key: "confirm", label: OPS_STATES.confirm.label, on: true,
+            hint: "質問・選択肢・許可で止まって、あなたの応答を待っています"};
+  }
+  if (s.state === "busy" || s.activity_kind === "work") {
+    return {key: "work", label: OPS_STATES.work.label, on: true};
+  }
+  return {key: "idle", label: OPS_STATES.idle.label, on: false};
 }
 
 function ago(iso) {
@@ -353,7 +456,7 @@ function sessionCard(s) {
     ${commit}
     ${s.live && viewerState.can_send !== false
       ? `<button class="linkish send" data-sid="${esc(s.id)}"
-           style="margin-top:6px;">プロンプトを送る</button>` : ""}
+           style="margin-top:6px;">送る</button>` : ""}
     <div class="sub">${s.live ? "稼働中" : "停止"}${s.last_active
       ? ` · <span data-ts="${esc(s.last_active)}">${ago(s.last_active)}</span>`
       : ""}</div>
@@ -369,7 +472,8 @@ function localCard(s) {
   // 状態は道具が申告しているものをそのまま出す (作業中 / 待機)。
   const live = liveness(s);
   return `<div class="session local">
-    <div class="who"><span class="dot ${live.on ? "on" : ""}"></span>${esc(head)}</div>
+    <div class="who"><span class="dot ${
+      live.key === "confirm" ? "confirm" : live.on ? "on" : ""}"></span>${esc(head)}</div>
     ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
     ${s.title ? `<div class="sub">${esc(s.title)}</div>` : ""}
     ${s.target_guess ? `<div class="target guess"
@@ -525,6 +629,8 @@ function fillGroup(key, rows, owners, rosterKnown, guessed) {
 }
 
 function render(board) {
+  document.documentElement.classList.remove("ops"); // 盤は従来トンマナ
+
   lastBoard = board;
   const p = board.project || {}, g = board.progress || {};
   const src = board.source || {};
@@ -744,6 +850,8 @@ function render(board) {
 // 「見つかりません」で終わらせず、その場で選べるようにする。実行ファイルを配って
 // もらった人にとって、起動場所に .beacon が無いのは異常ではなく普通のこと。
 function renderPicker(state) {
+  document.documentElement.classList.remove("ops"); // 選ぶ画面も従来トンマナ
+
   const cloud = !state.cloud_available
     ? `<p class="empty">${esc(state.cloud_reason || "クラウドはまだ使えません")}</p>`
     : state.cloud_signed_in
@@ -968,68 +1076,54 @@ function wireSendButtons() {
   }
 }
 
-// 「端末へ飛ぶ」ボタン。押すとそのセッションの端末ウィンドウを前面化する。
-// 見つからない/未対応でも落とさず、ボタン脇に理由を出す (SPEC ms-173 方針4)。
+// 飛べない理由 (jump_blocked) を人の言葉にする対応表。キーの綴りは Go
+// (viewer/jump.go の JumpBlocked* 定数) が唯一の正典で、ずれると
+// TestJumpBlockedLiteralMatchesPage (page.html を読んで機械照合) が赤くなる。
+const JUMP_BLOCKED_REASON = {
+  "exposed": "外部公開中の盤からは端末へ飛べません",
+  "unsupported-os": "この盤の OS は端末の前面化に未対応です (現状 macOS のみ)",
+  "remote-machine": "別のマシンで動いているため、この盤からは飛べません",
+  "no-pid": "プロセス番号が取れておらず、端末を辿れません",
+  "unsupported-terminal": "この端末は前面化に未対応です (作業フォルダは時刻のホバーで確認できます)",
+};
+
+// カード全体クリックで端末へ飛ぶ (e-6549 — 飛ぶボタンは廃止し、カードそのものが
+// 入口)。飛べるカード (.jumpable = サーバの最終 1 値) だけに付ける。結果は
+// .jumphint (hover で出る「端末へ →」) の文言で返し、失敗理由は title に残す。
 // /api/jump の HTTP status (400=入力起因 / 403,404,501=直しても無駄) はここでは
 // あえて分岐しない — 画面はサーバが返す文面 (res.error) をそのまま人に見せるだけで
-// 足りる。status の意味論は API を直接叩く自動化クライアント (AI 等) 向けの契約
-// (#756 独立 AX レビューで「宣言だけあり消費者不在」に見える点を明記)。
-function wireJumpButtons() {
-  for (const btn of document.querySelectorAll("button.jump")) {
-    btn.onclick = async e => {
-      e.stopPropagation();
-      const pid = parseInt(btn.dataset.processPid, 10);
+// 足りる。status の意味論は API を直接叩く自動化クライアント (AI 等) 向けの契約。
+function wireCardJumps() {
+  for (const card of document.querySelectorAll(".card.jumpable")) {
+    card.onclick = async () => {
+      const hint = card.querySelector(".jumphint");
+      const pid = parseInt(card.dataset.processPid, 10);
       // 数値でなければサーバに投げない (NaN は JSON で欠落し pid=0 として届き、
       // 「別マシン」と誤診されるため。ここで正直な理由を出す)。
       if (!Number.isFinite(pid)) {
-        btn.textContent = "PID が読めません";
-        btn.title = "このセッションのプロセス番号が取得できませんでした";
+        if (hint) { hint.textContent = "PID が読めません"; hint.style.opacity = 1; }
         return;
       }
-      btn.disabled = true;
-      const original = btn.textContent;
-      btn.textContent = "前面化中…";
+      const original = hint ? hint.textContent : "";
+      if (hint) { hint.textContent = "前面化中…"; hint.style.opacity = 1; }
+      let failed = "";
       try {
         const r = await fetch("/api/jump", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({pid, harness: btn.dataset.harness || ""}),
+          body: JSON.stringify({pid, harness: card.dataset.harness || ""}),
         });
         const res = await r.json();
-        if (!r.ok || res.error) {
-          btn.textContent = "飛べません";
-          btn.title = res.error || "端末を前面化できませんでした";
-        } else {
-          btn.textContent = "前面に出しました";
-          setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
-          return;
-        }
+        if (!r.ok || res.error) failed = res.error || "端末を前面化できませんでした";
       } catch (err) {
-        btn.textContent = "飛べません";
-        btn.title = String(err);
+        failed = String(err);
       }
-      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
-    };
-  }
-}
-
-// 「パスをコピー」ボタン。前面化に未対応の端末 (kitty / VS Code 等) の fallback。
-// 作業フォルダのパスをクリップボードにコピーして、手で開けるようにする (SPEC 方針4)。
-function wireCopyPathButtons() {
-  for (const btn of document.querySelectorAll("button.copypath")) {
-    btn.onclick = async e => {
-      e.stopPropagation();
-      const path = btn.dataset.path || "";
-      const original = btn.textContent;
-      try {
-        await navigator.clipboard.writeText(path);
-        btn.textContent = "コピーしました";
-      } catch (err) {
-        // クリップボードが使えない環境でも落とさず、パスをそのまま見せる。
-        btn.textContent = path || "パスが分かりません";
-        btn.title = path;
+      if (hint) {
+        hint.textContent = failed ? "飛べません" : "前面に出しました";
+        if (failed) { hint.title = failed; card.title = failed; }
+        setTimeout(() => { hint.textContent = original; hint.style.opacity = ""; },
+                   failed ? 2500 : 1500);
       }
-      setTimeout(() => { btn.textContent = original; }, 2000);
     };
   }
 }
@@ -1048,15 +1142,6 @@ async function openPicker() {
 const SOURCE_LABEL = {
   beacon: "Beacon 申告", branch: "ブランチから推測", commit: "コミットから推測",
 };
-function attribution(a, hint) {
-  if (!a) {
-    return `<span class="nobody" title="${esc(hint || "")}">—</span>`;
-  }
-  const guess = a.source !== "beacon";
-  return `<span class="who-badge ${guess ? "guess" : ""}"
-      title="${esc(SOURCE_LABEL[a.source] || a.source)}">${esc(a.id)}</span>` +
-    (a.label ? `<div class="sub2">${esc(a.label)}</div>` : "");
-}
 
 // 内容の指紋の共通ルール (保守性 review #753 M2)。刻々と変わる最終活動時刻
 // (last_active) は外す — 入れると中身が何も変わっていなくても毎回作り直すことになり、
@@ -1113,6 +1198,99 @@ async function refreshSessions() {
   renderSessions(d);
 }
 
+// --- 親子 (fork) の木 (e-6549) --------------------------------------------
+// renderSessions から分離した純関数。判定だけを局所で読める・変えられるようにする
+// (#757 独立保守性レビュー)。子の判定は 2 段:
+//  (a) target_source == "fork" — サーバが解決した「担当の決まり方」(宣言ベースの正)。
+//  (b) フォルダの物理配置 <親repo>/.worktrees/<枝> — 名乗っていない行の補完。
+// (b) は「fork か」ではなく「worktree 配下か」を見る近似なので、関数名もそう名乗る
+// (worktreeParentDir)。fork 以外の worktree 運用でも親の下に束ねるが、それは物理的な
+// 親子関係として正しい表示。親 = 子の worktree を含む repo を作業場にしている行。
+// 見つからなければ、root が 1 つだけのグループに限り母艦へぶら下げ、それ以外は
+// 平置きにする (親をでっち上げない)。語タグは付けない — 関係はエッジだけで示す。
+function opsNormDir(s) {
+  return (s.directory || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+function worktreeParentDir(s) {
+  const d = opsNormDir(s);
+  const i = d.indexOf("/.worktrees/");
+  return i > 0 ? d.slice(0, i) : "";
+}
+function sessionForest(list) {
+  const isChild = s => s.target_source === "fork" || !!worktreeParentDir(s);
+  const roots = list.filter(s => !isChild(s));
+  const rootByDir = new Map(roots.map(r => [opsNormDir(r), r]));
+  const kids = new Map(); const loose = [];
+  for (const s of list) {
+    if (!isChild(s)) continue;
+    const p = rootByDir.get(worktreeParentDir(s)) ||
+              (roots.length === 1 ? roots[0] : null);
+    if (!p) { loose.push(s); continue; }
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(s);
+  }
+  return {roots, kids, loose};
+}
+
+// 運用室カード 1 枚 (e-6549、正典 = mockups/beacon-ops-room-card.html v3)。
+// 3 段構成: r1 = 状態 + 名前 + 持ち主 / r2 = 担当 (対象) + ブランチ / r3 = 活動 +
+// 時刻 + 操作。情報を足すときは mockup と突き合わせる (勝手に 4 段目を生やさない)。
+// 作業フォルダ (cwd) は時刻のホバー (title) へ退避 — 表示からは削るが消滅させない。
+// タイトル (セッションの見出し) は名前のホバーへ退避。
+function opsCard(s, isRoot) {
+  const l = liveness(s);
+  const idns = [s.who, s.machine || (s.remote ? "別のマシン" : "")]
+    .filter(Boolean).map(esc).join(" · ");
+  // 注意: s.target.source (= このビューワーが担当をどう推定したか beacon/branch/
+  // commit) と s.target_source (= サーバが解決した担当の決まり方、fork 子判定に使う)
+  // は別物。名前が似ているが値域も用途も違う (#757 独立 AX レビュー)。
+  const guess = s.target && s.target.source !== "beacon";
+  // 送る: 名乗っていない相手には入口自体を出さない (送れない入口は出さない原則、
+  // send.go 冒頭)。畳まれた行 (collapsed_peers) は誤配ガードとして「送信不可」を
+  // 理由付きで明示する (#745 — 開示と操作抑止は一組)。
+  const sendUI = (s.named && s.session_id)
+    ? (s.collapsed_peers
+      ? `<span class="nosend" title="同じフォルダ・道具で複数の live セッションが 1 行に畳まれていて、宛先 (session_id) が一意に定まりません。押した相手と違うセッションに届く誤配を防ぐため、送信口を出していません (畳まれている数: ${s.collapsed_peers}、解消は session_id 粒度の突合 e-6446)">送信不可</span>`
+      : `<button class="send" data-sid="${esc(s.session_id)}"
+           data-pid="${esc((s.project || {}).project_id || "")}">送る</button>`)
+    : "";
+  return `<div class="card${isRoot ? " root" : ""}${s.remote ? " remote" : ""}${
+      s.jumpable ? " jumpable" : ""}"${
+      s.jumpable
+        ? ` data-process-pid="${esc(String(s.pid))}" data-harness="${esc(s.harness || "")}"
+            title="クリックでこのセッションの端末ウィンドウを前面に出します"`
+        : s.jump_blocked
+          ? ` title="${esc(JUMP_BLOCKED_REASON[s.jump_blocked] || s.jump_blocked)}"`
+          : ""}>
+    <div class="r1">
+      <span class="dot ${l.key}"></span>
+      <span class="name"${s.title ? ` title="${esc(s.title)}"` : ""}>${esc(s.name || s.tool || "不明")}</span>
+      <span class="idns">${idns}</span>
+      <span class="st ${l.key}" title="${esc(l.hint || "")}">${esc(l.label)}</span>
+      ${s.context_pct != null ? `<span class="ctx ${
+          s.context_pct >= 80 ? "high" : s.context_pct >= 60 ? "mid" : ""}"
+        data-metric="context"
+        title="コンテキスト窓の使用率 (0–100%)。高いほど圧縮 (要約) が近づいています (Beacon が申告しているセッションのみ)">${s.context_pct}%</span>` : ""}
+    </div>
+    ${(s.target || s.branch) ? `<div class="r2">
+      ${s.target ? `<span class="tgt${guess ? " guess" : ""}"
+          title="${esc(SOURCE_LABEL[s.target.source] || s.target.source || "")}">${esc(s.target.id)}</span>` : ""}
+      <span class="label">${s.target && s.target.label ? esc(s.target.label) : ""}</span>
+      ${s.branch ? `<span class="branch">${esc(s.branch)}</span>` : ""}
+    </div>` : ""}
+    <div class="r3">
+      <span class="act" title="このセッションが今何をしているか。空欄は「分からない」であって「何もしていない」ではありません (ms-159 e-6533)">${
+        s.activity ? esc(s.activity)
+          : (s.activity_kind === "wait" ? "待機・理由不明" : "—")}</span>
+      <span class="when" title="${esc(s.directory || "")}"${
+        s.last_active ? ` data-ts="${esc(s.last_active)}"` : ""}>${
+        s.last_active ? ago(s.last_active) : ""}</span>
+      <span class="ops-slot">${sendUI}${
+        s.jumpable ? `<span class="jumphint">端末へ →</span>` : ""}</span>
+    </div>
+  </div>`;
+}
+
 // 運用室の一覧を実際に組み立てる。open (手動) と refresh (自動) の両方から呼ぶので
 // 「作る」処理はここ 1 か所に寄せる (真実源を 1 つに)。絞り (scope/root/stopped) は
 // 呼び出し時点の globals を読む = ユーザーの今の選択をそのまま反映する。
@@ -1121,6 +1299,9 @@ async function refreshSessions() {
 // 各行の jumpable / jump_blocked に織り込むので、d だけで全部描ける (以前は state の
 // jump_available と pid の AND を画面で再構成していて、判定の正典が割れていた)。
 function renderSessions(d) {
+  // 運用室のトンマナ (void 背景 / 走査線 / モノスペース) は html.ops が立って
+  // いる間だけ効く。盤や選ぶ画面に戻るときは外す (盤の見た目を変えない)。
+  document.documentElement.classList.add("ops");
   const app = document.getElementById("app");
   const scoped = d.sessions || [];
   // プロジェクト名は 3 箇所 (選択肢 / 絞り / グルーピング) で使うので 1 か所に寄せる。
@@ -1135,8 +1316,8 @@ function renderSessions(d) {
   // 止まっているものは既定で隠す。いま何が動いているかを読みに来ているのに、
   // 終わった分に埋もれては意味がない (2026-09-10 の指摘)。
   // 「止まっている」の判定は liveness に一本化してある。
-  const stopped = all.filter(s => liveness(s).label === "停止");
-  const rows = showStopped ? all : all.filter(s => liveness(s).label !== "停止");
+  const stopped = all.filter(s => liveness(s).key === "stop");
+  const rows = showStopped ? all : all.filter(s => liveness(s).key !== "stop");
 
   // プロジェクトごとにまとめる。どのプロジェクトの作業かが一目で分かるように。
   const groups = new Map();
@@ -1153,16 +1334,30 @@ function renderSessions(d) {
   // 「変わらなければ再描画しない」とは両立する (順序付けは描画時の見せ方だけ)。
   const stableStr = (a, b) => a < b ? -1 : a > b ? 1 : 0;
   const sessionSortKey = s =>
-    [s.name || s.tool || "", s.directory || "", s.session_id || ""].join(" ");
+    [s.name || s.tool || "", s.directory || "", s.session_id || ""].join(" ");
   for (const list of groups.values()) {
     list.sort((a, b) => stableStr(sessionSortKey(a), sessionSortKey(b)));
   }
   const orderedGroups = [...groups.entries()].sort(([a], [b]) => stableStr(a, b));
 
+  // --- 親子 (fork) の木 (e-6549) ---
+  // 子の判定は 2 段: サーバが解決した担当の決まり方 (target_source == "fork") が正、
+  // 名乗っていない行はフォルダの物理配置 (<親repo>/.worktrees/<枝>) で補う。
+  // 親は「子の worktree を含む repo を作業場にしている、同じグループ内の行」。
+  // 見つからなければ、root が 1 つだけのグループに限り母艦へぶら下げ、それ以外は
+  // 平置きにする (親をでっち上げない)。語タグは付けない — 関係はエッジだけで示す。
+  const normDir = s => (s.directory || "").replace(/\\/g, "/")
+    .replace(/\/+$/, "").toLowerCase();
+  const forkParentDir = s => {
+    const d = normDir(s);
+    const i = d.indexOf("/.worktrees/");
+    return i > 0 ? d.slice(0, i) : "";
+  };
+  const isForkChild = s => s.target_source === "fork" || !!forkParentDir(s);
+
   app.innerHTML = `
     <header>
       <h1>セッション一覧</h1>
-      <div class="objective">このマシンで動いている作業を、プロジェクトを跨いで並べています。</div>
       <div class="meta">
         <b>${rows.length}</b> セッション ・ <b>${groups.size}</b> プロジェクト
         ${d.no_project ? ` ・ プロジェクトに紐づかないもの <b>${d.no_project}</b>` : ""}
@@ -1192,95 +1387,20 @@ function renderSessions(d) {
       <b>名乗って動いているセッション (他のマシン・クラウド分を含む) が、ここに出ていない
       恐れがあります。</b>空に見えても「誰も居ない」とは限りません。
       <code>beacon auth login</code> でログインし直すと回復します。</div>` : ""}
-    <p class="empty">担当は、Beacon に名乗っているセッションはその申告を、そうでないものは
-      ブランチ名や直近のコミットから推し量っています。<b>推測は破線</b>で示します。
-      <br>タスクは直近のコミット件名に含まれる番号 (e-NNNN) から辿ります。
-      書かれていなければ <b>—</b> になります (そのセッションがタスクを持っていない
-      という意味ではありません)。
-      <br>Beacon に名乗っているセッションは、<b>他のマシンのものも含みます</b>
-      (名簿はどのマシンからでも引けるため)。破線の札がそれです。
-      名乗っていないセッションは、このマシンの分しか分かりません。
-      <br><b>この一覧は「すべての作業」ではありません。</b>別のマシンで動いている、
-      Beacon に名乗っていない素の Claude / Codex は、何も送っていない以上こちらに届く
-      経路が無く、<b>原理的にここには出ません</b>。空いて見えても「誰も居ない」とは
-      限りません — こちらから見えていないだけのこともあります。</p>
-    ${rows.length ? orderedGroups.map(([name, list]) => `
-      <div class="section-title">${esc(name)} (${list.length})</div>
-      <div class="grid">${list.map(s => {
-        const l = liveness(s);
-        return `<div class="card ${s.remote ? "remote" : ""}">
-          <div class="card-head">
-            <span class="dot ${l.on ? "on" : ""}"></span>
-            <span class="card-name">${esc(s.name || s.tool)}</span>
-            <span class="badge ${l.on ? "s-open" : "s-todo"}"
-              title="${esc(l.hint || "")}">${esc(l.label)}</span>
-            ${s.context_pct != null ? `<span class="context-badge ${
-              s.context_pct >= 80 ? "context-high" : s.context_pct >= 60 ? "context-mid" : ""}"
-              title="このセッションのコンテキスト窓の使用率 (0–100%)。高いほど圧縮 (要約) が近づいています。60% 以上で注意色、80% 以上で警告色 (Beacon が申告しているセッションのみ)"
-              >context ${s.context_pct}%</span>` : ""}
-          </div>
-          <div class="sub2 sub1">${esc(s.tool || "不明")}${s.branch
-            ? " · " + esc(s.branch) : ""}</div>
-          ${s.named && (s.who || s.machine)
-            ? `<div class="sub2 sub1"
-                 title="Beacon の名簿が持っている、このセッションの持ち主と機械です"
-                 >${[s.who, s.machine].filter(Boolean).map(esc).join(" · ")}</div>`
-            : ""}
-          ${s.remote ? `<div class="sub2 sub1 remote-note"
-            title="Beacon の名簿から拾ったものです。このマシンには痕跡がありません"
-            >別のマシン</div>` : ""}
-          ${s.collapsed_peers ? `<div class="sub2 sub1 remote-note"
-            title="同じフォルダ・同じ道具で名乗っている live セッションが他にもありますが、識別子の粒度が足りず個別に表示できていません (session_id 突合で解消予定)"
-            >⚠ 同フォルダに他 ${s.collapsed_peers} セッション (未表示)</div>` : ""}
-          ${s.title ? `<div class="sub2">${esc(s.title)}</div>` : ""}
-          <div class="card-attrs">
-            <div>${attribution(s.target,
-              "ブランチ名にもコミット件名にも対象 (ms-NN) が無いため分かりません")}</div>
-            <div>${attribution(s.task,
-              "直近のコミット件名にタスク番号 (e-NNNN) が無いため分かりません")}</div>
-            <div class="activity" title="このセッションが今何をしているか。空欄は「分からない」であって「何もしていない」ではありません。待機中(activity_kind=wait)で理由が不明なときは「待機・理由不明」、稼働中(work)で表示する要約が無いときは「活動 —」と描き分けます (ms-159 e-6533)">${
-              s.activity ? esc(s.activity)
-                : (s.activity_kind === "wait" ? "待機・理由不明" : "活動 —")}</div>
-          </div>
-          <div class="card-foot">
-            <span class="sub2 sub1" title="${esc(s.directory)}"
-              >${esc(s.directory)}</span>
-            <span class="sub2 sub1"
-              ${s.last_active ? `data-ts="${esc(s.last_active)}"` : ""}
-              >${s.last_active ? ago(s.last_active) : ""}</span>
-          </div>
-          ${!(s.named && s.session_id)
-            ? `<div class="sub2 sub1" style="margin-top:8px;"
-                 title="Beacon に名乗っているセッションにしか文面を渡せません">
-                 送信不可 — Beacon に名乗っていません</div>`
-            : s.collapsed_peers
-              ? `<div class="sub2 sub1" style="margin-top:8px;"
-                   title="同じフォルダ・道具で複数の live セッションが1行に畳まれており、この行の識別子 (session_id) が畳まれたどのセッションを指すか一意に定まりません。押した相手と違うセッションに届く誤配を防ぐため、送信口を出していません (session_id 粒度の突合 e-6446 で解消予定)">
-                   送信不可 — 宛先が一意に定まりません (同フォルダに他 ${s.collapsed_peers} セッション)</div>`
-              : `<button class="linkish send" style="margin-top:8px; width:100%;"
-                   data-sid="${esc(s.session_id)}"
-                   data-pid="${esc((s.project || {}).project_id || "")}"
-                  >プロンプトを送る</button>`}
-          ${s.jumpable
-            ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
-                 data-process-pid="${esc(String(s.pid))}"
-                 data-harness="${esc(s.harness || "")}"
-                 title="このセッションが動いている端末ウィンドウを前面に出します">
-                 端末へ飛ぶ</button>`
-            : s.jump_blocked === "unsupported-terminal"
-              ? `<button class="linkish copypath" style="margin-top:6px; width:100%;"
-                   data-path="${esc(s.directory || "")}"
-                   title="この端末 (${esc(s.harness)}) は前面化に未対応です。作業フォルダのパスをコピーします">
-                   パスをコピー (${esc(s.harness)} は未対応)</button>`
-              : ""}
-        </div>`; }).join("")}</div>`).join("")
+    ${rows.length ? `<div class="ops-board">${orderedGroups.map(([name, list]) => {
+        const {roots, kids, loose} = sessionForest(list);
+        const trees = roots.map(r => `<div class="tree">${opsCard(r, true)}${
+          kids.has(r) ? `<div class="kids">${
+            kids.get(r).map(s => opsCard(s, false)).join("")}</div>` : ""}</div>`);
+        trees.push(...loose.map(s => `<div class="tree">${opsCard(s, false)}</div>`));
+        return `<div class="proj"><div class="section-title">${esc(name)} (${list.length})</div>${trees.join("")}</div>`;
+      }).join("")}</div>`
       : `<p class="empty">${stopped.length && !showStopped
           ? `動いているセッションはありません (停止中が ${stopped.length} 件あります)。`
           : "セッションが見つかりませんでした。"}</p>`}
   `;
   wireSendButtons();
-  wireJumpButtons();
-  wireCopyPathButtons();
+  wireCardJumps();
   const toggle = document.getElementById("toggle-stopped");
   if (toggle) toggle.onclick = () => { showStopped = !showStopped; openSessions(); };
   // 表示範囲 (自分のみ / 要対応のみ / 全て) の切り替え。

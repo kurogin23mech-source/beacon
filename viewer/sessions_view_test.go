@@ -694,3 +694,32 @@ func itoaSmall(n int) string {
 	}
 	return string(digits)
 }
+
+// 担当の決まり方 (target_source) が名簿から運用室の各行へ運ばれること (e-6549)。
+// 運用室のカード木は "fork" の行を子として字下げするので、**両方の組み立て経路**
+// (手元にも痕跡がある名乗り / 別マシンだけの名乗り) で落ちると親子表示が silent に
+// 全部フラットになる。
+func TestTargetSourceCarriedToOverview(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	ts := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	local := []LocalSessionRow{
+		{Tool: "claude-code", Directory: "/Users/x/beacon/.worktrees/ms-1-fork-ab", LastActive: ts},
+	}
+	named := []SessionRow{
+		{ID: "sv-local", Agent: "claude-code", Cwd: "/Users/x/beacon/.worktrees/ms-1-fork-ab",
+			Live: true, LastActive: ts, TargetSource: "fork"},
+		{ID: "sv-remote", Agent: "claude-code", Cwd: "/Users/y/beacon",
+			Who: "other@example.com", Live: true, LastActive: ts, TargetSource: "declared"},
+	}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	byID := map[string]string{}
+	for _, s := range view.Sessions {
+		byID[s.SessionID] = s.TargetSource
+	}
+	if byID["sv-local"] != "fork" {
+		t.Errorf("手元経路で target_source が落ちている: %q", byID["sv-local"])
+	}
+	if byID["sv-remote"] != "declared" {
+		t.Errorf("別マシン経路で target_source が落ちている: %q", byID["sv-remote"])
+	}
+}

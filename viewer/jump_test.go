@@ -266,18 +266,22 @@ func TestJumpBlockedEnumClosed(t *testing.T) {
 	}
 }
 
-// page.html が文字列比較で消費する enum 値が、Go 定数と一致していること (#756
+// page.html が文字列で消費する enum 値が、Go 定数と一致していること (#756
 // 独立レビュー consensus: コメントで「両方更新せよ」と頼むのは構造ガードではない。
-// 定数の綴りを変えたら page.html の分岐が silent に壊れる前に、ここが赤くなる)。
+// 定数の綴りを変えたら page.html の対応表 (JUMP_BLOCKED_REASON = 飛べない理由を
+// 人の言葉にする map、e-6549) が silent に引けなくなる前に、ここが赤くなる)。
 func TestJumpBlockedLiteralMatchesPage(t *testing.T) {
 	page, err := os.ReadFile("page.html")
 	if err != nil {
 		t.Fatalf("page.html が読めない: %v", err)
 	}
-	needle := `jump_blocked === "` + JumpBlockedUnsupportedTerminal + `"`
-	if !strings.Contains(string(page), needle) {
-		t.Errorf("page.html に %q が無い — Go 定数 JumpBlockedUnsupportedTerminal と"+
-			" 画面の文字列比較がずれている (fallback ボタンの出し分けが silent に壊れる)", needle)
+	for _, v := range []string{JumpBlockedExposed, JumpBlockedUnsupportedOS,
+		JumpBlockedRemoteMachine, JumpBlockedNoPID, JumpBlockedUnsupportedTerminal} {
+		needle := `"` + v + `"`
+		if !strings.Contains(string(page), needle) {
+			t.Errorf("page.html に %s が無い — Go 定数と画面の理由対応表"+
+				" (JUMP_BLOCKED_REASON) がずれている (飛べない理由の表示が silent に壊れる)", needle)
+		}
 	}
 }
 

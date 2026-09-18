@@ -69,6 +69,16 @@ type SessionOverview struct {
 	Project    *ProjectRef  `json:"project,omitempty"`
 	Target     *Attribution `json:"target,omitempty"`
 	Task       *Attribution `json:"task,omitempty"`
+	// TargetSource は担当 (working_target) がどう決まったか。サーバが解決した値
+	// (declared=宣言 / fork / branch / cwd 等) をそのまま運ぶ。運用室のカード木は
+	// これが "fork" の行を子として字下げする (e-6549 — 親子はエッジで示す)。
+	// 名乗っているセッションだけが持つ (このビューワーは作らない、消費するだけ)。
+	//
+	// **Target.Source (Attribution) とは別物** (#757 独立 AX レビュー)。あちらは
+	// 「このビューワーが担当をどう推定したか」(beacon/branch/commit) で値域も用途も
+	// 違う。名前は roster (SessionRow.target_source) とのサーバ JSON 契約に揃えて
+	// いるため変えない — 混同しそうになったらこの対比を読むこと。
+	TargetSource string `json:"target_source,omitempty"`
 	// Activity は「今このセッションが何をしているか」の要約 (ms-159 が produce する)。
 	// **このビューワーは作らない。消費するだけ。** 空は「分からない」であって
 	// 「何もしていない」ではないので、運用室では空欄として描く (でっち上げない)。
@@ -370,6 +380,8 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			o.Harness = n.Harness
 			// コンテキスト使用率も名簿から運ぶ (未申告なら nil のまま = バッジ非表示)。
 			o.ContextPct = n.ContextPct
+			// 担当の決まり方 (fork 子判定の源) も名簿から運ぶ (e-6549)。
+			o.TargetSource = n.TargetSource
 		}
 
 		// 端末へ飛べるかの最終判定はここではしない。組み立てはサーバの環境
@@ -405,6 +417,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			ActivityKind:  n.ActivityKind,
 			Harness:       n.Harness,
 			ContextPct:    n.ContextPct, // 別マシンのセッションもコンテキスト使用率を運ぶ
+			TargetSource:  n.TargetSource,
 			Remote:        true,
 		}
 		// 別マシンの名乗りセッションにも、宛先ルーティング用に自分のプロジェクトを
