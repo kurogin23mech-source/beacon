@@ -71,6 +71,10 @@ type LocalSessionRow struct {
 	// **端末へ飛ぶ (jump-to-terminal) の起点。** ここから制御端末 (tty) を辿り、
 	// その tty を持つ端末ウィンドウを前面化する。分からない道具では 0 = 飛べない。
 	PID int `json:"pid,omitempty"`
+	// SessionID は Beacon の名簿上の識別子 (sv-...)。この行のプロセス (PID) が
+	// 立てた bridge の名乗り札 (<フォルダ>/.beacon/bridges/<sid>.json の parent_pid)
+	// から引く。引けたときだけ非空 — 名簿との突合を identity で閉じる鍵 (e-6446)。
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // LocalSessions は、与えられたプロジェクトのフォルダで動いていたセッションを集める。
@@ -95,6 +99,65 @@ func LocalSessions(root string, since time.Duration, now time.Time) []LocalSessi
 		kept[i].Target = targetFromBranch(kept[i].Branch)
 	}
 	return kept
+}
+
+// resolveBeaconSIDs は、ローカル行に Beacon の名簿識別子 (sv-...) を引き当てる。
+//
+// bridge は起動時に <作業フォルダ>/.beacon/bridges/<sid>.json へ名乗り札を書き、
+// そこに parent_pid (= その bridge を立てた Claude Code プロセス) が入っている。
+// ローカル行の PID と突き合わせれば「このプロセス = 名簿のこの行」が identity で
+// 確定する (e-6446)。フォルダ + 道具の推測突合はこの解決が効かない行の fallback。
+//
+// 読み取り専用・best-effort: .beacon が無い / 読めない / 対応する札が無い行は
+// SessionID 空のまま返す (呼び出し側が fallback に落とす)。
+func resolveBeaconSIDs(rows []LocalSessionRow) []LocalSessionRow {
+	// 同じフォルダの札は 1 度だけ読む (worktree ごとに .beacon は別)。
+	claims := map[string]map[int]string{} // dir → parent_pid → session_id
+	for i, r := range rows {
+		if r.PID <= 0 || r.Directory == "" {
+			continue
+		}
+		byPid, ok := claims[r.Directory]
+		if !ok {
+			byPid = readBridgeClaims(r.Directory)
+			claims[r.Directory] = byPid
+		}
+		if sid := byPid[r.PID]; sid != "" {
+			rows[i].SessionID = sid
+		}
+	}
+	return rows
+}
+
+// readBridgeClaims は 1 フォルダ分の bridge 名乗り札を読み、parent_pid → sid を返す。
+func readBridgeClaims(dir string) map[int]string {
+	out := map[int]string{}
+	entries, err := os.ReadDir(filepath.Join(dir, ".beacon", "bridges"))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") ||
+			strings.HasSuffix(name, ".delivery.json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, ".beacon", "bridges", name))
+		if err != nil {
+			continue
+		}
+		var claim struct {
+			SessionID string `json:"session_id"`
+			ParentPID int    `json:"parent_pid"`
+		}
+		if err := json.Unmarshal(raw, &claim); err != nil {
+			continue
+		}
+		if claim.SessionID != "" && claim.ParentPID > 0 {
+			out[claim.ParentPID] = claim.SessionID
+		}
+	}
+	return out
 }
 
 // filterAndSort は、このプロジェクトのものだけを残して新しい順に並べる。

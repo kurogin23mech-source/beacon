@@ -1856,6 +1856,13 @@ def _compute_poll_health(session: dict, now_dt) -> dict:
 _DRAINING_SCAN_LIMIT = int(
     os.environ.get("BEACON_BUS_DRAINING_SCAN_LIMIT", "400") or "400")
 
+# ms-173 (e-6563): zombie-WS ガードの閾値。poll loop を持つ bridge がこの秒数を
+# 超えて poll を止めているのに WS keepalive だけ生きている場合、その WS は wedge
+# した旧プロセスの残骸とみなし、live 判定を WS 単独で維持させない。通常 cadence
+# (5s) の 360 倍 = 30 分。一時的な poll 欠落 (再接続・GC 停止) では発火しない。
+_WS_ZOMBIE_POLL_AGE_S = int(
+    os.environ.get("BEACON_WS_ZOMBIE_POLL_AGE_S", "1800") or "1800")
+
 
 def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
                                         now_dt) -> str:
@@ -1914,7 +1921,19 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     ws_live = redis_client.ws_session_live(project_id, sid) if sid else None
     session["ws_live"] = ws_live
     poll_healthy = session["poll_health"].get("healthy") is True
-    session["live"] = (ws_live is True) or poll_healthy
+    live = (ws_live is True) or poll_healthy
+    # ms-173 (e-6563): zombie-WS ガード。poll loop を持つ bridge (= last_poll_at を
+    # 書いたことがある) が、自分の cadence を桁違いに超えて poll を止めているのに
+    # WS keepalive だけ生きている状態は wedge (= プロセスは居るが働いていない)。
+    # 実測: sid 再発番で置き去りになった旧 bridge が 8 日間 WS ping だけ続け、
+    # live=true の幽霊行として名簿に残った。WS 単独では live を維持させない。
+    # (poll を持たない旧版 bridge = last_poll_at 無しは対象外。数分の poll 欠落は
+    # ws_live が救う従来挙動のまま — 閾値は cadence 5s の 360 倍で誤爆しない。)
+    if live and not poll_healthy and ws_live is True and session["bridge"]:
+        age = session["poll_health"].get("age_seconds")
+        if age is not None and age > _WS_ZOMBIE_POLL_AGE_S:
+            live = False
+    session["live"] = live
     # ms-165 (e-5965): informational signal. `live` (above) is the deliverability
     # gate — it proves the bridge polls and, post-e-5964, will deliver even to an
     # idle session. `heartbeat_fresh` is a SEPARATE, weaker signal: whether the

@@ -193,6 +193,9 @@ func AllSessions(since time.Duration, now time.Time,
 	rows = append(rows, claudeSessions(home)...)
 	rows = append(rows, opencodeSessions(home)...)
 	rows = append(rows, codexSessions(home)...)
+	// 名簿との突合を identity で閉じるため、bridge の名乗り札から Beacon の
+	// 識別子を引き当てる (e-6446)。組み立て (assembleSessions) は純関数のまま。
+	rows = resolveBeaconSIDs(rows)
 	return assembleSessions(rows, named, since, now)
 }
 
@@ -203,6 +206,9 @@ type keptRow struct {
 	row     LocalSessionRow
 	named   SessionRow // isNamed のときだけ意味を持つ (突合した名簿エントリ)
 	isNamed bool       // この行がキーの名乗りの主 (claimer) か
+	viaSID  bool       // 突合が identity (session_id) で確定したか (e-6446)。
+	// false の isNamed は フォルダ+道具 の推測突合 (fallback) — 同一キーの
+	// 残り全部をこの行に畳む従来規則が適用される。true なら畳まない (exact)。
 }
 
 // parseActive は LastActive (RFC3339) を時刻に。パースできなければ zero + false。
@@ -227,21 +233,43 @@ func laterActive(a, b string) bool {
 	return a > b
 }
 
+// indexNamedBySID は名簿を Beacon の識別子 (session_id) で引ける map にする。
+//
+// ローカル行が bridge の名乗り札から自分の識別子を引けた場合 (e-6446)、この map で
+// **identity の一致** として突合する。フォルダ + 道具の推測突合 (indexNamedByDir) は
+// 識別子が引けない行だけの fallback。
+func indexNamedBySID(named []SessionRow) map[string]SessionRow {
+	bySID := map[string]SessionRow{}
+	for _, n := range named {
+		if n.ID != "" {
+			bySID[n.ID] = n
+		}
+	}
+	return bySID
+}
+
 // indexNamedByDir は名簿を「作業フォルダ + 道具」で引ける map と、キーごとの件数を返す。
 //
 // **フォルダだけで引いてはいけない。** 同じフォルダで Codex や OpenCode を何本も
 // 動かしていると、その全部が bclaude セッションの識別子を貰ってしまい、名乗っていない
 // セッションが名乗っているように見える (2026-09-11 に観測)。件数は、同一キーに複数の
 // live が畳まれた事実を開示する (CollapsedPeers) ために持ち帰る。
-func indexNamedByDir(named []SessionRow) (map[string]SessionRow, map[string]int) {
+//
+// ``consumedSID`` は identity 突合 (sid) で既に持ち主が決まった名簿行 — fallback の
+// 取り合いから外す (identity で確定した行を推測突合が二重に配らない)。同一キーに
+// 複数残る場合は **最新の 1 行** を採る (last-write-wins だと入力順という無関係な
+// 偶然が持ち主を決め、幽霊行が勝ち得た — e-6563 で観測)。
+func indexNamedByDir(named []SessionRow, consumedSID map[string]bool) (map[string]SessionRow, map[string]int) {
 	byDir := map[string]SessionRow{}
 	counts := map[string]int{}
 	for _, n := range named {
-		if n.Cwd == "" {
+		if n.Cwd == "" || consumedSID[n.ID] {
 			continue
 		}
 		key := namedKey(n.Cwd, n.Agent)
-		byDir[key] = n // last-write-wins (畳まれた分は counts で開示)
+		if prev, ok := byDir[key]; !ok || laterActive(n.LastActive, prev.LastActive) {
+			byDir[key] = n // 最新優先 (畳まれた分は counts で開示)
+		}
 		counts[key]++
 	}
 	return byDir, counts
@@ -250,21 +278,32 @@ func indexNamedByDir(named []SessionRow) (map[string]SessionRow, map[string]int)
 // selectKept は、新しい順のローカル行から表示に残す行を選び、各行に名乗りの主
 // (claimer) 判定を付けて返す。**claimer 規則の唯一の実装点** (e-6454):
 //
-//   - 名簿に居るキーは、最初に来た (= 最新の) 1 行だけを主 (isNamed=true) にする。
-//     残りの同キー行は名乗り扱いにしない (同フォルダの死んだ重複に live を漏らさない、
-//     思想レビュー finding 2026-09-14)。
+//   - まず identity: 名乗り札から引けた識別子 (row.SessionID) が名簿に居れば、
+//     その行が名簿行の持ち主として確定する (e-6446、推測でなく突合)。
+//   - 識別子が引けない行は従来の fallback: 名簿に居るキーは、最初に来た (= 最新の)
+//     1 行だけを主 (isNamed=true) にする。残りの同キー行は名乗り扱いにしない
+//     (同フォルダの死んだ重複に live を漏らさない、思想レビュー finding 2026-09-14)。
 //   - 主でない行 (未名乗り or 同キーの重複) は会話時刻の 24h カットオフに従う。名乗りの
 //     主は transport live が生存の真値なので、会話が何時間前でも残す (ms-171 e-6431)。
 //
-// rows は laterActive で新しい順に並んでいる前提。
-func selectKept(rows []LocalSessionRow, namedByDir map[string]SessionRow,
-	cutoff time.Time) []keptRow {
+// rows は laterActive で新しい順に並んでいる前提。namedByDir は identity で持ち主が
+// 決まった名簿行を除いてある (assembleSessions が consumedSID で除外して作る)。
+func selectKept(rows []LocalSessionRow, namedBySID map[string]SessionRow,
+	namedByDir map[string]SessionRow, cutoff time.Time) []keptRow {
 
 	claimed := map[string]bool{}
+	claimedSID := map[string]bool{}
 	kept := []keptRow{}
 	for _, r := range rows {
 		if r.Directory == "" {
 			continue
+		}
+		if r.SessionID != "" {
+			if n, ok := namedBySID[r.SessionID]; ok && !claimedSID[r.SessionID] {
+				claimedSID[r.SessionID] = true
+				kept = append(kept, keptRow{row: r, named: n, isNamed: true, viaSID: true})
+				continue
+			}
 		}
 		key := namedKey(r.Directory, r.Tool)
 		n, inRoster := namedByDir[key]
@@ -293,16 +332,32 @@ func selectKept(rows []LocalSessionRow, namedByDir map[string]SessionRow,
 func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 	since time.Duration, now time.Time) SessionsView {
 
-	namedByDir, namedCounts := indexNamedByDir(named)
+	namedBySID := indexNamedBySID(named)
+	// identity (sid) で持ち主が決まる名簿行を先に確定し、フォルダ+道具の推測突合
+	// (fallback) の取り合いから除く (e-6446)。
+	consumedSID := map[string]bool{}
+	for _, r := range rows {
+		if r.SessionID == "" {
+			continue
+		}
+		if _, ok := namedBySID[r.SessionID]; ok {
+			consumedSID[r.SessionID] = true
+		}
+	}
+	namedByDir, namedCounts := indexNamedByDir(named, consumedSID)
 
 	sort.SliceStable(rows, func(i, j int) bool {
 		return laterActive(rows[i].LastActive, rows[j].LastActive)
 	})
-	kept := selectKept(rows, namedByDir, now.Add(-since))
+	kept := selectKept(rows, namedBySID, namedByDir, now.Add(-since))
 
 	lookup := newProjectLookup()
 	// 手元の記録と突き合わせ済みの名簿を覚えておく (二重に並べないため)。
+	// キー単位 (fallback 突合 = 同キーの残りも畳む) と識別子単位 (identity 突合 =
+	// その 1 行だけ) を分けて持つ — identity で確定した行の同キー隣人まで
+	// 巻き添えで消さない (e-6446)。
 	seenNamed := map[string]bool{}
+	seenNamedSID := map[string]bool{}
 	out := SessionsView{Sessions: []SessionOverview{}}
 	for _, kr := range kept {
 		r := kr.row
@@ -326,17 +381,26 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 		n := kr.named
 		o.Named = kr.isNamed
 		if kr.isNamed {
-			key := namedKey(r.Directory, r.Tool)
-			seenNamed[key] = true
+			if kr.viaSID {
+				// identity 突合: この名簿行だけを消費 (同キーの隣人は独立に扱う)。
+				seenNamedSID[n.ID] = true
+			} else {
+				// fallback 突合: 従来どおりキーごと消費 (残りは CollapsedPeers に畳む)。
+				seenNamed[namedKey(r.Directory, r.Tool)] = true
+			}
 			o.SessionID = n.ID
 			// 名簿に居る = transport が live (サーバ判定)。ローカルの Running (プロセス
 			// 観測) は上書きせず、別フィールドで持つ — 出自を潰さない (e-6454)。表示・
 			// 停止隠しの判定は Running か TransportLive の合成で行う (画面側)。
 			o.TransportLive = true
-			// 同一キーに複数 live が畳まれていれば、その事実を開示する (AX finding
-			// 2026-09-14)。個別表示は identity 突合の根治待ち (e-6446)。
-			if extra := namedCounts[key] - 1; extra > 0 {
-				o.CollapsedPeers = extra
+			// fallback 突合で同一キーに複数 live が畳まれていれば、その事実を開示
+			// する (AX finding 2026-09-14)。identity 突合 (viaSID) は exact なので
+			// 畳みが起きない — 同キーの隣人は自分の行として独立に出る (e-6446)。
+			// namedCounts は identity で持ち主が決まった行を除いた残り件数。
+			if !kr.viaSID {
+				if extra := namedCounts[namedKey(r.Directory, r.Tool)] - 1; extra > 0 {
+					o.CollapsedPeers = extra
+				}
 			}
 			// DM の宛先はそのセッション自身のプロジェクト (e-6396)。名簿が持つ
 			// ProjectID を権威として載せる — 手元の .beacon から引けなかったり、
@@ -396,8 +460,10 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 	//
 	// **これが他のマシンで動いている bclaude セッション。** 名簿には載るが、この
 	// マシンには痕跡が無いので、手元の記録を並べるだけでは一覧から丸ごと抜ける。
+	// identity 突合で消費済み (seenNamedSID) か、fallback 突合でキーごと畳まれた
+	// (seenNamed) 名簿行は既に一覧に居るので足さない。
 	for _, n := range named {
-		if seenNamed[namedKey(n.Cwd, n.Agent)] {
+		if seenNamedSID[n.ID] || seenNamed[namedKey(n.Cwd, n.Agent)] {
 			continue
 		}
 		o := SessionOverview{
