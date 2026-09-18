@@ -70,9 +70,14 @@ type SessionOverview struct {
 	Target     *Attribution `json:"target,omitempty"`
 	Task       *Attribution `json:"task,omitempty"`
 	// TargetSource は担当 (working_target) がどう決まったか。サーバが解決した値
-	// (declared=宣言 / fork / branch / cwd) をそのまま運ぶ。運用室のカード木は
+	// (declared=宣言 / fork / branch / cwd 等) をそのまま運ぶ。運用室のカード木は
 	// これが "fork" の行を子として字下げする (e-6549 — 親子はエッジで示す)。
 	// 名乗っているセッションだけが持つ (このビューワーは作らない、消費するだけ)。
+	//
+	// **Target.Source (Attribution) とは別物** (#757 独立 AX レビュー)。あちらは
+	// 「このビューワーが担当をどう推定したか」(beacon/branch/commit) で値域も用途も
+	// 違う。名前は roster (SessionRow.target_source) とのサーバ JSON 契約に揃えて
+	// いるため変えない — 混同しそうになったらこの対比を読むこと。
 	TargetSource string `json:"target_source,omitempty"`
 	// Activity は「今このセッションが何をしているか」の要約 (ms-159 が produce する)。
 	// **このビューワーは作らない。消費するだけ。** 空は「分からない」であって
