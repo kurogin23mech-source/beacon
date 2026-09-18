@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>運用室カード 再デザイン案 v3 (ms-173)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* Beacon Web UI (server/static/index.html) のトークンを継承。
+     ダーク・ターミナル/CRT コンソール: void 背景・緑アクセント・走査線・モノスペース。 */
+  :root {
+    --bg-void: #0a0a0c;
+    --bg-surface: #111114;
+    --bg-raised: #18181c;
+    --bg-hover: #1f1f24;
+    --border: #2a2a30;
+    --border-subtle: #1e1e24;
+    --text-primary: #e4e4e8;
+    --text-secondary: #a1a1aa;
+    --text-dim: #71717a;
+    --accent: #4ade80;
+    --accent-dim: #166534;
+    --accent-glow: rgba(74, 222, 128, 0.08);
+    --warning: #fbbf24;
+    --info: #60a5fa;
+    --waiting: #f97316;
+    --cancelled: #ef4444;
+    --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+    --font-body: 'IBM Plex Mono', 'JetBrains Mono', monospace;
+    --scanline-opacity: 0.03;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg-void); }
+  body {
+    margin: 0; padding: 26px 24px 90px;
+    font: 13px/1.5 var(--font-body);
+    color: var(--text-primary);
+    max-width: 1180px; margin-inline: auto;
+    position: relative;
+  }
+  /* 走査線オーバーレイ (Web UI と同じ CRT 質感) */
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+    background: repeating-linear-gradient(0deg,
+      transparent, transparent 2px,
+      rgba(0,0,0,var(--scanline-opacity)) 2px,
+      rgba(0,0,0,var(--scanline-opacity)) 4px);
+  }
+  h1 { font-size: 15px; font-weight: 700; margin: 0 0 2px; letter-spacing: .01em; }
+  .lede { color: var(--text-secondary); font-size: 12px; margin: 0 0 22px; max-width: 800px; }
+  .lede b { color: var(--text-primary); font-weight: 600; }
+  .section-title {
+    font-size: 10.5px; letter-spacing: .12em; color: var(--text-dim);
+    text-transform: uppercase; margin: 20px 0 8px;
+  }
+
+  /* --- 状態ドット --- */
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot.work { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s ease-in-out infinite; }
+  .dot.confirm { background: var(--waiting); box-shadow: 0 0 9px var(--waiting); animation: pulse 1.3s ease-in-out infinite; }
+  .dot.idle { background: transparent; border: 1.5px solid var(--text-dim); }
+  .dot.stop { background: var(--text-dim); opacity: .5; }
+  @keyframes pulse { 50% { opacity: .4; } }
+
+  /* --- 状態札 (語が主・色は補助) --- */
+  .st {
+    display: inline-block; font-size: 10px; padding: 0 6px; line-height: 17px;
+    border-radius: 3px; white-space: nowrap; border: 1px solid transparent;
+    letter-spacing: .02em; flex: none;
+  }
+  .st.work    { color: var(--accent);  background: var(--accent-glow); border-color: var(--accent-dim); }
+  .st.confirm { color: #0a0a0c;        background: var(--waiting);     border-color: var(--waiting); font-weight: 600; }
+  .st.idle    { color: var(--text-dim); border-color: var(--border); }
+  .st.stop    { color: var(--text-dim); opacity: .6; border-color: var(--border-subtle); }
+
+  .ctx {
+    font-size: 10px; padding: 0 5px; line-height: 17px; border-radius: 3px;
+    white-space: nowrap; border: 1px solid var(--border); color: var(--text-dim);
+    font-variant-numeric: tabular-nums; flex: none;
+  }
+  .ctx.mid  { color: var(--warning);   border-color: color-mix(in srgb, var(--warning) 50%, transparent); }
+  .ctx.high { color: var(--cancelled); border-color: color-mix(in srgb, var(--cancelled) 55%, transparent); }
+  .tgt {
+    font-size: 10.5px; padding: 0 6px; line-height: 17px; border-radius: 3px;
+    color: var(--info); background: color-mix(in srgb, var(--info) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--info) 30%, transparent);
+    white-space: nowrap; font-variant-numeric: tabular-nums; flex: none;
+  }
+
+  /* --- 操作: 飛ぶボタンは廃止。カード全体クリックで端末へ飛ぶ。送るのみ従ボタン --- */
+  .send {
+    font: inherit; font-size: 10.5px; color: var(--text-secondary); opacity: .8;
+    background: transparent; border: 1px solid var(--border); border-radius: 5px;
+    padding: 2px 8px; cursor: pointer; flex: none; align-self: flex-start;
+  }
+  .send:hover { opacity: 1; background: var(--bg-hover); }
+
+  /* --- カード本体 (密度 + 折り返し) --- */
+  .card {
+    border: 1px solid var(--border); border-radius: 7px; padding: 8px 11px;
+    background: var(--bg-surface); min-width: 0; display: grid; gap: 4px;
+    position: relative;
+  }
+  /* 飛べるカードはクリックで端末へ飛ぶ。hover で持ち上げ、右上に → を出す。 */
+  .card.jumpable { cursor: pointer; }
+  .card.jumpable:hover {
+    background: var(--bg-raised);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent),
+                0 0 16px -6px var(--accent);
+  }
+  /* hover 時、時刻の隣に「端末へ →」の手掛かりを出す (badge とは衝突しない位置)。 */
+  .card.jumpable .jumphint {
+    color: var(--accent); font-size: 9.5px; letter-spacing: .04em;
+    opacity: 0; transition: opacity .12s; white-space: nowrap; flex: none; margin-top: 6px;
+  }
+  .card.jumpable:hover .jumphint { opacity: .9; }
+  /* 飛べないカード (別マシン / pid 無 / 未対応端末) はクリック不可。 */
+  .card:not(.jumpable):hover { background: var(--bg-raised); }
+  .card.root {
+    border-left: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    box-shadow: -6px 0 14px -10px var(--accent);
+  }
+  .card.remote { border-style: dashed; opacity: .82; }
+
+  /* 折り返し方針: 文字は省略 (…) で隠さず折り返す。右端の札は flex:none で
+     幅を持たず、行は align-items:flex-start にして複数行でも右上に留める。 */
+  .r1 { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+  .r1 .dot { margin-top: 5px; }
+  .name { font-weight: 600; font-size: 12.5px; flex: none; }
+  .idns { color: var(--text-dim); font-size: 10.5px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .r2 { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+  .r2 .label { font-size: 11.5px; color: var(--text-secondary); min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .r2 .branch { color: var(--text-dim); font-size: 10px; flex: none; overflow-wrap: anywhere; text-align: right; max-width: 42%; }
+  .r3 { display: flex; align-items: flex-start; gap: 9px; min-width: 0; margin-top: 1px; }
+  .r3 .act { color: var(--text-dim); font-size: 10.5px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .r3 .when { color: var(--text-dim); font-size: 10px; white-space: nowrap; flex: none; margin-top: 6px; }
+  .r3 .ops { display: flex; gap: 6px; flex: none; align-items: flex-start; }
+
+  /* --- 木: 親 → 子。エッジ (レール + 爪) だけで関係を示す。 --- */
+  .tree { display: grid; gap: 6px; }
+  .kids {
+    position: relative; margin: 6px 0 0 12px; padding-left: 16px;
+    border-left: 1.5px solid var(--border); display: grid; gap: 6px;
+  }
+  .kids > .card { position: relative; }
+  .kids > .card::before {
+    content: ""; position: absolute; left: -16px; top: 16px;
+    width: 12px; height: 1.5px; background: var(--border);
+  }
+
+  /* 盤: 木を段組みで流す。1 画面で複数プロジェクトを俯瞰。 */
+  .board { display: grid; gap: 16px 22px; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); align-items: start; }
+
+  .legend { margin-top: 34px; font-size: 12px; color: var(--text-secondary); border-top: 1px solid var(--border); padding-top: 14px; }
+  .legend b { color: var(--text-primary); font-weight: 600; }
+  .legend ul { margin: 6px 0 0; padding-left: 18px; }
+  .legend li { margin: 4px 0; }
+  .swatch { display: inline-flex; align-items: center; gap: 5px; margin-right: 14px; }
+  code { font-size: 11px; background: var(--bg-raised); padding: 0 4px; border-radius: 3px; color: var(--text-secondary); }
+</style>
+
+<h1>運用室カード 再デザイン案 v3 — Beacon Web UI のトンマナに統一 (ms-173)</h1>
+<p class="lede">
+  色・フォント・質感を Web UI (<code>server/static/index.html</code>) のトークンに統一：ダーク・ターミナル/CRT、
+  モノスペース (IBM Plex Mono)、緑アクセント + グロー、走査線。状態は <b>作業中 / 確認待ち / 待機中</b> の 3 つに整理し、
+  質問や選択肢で止まっている時は <b>確認待ち</b> (橙・要対応色) で目立たせる。親子はエッジのみ。
+  <b>カードクリックで端末へ飛ぶ</b> (飛ぶボタンは廃止)。
+</p>
+<script>
+  // mockup 用の click デモ。実装では jump.go の判定 + 実 pid/harness を使う。
+  document.querySelectorAll(".card.jumpable").forEach(c => {
+    c.addEventListener("click", () => {
+      c.style.outline = "1px solid var(--accent)";
+      setTimeout(() => c.style.outline = "", 260);
+      console.log("→ 端末へ飛ぶ (このカードのセッション)");
+    });
+  });
+</script>
+
+<div style="margin-bottom:6px; font-size:11px; color:var(--text-dim);">
+  <span class="swatch"><span class="dot work"></span> 作業中 = 実際に手が動いている</span>
+  <span class="swatch"><span class="dot confirm"></span> 確認待ち = 質問/選択肢/許可で止まって<b style="color:var(--waiting)">あなたを待っている</b></span>
+  <span class="swatch"><span class="dot idle"></span> 待機中 = 手待ち・保留中</span>
+</div>
+
+<div class="board">
+  <!-- プロジェクト 1: 親 1 + 子 3 -->
+  <div class="proj">
+    <div class="section-title">BEACON (4)</div>
+    <div class="tree">
+      <div class="card root jumpable">
+        <div class="r1">
+          <span class="dot idle"></span><span class="name">claude-code</span>
+          <span class="idns">kurogin23mech@gmail.com · CFGW5D79LL</span>
+          <span class="st idle">待機中</span><span class="ctx">29%</span>
+        </div>
+        <div class="r2">
+          <span class="tgt">ms-121</span>
+          <span class="label">バックオフィス職種（経理・法務・人事）を Beacon の3職種横断フレームに載せる</span>
+          <span class="branch">main</span>
+        </div>
+        <div class="r3">
+          <span class="act">Merge pull request #721 from kurogin23mech-source/ms-121-backoffice</span>
+          <span class="when" title="/Users/r_kida2/tools/beacon">44 秒前</span>
+          <span class="jumphint">端末へ →</span>
+        </div>
+      </div>
+
+      <div class="kids">
+        <!-- 子: 確認待ち (質問で止まっている = 要対応) -->
+        <div class="card jumpable">
+          <div class="r1">
+            <span class="dot confirm"></span><span class="name">claude-code</span>
+            <span class="idns">kurogin23mech@gmail.com · CFGW5D79LL</span>
+            <span class="st confirm">確認待ち</span><span class="ctx mid">62%</span>
+          </div>
+          <div class="r2">
+            <span class="tgt">ms-159</span>
+            <span class="label">統合オペレーションUI — ターミナルを一次オブジェクトから降ろす</span>
+            <span class="branch">ms-159-fork-acf764</span>
+          </div>
+          <div class="r3">
+            <span class="act">「この変更を page.html に適用しますか？」で停止中</span>
+            <span class="when">たった今</span>
+            <span class="ops"><button class="send" onclick="event.stopPropagation()">送る</button><span class="jumphint">端末へ →</span></span>
+          </div>
+        </div>
+
+        <!-- 子: 作業中 -->
+        <div class="card jumpable">
+          <div class="r1">
+            <span class="dot work"></span><span class="name">claude-code</span>
+            <span class="idns">kurogin23mech@gmail.com · CFGW5D79LL</span>
+            <span class="st work">作業中</span><span class="ctx">41%</span>
+          </div>
+          <div class="r2">
+            <span class="tgt">ms-173</span>
+            <span class="label">並列で動く作業セッションを live で一望できる運用室</span>
+            <span class="branch">ms-173-fork-31201c</span>
+          </div>
+          <div class="r3">
+            <span class="act">カードの親子表示を実装中</span>
+            <span class="when">2 分前</span>
+            <span class="ops"><button class="send" onclick="event.stopPropagation()">送る</button><span class="jumphint">端末へ →</span></span>
+          </div>
+        </div>
+
+        <!-- 子: 停止 (別マシン) -->
+        <div class="card remote">
+          <div class="r1">
+            <span class="dot stop"></span><span class="name">codex</span>
+            <span class="idns">iruca3@dolphin.orca · 別のマシン</span>
+            <span class="st stop">停止</span>
+          </div>
+          <div class="r2">
+            <span class="tgt">ms-170</span>
+            <span class="label">ローカルでもクラウドでも同じ盤が見えるビューワー</span>
+            <span class="branch">ms-170-fork-9a</span>
+          </div>
+          <div class="r3">
+            <span class="act">—</span>
+            <span class="when">3 時間前</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- プロジェクト 2: 親のみ (子なし = フラット) -->
+  <div class="proj">
+    <div class="section-title">TRAILNODE (1)</div>
+    <div class="tree">
+      <div class="card root jumpable">
+        <div class="r1">
+          <span class="dot work"></span><span class="name">claude-code</span>
+          <span class="idns">kurogin23mech@gmail.com · MB-AIR</span>
+          <span class="st work">作業中</span><span class="ctx high">83%</span>
+        </div>
+        <div class="r2">
+          <span class="tgt">ms-12</span>
+          <span class="label">org-closed スキル共有レジストリ</span>
+          <span class="branch">main</span>
+        </div>
+        <div class="r3">
+          <span class="act">push 記録の整合を確認</span>
+          <span class="when">6 分前</span>
+          <span class="jumphint">端末へ →</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <b>v3 の変更</b>
+  <ul>
+    <li><b>トンマナを Web UI に統一</b>: void 背景 / 緑アクセント + グロー / 走査線 / モノスペース (IBM Plex Mono)。カードだけ浮かないよう Web UI と同じトークンを使う。</li>
+    <li><b>状態を 3 つに整理</b>: <span style="color:var(--accent)">作業中</span> (手が動いている) / <span style="color:var(--waiting);font-weight:600">確認待ち</span> (質問・選択肢・許可で停止 = あなた待ち) / <span style="color:var(--text-dim)">待機中</span> (手待ち)。曖昧だった「稼働中 / 最近動いた」を廃止。停止 (dead) は淡色で従来どおり。</li>
+    <li><b>確認待ちを要対応色に</b>: 橙 (Web UI の <code>--waiting</code>) の塗り札 + 鼓動するドットで、止まって待っているセッションが一目で分かる。データは <code>activity_kind=wait</code> + 待機内容 (「Claude needs your permission」等) から判定。</li>
+    <li><b>飛ぶボタンを廃止 → カードクリックで端末へ飛ぶ</b>: ボタン分の場所を無くしカードを更に小さく。hover で緑グロー + 「端末へ →」の手掛かり。「送る」だけ従ボタンで残し、クリックは stopPropagation でカード飛びと分離。別マシン/pid無/未対応端末は非 jumpable (クリック不可)。</li>
+    <li><b>折り返し維持</b>: 文字は省略で隠さず折り返す。親子はレール + 爪のエッジのみ (語なし)。</li>
+  </ul>
+</div>
+</html>
