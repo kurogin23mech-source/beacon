@@ -970,6 +970,10 @@ function wireSendButtons() {
 
 // 「端末へ飛ぶ」ボタン。押すとそのセッションの端末ウィンドウを前面化する。
 // 見つからない/未対応でも落とさず、ボタン脇に理由を出す (SPEC ms-173 方針4)。
+// /api/jump の HTTP status (400=入力起因 / 403,404,501=直しても無駄) はここでは
+// あえて分岐しない — 画面はサーバが返す文面 (res.error) をそのまま人に見せるだけで
+// 足りる。status の意味論は API を直接叩く自動化クライアント (AI 等) 向けの契約
+// (#756 独立 AX レビューで「宣言だけあり消費者不在」に見える点を明記)。
 function wireJumpButtons() {
   for (const btn of document.querySelectorAll("button.jump")) {
     btn.onclick = async e => {
@@ -1066,10 +1070,11 @@ function contentFingerprint(data, extra) {
   return extra != null ? body + "|" + extra : body;
 }
 
-// 運用室の内容の指紋。共通の contentFingerprint に、端末へ飛べるか (jump_available) を
-// 追加で混ぜる — 札の「端末へ飛ぶ」出し分けに効くので、これが変わったら作り直す。
-function sessionsSignature(d, st) {
-  return contentFingerprint(d, st && st.jump_available ? "1" : "0");
+// 運用室の内容の指紋。「端末へ飛ぶ」の出し分けを含む判定はすべてサーバが
+// jumpable / jump_blocked として応答に織り込むので (e-6427)、指紋は応答そのもの
+// だけで足りる (以前はここに /api/state の jump_available を混ぜていた)。
+function sessionsSignature(d) {
+  return contentFingerprint(d);
 }
 
 async function openSessions() {
@@ -1078,16 +1083,16 @@ async function openSessions() {
   app.innerHTML = `<p class="loading">読み込み中…</p>`;
   let d;
   try {
-    // 「端末へ飛ぶ」が使えるか (自分の機械の中か) を知るために状態も引く。
-    viewerState = await (await fetch("/api/state")).json();
     // 「自分のみ / 要対応のみ / 全て」はサーバ側で絞る (誰が自分かはログイン情報で判定)。
+    // 「端末へ飛べるか」もサーバが各行に jumpable / jump_blocked で織り込む (e-6427)
+    // ので、/api/state を別に引く必要は無い。
     d = await (await fetch("/api/sessions?scope=" +
       encodeURIComponent(sessionScope))).json();
   } catch (e) {
     app.innerHTML = `<p class="err">読めませんでした: ${esc(e)}</p>`;
     return;
   }
-  renderSessions(d, viewerState);
+  renderSessions(d);
 }
 
 // 運用室を、手動リロードなしで最新に保つ (e-6483)。盤の refresh と同じ作法で、
@@ -1096,29 +1101,26 @@ async function openSessions() {
 async function refreshSessions() {
   // 盤・選ぶ画面を見ている間は触らない (画面を奪わない)。
   if (!sessionsOpen || pickerOpen) return;
-  let d, st;
+  let d;
   try {
-    st = await (await fetch("/api/state")).json();
     d = await (await fetch("/api/sessions?scope=" +
       encodeURIComponent(sessionScope))).json();
   } catch (e) {
     return; // 一時的に取れなくても、今出ている一覧は消さない
   }
   // 中身が前と同じなら画面に触らない。ここが点滅とスクロール飛びを止める要。
-  if (sessionsSignature(d, st) === lastSessionsSig) return;
-  viewerState = st; // 盤など他経路も global を読むので更新は保つ
-  renderSessions(d, st); // が、renderSessions へは明示引数で渡す (隠れ依存を作らない)
+  if (sessionsSignature(d) === lastSessionsSig) return;
+  renderSessions(d);
 }
 
 // 運用室の一覧を実際に組み立てる。open (手動) と refresh (自動) の両方から呼ぶので
 // 「作る」処理はここ 1 か所に寄せる (真実源を 1 つに)。絞り (scope/root/stopped) は
 // 呼び出し時点の globals を読む = ユーザーの今の選択をそのまま反映する。
 //
-// state (= /api/state の結果) は **明示引数で受ける** (ax/保守性 review #753)。以前は
-// global viewerState を暗黙に読んでいたため、呼び出し側が viewerState を更新する前に
-// renderSessions を呼ぶと「端末へ飛ぶ」ボタンが古い jump_available で描かれる隠れ依存が
-// あった。引数にすることで「この関数は state を要る」ことが呼び出し側から見える。
-function renderSessions(d, state) {
+// /api/state には依存しない (e-6427)。「端末へ飛べるか」と飛べない理由はサーバが
+// 各行の jumpable / jump_blocked に織り込むので、d だけで全部描ける (以前は state の
+// jump_available と pid の AND を画面で再構成していて、判定の正典が割れていた)。
+function renderSessions(d) {
   const app = document.getElementById("app");
   const scoped = d.sessions || [];
   // プロジェクト名は 3 箇所 (選択肢 / 絞り / グルーピング) で使うので 1 か所に寄せる。
@@ -1259,18 +1261,18 @@ function renderSessions(d, state) {
                    data-sid="${esc(s.session_id)}"
                    data-pid="${esc((s.project || {}).project_id || "")}"
                   >プロンプトを送る</button>`}
-          ${state.jump_available && s.pid
-            ? (s.jumpable
-              ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
-                   data-process-pid="${esc(String(s.pid))}"
-                   data-harness="${esc(s.harness || "")}"
-                   title="このセッションが動いている端末ウィンドウを前面に出します">
-                   端末へ飛ぶ</button>`
-              : `<button class="linkish copypath" style="margin-top:6px; width:100%;"
+          ${s.jumpable
+            ? `<button class="linkish jump" style="margin-top:6px; width:100%;"
+                 data-process-pid="${esc(String(s.pid))}"
+                 data-harness="${esc(s.harness || "")}"
+                 title="このセッションが動いている端末ウィンドウを前面に出します">
+                 端末へ飛ぶ</button>`
+            : s.jump_blocked === "unsupported-terminal"
+              ? `<button class="linkish copypath" style="margin-top:6px; width:100%;"
                    data-path="${esc(s.directory || "")}"
                    title="この端末 (${esc(s.harness)}) は前面化に未対応です。作業フォルダのパスをコピーします">
-                   パスをコピー (${esc(s.harness)} は未対応)</button>`)
-            : ""}
+                   パスをコピー (${esc(s.harness)} は未対応)</button>`
+              : ""}
         </div>`; }).join("")}</div>`).join("")
       : `<p class="empty">${stopped.length && !showStopped
           ? `動いているセッションはありません (停止中が ${stopped.length} 件あります)。`
@@ -1292,7 +1294,7 @@ function renderSessions(d, state) {
     sessionsOpen = false; lastBoardJSON = ""; refresh();
   };
   // 指紋を控える。次の自動更新 (refreshSessions) が「変わっていない」を判定できる。
-  lastSessionsSig = sessionsSignature(d, state);
+  lastSessionsSig = sessionsSignature(d);
 }
 
 async function refresh() {

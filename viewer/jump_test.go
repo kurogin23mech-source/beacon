@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -184,3 +185,180 @@ func TestResolveTTYWith(t *testing.T) {
 type errForTest string
 
 func (e errForTest) Error() string { return string(e) }
+
+// --- 最終判定 jumpVerdict (e-6427) ----------------------------------------
+
+// 「飛べるか」の最終 1 値と、飛べない理由の閉じた enum が正しく出ること。
+// 特に **別マシンと未対応端末が同じ false に潰れない** こと (#744 独立レビューの核心)。
+func TestJumpVerdict(t *testing.T) {
+	cases := []struct {
+		envBlocked string
+		remote     bool
+		pid        int
+		harness    string
+		wantOK     bool
+		wantWhy    string
+		why        string
+	}{
+		{"", false, 100, "apple-terminal", true, "", "このマシン・対応端末は飛べる"},
+		{"", false, 100, "", true, "", "harness 不明は Terminal.app 既定で飛べる"},
+		{JumpBlockedExposed, false, 100, "apple-terminal", false, JumpBlockedExposed,
+			"環境 (公開中/非loopback) が最優先で塞ぐ"},
+		{JumpBlockedUnsupportedOS, true, 0, "kitty", false, JumpBlockedUnsupportedOS,
+			"環境起因は他のどの理由よりも優先。OS 起因は exposed に潰れない (#756 AX)"},
+		{"", true, 0, "apple-terminal", false, JumpBlockedRemoteMachine,
+			"別マシンは pid 無しでも remote-machine と名乗る (no-pid に潰れない)"},
+		{"", false, 0, "apple-terminal", false, JumpBlockedNoPID,
+			"このマシンで pid 不明"},
+		{"", false, 100, "kitty", false, JumpBlockedUnsupportedTerminal,
+			"未対応端末は fallback (パスのコピー) に回す理由として区別"},
+	}
+	for _, c := range cases {
+		ok, why := jumpVerdict(c.envBlocked, c.remote, c.pid, c.harness)
+		if ok != c.wantOK || why != c.wantWhy {
+			t.Errorf("jumpVerdict(%q,%v,%d,%q) = (%v,%q), want (%v,%q) — %s",
+				c.envBlocked, c.remote, c.pid, c.harness, ok, why, c.wantOK, c.wantWhy, c.why)
+		}
+	}
+}
+
+// 環境ブロック理由の判定 (jumpEnvBlocked)。OS 起因と公開起因は直し方が違うので
+// 別の値で返ること (#756 独立 AX レビュー)。
+func TestJumpEnvBlocked(t *testing.T) {
+	cases := []struct {
+		goos, host string
+		expose     bool
+		want       string
+	}{
+		{"darwin", "127.0.0.1", false, ""},
+		{"linux", "127.0.0.1", false, JumpBlockedUnsupportedOS},
+		{"linux", "0.0.0.0", true, JumpBlockedUnsupportedOS}, // OS 起因が公開起因より先
+		{"darwin", "0.0.0.0", true, JumpBlockedExposed},
+		{"darwin", "192.168.1.10", false, JumpBlockedExposed},
+	}
+	for _, c := range cases {
+		if got := jumpEnvBlocked(c.goos, c.host, c.expose); got != c.want {
+			t.Errorf("jumpEnvBlocked(%q,%q,%v) = %q, want %q",
+				c.goos, c.host, c.expose, got, c.want)
+		}
+	}
+}
+
+// 飛べない理由が閉じた enum に収まっていること。値のうち画面 (page.html) が
+// 文字列比較で読むのは "unsupported-terminal" だけ (それ以外はボタン非表示のみで
+// 描画分岐を持たない — #756 独立 AX レビューで過大宣言を修正)。その 1 値は下の
+// TestJumpBlockedLiteralMatchesPage が Go 定数と page.html の一致を機械検証するので、
+// 定数の綴りを変えると即座に赤くなる。
+func TestJumpBlockedEnumClosed(t *testing.T) {
+	want := map[string]bool{
+		"exposed": true, "unsupported-os": true, "remote-machine": true,
+		"no-pid": true, "unsupported-terminal": true,
+	}
+	got := []string{JumpBlockedExposed, JumpBlockedUnsupportedOS,
+		JumpBlockedRemoteMachine, JumpBlockedNoPID, JumpBlockedUnsupportedTerminal}
+	if len(got) != len(want) {
+		t.Fatalf("enum の数が合わない: %d / %d", len(got), len(want))
+	}
+	for _, v := range got {
+		if !want[v] {
+			t.Errorf("未知の理由値 %q (閉じた enum の外)", v)
+		}
+	}
+}
+
+// page.html が文字列比較で消費する enum 値が、Go 定数と一致していること (#756
+// 独立レビュー consensus: コメントで「両方更新せよ」と頼むのは構造ガードではない。
+// 定数の綴りを変えたら page.html の分岐が silent に壊れる前に、ここが赤くなる)。
+func TestJumpBlockedLiteralMatchesPage(t *testing.T) {
+	page, err := os.ReadFile("page.html")
+	if err != nil {
+		t.Fatalf("page.html が読めない: %v", err)
+	}
+	needle := `jump_blocked === "` + JumpBlockedUnsupportedTerminal + `"`
+	if !strings.Contains(string(page), needle) {
+		t.Errorf("page.html に %q が無い — Go 定数 JumpBlockedUnsupportedTerminal と"+
+			" 画面の文字列比較がずれている (fallback ボタンの出し分けが silent に壊れる)", needle)
+	}
+}
+
+// applyJumpVerdicts が全行に最終判定を書き込むこと (受け口はこれを呼ぶだけ)。
+func TestApplyJumpVerdicts(t *testing.T) {
+	rows := []SessionOverview{
+		{PID: 100, Harness: "apple-terminal"},
+		{Remote: true},
+		{PID: 100, Harness: "kitty"},
+	}
+	applyJumpVerdicts(rows, "")
+	if !rows[0].Jumpable || rows[0].JumpBlocked != "" {
+		t.Errorf("飛べる行が飛べる印になっていない: %+v", rows[0])
+	}
+	if rows[1].Jumpable || rows[1].JumpBlocked != JumpBlockedRemoteMachine {
+		t.Errorf("別マシン行の理由が違う: %+v", rows[1])
+	}
+	if rows[2].Jumpable || rows[2].JumpBlocked != JumpBlockedUnsupportedTerminal {
+		t.Errorf("未対応端末行の理由が違う: %+v", rows[2])
+	}
+	// 環境が塞がっていれば、飛べたはずの行もその環境理由で塞がる。
+	applyJumpVerdicts(rows, JumpBlockedExposed)
+	if rows[0].Jumpable || rows[0].JumpBlocked != JumpBlockedExposed {
+		t.Errorf("環境起因の塞ぎが効いていない: %+v", rows[0])
+	}
+}
+
+// --- 前面化失敗の status 対応 (e-6429) --------------------------------------
+
+// 失敗理由ごとに HTTP status が「入力を直しても無駄か」を伝えること。
+// 501 = 環境 (OS / 端末種別)、400 = 入力 (pid)、404 = 実体不在、500 = 実行失敗。
+func TestJumpToTerminalWithStatuses(t *testing.T) {
+	// 実行器 stub: ps は tty を返し、osascript は指定の結果を返す。
+	runner := func(psOut string, psErr error, osaOut string, osaErr error) commandRunner {
+		return func(name string, args ...string) ([]byte, error) {
+			if name == "ps" {
+				return []byte(psOut), psErr
+			}
+			return []byte(osaOut), osaErr
+		}
+	}
+	status := func(err error) int {
+		jf, ok := err.(*jumpFailure)
+		if !ok {
+			t.Fatalf("jumpFailure でないエラー: %v", err)
+		}
+		return jf.Status
+	}
+	// 非 macOS は 501 (環境起因)。
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil),
+		"linux", 100, "apple-terminal"); status(err) != 501 {
+		t.Errorf("非 macOS が 501 でない: %v", err)
+	}
+	// 未対応端末は 501 (環境起因)。
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil),
+		"darwin", 100, "kitty"); status(err) != 501 {
+		t.Errorf("未対応端末が 501 でない: %v", err)
+	}
+	// pid 無効は 400 (入力起因)。
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil),
+		"darwin", 0, "apple-terminal"); status(err) != 400 {
+		t.Errorf("pid 無効が 400 でない: %v", err)
+	}
+	// プロセスが消えている (ps 失敗) は 404 (実体不在)。
+	if err := jumpToTerminalWith(runner("", errForTest("gone"), "true", nil),
+		"darwin", 100, "apple-terminal"); status(err) != 404 {
+		t.Errorf("プロセス不在が 404 でない: %v", err)
+	}
+	// タブが見つからない (osascript が false) も 404。
+	if err := jumpToTerminalWith(runner("ttys000", nil, "false", nil),
+		"darwin", 100, "apple-terminal"); status(err) != 404 {
+		t.Errorf("タブ不在が 404 でない: %v", err)
+	}
+	// osascript 実行失敗は 500。
+	if err := jumpToTerminalWith(runner("ttys000", nil, "", errForTest("boom")),
+		"darwin", 100, "apple-terminal"); status(err) != 500 {
+		t.Errorf("osascript 失敗が 500 でない: %v", err)
+	}
+	// 正常系はエラー無し。
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true\n", nil),
+		"darwin", 100, "apple-terminal"); err != nil {
+		t.Errorf("正常系でエラー: %v", err)
+	}
+}

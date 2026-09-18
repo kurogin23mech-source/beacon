@@ -607,12 +607,11 @@ func TestOpsRoomAtScale(t *testing.T) {
 	for p := 0; p < projects; p++ {
 		for k := 0; k < perProject; k++ {
 			h := harnesses[k%len(harnesses)]
-			s := SessionOverview{Project: refs[p], Harness: h, Jumpable: jumpableHarness(h)}
+			s := SessionOverview{Project: refs[p], Harness: h}
 			if k%4 == 0 { // 1/4 は別マシン (他人・pid 無し・飛べない)
 				s.Who = "other@example.com"
 				s.Remote = true
 				s.Running = true
-				s.Jumpable = false // 別マシンは前面化できない (AllSessions と同じ規則)
 			} else {
 				s.Who = ""     // このマシン = 自分
 				s.PID = 1000 + p*perProject + k
@@ -623,14 +622,16 @@ func TestOpsRoomAtScale(t *testing.T) {
 				} else {
 					s.Running, s.ToolRunning = true, true
 				}
-				// 端末へ飛べるボタンが出る条件: このマシン (pid>0・非 Remote) かつ対応端末。
-				if s.Jumpable {
+				// 飛べる想定: このマシン (pid>0・非 Remote) かつ対応端末。
+				if jumpableHarness(h) {
 					wantJumpEligible++
 				}
 			}
 			sessions = append(sessions, s)
 		}
 	}
+	// 受け口 (/api/sessions) と同じく、最終判定をここで全行に書き込む (e-6427)。
+	applyJumpVerdicts(sessions, "")
 	total := projects * perProject
 
 	// (1) グルーピング: プロジェクト数ちょうどに束ね、取りこぼし/重複が無い。
@@ -657,11 +658,11 @@ func TestOpsRoomAtScale(t *testing.T) {
 		t.Errorf("attention が件数と合わない: %d / %d", len(got), wantAttention)
 	}
 
-	// (3) 端末へ飛ぶ対象解決: 飛べるボタンが出る条件 (このマシン・pid>0・対応端末) を
-	// 規模で数え、取り違えが無いことを確かめる。
+	// (3) 端末へ飛ぶ対象解決: Jumpable は最終 1 値 (e-6427) なので、画面がしていた
+	// ような AND の再構成なしにそのまま数えられることを規模で確かめる。
 	gotJumpEligible := 0
 	for _, s := range sessions {
-		if !s.Remote && s.PID > 0 && s.Jumpable {
+		if s.Jumpable {
 			gotJumpEligible++
 		}
 	}
@@ -672,7 +673,7 @@ func TestOpsRoomAtScale(t *testing.T) {
 	self := FilterSessions(sessions, SessionFilter{Scope: "self"}, me)
 	selfJump := 0
 	for _, s := range self {
-		if !s.Remote && s.PID > 0 && s.Jumpable {
+		if s.Jumpable {
 			selfJump++
 		}
 	}
