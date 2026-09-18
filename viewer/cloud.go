@@ -268,6 +268,9 @@ type rosterSessionDTO struct {
 	ProjectID  string `json:"project_id"`
 	Live       bool   `json:"live"`
 	LastActive string `json:"last_active"`
+	// サーバが導出する正典の作業状態 (running / idle / awaiting_human / blocked /
+	// terminated / unknown)。ローカル道具の申告 (busy/idle) とは別系統 (e-6562)。
+	State string `json:"state"`
 	Actor      struct {
 		Email   string `json:"email"`
 		Machine string `json:"machine"`
@@ -364,6 +367,8 @@ func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 			LastActive:  s.LastActive,
 			Branch:      s.Git.Branch,
 			HeadSubject: s.Git.HeadSubject,
+			// サーバの正典 state。確認待ち (awaiting_human) 判定の源 (e-6562)。
+			State: s.State,
 		}
 
 		// 担当はサーバが解決した working_target を使う。

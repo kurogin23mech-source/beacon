@@ -87,6 +87,13 @@ type SessionOverview struct {
 	// 「待機・理由不明」("wait") と「稼働・表示なし」("work") に判別するため
 	// (ms-159 e-6533, #755 review AX-F1/F2)。
 	ActivityKind string `json:"activity_kind,omitempty"`
+	// ServerState はサーバが導出する正典の作業状態 (running / idle /
+	// awaiting_human / blocked / terminated / unknown)。**State (ローカル道具の
+	// busy/idle 申告) とは別系統** — 出自を混ぜない (e-6454 と同じ原則)。
+	// 確認待ち (橙) の判定源: awaiting_human は「質問・選択肢・許可で人を待って
+	// いる」の宣言そのものなので、待機内容 (Activity) が引けなくても確認待ちに
+	// する (e-6562 — 内容の有無と待っている事実を混同しない)。
+	ServerState string `json:"server_state,omitempty"`
 	// Named は Beacon に名乗っているか。
 	//
 	// **送れるのはこれが真のものだけ。** 名乗っていないセッションには、外から
@@ -441,6 +448,8 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			o.Who = n.Who
 			o.Activity = n.Activity
 			o.ActivityKind = n.ActivityKind
+			// サーバの正典 state も運ぶ (確認待ち判定の源、e-6562)。
+			o.ServerState = n.State
 			o.Harness = n.Harness
 			// コンテキスト使用率も名簿から運ぶ (未申告なら nil のまま = バッジ非表示)。
 			o.ContextPct = n.ContextPct
@@ -481,6 +490,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			Who:           n.Who,
 			Activity:      n.Activity,
 			ActivityKind:  n.ActivityKind,
+			ServerState:   n.State, // 別マシンでも確認待ち (awaiting_human) を判定できるように運ぶ
 			Harness:       n.Harness,
 			ContextPct:    n.ContextPct, // 別マシンのセッションもコンテキスト使用率を運ぶ
 			TargetSource:  n.TargetSource,

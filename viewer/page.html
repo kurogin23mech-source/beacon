@@ -425,7 +425,14 @@ function liveness(s) {
               ? `${s.tool} は起動していますが、このセッションは最近動いていません`
               : ""};
   }
-  if (s.activity_kind === "wait" && s.activity) {
+  // 確認待ちの第一の源はサーバの正典 state (server_state=awaiting_human)。
+  // これは Notification hook が「質問・選択肢・許可で人を待っている」と宣言した
+  // 事実そのもので、待機内容 (activity) が引けているかとは独立 (e-6562 —
+  // 以前は「wait + 待機内容あり」を要求したため、内容が届かない選択肢待ちが
+  // 「待機中」に落ちていた)。activity_kind=wait + 内容あり は blocked 等の
+  // 待機理由が届いているケースを引き続き拾う。
+  if (s.server_state === "awaiting_human" ||
+      (s.activity_kind === "wait" && s.activity)) {
     return {key: "confirm", label: OPS_STATES.confirm.label, on: true,
             hint: "質問・選択肢・許可で止まって、あなたの応答を待っています"};
   }

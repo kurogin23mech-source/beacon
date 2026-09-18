@@ -100,10 +100,23 @@ class TestActivityForRowStateAware:
         row = self._row(state=bl.STATE_RUNNING)
         assert wt.activity_for_row(row) == "feat: last commit"
 
-    def test_declared_activity_on_row_wins(self):
+    def test_wait_row_activity_without_kind_is_proxy_not_self_report(self):
+        # ms-173 e-6562 で旧契約を supersede: kind を stamp しない legacy server
+        # (e-6292..e-6533) は git head-subject の代理値を `activity` に stamp する
+        # ため、これを自己申告扱いすると待機中の行が直近コミットで作業中に見える
+        # (2026-09-18 実測)。kind 無し + 待機 state では wait detail が勝つ。
+        row = self._row(state=bl.STATE_AWAITING_HUMAN, activity="Merge pull request #757",
+                        state_detail="選択肢への応答待ち")
+        assert wt.activity_for_row(row) == "選択肢への応答待ち"
+
+    def test_stamped_kind_makes_row_activity_authoritative(self):
+        # e-6533+ server は (activity, kind) を対で stamp する — その activity は
+        # verbatim に信じる (自己申告も wait detail もサーバが選別済み)。
         row = self._row(state=bl.STATE_AWAITING_HUMAN, activity="明示 activity",
-                        state_detail="無視される")
+                        activity_kind=wt.ACTIVITY_KIND_WORK,
+                        state_detail="使われない")
         assert wt.activity_for_row(row) == "明示 activity"
+        assert wt.activity_kind_for_row(row) == wt.ACTIVITY_KIND_WORK
 
     def test_no_state_row_backcompat(self):
         # Rows from the (undeployed) server carry no `state` → head-subject.
@@ -175,8 +188,19 @@ class TestActivityKindForRow:
         row = {"state": bl.STATE_RUNNING}
         assert wt.activity_kind_for_row(row) == wt.ACTIVITY_KIND_WORK
 
-    def test_declared_activity_row_is_work(self):
+    def test_wait_row_activity_without_stamped_kind_is_wait(self):
+        # ms-173 e-6562 で旧契約 (「row activity = 自己申告 ⇒ work」) を supersede:
+        # legacy server (e-6292..e-6533) の activity は head-subject 代理値であり
+        # うるため、kind 無し + 待機 state は wait とする (実測: awaiting_human 行が
+        # 「Merge pull request #757 …」を work として運用室に出た)。
         row = {"state": bl.STATE_AWAITING_HUMAN, "activity": "明示"}
+        assert wt.activity_kind_for_row(row) == wt.ACTIVITY_KIND_WAIT
+
+    def test_stamped_kind_is_authoritative_over_state(self):
+        # e-6533+ server が stamp した kind は再導出で上書きしない — サーバは
+        # intent (自己申告) の有無を知っており、行だけ見るこちらより正確。
+        row = {"state": bl.STATE_AWAITING_HUMAN, "activity": "明示",
+               "activity_kind": wt.ACTIVITY_KIND_WORK}
         assert wt.activity_kind_for_row(row) == wt.ACTIVITY_KIND_WORK
 
     def test_enrich_row_stamps_kind_wait_for_empty_waiting(self):

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -803,4 +805,48 @@ func TestFallbackPrefersFreshestNamedRow(t *testing.T) {
 		}
 	}
 	t.Fatal("fallback 突合の主が出ていない")
+}
+
+// サーバの正典 state (awaiting_human 等) が名簿から運用室の行まで運ばれること
+// (e-6562)。これが欠けると「選択肢を出して答え待ち」のカードを確認待ち (橙) に
+// できない — 実測 (2026-09-18): awaiting_human の親セッションが activity_kind=work
+// (legacy server の head-subject 代理値) で作業中に見えた。
+func TestServerStateCarriedToOverview(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	named := []SessionRow{
+		{ID: "sv-here", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: true, LastActive: fresh, State: "awaiting_human"},
+		{ID: "sv-far", Agent: "claude-code", Cwd: "/other/q", ProjectID: "q",
+			Live: true, LastActive: fresh, State: "awaiting_human"},
+	}
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh,
+		Running: true, SessionID: "sv-here",
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	got := map[string]string{}
+	for _, s := range view.Sessions {
+		got[s.SessionID] = s.ServerState
+	}
+	if got["sv-here"] != "awaiting_human" {
+		t.Errorf("このマシンの行に server_state が運ばれていない: %q", got["sv-here"])
+	}
+	if got["sv-far"] != "awaiting_human" {
+		t.Errorf("別マシンの行に server_state が運ばれていない: %q", got["sv-far"])
+	}
+}
+
+// 画面の確認待ち判定がサーバの正典 state を読むこと (e-6562)。判定の文字列が
+// page.html から消えたら (リネーム / 条件の退化)、このテストが赤くなる —
+// TestJumpBlockedLiteralMatchesPage と同型の Go↔画面 drift ガード。
+func TestConfirmConditionReadsServerState(t *testing.T) {
+	page, err := os.ReadFile("page.html")
+	if err != nil {
+		t.Fatalf("page.html が読めない: %v", err)
+	}
+	if !strings.Contains(string(page), `s.server_state === "awaiting_human"`) {
+		t.Error("page.html の確認待ち判定が server_state (awaiting_human) を読んでいない — " +
+			"待機内容が空の選択肢待ちが「待機中」に落ちる回帰 (e-6562)")
+	}
 }

@@ -165,6 +165,12 @@ type SessionRow struct {
 	ActivityKind string `json:"activity_kind,omitempty"`
 	// Harness は端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶ分岐に使う。
 	Harness string `json:"harness"`
+	// State はサーバが導出する正典の作業状態 (running / idle / awaiting_human /
+	// blocked / terminated / unknown、lib/bus_liveness.derive_state が所管)。
+	// awaiting_human = 質問・選択肢・許可で人を待っている。ローカル道具の申告
+	// (busy/idle) とは別系統なので、SessionOverview では server_state として運ぶ
+	// (e-6562 — 確認待ち判定の源)。
+	State string `json:"state,omitempty"`
 	Live        bool   `json:"live"`
 	Healthy     bool   `json:"healthy"`
 	LastActive  string `json:"last_active"`
