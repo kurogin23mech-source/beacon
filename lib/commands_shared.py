@@ -2632,6 +2632,79 @@ def _release_occupation_for_transition(data, target_id, *, reason):
             data, target_id, event_type="release", session_id=sid,
             machine=actor.get("machine", ""), agent=actor.get("agent", ""),
             reason=reason)
+        # ms-173 e-6564: 自分の claim を手放したら、セッション行の working_target
+        # 宣言も同じ target を指している場合に限り消す (別 target へ移った後の
+        # 宣言を巻き添えにしない)。他セッションの claim の takeover 解放では
+        # 触らない — 宣言はその session 自身のもの。
+        if released.get("session_id") and released.get("session_id") == sid:
+            _clear_working_target_declaration(target_id, sid)
+
+
+def _declare_working_target_for_claim(target_id, rec) -> None:
+    """occupation claim と同じ事実をセッション行の working_target 宣言にも書く
+    (ms-173 e-6564)。
+
+    運用室の担当は server が session 行から導出するが、その fallback (branch /
+    cwd の ms-番号 / focus.milestone) は開発前提で、営業セッション (main branch
+    で opportunity を進める) ではどの経路もヒットせず空になる (2026-09-18 実測:
+    Cairn Sales の live 行が working_target.target=null / source=none)。claim は
+    「この session がこの target に座っている」の宣言そのものなので、stamp と
+    同時にセッション行へも宣言する — derive の第 1 優先 (declaration) に載り、
+    職種に依らず運用室に担当が出る。
+
+    Best-effort: local mode (cloud 未接続) / offline / session 不明では黙って
+    何もしない。claim 本体 (target record への stamp) を止めない。"""
+    sid = _resolve_session_id() or ""
+    if not sid:
+        return
+    title = ""
+    if isinstance(rec, dict):
+        title = str(rec.get("label") or rec.get("title") or "")
+    try:
+        # BaseException: _get_api_client は cloud 未設定で sys.exit(1) (= SystemExit)
+        # する (既存 caller と同じ捕捉パターン)。
+        client, config = _get_api_client()
+        if _refuse_prod_write_from_tests(config):
+            return
+        project_id = _resolve_bus_project_id(config)
+        if not project_id:
+            return
+        client.upsert_session_intent(project_id, sid, working_target={
+            "target": {"kind": work_model.target_kind(target_id),
+                       "id": target_id, "title": title},
+        })
+    except BaseException:
+        return
+
+
+def _clear_working_target_declaration(target_id, sid) -> None:
+    """release の counterpart (ms-173 e-6564): セッション行の working_target 宣言が
+    いま手放した target を指しているときだけ空にする (server は空 dict で宣言を
+    クリアし derive fallback に戻る)。Best-effort — 読めない/照合不一致なら触らない。"""
+    try:
+        client, config = _get_api_client()
+        if _refuse_prod_write_from_tests(config):
+            return
+        project_id = _resolve_bus_project_id(config)
+        if not project_id:
+            return
+        s = client.get_session(project_id, sid) or {}
+        cur = ((((s.get("intent") or {}).get("working_target") or {})
+                .get("target") or {}).get("id") or "")
+        if cur == target_id:
+            client.upsert_session_intent(project_id, sid, working_target={})
+    except BaseException:
+        return
+
+
+def _refuse_prod_write_from_tests(config) -> bool:
+    """テスト実行中のプロセスから本番クラウドへの session intent 書き込みを
+    構造で拒む (ms-123 e-4029 の tap 閉じと同型)。unit テストが fake クラウド
+    (api.test 等) を指す場合は通す — ロジック自体はテスト可能なまま。"""
+    import cloud_write_guard
+    api_url = str((config or {}).get("api_url") or "")
+    return (cloud_write_guard.is_test_context()
+            and cloud_write_guard.is_prod_api_url(api_url))
 
 
 def _claim_occupation_for_work(data, target_id) -> bool:
@@ -2662,6 +2735,9 @@ def _claim_occupation_for_work(data, target_id) -> bool:
             machine=actor.get("machine", ""), agent=actor.get("agent", ""))
     except ValueError:
         return False  # target not found — best-effort
+    # ms-173 e-6564: claim と同じ事実をセッション行にも宣言する (運用室の担当が
+    # 職種に依らず出るように)。stamp 成功後・警告表示の前後は問わない best-effort。
+    _declare_working_target_for_claim(target_id, _rec)
     if previous and previous.get("session_id") and \
             previous.get("session_id") != sid:
         prev_sid = previous.get("session_id", "?")
