@@ -327,8 +327,6 @@
     align-items: start;
   }
   html.ops .section-title { letter-spacing: .12em; font-size: 10.5px; color: var(--text-dim); margin: 20px 0 8px; }
-  html.ops .ops-legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
-  html.ops .ops-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 </style>
 
 <div id="app"><p class="loading">読み込み中…</p></div>
@@ -409,9 +407,9 @@ function typeLabel(t) { return esc(TYPE_LABEL[t] || t || ""); }
 // しているかは不明」は全部「待機中」に畳む (曖昧な中間ラベルは走査の邪魔)。
 // 生存はローカルのプロセス観測 (running) か、サーバの transport live
 // (transport_live)、または道具の台帳申告 (state) の合成 (e-6454)。
-// 状態の語彙 (3 状態 + 停止) の唯一の定義。liveness() と運用室の凡例 (legend) の
-// 両方がここを読む — 片方だけ直して silent に乖離させない (#757 独立保守性レビュー)。
-// legend が null のものは凡例に出さない (停止は既定で隠れているため)。
+// 状態の語彙 (3 状態 + 停止) の唯一の定義。label は liveness() が読む。
+// legend は各状態の意味の定義文 (現在は画面に描画しない — 凡例表示は説明過多として
+// 2026-09-18 に人間判断で撤去。語彙の意味はこの定義文が正で、復活時もここを読む)。
 const OPS_STATES = {
   work:    {label: "作業中",   legend: "手が動いている"},
   confirm: {label: "確認待ち", legend: "質問・選択肢・許可で止まってあなたを待っている"},
@@ -1360,7 +1358,6 @@ function renderSessions(d) {
   app.innerHTML = `
     <header>
       <h1>セッション一覧</h1>
-      <div class="objective">このマシンで動いている作業を、プロジェクトを跨いで並べています。</div>
       <div class="meta">
         <b>${rows.length}</b> セッション ・ <b>${groups.size}</b> プロジェクト
         ${d.no_project ? ` ・ プロジェクトに紐づかないもの <b>${d.no_project}</b>` : ""}
@@ -1384,27 +1381,12 @@ function renderSessions(d) {
             n === sessionRoot ? " selected" : ""}>${esc(n)}</option>`).join("")}
         </select>
       </div>
-      <div class="meta ops-legend">
-        ${Object.entries(OPS_STATES).filter(([, v]) => v.legend).map(([k, v]) =>
-          `<span class="ops-legend-item"><span class="dot ${k}"></span>${
-            esc(v.label)} = ${esc(v.legend)}</span>`).join("")}
-        <span>飛べるカードはクリックで端末へ</span>
-      </div>
     </header>
     ${d.roster_status === "unavailable" ? `<div class="notice">
       ⚠ 名乗っているセッションの名簿を取得できませんでした (ログイン切れ・通信断の可能性)。
       <b>名乗って動いているセッション (他のマシン・クラウド分を含む) が、ここに出ていない
       恐れがあります。</b>空に見えても「誰も居ない」とは限りません。
       <code>beacon auth login</code> でログインし直すと回復します。</div>` : ""}
-    <p class="empty">担当は、Beacon に名乗っているセッションはその申告を、そうでないものは
-      ブランチ名や直近のコミットから推し量っています。<b>推測は破線の対象札</b>で示します。
-      <br>Beacon に名乗っているセッションは、<b>他のマシンのものも含みます</b>
-      (名簿はどのマシンからでも引けるため)。破線枠のカードがそれです。
-      名乗っていないセッションは、このマシンの分しか分かりません。
-      <br><b>この一覧は「すべての作業」ではありません。</b>別のマシンで動いている、
-      Beacon に名乗っていない素の Claude / Codex は、何も送っていない以上こちらに届く
-      経路が無く、<b>原理的にここには出ません</b>。空いて見えても「誰も居ない」とは
-      限りません — こちらから見えていないだけのこともあります。</p>
     ${rows.length ? `<div class="ops-board">${orderedGroups.map(([name, list]) => {
         const {roots, kids, loose} = sessionForest(list);
         const trees = roots.map(r => `<div class="tree">${opsCard(r, true)}${
