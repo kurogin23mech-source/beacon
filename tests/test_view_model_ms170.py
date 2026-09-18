@@ -166,6 +166,8 @@ def test_top_level_shape_is_pinned():
         # で何が動いているか」が分からないため、盤に載せている。
         "operations", "releases", "deployments",
         "deliverables", "documents", "sessions", "source",
+        # サーバ側 workflow 実行 (run) 状態の seam (e-6407)。v1 では常に空。
+        "runs",
     }
     assert view["schema_version"] == view_model.SCHEMA_VERSION
     assert view["project"]["name"] == "Beacon"
@@ -266,6 +268,25 @@ def test_absent_documents_and_sessions_are_empty_not_missing():
         _dev_project(), source=view_model.SOURCE_LOCAL)
     assert view["documents"] == []
     assert view["sessions"] == []
+
+
+def test_runs_seam_is_empty_by_default_and_passes_through_unnormalised():
+    """サーバ側 workflow 実行 (run) 状態の seam (e-6407)。
+
+    v1 では producer が無いので既定は空。行の形は producer 確定後に定めるため、
+    渡されたものは正規化せずそのまま通す。sessions と別の top-level key に
+    しておくことで、run がセッション欄へ混入する経路を塞ぐ。
+    """
+    view = view_model.build_board_view(
+        _dev_project(), source=view_model.SOURCE_LOCAL)
+    assert view["runs"] == []
+
+    injected = [{"anything": "producer-defined"}]
+    view = view_model.build_board_view(
+        _dev_project(), source=view_model.SOURCE_LOCAL, runs=injected)
+    assert view["runs"] == injected
+    assert view["runs"] is not injected  # 呼び出し側の list を共有しない
+    assert view["sessions"] == []  # run は sessions に混ざらない
 
 
 def test_empty_project_still_produces_a_full_shape():

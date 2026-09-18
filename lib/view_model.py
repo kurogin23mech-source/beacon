@@ -172,6 +172,7 @@ def build_board_view(
     project_id: str = "",
     documents=None,
     sessions=None,
+    runs=None,
 ) -> dict:
     """盤 1 面分のビューを組み立てる (純粋関数)。
 
@@ -183,6 +184,8 @@ def build_board_view(
         project_id: クラウドのプロジェクト識別子 (ローカルでは空)。同じく表示用。
         documents: ``Store.list_documents()`` の結果 (省略可)。
         sessions: 作業セッション一覧 (省略可)。取得は呼び出し側の仕事。
+        runs: サーバ側 workflow 実行 (run) 状態の差し込み口 (省略可)。行の形は
+            producer 確定後に定める — セッション欄への混入を防ぐための名前付き seam。
 
     Returns:
         ビュー用スキーマ 1 件。表示層はこの形だけを知っていればよく、
@@ -217,11 +220,15 @@ def build_board_view(
         "deliverables": list(projection.get("deliverables") or []),
         "documents": [_document_row(d) for d in documents or []],
         "sessions": [_session_row(s) for s in sessions or []],
+        # サーバ側 workflow 実行 (run) 状態の seam。v1 では producer が無く常に空。
+        # 行の形は producer 確定後に定める (正規化しない) — sessions と別の名前を
+        # 先に切っておくことで、run がセッション欄へ混入する経路を塞ぐ。
+        "runs": list(runs or []),
         "source": {"kind": source, "project_id": project_id},
     }
 
 
-def board_view_from_store(store, *, documents=None, sessions=None) -> dict:
+def board_view_from_store(store, *, documents=None, sessions=None, runs=None) -> dict:
     """``Store`` から盤ビューを 1 つ組み立てる薄い包み。
 
     取得元の判定を ``store.is_cloud()`` の 1 箇所に閉じ込めるためだけに存在する。
@@ -241,4 +248,5 @@ def board_view_from_store(store, *, documents=None, sessions=None) -> dict:
         project_id=project_id,
         documents=documents,
         sessions=sessions,
+        runs=runs,
     )

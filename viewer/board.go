@@ -53,7 +53,11 @@ type Board struct {
 	Deliverables  []any          `json:"deliverables"`
 	Documents     []DocumentRow  `json:"documents"`
 	Sessions      []SessionRow   `json:"sessions"`
-	Source        Source         `json:"source"`
+	// Runs はサーバ側 workflow 実行 (run) 状態の seam (Beacon 側 e-6407)。
+	// v1 では producer が無く常に空。行の形は producer 確定後に定める。
+	// Sessions と別の欄にしておくことで、run がセッション欄へ混入する経路を塞ぐ。
+	Runs   []any  `json:"runs"`
+	Source Source `json:"source"`
 	Unsupported   *Unsupported   `json:"unsupported,omitempty"`
 
 	// LocalSessions は **このマシンの上で観測できた** 作業セッション (ms-171)。
@@ -347,6 +351,7 @@ func BuildBoard(p *Project, source, projectID string,
 		Deliverables: deliverablesFor(profession),
 		Documents:    documents,
 		Sessions:     sessions,
+		Runs:         []any{}, // v1 は常に空 (nil だと null になり Python 側の [] と食い違う)
 		Source:       Source{Kind: source, ProjectID: projectID},
 		Unsupported:  unsupportedClasses(p),
 	}
