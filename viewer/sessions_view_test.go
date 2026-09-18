@@ -850,3 +850,88 @@ func TestConfirmConditionReadsServerState(t *testing.T) {
 			"待機内容が空の選択肢待ちが「待機中」に落ちる回帰 (e-6562)")
 	}
 }
+
+// 名簿由来フィールドの転写が local (このマシンの行に紐づく) / remote (別マシンの
+// 追補) の両構築パスで一致すること (e-6428)。転写の書き手は applyNamed 1 関数 —
+// このテストは「どちらかのパスが applyNamed を迂回して手書き転写に戻る」退行を
+// 赤くする (context_pct #750 の取りこぼしの再発防止)。
+func TestNamedTranscriptionIdenticalAcrossBothPaths(t *testing.T) {
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	pct := 42
+	n := SessionRow{
+		ID: "sv-full", Who: "me@example.com", Machine: "mac-1",
+		Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "proj-9",
+		Target: "opp-4", TargetLabel: "商談X", TargetSource: "declared",
+		ProjectFocus: "ms-1", Activity: "提案書ドラフト", ActivityKind: "work",
+		Harness: "iterm2", Live: true, Healthy: true, LastActive: fresh,
+		Branch: "main", HeadSubject: "feat: x", ContextPct: &pct,
+		State: "awaiting_human",
+	}
+
+	// パス A: このマシンの行と identity 突合。
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh,
+		Running: true, SessionID: "sv-full",
+	}}
+	viaLocal := assembleSessions(local, []SessionRow{n}, 24*time.Hour, now)
+
+	// パス B: 手元に痕跡が無い → remote 追補。
+	viaRemote := assembleSessions(nil, []SessionRow{n}, 24*time.Hour, now)
+
+	pick := func(v SessionsView) *SessionOverview {
+		for i := range v.Sessions {
+			if v.Sessions[i].SessionID == "sv-full" {
+				return &v.Sessions[i]
+			}
+		}
+		return nil
+	}
+	a, b := pick(viaLocal), pick(viaRemote)
+	if a == nil || b == nil {
+		t.Fatalf("両パスに行が出ていない: local=%v remote=%v", a != nil, b != nil)
+	}
+
+	// 名簿由来フィールドの射影 (転写対象の列挙はここ 1 箇所)。
+	type namedFields struct {
+		Named         bool
+		SessionID     string
+		TransportLive bool
+		Machine       string
+		Who           string
+		Activity      string
+		ActivityKind  string
+		ServerState   string
+		Harness       string
+		ContextPct    int // deref 済み (-1 = nil)
+		TargetSource  string
+		TargetID      string
+		TargetLabel   string
+		TargetOrigin  string
+		ProjectID     string
+	}
+	proj := func(o *SessionOverview) namedFields {
+		f := namedFields{
+			Named: o.Named, SessionID: o.SessionID,
+			TransportLive: o.TransportLive, Machine: o.Machine, Who: o.Who,
+			Activity: o.Activity, ActivityKind: o.ActivityKind,
+			ServerState: o.ServerState, Harness: o.Harness,
+			ContextPct: -1, TargetSource: o.TargetSource,
+		}
+		if o.ContextPct != nil {
+			f.ContextPct = *o.ContextPct
+		}
+		if o.Target != nil {
+			f.TargetID, f.TargetLabel, f.TargetOrigin =
+				o.Target.ID, o.Target.Label, o.Target.Source
+		}
+		if o.Project != nil {
+			f.ProjectID = o.Project.ProjectID
+		}
+		return f
+	}
+	if proj(a) != proj(b) {
+		t.Errorf("両構築パスの名簿転写が食い違う:\n local  = %+v\n remote = %+v",
+			proj(a), proj(b))
+	}
+}

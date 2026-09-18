@@ -386,7 +386,6 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 
 		// 名乗り判定は selectKept が済ませた印 (kr.isNamed) を読むだけ (再判定しない)。
 		n := kr.named
-		o.Named = kr.isNamed
 		if kr.isNamed {
 			if kr.viaSID {
 				// identity 突合: この名簿行だけを消費 (同キーの隣人は独立に扱う)。
@@ -395,11 +394,8 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 				// fallback 突合: 従来どおりキーごと消費 (残りは CollapsedPeers に畳む)。
 				seenNamed[namedKey(r.Directory, r.Tool)] = true
 			}
-			o.SessionID = n.ID
-			// 名簿に居る = transport が live (サーバ判定)。ローカルの Running (プロセス
-			// 観測) は上書きせず、別フィールドで持つ — 出自を潰さない (e-6454)。表示・
-			// 停止隠しの判定は Running か TransportLive の合成で行う (画面側)。
-			o.TransportLive = true
+			// 名簿由来フィールドの転写は applyNamed が唯一の書き手 (e-6428)。
+			applyNamed(&o, n)
 			// fallback 突合で同一キーに複数 live が畳まれていれば、その事実を開示
 			// する (AX finding 2026-09-14)。identity 突合 (viaSID) は exact なので
 			// 畳みが起きない — 同キーの隣人は自分の行として独立に出る (e-6446)。
@@ -409,52 +405,26 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 					o.CollapsedPeers = extra
 				}
 			}
-			// DM の宛先はそのセッション自身のプロジェクト (e-6396)。名簿が持つ
-			// ProjectID を権威として載せる — 手元の .beacon から引けなかったり、
-			// 別プロジェクトのフォルダで作業していても、正しいプロジェクト宛に送れる。
-			if n.ProjectID != "" {
-				if o.Project == nil {
-					// 手元の .beacon から引けなかった (別マシン由来のフォルダ等)。
-					// 宛先に要る ProjectID だけでも載せる (名前は不明のまま)。
-					o.Project = &ProjectRef{ProjectID: n.ProjectID}
-				} else if o.Project.ProjectID == "" {
-					o.Project.ProjectID = n.ProjectID
-				}
-			}
 		}
 
-		// 担当は、サーバが解決した値があるときだけ「確か」として扱う。
+		// 担当は、サーバが解決した値 (applyNamed が転写済み) があるときだけ「確か」
+		// として扱い、無いときだけ推測に落ちる。
 		//
 		// **プロジェクトの進行中マイルストーン (focus) を担当にしてはいけない。**
 		// 全セッションが同じ値になり、別の対象で作業していても正しく見えてしまう。
 		// Beacon 自身も lib/working_target.py でそう戒めている。
-		if kr.isNamed && n.Target != "" {
-			o.Target = &Attribution{
-				ID: n.Target, Label: n.TargetLabel, Source: "beacon"}
-		} else if id := targetFromBranch(o.Branch); id != "" {
-			o.Target = &Attribution{ID: id, Source: "branch"}
-		} else if id := targetFromBranch(subject); id != "" {
-			// ブランチが main のままでも、コミット件名に対象が入っていることがある。
-			o.Target = &Attribution{ID: id, Source: "commit"}
+		if o.Target == nil {
+			if id := targetFromBranch(o.Branch); id != "" {
+				o.Target = &Attribution{ID: id, Source: "branch"}
+			} else if id := targetFromBranch(subject); id != "" {
+				// ブランチが main のままでも、コミット件名に対象が入っていることがある。
+				o.Target = &Attribution{ID: id, Source: "commit"}
+			}
 		}
 
 		// タスクはコミット件名からしか辿れない (名簿も持っていないことが多い)。
 		if id := taskFromSubject(subject); id != "" {
 			o.Task = &Attribution{ID: id, Source: "commit"}
-		}
-
-		if kr.isNamed {
-			o.Machine = n.Machine
-			o.Who = n.Who
-			o.Activity = n.Activity
-			o.ActivityKind = n.ActivityKind
-			// サーバの正典 state も運ぶ (確認待ち判定の源、e-6562)。
-			o.ServerState = n.State
-			o.Harness = n.Harness
-			// コンテキスト使用率も名簿から運ぶ (未申告なら nil のまま = バッジ非表示)。
-			o.ContextPct = n.ContextPct
-			// 担当の決まり方 (fork 子判定の源) も名簿から運ぶ (e-6549)。
-			o.TargetSource = n.TargetSource
 		}
 
 		// 端末へ飛べるかの最終判定はここではしない。組み立てはサーバの環境
@@ -475,6 +445,10 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 		if seenNamedSID[n.ID] || seenNamed[namedKey(n.Cwd, n.Agent)] {
 			continue
 		}
+		// 手元由来の骨格だけここで作る。名簿由来フィールド (識別子・担当・
+		// activity・ProjectID 等) の転写は applyNamed が唯一の書き手 (e-6428) —
+		// 以前は 2 箇所の手書き転写で、新フィールドが片側にだけ載る取りこぼしが
+		// 起きていた (context_pct #750、server_state 追加時にも再発しかけた)。
 		o := SessionOverview{
 			Tool:       n.Agent,
 			Name:       n.Who,
@@ -483,29 +457,9 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			LastActive: n.LastActive,
 			// 別マシンなので手元のプロセス観測は無い (Running=false)。生存はサーバの
 			// transport live で確か (e-6454 で Running と分離)。
-			TransportLive: n.Live,
-			Named:         true,
-			SessionID:     n.ID,
-			Machine:       n.Machine,
-			Who:           n.Who,
-			Activity:      n.Activity,
-			ActivityKind:  n.ActivityKind,
-			ServerState:   n.State, // 別マシンでも確認待ち (awaiting_human) を判定できるように運ぶ
-			Harness:       n.Harness,
-			ContextPct:    n.ContextPct, // 別マシンのセッションもコンテキスト使用率を運ぶ
-			TargetSource:  n.TargetSource,
-			Remote:        true,
+			Remote: true,
 		}
-		// 別マシンの名乗りセッションにも、宛先ルーティング用に自分のプロジェクトを
-		// 載せる (e-6396)。手元に痕跡が無いので名前は引けないが、ProjectID は名簿が
-		// 持っている。これが無いと DM が「今見ているプロジェクト」に誤ルートする。
-		if n.ProjectID != "" {
-			o.Project = &ProjectRef{ProjectID: n.ProjectID}
-		}
-		if n.Target != "" {
-			o.Target = &Attribution{
-				ID: n.Target, Label: n.TargetLabel, Source: "beacon"}
-		}
+		applyNamed(&o, n)
 		out.Sessions = append(out.Sessions, o)
 	}
 
@@ -516,6 +470,47 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 		return laterActive(out.Sessions[i].LastActive, out.Sessions[j].LastActive)
 	})
 	return out
+}
+
+// applyNamed は名簿行 (SessionRow) 由来のフィールドを表示行 (SessionOverview) へ
+// 転写する **唯一の書き手** (e-6428)。突合の形 (identity / fallback / 別マシン追補)
+// に依らず、名簿が運ぶ情報は必ずここを通る — 以前は local / remote の 2 構築パスに
+// 手書き転写が分かれ、新フィールドが片側にだけ載る取りこぼしが構造的に起きていた
+// (context_pct #750 で実害、server_state e-6562 でも再発しかけた)。
+//
+// ここに含めないもの: 手元観測由来 (Running / PID / Tool / Directory / State) と
+// 突合の形に依るもの (CollapsedPeers / Remote) — 転写ではないので呼び出し側が持つ。
+func applyNamed(o *SessionOverview, n SessionRow) {
+	o.Named = true
+	o.SessionID = n.ID
+	// 生存はサーバの transport live をそのまま運ぶ (ローカルの Running とは別出自、
+	// e-6454)。表示・停止隠しの判定は両者の合成 (alive) で行う。
+	o.TransportLive = n.Live
+	o.Machine = n.Machine
+	o.Who = n.Who
+	o.Activity = n.Activity
+	o.ActivityKind = n.ActivityKind
+	// サーバの正典 state (確認待ち判定の源、e-6562)。
+	o.ServerState = n.State
+	o.Harness = n.Harness
+	// コンテキスト使用率 (未申告なら nil のまま = バッジ非表示)。
+	o.ContextPct = n.ContextPct
+	// 担当の決まり方 (fork 子判定の源、e-6549)。
+	o.TargetSource = n.TargetSource
+	// 担当はサーバが解決した working_target のみ (focus は使わない)。
+	if n.Target != "" {
+		o.Target = &Attribution{
+			ID: n.Target, Label: n.TargetLabel, Source: "beacon"}
+	}
+	// DM の宛先はそのセッション自身のプロジェクト (e-6396)。手元の .beacon から
+	// 引けたときは名前を保ち、ProjectID だけ名簿の権威で補う。
+	if n.ProjectID != "" {
+		if o.Project == nil {
+			o.Project = &ProjectRef{ProjectID: n.ProjectID}
+		} else if o.Project.ProjectID == "" {
+			o.Project.ProjectID = n.ProjectID
+		}
+	}
 }
 
 // alive は「このセッションは生きているか」の合成。手元のプロセス観測 (Running) か
