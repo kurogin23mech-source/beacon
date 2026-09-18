@@ -2699,12 +2699,14 @@ def _clear_working_target_declaration(target_id, sid) -> None:
 
 def _refuse_prod_write_from_tests(config) -> bool:
     """テスト実行中のプロセスから本番クラウドへの session intent 書き込みを
-    構造で拒む (ms-123 e-4029 の tap 閉じと同型)。unit テストが fake クラウド
-    (api.test 等) を指す場合は通す — ロジック自体はテスト可能なまま。"""
+    構造で拒む (ms-123 e-4029 の tap 閉じと同型)。判定は cloud_write_guard の
+    唯一の決定連鎖 (is_test_context × is_prod_api_url × BEACON_ALLOW_PROD_TEST_
+    WRITE 脱出口) に委ねる — 手元で組み直すと脱出口が silent に落ち、規則の
+    真実源が二つに割れる (PR#758 保守性レビュー finding)。unit テストが fake
+    クラウド (api.test 等) を指す場合は通る — ロジック自体はテスト可能なまま。"""
     import cloud_write_guard
-    api_url = str((config or {}).get("api_url") or "")
-    return (cloud_write_guard.is_test_context()
-            and cloud_write_guard.is_prod_api_url(api_url))
+    return cloud_write_guard.prod_test_write_blocked(
+        str((config or {}).get("api_url") or ""))
 
 
 def _claim_occupation_for_work(data, target_id) -> bool:
@@ -2713,6 +2715,14 @@ def _claim_occupation_for_work(data, target_id) -> bool:
     "someone is sitting here now" layer covers operation / release / descriptor
     targets, not just milestones (closing the silent double-work hole, 理想像 §5).
     The release COUNTERPART is ``_release_occupation_for_transition``.
+
+    ms-173 e-6564: stamp 成功時はセッション行の working_target 宣言にも同じ事実を
+    書く (_declare_working_target_for_claim)。**milestone start (cmd_milestone の
+    milestone_claim_occupation 経路) は意図的にこの宣言を配線していない** — 開発の
+    MS は branch / fork.json からの derive が担当を既に正しく導出しており、宣言で
+    上書きすると fork worktree の branch 切替 (milestone start が branch を作る) と
+    競合するため。宣言の溶接対象は「derive が届かない target (営業の商談 等)」が
+    通る本経路だけ (PR#758 保守性レビューで非対称の明文化を指摘され、ここに固定)。
 
     Returns ``True`` iff a claim was actually stamped (maint review e-5225: the
     return makes the CONDITIONAL nature visible at the call site and testable). Only

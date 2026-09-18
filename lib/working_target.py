@@ -215,7 +215,12 @@ def derive_activity(declared_activity, *, head_subject="", state="",
     Precedence:
 
     1. An explicit ``declared_activity`` (the session's own self-report) always
-       wins — it knows best what it is doing / waiting for.
+       wins — it knows best what it is doing / waiting for. NOTE: this is the
+       contract when calling THIS function directly. The row-level wrapper
+       ``activity_for_row`` runs its own upstream checks first (stamped kind /
+       wait state, ms-173 e-6562) and may not reach this function at all — a
+       row's ``activity`` field is not necessarily a self-report (a legacy
+       server stamps the head-subject proxy into it).
     2. Otherwise the answer is STATE-AWARE (ms-159 / e-6484):
        * ``awaiting_human`` / ``blocked`` (``_WAIT_DETAIL_STATES``) → the
          ``state_detail`` (what it is waiting for / blocked on). When that is
@@ -341,11 +346,16 @@ def working_target_for_row(row) -> dict:
 def activity_for_row(row) -> str:
     """Derive the 1-line activity for a server directory row.
 
-    A declared ``row["activity"]`` wins; otherwise it is state-aware (e-6484):
-    an ``awaiting_human`` / ``blocked`` row shows its wait detail
-    (``row["state_detail"]`` — the same field ``lib/attention`` reads) and is
-    EMPTY when none is known, while any other state falls back to the row's
-    ``git.head_subject``.
+    Precedence (3 tiers, ms-173 e-6562 — supersedes the pre-#758 "a declared
+    row activity always wins" contract):
+
+    1. A valid stamped ``row["activity_kind"]`` (e-6533+ server) → return
+       ``row["activity"]`` verbatim (the server derived the pair consistently).
+    2. No stamped kind + wait state (``awaiting_human`` / ``blocked``) → the
+       wait detail (``row["state_detail"]``), EMPTY when none is known. The
+       row's ``activity`` is deliberately IGNORED here — a legacy server may
+       have stamped the git head-subject proxy into it (see docstring below).
+    3. Otherwise → ``derive_activity`` (declared text → head-subject proxy).
 
     NOTE (e-6488 wiring status, #750 AX3): the CARRY path for ``state_detail`` IS
     wired — beacon-state-hook.py writes it to the marker, the bridge piggybacks it

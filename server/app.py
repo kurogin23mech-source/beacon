@@ -1933,6 +1933,10 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
         age = session["poll_health"].get("age_seconds")
         if age is not None and age > _WS_ZOMBIE_POLL_AGE_S:
             live = False
+            # PR#758 AX finding: 抑止を silent にしない。live=false だけだと
+            # 「普通に止まった session」と見分けが付かず、診断側が誤った回復
+            # (再起動不要の session を再起動 等) に向かう。理由を行に刻む。
+            session["live_suppressed_reason"] = "ws-zombie-poll-stale"
     session["live"] = live
     # ms-165 (e-5965): informational signal. `live` (above) is the deliverability
     # gate — it proves the bridge polls and, post-e-5964, will deliver even to an

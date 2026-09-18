@@ -1,5 +1,11 @@
 """`beacon view` — 運用室 (Go 版 beacon-view) に委譲する入口 (ms-170)。
 
+環境変数 (dispatch 層が渡す BEACON_VIEW_PORT / HOST / EXPOSE / NO_OPEN のほか):
+  BEACON_VIEW_SKIP_HANDSHAKE=1 … 委譲前の版握手 (e-6482) を意図して飛ばす。
+    通常は不要 — 版が食い違う beacon-view へ黙って委譲しないための握手なので、
+    飛ばすのは「食い違いを承知で古い盤を見たい」ときだけ。
+
+
 **Go 一本化 (e-6518)**: 盤 / 運用室 (セッション一覧・状態・端末ジャンプ) の表示は
 Go 版ビューワー ``beacon-view`` (viewer/*.go) が唯一の実装。この Python モジュールは
 ユーザーの入口 ``beacon view`` として beacon-view を **探して委譲する** だけで、盤の
@@ -348,6 +354,8 @@ def cmd_view() -> None:
         # beacon-view が無い。素朴盤に落とさず、入手 / 更新手順を出して終了する。
         raise SystemExit(FALLBACK_NOTICE)
     if os.environ.get("BEACON_VIEW_SKIP_HANDSHAKE") != "1":
+        # __version__ の真実源は commands (lib/cmd_project._beacon_version と同じ
+        # 出所)。遅延 import なのは commands が重く、--json 経路では不要なため。
         from commands import __version__ as _beacon_version
         ok, detail = viewer_handshake(binary, _beacon_version)
         if not ok:

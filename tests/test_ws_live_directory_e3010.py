@@ -318,6 +318,9 @@ def test_ws_alone_does_not_keep_long_poll_silent_bridge_live():
         "poll 履歴を持つ bridge が 30 分を超えて poll 沈黙しているのに WS だけで "
         "live 維持されると、幽霊行が名簿に残り続ける (e-6563)"
     )
+    # 抑止は silent にしない (PR#758 AX finding): 普通に止まった session と
+    # 見分けられるよう、理由が行に刻まれる。
+    assert row["live_suppressed_reason"] == "ws-zombie-poll-stale"
 
 
 def test_ws_zombie_guard_does_not_touch_bridgeless_sessions():
