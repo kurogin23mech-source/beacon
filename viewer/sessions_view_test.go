@@ -851,6 +851,28 @@ func TestConfirmConditionReadsServerState(t *testing.T) {
 	}
 }
 
+// 「作業中」(緑) の判定が状態 (ローカル道具の busy / サーバ正典 state=running) だけを
+// 読むこと。activity_kind は「activity 文字列の読み方」のラベルで、wait 状態以外は
+// idle でも unknown でも常に "work" が付く (lib/working_target.derive_activity_kind の
+// 設計)。判定源に流用すると、kind を stamp するサーバの下で待機中の全行が作業中に
+// 化ける — 2026-09-23 の本番デプロイ直後に実測 (旧サーバは kind を送らず偶然無害、
+// kind が全行に載った瞬間に発火した)。TestConfirmConditionReadsServerState と同型の
+// Go↔画面 drift ガード。
+func TestWorkConditionReadsCanonicalStateNotActivityKind(t *testing.T) {
+	page, err := os.ReadFile("page.html")
+	if err != nil {
+		t.Fatalf("page.html が読めない: %v", err)
+	}
+	if !strings.Contains(string(page), `s.state === "busy" || s.server_state === "running"`) {
+		t.Error("page.html の作業中判定が状態 (busy / server_state=running) を読んでいない — " +
+			"判定源が状態以外に変わると待機中の行が作業中に化ける回帰 (2026-09-23 実測)")
+	}
+	if strings.Contains(string(page), `s.activity_kind === "work"`) {
+		t.Error("page.html が activity_kind=work を状態判定に流用している — kind は wait 以外の " +
+			"全行に付く文字列ラベルであり、状態の源にすると idle/unknown が作業中に化ける")
+	}
+}
+
 // 名簿由来フィールドの転写が local (このマシンの行に紐づく) / remote (別マシンの
 // 追補) の両構築パスで一致すること (e-6428)。転写の書き手は applyNamed 1 関数 —
 // このテストは「どちらかのパスが applyNamed を迂回して手書き転写に戻る」退行を

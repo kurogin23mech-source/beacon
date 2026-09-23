@@ -397,7 +397,12 @@ function typeLabel(t) { return esc(TYPE_LABEL[t] || t || ""); }
 
 // セッションの状態は 3 つ + 停止に整理する (e-6549、正典 = ops-room mockup v3)。
 //
-//  作業中   … 実際に手が動いている (道具の申告 busy、または activity_kind=work)
+//  作業中   … 実際に手が動いている (道具の申告 busy、またはサーバ正典 state=running)。
+//             activity_kind を判定源にしてはならない — あれは「activity 文字列の
+//             読み方」のラベルで、wait 状態以外は idle でも unknown でも常に
+//             "work" を返す (lib/working_target.derive_activity_kind の設計)。
+//             判定源に流用すると kind を stamp するサーバの下で全行が作業中に
+//             化ける (2026-09-23 本番デプロイ直後に実測、人間 user 発見)
 //  確認待ち … 質問・選択肢・許可で止まって **あなたを待っている**
 //             (activity_kind=wait + 待機内容あり。ms-159 が produce する)
 //  待機中   … 生きているが手待ち・保留中 (理由は分からないものも含む)
@@ -416,6 +421,12 @@ const OPS_STATES = {
   idle:    {label: "待機中",   legend: "手待ち・保留"},
   stop:    {label: "停止",     legend: null},
 };
+// s.server_state の値域 (サーバ正典、lib/bus_liveness.derive_state が所管):
+//   running | idle | awaiting_human | blocked | terminated | unknown
+// s.state はローカル道具の申告 (busy | idle) で別系統 — 混ぜない (e-6454)。
+// なお activity_kind は wait だけが判定材料になる (wait = 「待っている」という
+// 情報を運ぶ)。work は wait 以外の全行に付く既定値で情報量が無いため、状態判定に
+// は使わない (PR#759 AX レビュー採否)。
 function liveness(s) {
   const aliveNow = s.state === "busy" || s.state === "idle" ||
     s.running || s.transport_live;
@@ -436,7 +447,10 @@ function liveness(s) {
     return {key: "confirm", label: OPS_STATES.confirm.label, on: true,
             hint: "質問・選択肢・許可で止まって、あなたの応答を待っています"};
   }
-  if (s.state === "busy" || s.activity_kind === "work") {
+  // 作業中の源は「状態」だけ: ローカル道具の busy 申告か、サーバ正典 state の
+  // running。activity_kind は使わない (上の語彙定義コメント参照 — kind は文字列の
+  // 読み方ラベルで、idle/unknown 行にも "work" が付く)。
+  if (s.state === "busy" || s.server_state === "running") {
     return {key: "work", label: OPS_STATES.work.label, on: true};
   }
   return {key: "idle", label: OPS_STATES.idle.label, on: false};
