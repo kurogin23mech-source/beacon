@@ -421,6 +421,12 @@ const OPS_STATES = {
   idle:    {label: "待機中",   legend: "手待ち・保留"},
   stop:    {label: "停止",     legend: null},
 };
+// s.server_state の値域 (サーバ正典、lib/bus_liveness.derive_state が所管):
+//   running | idle | awaiting_human | blocked | terminated | unknown
+// s.state はローカル道具の申告 (busy | idle) で別系統 — 混ぜない (e-6454)。
+// なお activity_kind は wait だけが判定材料になる (wait = 「待っている」という
+// 情報を運ぶ)。work は wait 以外の全行に付く既定値で情報量が無いため、状態判定に
+// は使わない (PR#759 AX レビュー採否)。
 function liveness(s) {
   const aliveNow = s.state === "busy" || s.state === "idle" ||
     s.running || s.transport_live;
