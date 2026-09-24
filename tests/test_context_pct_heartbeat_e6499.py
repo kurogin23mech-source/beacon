@@ -1,13 +1,19 @@
-"""ms-159 / e-6499 — pin the context-usage % carry: monitor persist → state file
-→ JS reader → heartbeat body (both twins) → server field.
+"""ms-159 / e-6499 — pin the context-usage % carry: monitor persist → state
+record → JS reader → heartbeat body (both twins) → server field.
 
-The value travels monitor(Python) → .claude/context-usage-state.json →
-bus-context-usage.mjs(JS reader) → buildHeartbeatBody/heartbeat_body(twins) →
-SessionUpsert(server). This file pins the parts that are unit-verifiable without
-a live server: the monitor persists the %, the JS reader parses it fail-safe, and
-the two heartbeat-body twins both carry it (drift guard). The server store + row
-projection are exercised by the model field + existing upsert pass-through, and
-are runtime-verified after the production state-stamp deploy (see e-6488 note).
+The value travels monitor(Python) → .claude/context-usage/<session_id>.json
+(one record per Claude session, e-6588) → bus-context-usage.mjs
+readContextUsageForSession (picks THIS terminal's record by pid identity) →
+buildHeartbeatBody/heartbeat_body(twins) → SessionUpsert(server). This file pins
+the monitor's serialisation (`_save_state`) and the heartbeat twins' parity. The
+JS reader — including the fail-safe cases (absent / malformed / no pct / zero /
+out-of-range) — is pinned in tests/test_context_monitor_multisession_e6588.py
+via the per-session directory API; the pre-e-6588 single-file reader
+`readContextUsage(path)` was removed in #760 (review F1/M1) because an exported
+path-based reader is the last-writer-wins surface e-6588 retired. The server
+store + row projection are exercised by the model field + existing upsert
+pass-through, and are runtime-verified after the production state-stamp deploy
+(see e-6488 note).
 """
 from __future__ import annotations
 
@@ -24,8 +30,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "beacon_cli" / "hooks"))
 import context_monitor as cm  # noqa: E402
-
-CONTEXT_MJS = REPO / "channel" / "bus-context-usage.mjs"
 
 
 # --------------------------------------------------------------------------- #
@@ -59,7 +63,7 @@ class TestMonitorPersist:
 
 
 # --------------------------------------------------------------------------- #
-# JS reader (Layer 3) — bus-context-usage.mjs, fail-safe
+# node availability (used by the twin-parity guard below)
 # --------------------------------------------------------------------------- #
 
 def _have_node() -> bool:
@@ -67,52 +71,6 @@ def _have_node() -> bool:
 
 
 jsmark = pytest.mark.skipif(not _have_node(), reason="node not available")
-
-
-def _read_via_node(state_path: Path):
-    script = textwrap.dedent(f"""
-        import {{ readContextUsage }} from '{CONTEXT_MJS.as_posix()}'
-        const r = readContextUsage({json.dumps(str(state_path))})
-        process.stdout.write(JSON.stringify(r))
-    """)
-    proc = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        capture_output=True, text=True, timeout=30)
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout)
-
-
-@jsmark
-class TestJsReader:
-    def test_reads_context_pct(self, tmp_path):
-        p = tmp_path / "context-usage-state.json"
-        p.write_text(json.dumps({"session_id": "s", "context_pct": 73}))
-        assert _read_via_node(p) == {"contextPct": 73}
-
-    def test_zero_is_returned_not_treated_as_absent(self, tmp_path):
-        p = tmp_path / "context-usage-state.json"
-        p.write_text(json.dumps({"context_pct": 0}))
-        assert _read_via_node(p) == {"contextPct": 0}
-
-    def test_absent_file_is_null(self, tmp_path):
-        assert _read_via_node(tmp_path / "nope.json") is None
-
-    def test_malformed_file_is_null(self, tmp_path):
-        p = tmp_path / "context-usage-state.json"
-        p.write_text("{not json")
-        assert _read_via_node(p) is None
-
-    def test_no_context_pct_field_is_null(self, tmp_path):
-        # Back-compat: an old state file (session_id + notified only) → null.
-        p = tmp_path / "context-usage-state.json"
-        p.write_text(json.dumps({"session_id": "s", "notified_thresholds": [20]}))
-        assert _read_via_node(p) is None
-
-    def test_out_of_range_is_null(self, tmp_path):
-        for bad in (-5, 150, "73", None):
-            p = tmp_path / "context-usage-state.json"
-            p.write_text(json.dumps({"context_pct": bad}))
-            assert _read_via_node(p) is None, bad
 
 
 # --------------------------------------------------------------------------- #

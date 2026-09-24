@@ -242,6 +242,27 @@ class TestBridgePicksOwnRecord:
         _rec(d, "A", context_pct=0, pids=[1000])
         assert _read_dir_via_node(d, {"ppid": 1000}) == {"contextPct": 0}
 
+    # Fail-safe cases carried over from the removed single-file reader
+    # (e-6499 TestJsReader, #760 review F1/M1): the per-session reader must keep
+    # every "no declaration" outcome the old reader had, now per matched record.
+    def test_matched_record_without_context_pct_is_null(self, tmp_path):
+        # Back-compat: a record with session_id + notified only (no pct) → null.
+        d = tmp_path / "context-usage"; d.mkdir()
+        _rec(d, "A", session_id="s", notified_thresholds=[20], pids=[1000])
+        assert _read_dir_via_node(d, {"ppid": 1000}) is None
+
+    def test_matched_record_out_of_range_pct_is_null(self, tmp_path):
+        for bad in (-5, 150, "73", None):
+            d = tmp_path / f"context-usage-{abs(hash(str(bad)))}"; d.mkdir()
+            _rec(d, "A", context_pct=bad, pids=[1000])
+            assert _read_dir_via_node(d, {"ppid": 1000}) is None, bad
+
+    def test_pct_field_with_non_array_pids_is_unmatchable(self, tmp_path):
+        # A corrupt identity block must never match by accident.
+        d = tmp_path / "context-usage"; d.mkdir()
+        _rec(d, "A", context_pct=40, pids="1000", parent_pid="777")
+        assert _read_dir_via_node(d, {"ppid": 1000, "parentPid": 777}) is None
+
 
 # --------------------------------------------------------------------------- #
 # Wiring guard — bus.mjs reads the per-session dir with its own identity, and

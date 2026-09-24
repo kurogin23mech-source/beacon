@@ -36,23 +36,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * Parse ONE state record at `statePath` (the pre-e-6588 single-file API, kept
- * as the shared parser so the directory reader and its tests use one
- * validation path).
- *
- * @param {string} statePath  Path to a context-usage state JSON file.
- * @returns {{contextPct: number}|null}
- *   The context-window usage percent, or null when the file is absent,
- *   unreadable, malformed, or carries no numeric `context_pct`. A percent of 0
- *   is a legitimate value (a fresh session) and is returned, not treated as
- *   absent — hence the explicit numeric/range check rather than a falsy test.
- */
-export function readContextUsage(statePath) {
-  const rec = readRecord(statePath)
-  return rec ? { contextPct: rec.contextPct } : null
-}
-
-/**
  * Pick THIS terminal's record from the per-session directory (e-6588).
  *
  * @param {string} dirPath  Path to .claude/context-usage/.
@@ -92,7 +75,12 @@ export function readContextUsageForSession(dirPath, me) {
 
 // Parse one record; null unless it carries a valid context_pct. Identity fields
 // are normalised (non-numeric entries dropped) so the matcher above never sees
-// a malformed value.
+// a malformed value. Deliberately NOT exported (#760 review F1/M1): the
+// pre-e-6588 single-file reader `readContextUsage(path)` was removed rather
+// than kept as a "shared parser" — an exported path-based reader is exactly
+// the last-writer-wins surface this module exists to retire, and a future
+// caller would reproduce the wrong-session badge without any error.
+// `readContextUsageForSession` is the only public entry point.
 function readRecord(statePath) {
   let raw
   try {
