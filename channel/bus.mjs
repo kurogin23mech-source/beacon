@@ -47,7 +47,7 @@ import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
 import { readStateMarker, STATE_TERMINATED } from './bus-state-marker.mjs'
-import { readContextUsage } from './bus-context-usage.mjs'
+import { readContextUsageForSession } from './bus-context-usage.mjs'
 import { isPidAlive, detectOtherAliveBridges } from './bridge_detect.mjs'
 import {
   buildAutonomousActionContent,
@@ -67,9 +67,15 @@ const SESSION_JSON = path.join(CWD, '.beacon', 'session.json')
 // ms-159 e-6244: where beacon-state-hook.py writes this session's declared
 // execution state; the poll heartbeat piggybacks it (see writePollHeartbeat).
 const STATE_MARKER_JSON = path.join(CWD, '.beacon', 'session-state.json')
-// ms-159 e-6499: where bin/context-usage-monitor writes this session's context
-// usage %; the poll heartbeat piggybacks context_pct (see writePollHeartbeat).
-const CONTEXT_USAGE_JSON = path.join(CWD, '.claude', 'context-usage-state.json')
+// ms-159 e-6499 / e-6588: where bin/context-usage-monitor writes each Claude
+// session's context usage % (one record per session — the shared per-cwd file
+// was last-writer-wins across co-located sessions). The poll heartbeat picks
+// THIS terminal's record by pid identity and piggybacks context_pct (see
+// writePollHeartbeat / bus-context-usage.mjs).
+const CONTEXT_USAGE_DIR = path.join(CWD, '.claude', 'context-usage')
+// Numeric BEACON_PARENT_PID (exported by bin/bclaude, inherited by hook and
+// bridge alike) — the weak identity key when the pid chain can't be matched.
+const MY_PARENT_PID = Number.parseInt(process.env.BEACON_PARENT_PID || '', 10) || undefined
 
 // ms-64 / e-1459: profile-aware credentials + api_url resolution.
 // MUST stay behavior-equivalent to lib/profile.py — pinned by
@@ -1324,10 +1330,13 @@ if (!PROJECT_ID || !SESSION_ID) {
         stateDetail = marker.stateDetail  // e-6488: awaiting_human wait detail
       }
     }
-    // ms-159 e-6499: piggyback this session's context usage % (whatever the
-    // monitor last wrote for this cwd). Read every poll so the roster reflects
-    // the freshest value; null when the monitor never ran / wrote no percent.
-    const contextUsage = readContextUsage(CONTEXT_USAGE_JSON)
+    // ms-159 e-6499 / e-6588: piggyback THIS session's context usage % — the
+    // record whose writer (the Stop hook) shares our Claude Code parent process.
+    // Read every poll so the roster reflects the freshest value; null when the
+    // monitor never ran here / no record is ours / it carries no percent.
+    const contextUsage = readContextUsageForSession(CONTEXT_USAGE_DIR, {
+      ppid: process.ppid, parentPid: MY_PARENT_PID,
+    })
     const contextPct = contextUsage ? contextUsage.contextPct : undefined
     try {
       const body = buildHeartbeatBody({

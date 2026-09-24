@@ -34,7 +34,10 @@ The Python port keeps every public contract identical:
   * Stdin JSON: ``{"session_id": "...", "transcript_path": "..."}``.
   * Env var ``BEACON_CONTEXT_LIMIT`` (integer tokens) wins over
     model-name inference. Same name as bash.
-  * State file: ``.claude/context-usage-state.json`` (same path).
+  * State files: ``.claude/context-usage/<session_id>.json`` (one per
+    Claude Code session, ms-159 e-6588) + the legacy single
+    ``.claude/context-usage-state.json`` (still written, read by no
+    current code; see ``_persist_state``).
   * Auto-note body: identical headings to the bash template so
     downstream consumers (Claude prompt, session_notes.jsonl) don't
     care which implementation produced the note.
@@ -91,7 +94,35 @@ DEFAULT_CONTEXT_LIMIT_1M: int = 1_000_000
 _LEGACY_200K_RE = re.compile(r"claude-[0-3][.\-]", re.IGNORECASE)
 
 STATE_FILE_REL = Path(".claude") / "context-usage-state.json"
-"""Per-project state file. Same path as the bash script."""
+"""LEGACY per-cwd state file (pre e-6588). Still WRITTEN for one release so an
+older bridge (channel/bus-context-usage.mjs that predates the per-session
+directory) keeps showing a context% badge; no longer READ by this monitor for
+threshold dedup. Remove the write once every deployed bridge reads
+``STATE_DIR_REL``."""
+
+STATE_DIR_REL = Path(".claude") / "context-usage"
+"""Per-session state directory (ms-159 / e-6588).
+
+Why a directory of ``<session_id>.json`` files and not one shared file:
+
+* The threshold dedup key is the Claude Code ``session_id``. A single per-cwd
+  file can remember only ONE session, so with two Claude sessions running in
+  the same folder each Stop hook saw "session changed" and reset the other's
+  notified list — the 20/40 % note request re-fired on every alternation
+  (observed 2026-09-23/24). Keying the FILE by session makes that reset path
+  structurally impossible: a session can only ever read and write its own
+  record, so no other writer can touch its dedup state.
+* A dict inside one shared file would still leave two hooks racing on one
+  write (read-modify-write with no lock) — the same interleaving that caused
+  the reset, just one level down. One file per writer has no shared write.
+* The bridge (channel/bus-context-usage.mjs) reads this directory too and
+  must pick the record of ITS OWN terminal. Each record therefore carries the
+  hook's ancestor pids + ``BEACON_PARENT_PID`` (see ``_identity_fields``); the
+  bridge matches its ``process.ppid`` (= the Claude Code process, a common
+  ancestor of both the hook and the MCP bridge) against ``pids``.
+"""
+
+_SAFE_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +231,12 @@ def _classify_thresholds(
 def _load_state(state_path: Path, current_session: str) -> Tuple[str, List[int]]:
     """Read previous ``(session_id, notified_thresholds)`` or empty defaults.
 
-    If ``session_id`` mismatches the current one, the bash counterpart
-    *resets* notified_thresholds — so a new session starts fresh.
+    ``state_path`` is the CURRENT session's own record (``_state_path_for``),
+    so ``session_id`` inside it can only mismatch if the file was hand-edited
+    or a filename collided; in that case the record is not ours and we start
+    fresh. Before e-6588 this branch also fired whenever ANOTHER session in the
+    same cwd had written the shared file — that was the double-notification
+    bug, and the per-session path is what removes it (not this check).
     """
     try:
         raw = state_path.read_text(encoding="utf-8")
@@ -211,7 +246,7 @@ def _load_state(state_path: Path, current_session: str) -> Tuple[str, List[int]]
 
     prev_session = data.get("session_id", "") or ""
     if prev_session != current_session:
-        _log(f"session changed ({prev_session} -> {current_session}) — resetting state")
+        _log(f"state record belongs to {prev_session!r}, not {current_session!r} — starting fresh")
         return (prev_session, [])
 
     raw_thresholds = data.get("notified_thresholds")
@@ -239,8 +274,14 @@ def _save_state(
     context_pct: Optional[int] = None,
     context_used: Optional[int] = None,
     context_limit: Optional[int] = None,
+    extra: Optional[dict] = None,
 ) -> None:
     """Persist the merged notified list + the current context usage. Never raises.
+
+    Writes ONE file. Callers in the hook go through ``_persist_state`` (which
+    writes the per-session record + legacy file); this stays the single
+    serialisation point so both share one payload shape. ``extra`` carries the
+    per-session identity fields (``pids`` / ``parent_pid`` / ``updated_at``).
 
     ms-159 / e-6499: the state file doubles as the read-point the beacon-bus
     bridge (channel/bus.mjs) picks up on every poll to piggyback ``context_pct``
@@ -260,9 +301,151 @@ def _save_state(
             payload["context_used"] = int(context_used)
         if context_limit is not None:
             payload["context_limit"] = int(context_limit)
+        if extra:
+            payload.update(extra)
         state_path.write_text(json.dumps(payload), encoding="utf-8")
     except OSError:
         pass
+
+
+def _state_path_for(session_id: str, state_dir: Optional[Path] = None) -> Path:
+    """Return this session's own record path under ``STATE_DIR_REL``.
+
+    Claude Code session ids are UUIDs; anything else is sanitised to a safe
+    filename so a hostile / odd id can never escape the directory.
+    """
+    base = state_dir if state_dir is not None else Path(STATE_DIR_REL)
+    safe = _SAFE_SESSION_ID_RE.sub("_", session_id)[:128] or "unknown"
+    return base / f"{safe}.json"
+
+
+def _ancestor_pids(max_depth: int = 20) -> List[int]:
+    """Best-effort list of this process's pid + ancestor pids (POSIX ``ps``).
+
+    The Stop hook runs as ``python`` (exec'd from the bash shim) under the
+    Claude Code process; the MCP bridge is a direct child of that same Claude
+    Code process. Recording the chain lets the bridge find "the record whose
+    ancestors include my ppid" = the record of the terminal it serves. On a
+    host without ``ps`` (Windows) the walk stops after ``os.getppid()``; the
+    bridge then falls back to ``parent_pid`` (BEACON_PARENT_PID) matching.
+    """
+    pids: List[int] = [os.getpid()]
+    try:
+        ppid = os.getppid()
+        if ppid > 1:
+            pids.append(ppid)
+    except OSError:
+        return pids
+    pid = pids[-1]
+    for _ in range(max_depth):
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            )
+            ppid_str = result.stdout.strip()
+            ppid = int(ppid_str) if ppid_str else 0
+        except (OSError, subprocess.SubprocessError, ValueError):
+            break
+        if ppid <= 1 or ppid in pids:
+            break
+        pids.append(ppid)
+        pid = ppid
+    return pids
+
+
+def _identity_fields() -> dict:
+    """Fields the bridge uses to attribute a record to its own terminal.
+
+    ``pids``: this hook's ancestor chain (strong key — contains the Claude
+    Code pid the bridge sees as ``process.ppid``). ``parent_pid``: the
+    ``BEACON_PARENT_PID`` env that ``bin/bclaude`` exports and every child
+    (hook and bridge alike) inherits — platform-independent, weaker (shared by
+    successive Claude sessions in one terminal, so the bridge tie-breaks on
+    ``updated_at``). Both are best-effort; a missing key just means the bridge
+    cannot attribute the record and reports no context% for that heartbeat.
+    """
+    fields: dict = {"pids": _ancestor_pids()}
+    raw = os.environ.get("BEACON_PARENT_PID", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        fields["parent_pid"] = int(raw)
+    return fields
+
+
+def _pid_alive(pid: int) -> bool:
+    """POSIX-only liveness probe (``kill -0``). Callers must not use this on
+    Windows: there ``os.kill(pid, 0)`` TERMINATES the target process."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+
+
+def _prune_stale_state_files(state_dir: Path, keep: Path) -> None:
+    """Remove sibling records whose recorded processes are ALL dead.
+
+    A finished Claude session leaves its record behind (nothing else runs at
+    session end). Without pruning the directory grows by one small file per
+    session forever, and the bridge would scan ever more candidates. A record
+    with no ``pids`` (cannot judge) is left alone. Never raises; POSIX only
+    (see ``_pid_alive``).
+    """
+    if os.name != "posix":
+        return
+    try:
+        candidates = list(state_dir.glob("*.json"))
+    except OSError:
+        return
+    for f in candidates:
+        if f == keep:
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            pids = data.get("pids") if isinstance(data, dict) else None
+            if not (isinstance(pids, list) and pids):
+                continue
+            if any(_pid_alive(int(p)) for p in pids if isinstance(p, int) and p > 0):
+                continue
+            f.unlink()
+        except (OSError, ValueError, TypeError):
+            continue
+
+
+def _persist_state(
+    session_id: str,
+    notified: List[int],
+    *,
+    context_pct: Optional[int] = None,
+    context_used: Optional[int] = None,
+    context_limit: Optional[int] = None,
+    state_dir: Optional[Path] = None,
+    legacy_path: Optional[Path] = None,
+) -> None:
+    """Write this session's own record (canonical) + the legacy shared file.
+
+    Canonical: ``STATE_DIR_REL/<session_id>.json`` with the identity fields
+    the bridge matches on and ``updated_at`` for its tie-break. Legacy:
+    ``STATE_FILE_REL`` (per-cwd, last-writer-wins) is still written so a
+    bridge that predates e-6588 keeps a badge; it is NOT read back here, so
+    its last-writer-wins shape can no longer reset anyone's dedup state.
+    Stale sibling records are pruned on the way. Never raises.
+    """
+    own = _state_path_for(session_id, state_dir)
+    extra = _identity_fields()
+    extra["updated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    _save_state(own, session_id, notified, context_pct=context_pct,
+                context_used=context_used, context_limit=context_limit,
+                extra=extra)
+    _prune_stale_state_files(own.parent, keep=own)
+    legacy = legacy_path if legacy_path is not None else Path(STATE_FILE_REL)
+    _save_state(legacy, session_id, notified, context_pct=context_pct,
+                context_used=context_used, context_limit=context_limit,
+                extra=extra)
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +731,9 @@ def _main_impl() -> int:
     )
 
     # ─── state ───────────────────────────────────────────────────────────────
-    state_path = Path(STATE_FILE_REL)
+    # e-6588: read/write THIS session's own record, never the shared legacy
+    # file — another session in the same cwd can then never reset our dedup.
+    state_path = _state_path_for(session_id)
     prev_session, notified = _load_state(state_path, session_id)
 
     triggered, all_crossed = _classify_thresholds(percent, notified)
@@ -556,11 +741,11 @@ def _main_impl() -> int:
     if triggered is None:
         # No threshold crossed, but still persist the current context usage so the
         # bridge reads a FRESH context_pct every poll (e-6499) — not just on a
-        # crossing. (A session change also resets/bumps the file, matching bash.)
+        # crossing.
         if not _is_dry_run():
-            _save_state(state_path, session_id, notified,
-                        context_pct=percent, context_used=current_context,
-                        context_limit=context_limit)
+            _persist_state(session_id, notified,
+                           context_pct=percent, context_used=current_context,
+                           context_limit=context_limit)
         return 0
 
     # ─── enrichment + note ───────────────────────────────────────────────────
@@ -583,9 +768,9 @@ def _main_impl() -> int:
     if not _is_dry_run():
         # Persist state BEFORE invoking `beacon note` so a hanging beacon
         # call doesn't cause the same threshold to re-fire next time.
-        _save_state(state_path, session_id, sorted(set(notified) | set(all_crossed)),
-                    context_pct=percent, context_used=current_context,
-                    context_limit=context_limit)
+        _persist_state(session_id, sorted(set(notified) | set(all_crossed)),
+                       context_pct=percent, context_used=current_context,
+                       context_limit=context_limit)
 
         if beacon:
             try:

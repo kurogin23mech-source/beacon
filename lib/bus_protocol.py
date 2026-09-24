@@ -108,7 +108,7 @@ def heartbeat_body(
 
     ms-159 / e-6499 — optional ``context_pct`` (= このセッションのコンテキスト
     使用率 %) を載せる。bin/context-usage-monitor が算出して
-    ``.claude/context-usage-state.json`` に書いた値を受信ループが heartbeat に
+    ``.claude/context-usage/<session_id>.json`` (e-6588 で session 毎に分離) に書いた値を受信ループが heartbeat に
     相乗りさせ、サーバの session doc 経由で運用室 (bus directory / attention) の
     行まで運ぶ。「どのセッションが context 逼迫か」を一目で見えるようにするため。
     値が無い (古いクライアント / 未算出) ときは載せない (後方互換で行 shape を

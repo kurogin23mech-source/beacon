@@ -2576,7 +2576,7 @@ class SessionUpsert(BaseModel):
     state_detail: Optional[str] = None
 
     # ms-159 / e-6499 — the session's context-window usage % (0–100), computed by
-    # bin/context-usage-monitor (.claude/context-usage-state.json) and piggybacked
+    # bin/context-usage-monitor (.claude/context-usage/<session_id>.json, e-6588) and piggybacked
     # onto the heartbeat by the receive loop (bus.mjs / bus_protocol.heartbeat_body).
     # Stored merge=True on the session doc so the directory row exposes it, letting
     # the roster surface which session is context-pressured (display = e-6500). Must

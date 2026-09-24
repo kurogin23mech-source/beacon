@@ -89,6 +89,11 @@ def test_wired_sh_writes_context_pct(project_dir, tmp_path):
     # notified_thresholds behaviour must NOT regress (item 3 of the done-when).
     assert state["session_id"] == "drift-sess"
     assert 20 in state["notified_thresholds"]
+    # e-6588: the wired path must ALSO write the per-session record — the one the
+    # monitor reads back for dedup and the bridge matches by pid identity.
+    own = json.loads((project_dir / ".claude" / "context-usage" / "drift-sess.json").read_text())
+    assert own["context_pct"] == 30 and 20 in own["notified_thresholds"], own
+    assert isinstance(own.get("pids"), list) and own["pids"], own
 
 
 def test_sh_delegates_not_reimplements():

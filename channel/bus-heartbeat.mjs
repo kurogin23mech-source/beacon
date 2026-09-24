@@ -89,7 +89,7 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
     if (stateDetail) body.state_detail = stateDetail
   }
   // ms-159 e-6499 — piggyback this session's context-window usage % (written by
-  // bin/context-usage-monitor into .claude/context-usage-state.json, read by the
+  // bin/context-usage-monitor into .claude/context-usage/<session_id>.json, read by the
   // bridge each poll) so the roster (bus directory / attention) can show which
   // session is context-pressured. Shape MUST match lib/bus_protocol.py::
   // heartbeat_body. Omitted when unknown (undefined/null) so an older client or
