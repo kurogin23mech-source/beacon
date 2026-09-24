@@ -468,7 +468,11 @@ def test_main_emits_no_output_when_already_notified(
     monkeypatch.setenv("BEACON_CONTEXT_MONITOR_DRY_RUN", "1")
     monkeypatch.delenv("BEACON_CONTEXT_LIMIT", raising=False)
 
-    state_path = beacon_project / ".claude" / "context-usage-state.json"
+    # e-6588: dedup state lives in the session's OWN record under
+    # .claude/context-usage/, not the legacy shared per-cwd file (which is
+    # written for old bridges but never read back — see _persist_state).
+    state_path = beacon_project / cm._state_path_for("S-rep")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
         json.dumps({"session_id": "S-rep", "notified_thresholds": [20]})
     )
