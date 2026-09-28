@@ -1924,11 +1924,11 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
         "phase": o.get("phase", ""),
         "transition_date": get_transition_date(data, o["id"]),
         "transition_status": st,
-        # C-3 (e-3692): the live ball is derived from Communications; the static
-        # who_has_the_ball field is only the initial declaration and goes stale
-        # after an email exchange. Read derived-first so the 判定/催促 split is
-        # not a lie; fall back to the static field only when there is no comm.
-        "who_has_the_ball": derive_ball(o) or o.get("who_has_the_ball", ""),
+        # C-3 (e-3692) / ms-176 e-6605: the live ball is derived from
+        # Communications; the static who_has_the_ball field is only the initial
+        # declaration and goes stale after an exchange. ``effective_ball`` is the
+        # one named home of that derive-first precedence (was inlined here).
+        "who_has_the_ball": effective_ball(o),
     } for o, st in pairs]
 
 
@@ -1954,7 +1954,9 @@ def overdue_activities(data: dict, today: str) -> list:
                 "description": act.get("description", ""),
                 "deadline": act.get("deadline", ""),
                 "activity_status": st,  # deadline.TRANSITION_DUE / _OVERDUE
-                "who_has_the_ball": act.get("who_has_the_ball", ""),
+                # ms-176 e-6605: 活動の「次に動く責任」も証跡から導出する (静的
+                # フィールドは起票時の宣言で、やり取りの後は古い)。
+                "who_has_the_ball": effective_ball(opp, act),
             })
     out.sort(key=lambda r: r["deadline"] or "")
     return out
@@ -2502,7 +2504,7 @@ def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
             "anchor": (gate or {}).get("anchor", ""),
             "transition_date": (gate or {}).get("transition_date", ""),
             # C-3 (e-3692): derived-first ball (see opportunities_awaiting_judgement).
-            "who_has_the_ball": derive_ball(opp) or opp.get("who_has_the_ball", ""),
+            "who_has_the_ball": effective_ball(opp),  # ms-176 e-6605
         })
     out.sort(key=lambda r: (r["transition_date"] or "9999-99-99"))
     return out
@@ -3389,8 +3391,8 @@ def communications_of(target: dict, *, linked_id: Optional[str] = None,
     return [c for _, c in ordered]
 
 
-def derive_ball(target: dict) -> Optional[str]:
-    """Whose court the deal is in, derived from the latest Communication
+def derive_ball(target: dict, *, linked_id: Optional[str] = None) -> Optional[str]:
+    """Whose court the work is in, derived from the latest Communication
     (SPEC §6): the newest inbound means the counterpart just played → the ball
     is ours (BALL_SELF); the newest outbound means we played → theirs
     (BALL_COUNTERPART). Returns None when there's no communication to derive
@@ -3398,8 +3400,19 @@ def derive_ball(target: dict) -> Optional[str]:
     engine keeps it as the reply-watcher's (E) driver.
 
     e-3537: cancelled (取消済) communications are excluded — a mis-recorded
-    exchange must not decide whose court the deal is in."""
+    exchange must not decide whose court the deal is in.
+
+    ms-176 e-6605: ``linked_id`` narrows the derivation to the evidence that
+    fulfilled ONE work item (act-/nrt-), so the SAME rule serves both grains —
+    the deal's ball (no linked_id = every communication on the deal) and a single
+    activity's ball. This is deliberately a parameter on the ONE derivation
+    function rather than a second function or a stamped field: whose court an
+    activity is in must not be able to disagree with whose court the deal is in
+    by using a different rule, and a stamped copy would go stale the moment a
+    communication is cancelled (e-3537) or re-filed (e-3585)."""
     comms = communications_of(target, include_cancelled=False)
+    if linked_id is not None:
+        comms = [c for c in comms if c.get("linked_id") == linked_id]
     if not comms:
         return None
     latest = comms[-1]
@@ -3408,6 +3421,29 @@ def derive_ball(target: dict) -> Optional[str]:
     if latest.get("direction") == COMM_OUTBOUND:
         return BALL_COUNTERPART
     return None
+
+
+def effective_ball(target: dict, work_item: Optional[dict] = None) -> str:
+    """The ball a READER should surface (ms-176 e-6605) — derived from the
+    evidence first, falling back to the statically declared field only when there
+    is no communication to derive from.
+
+    The single named home of the derive-first idiom introduced piecemeal by C-3
+    (e-3692): the static ``who_has_the_ball`` is only the INITIAL declaration
+    (起票時 / 手で宣言した値) and goes stale after the first exchange, so a surface
+    that reads the raw field alone reports "自分のボール" forever — which is exactly
+    what the营業 instance saw on every deal. Readers call THIS instead of repeating
+    ``derive_ball(x) or x.get(who_has_the_ball, "")`` so the precedence lives in one
+    place.
+
+    ``work_item`` (an activity / nurturing) switches to the work-item grain: the
+    derivation looks only at evidence linked to that item, and the fallback is that
+    item's own declared field. Returns ``""`` when neither source knows (no
+    communication and no declaration) — "unknown", not a default of 自分."""
+    if work_item is None:
+        return derive_ball(target) or target.get(work_model.BALL_FIELD, "") or ""
+    return (derive_ball(target, linked_id=work_item.get("id", ""))
+            or work_item.get(work_model.BALL_FIELD, "") or "")
 
 
 # ---------------------------------------------------------------------------
@@ -4217,7 +4253,10 @@ def project_targets(data: dict) -> list:
             "work_items_done": done,
             "detail": {
                 "phase": opp.get("phase", ""),
-                "who_has_the_ball": opp.get("who_has_the_ball", ""),
+                # ms-176 e-6605: 盤面に出すボールは証跡からの導出を優先する。生の
+                # フィールドだけを載せると、やり取りの後も全商談が「自分のボール」に
+                # 見え続ける (営業インスタンスで実際にそう見えていた)。
+                "who_has_the_ball": effective_ball(opp),
                 "goal_amount": opp.get("goal_amount"),
                 "probability": opp.get("probability"),
                 "deadline": opp.get("deadline", ""),

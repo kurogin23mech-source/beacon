@@ -9229,7 +9229,12 @@ def cmd_opportunity_list():
         # projected symmetrically (e-5203): the cockpit reads gate_needs_anchor AND
         # needs_transition_date as facts, not one翼 from a flag and the other from a
         # raw gates[] walk. Projection only — not persisted onto the record.
+        # ms-176 e-6605: who_has_the_ball も投影で上書きする。生のレコードをそのまま
+        # 出すと、コックピット (この JSON の主な読み手) は起票時の宣言値を読み続け、
+        # やり取り後も全商談が「自分のボール」に見える。derive_ball を唯一の規則に
+        # 保ったまま、読み手に出す値だけを導出優先にする (記録は書き換えない)。
         enriched = [{**o,
+                     "who_has_the_ball": sales_entities.effective_ball(o),
                      "gate_needs_anchor": sales_entities.gate_needs_anchor(data, o["id"]),
                      "needs_transition_date": sales_entities.needs_transition_date(data, o["id"])}
                     for o in opps]
@@ -9250,7 +9255,7 @@ def cmd_opportunity_list():
             continue
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
-        ball = o.get("who_has_the_ball", "")
+        ball = sales_entities.effective_ball(o)  # ms-176 e-6605: 導出優先
         # e-3580 fold: 遷移日は商談ではなく open な前進ゲートが持つ。
         td = sales_entities.get_transition_date(data, o["id"])
         # 遷移日 = 判定予定日 (SPEC §2/§3). 判定待ちの overdue/due は距離を強調して促す。
@@ -10057,6 +10062,18 @@ def cmd_activity_update():
     save_project(data)
     print(f"activity {act_id} updated "
           f"(deadline={act.get('deadline', '')}, ball={act.get('who_has_the_ball', '')})")
+    # ms-176 e-6605: ボールは証跡からの導出が優先される (手で宣言した値は証跡が無い
+    # ときの土台)。宣言と導出が食い違うときは黙って無視せず、盤面に出る値と
+    # 食い違いの直し方を伝える (取消 / 綴じ直しが正しい直し方で、宣言の上書きではない)。
+    if ball:
+        opp, item = sales_entities.find_activity(data, act_id)
+        derived = sales_entities.derive_ball(opp, linked_id=act_id) if opp else None
+        if derived and derived != act.get("who_has_the_ball", ""):
+            print(f"  ℹ 盤面に出るボールは証跡からの導出値 '{derived}' です "
+                  f"(宣言した '{ball}' は証跡が無いときの土台)。"
+                  f"導出を変えるには証跡側を直します: 誤記録なら "
+                  f"`beacon communication cancel <comm-id> --reason ...`、"
+                  f"綴じ先違いなら `beacon communication retarget <comm-id> <act-id>`")
 
 
 def cmd_opportunity_contract_add():

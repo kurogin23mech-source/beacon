@@ -42,6 +42,14 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
 
 引数で商談 ID が渡っていれば、その 1 件に絞って深掘りする。無ければ全商談を横断する。
 
+> **ボール (次に動くのは誰か) は証跡からの導出値を読む (ms-176 e-6605)**: 上記 JSON の
+> `who_has_the_ball` は、最新の証跡 (やり取りの記録) の向きから導出した値が入っている
+> (自分発 = outbound なら相手待ち、相手発 = inbound なら自分の番)。起票時に宣言した静的な値は
+> 証跡が 1 件も無いときの土台にすぎない。ボールがおかしいと感じたら宣言を書き換えるのではなく
+> **証跡側を直す** — 誤記録なら `beacon communication cancel <comm-id> --reason ...`、綴じ先違いなら
+> `beacon communication retarget <comm-id> <act-id>`。活動ごとのボール (`opportunity due --json` の
+> `activities`) も、その活動に紐づいた証跡だけから同じ規則で導出される。
+
 > **取消済 (cancelled) は「やること」に載せない (e-3587 / ms-139 e-4954: 活動 done/cancel の CLI 経路と L2 の terminal 自動除外が揃った)**: `beacon opportunity list --json`
 > は取消済商談を既定で除外するが、*生きている商談の中の個々の活動・証跡* には
 > `status == "cancelled"` のものが混じりうる。それらは「未消化」ではないので、Step 2 の
