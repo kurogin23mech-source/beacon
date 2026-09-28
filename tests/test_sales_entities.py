@@ -75,7 +75,11 @@ def test_seed_phases_carry_methodology():
     assert m["goal"] and "transition_signal" not in m
     assert "初回面談を実施" in m["activity_template"] and m["default_lead"] == 7
     agree = se.opportunity_phase_methodology(data, "合意済み")
-    assert agree["activity_template"] == ["契約書を送付", "締結"]
+    # ms-176 e-6607: seed は「何のための活動か」を括弧で持つ (文言そのものは会社ごとに
+    # 編集できる config なので、ここは 2 段であることと骨だけを固定する)。
+    assert len(agree["activity_template"]) == 2
+    assert agree["activity_template"][0].startswith("契約書を送付")
+    assert agree["activity_template"][1].startswith("締結を記録")
     kentou = se.opportunity_phase_methodology(data, "先方検討中")
     assert kentou["goal"] == "先方の実行合意を取る" and kentou["default_lead"] == 14
 
@@ -2108,13 +2112,16 @@ def _opp_phase_def(data, name):
 def test_phase_activity_template_stays_string_list_backcompat():
     data = _fresh()
     tpl = se.phase_activity_template(_opp_phase_def(data, "商談準備"))
-    assert tpl == ["初回面談を打診", "初回面談を実施", "提案の方向性を確定"]
+    # dict 形式の anchor も bare string に落として返す (後方互換) ことが眼目。
+    # 文言は ms-176 e-6607 で「目的」付きに改めたので前方一致で見る。
+    assert [t.split("（")[0] for t in tpl] == [
+        "初回面談を打診", "初回面談を実施", "提案の方向性を確定"]
 
 
 def test_phase_activity_anchors_marks_meeting_kind():
     data = _fresh()
     anchors = se.phase_activity_anchors(_opp_phase_def(data, "商談準備"))
-    kinds = {a["desc"]: a["kind"] for a in anchors}
+    kinds = {a["desc"].split("（")[0]: a["kind"] for a in anchors}
     assert kinds["初回面談を実施"] == "meeting"
     assert kinds["初回面談を打診"] == ""
 
@@ -2137,7 +2144,8 @@ def test_instantiate_seeds_unscheduled_meeting_for_meeting_anchor():
     assert m["scheduled_at"] == ""
     assert m["linked_id"] == meet_act["id"]
     # a non-meeting anchor gets no Meeting
-    non = next(a for a in opp["activities"] if a["description"] == "初回面談を打診")
+    non = next(a for a in opp["activities"]
+               if a["description"].startswith("初回面談を打診"))
     assert se.find_meeting_by_linked(data, non["id"]) == (None, None)
 
 

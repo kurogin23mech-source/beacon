@@ -76,9 +76,12 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "商談準備", "probability": 10, "terminal": False,
      "allowed_terminals": ["不成立"],
      "goal": "初回面談の実施により、商談として進行可能な状態にする",
-     "activity_template": ["初回面談を打診",
+     # ms-176 e-6607: 各 seed は「何のための活動か」を括弧で持つ (定型だけの一行は AI も
+     # 人も読み飛ばし、活動一覧の信号対雑音比を下げる)。面談の「実施」は kind=meeting が
+     # 意味を運ぶので文言はそのまま (発火源の紐付け先として他所から名前で参照される)。
+     "activity_template": ["初回面談を打診（相手の課題を聞く場をもらう）",
                            {"desc": "初回面談を実施", "kind": "meeting"},
-                           "提案の方向性を確定"],
+                           "提案の方向性を確定（聞いた課題のどれに応えるかを決める）"],
      "default_lead": 7},
     {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
@@ -87,21 +90,26 @@ DEFAULT_OPPORTUNITY_PHASES = [
      # require_amount は phase 定義側のフラグにして「どのフェーズから金額を課すか」を
      # per-company に設定可能にする (block でなく警告、master = 人間)。
      "require_amount": True,
-     "activity_template": ["提案面談を打診",
+     "activity_template": ["提案面談を打診（提案を聞いてもらう場をもらう）",
                            {"desc": "提案面談を実施", "kind": "meeting"},
-                           "提案内容を準備"],
+                           "提案内容を準備（課題への答え・規模・進め方を形にする）"],
      "default_lead": 14},
     {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
      "require_amount": True,
-     "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
+     # ms-176 e-6607: 旧 seed は「合意確認日を確定」と「合意の確認を取る」が同義重複で、
+     # どちらを done にすべきか読めなかった。前者を「待ちを無期限にしない」ための期限合意、
+     # 後者を「可否を聞いて次のフェーズを決める」判断に切り分け、重複を解消する。
+     "activity_template": ["回答期限を先方と決める（待ちを無期限にしない）",
+                           "実行合意の可否を確認する（合意なら合意済みへ、難色なら論点を持ち帰る）"],
      "default_lead": 14},
     {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
      "require_amount": True,
-     "activity_template": ["契約書を送付", "締結"],
+     "activity_template": ["契約書を送付（合意した条件を書面にする）",
+                           "締結を記録（署名済み契約を beacon opportunity contract sign で残す。成約判定の前提）"],
      "default_lead": 7},
     # 決着フェーズ (terminal): outcome は有限ターゲットの結末種別。
     {"name": "成約",       "probability": 100,  "terminal": True,  "outcome": "won"},
