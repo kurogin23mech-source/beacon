@@ -164,6 +164,43 @@ def test_decided_by_values_are_in_the_vocabulary():
         assert decision_outbox.decided_by_for_actor(actor) in DECIDED_BY
 
 
+@pytest.mark.parametrize("session_kind", ["human", "", "ai"])
+def test_gate_attribution_has_one_source(monkeypatch, session_kind):
+    """人間所有のゲート判断の帰属は 1 箇所から出る (ms-166 e-6601 保守性 M-1)。
+
+    この写像はかつて cmd_target / target_completion / decision_outbox の 3 箇所に別コピー
+    されており、互いに docstring で「matching ...」と注記し合うだけで共有していなかった。
+    decided_by の意味論を変える者が 3 箇所を手で探す必要があり、1 箇所見落とすと判断の
+    帰属が capability ごとに静かに割れる。共有 leaf へ集約したので、**同じ入力に対して
+    全経路が同じ答えを返す** ことをここで固定する (再び割れたら落ちる)。
+    """
+    monkeypatch.setenv("BEACON_SESSION_KIND", session_kind)
+    import commands_shared
+    import cmd_target
+    canonical = commands_shared.decided_by_for_gate()
+    assert cmd_target._decided_by_for_gate() == canonical
+    # decision_outbox は「actor が人間か」を読む層を足しているだけで、人間判定が
+    # 立てば共有 leaf と同じ答えに落ちる。
+    assert decision_outbox.decided_by_for_actor("human:a@b.c") == canonical
+
+
+def test_gate_and_review_attribution_stay_asymmetric(monkeypatch):
+    """ゲート判断とレビュー採否の写像は **意図的に非対称** — 集約で潰さない。
+
+    ゲートは人間所有なので AI セッションでも「人間が選んだ」側 (AI-proposed-human-chose)、
+    レビュー採否は AI 単独判断なので最も監査が要る autonomous-AI に倒す。共有 leaf を
+    1 つにまとめる過程でこの非対称を取り違えると、監査上いちばん見たい「人間が見ていない
+    AI の判断」が人間承認済みに化ける。
+    """
+    import commands_shared
+    monkeypatch.setenv("BEACON_SESSION_KIND", "")      # AI セッション
+    assert commands_shared.decided_by_for_gate() == "AI-proposed-human-chose"
+    assert commands_shared.decided_by_for_review() == "autonomous-AI"
+    monkeypatch.setenv("BEACON_SESSION_KIND", "human")  # 人間端末
+    assert commands_shared.decided_by_for_gate() == "human-delegated"
+    assert commands_shared.decided_by_for_review() == "human-delegated"
+
+
 # --- 保存されなかった判断は decision にならない -----------------------------------
 
 def test_flush_emits_only_gates_that_survived_the_save():
@@ -242,9 +279,23 @@ def test_flush_failure_never_breaks_the_caller(monkeypatch, caplog):
 
 def test_stage_rejects_a_payload_without_kind_or_decision():
     with pytest.raises(ValueError):
-        decision_outbox.stage({"decision": "advance"})
+        decision_outbox.stage({"decision": "advance"}, verify=None)
     with pytest.raises(ValueError):
-        decision_outbox.stage({"kind": "gate-judgement"})
+        decision_outbox.stage({"kind": "gate-judgement"}, verify=None)
+    assert decision_outbox.staged() == ()
+
+
+def test_stage_requires_an_explicit_verify_decision():
+    """検証述語は省略できない (ms-166 e-6601 AX-3)。
+
+    「保存された判断だけを書く」がこの module の存在意義なので、その保証を docstring の
+    お願いに委ねない。省略できると、次に別の seam を足す者が無意識に検証なしで発行でき、
+    この module が構造的に不可能にしたと称する病理をそのまま再生産できてしまう。検証を
+    付けられない形なら ``verify=None`` を明示的に渡させる (挙動は同じでも、書いた本人が
+    一度意識する分だけ構造的)。
+    """
+    with pytest.raises(TypeError):
+        decision_outbox.stage({"kind": "gate-judgement", "decision": "advance"})
     assert decision_outbox.staged() == ()
 
 

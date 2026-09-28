@@ -3004,3 +3004,22 @@ def decided_by_for_review() -> str:
     (``cmd_decision``) が同じ写像を共有する — leaf module に home したので全員が
     上向きに import でき、cmd_* 兄弟間の横依存を作らない (旧: 3 箇所に別コピー)。"""
     return "human-delegated" if _session_kind_is_human() else "autonomous-AI"
+
+
+def decided_by_for_gate() -> str:
+    """人間所有のゲート判断 (目的達成 verdict / 完遂 / フェーズ判断) の ``decided_by`` を
+    SESSION KIND から導く単一真実源 (ms-154 e-5651 → ms-166 e-6601 保守性 M-1)。
+
+    人間の端末が直接押したなら ``human-delegated``、AI 補助セッションで人間が AI の
+    組み立てた材料を確認して倒したなら ``AI-proposed-human-chose``。姉妹の
+    :func:`decided_by_for_review` (レビュー採否) が AI 単独判断を ``autonomous-AI`` に
+    倒すのと **意図的に非対称**: ゲートは人間所有の判断なので、AI セッションでも
+    「人間が選んだ」側に倒す (SPEC ms-119 方針2)。
+
+    経緯: この写像は ``cmd_target._decided_by_for_gate`` / ``target_completion`` の
+    インライン / ``decision_outbox.decided_by_for_actor`` の 3 箇所に別コピーされており、
+    互いに docstring で「matching ...」と注記し合うだけで実際には共有していなかった。
+    decided_by の意味論を変える者が 3 箇所を手で探す必要があり、1 箇所見落とすと判断の
+    帰属が capability ごとに静かに割れる。``decided_by_for_review`` が同じ drift を
+    3→1 に畳んだ先例なので、それに倣ってここへ集約した。"""
+    return "human-delegated" if _session_kind_is_human() else "AI-proposed-human-chose"

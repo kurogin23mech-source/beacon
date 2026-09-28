@@ -53,16 +53,21 @@ GATE_JUDGEMENT_KIND = "gate-judgement"
 _staged: list = []
 
 
-def stage(payload: dict, *, verify: Optional[Callable[[dict], bool]] = None) -> dict:
+def stage(payload: dict, *, verify: Optional[Callable[[dict], bool]]) -> dict:
     """decision の発行意図を積む (I/O なし)。積んだ payload をそのまま返す。
 
     ``payload`` は ``client.record_decision`` にそのまま渡せる body
     (kind / decision / rationale / decided_by / evidence / related / context)。
     ``who`` は server が token + session header から刻むので **呼び出し側は載せない**。
 
-    ``verify`` は「保存された data にこの判断の結果が実在するか」を答える述語。
-    None は「検証しない」ではなく **無条件に発行してよい** の明示であり、既定では
-    渡すこと (= 検証できる seam が検証を省くのを見えなくしない)。
+    ``verify`` は「保存された data にこの判断の結果が実在するか」を答える述語で、
+    **既定値を持たない必須キーワード引数**。この module の存在意義は「保存された判断
+    だけを書く」ことなので、その保証を docstring のお願いに委ねない (ms-166 e-6601
+    AX-3): 省略できると、次に別の seam を足す者が無意識に検証なしで発行でき、この
+    module が「構造的に不可能にした」と称する病理 (= 判断したことになっているが対象は
+    動いていない記録) をそのまま再生産できてしまう。検証できない形の seam は
+    ``verify=None`` を **明示的に** 渡す — 省略と同じ挙動でも、書いた本人が「検証を
+    付けられない」と一度意識する分だけ構造的になる。
     """
     if not isinstance(payload, dict):
         raise TypeError("decision payload must be a dict")
@@ -97,17 +102,22 @@ def decided_by_for_actor(actor: str) -> str:
     * それ以外 (機械 actor / 空)
       → ``autonomous-AI`` (= 人間が見ていない判断。最も audit-critical な側に倒す)。
 
-    session kind の読み取りは ``commands_shared._session_kind_is_human`` を単一真実源と
-    して遅延 import する (env 名と既定値をここで二重定義しない)。
+    human 側の写像そのものは ``commands_shared.decided_by_for_gate`` が単一真実源
+    (ms-166 e-6601 保守性 M-1)。ここが持つのは **actor から人間かどうかを読む部分だけ**
+    で、「人間所有のゲート判断をどの語彙に倒すか」は共有 leaf に委ねる (旧: 同じ写像を
+    ここに 3 つ目として独立実装しており、decided_by の意味論を変える者が 3 箇所を手で
+    探す必要があった)。
     """
     a = (actor or "").strip().lower()
     if not (a == "human" or a.startswith("human:")):
         return "autonomous-AI"
     try:
-        from commands_shared import _session_kind_is_human
+        from commands_shared import decided_by_for_gate
     except Exception:
+        # 共有 leaf に届かない (= import 環境が整っていない) ときは、人間確認を
+        # 前提にした側へ倒す。ゲート判断は人間所有なので AI 単独扱いにはしない。
         return "AI-proposed-human-chose"
-    return "human-delegated" if _session_kind_is_human() else "AI-proposed-human-chose"
+    return decided_by_for_gate()
 
 
 def flush(data: dict) -> int:

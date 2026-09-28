@@ -230,12 +230,10 @@ def cmd_target_review_request():
 def _decided_by_for_gate() -> str:
     """decided_by for a human-owned attainment gate action (ms-154 e-5651).
 
-    The 目的達成 verdict is human-owned (SPEC ms-119 方針2). A straight human
-    terminal session pressing the action = ``human-delegated``; an AI-assisted
-    session where the human confirms the AI's assembled case = the review-gate
-    default ``AI-proposed-human-chose``.
-    """
-    return "human-delegated" if _session_kind_is_human() else "AI-proposed-human-chose"
+    ms-166 e-6601 保守性 M-1: 写像の本体は ``commands_shared.decided_by_for_gate``
+    (単一真実源) に移した。この名前は既存の呼び出し元のために残す薄い委譲。"""
+    from commands_shared import decided_by_for_gate
+    return decided_by_for_gate()
 
 
 def _record_completion_verdict_decision(target_id, verdict, entry, approval_rationale):
