@@ -94,7 +94,7 @@ Zoom / tl;dv / Otter 等の外部ツールは置き場も名前もまちまち�
 証跡は 1 活動配下に集約する (fold・履歴が読めなくなるのを防ぐ)。
 
 ```bash
-BEACON_COMM_TARGET="<$OPP または act-id>" \
+BEACON_COMM_TARGET="<満たした活動の act-id を優先、無ければ $OPP>" \
   BEACON_COMM_SUMMARY="<議事録の1行要約: 何が決まり何が宿題か>" \
   BEACON_COMM_DIRECTION="inbound" BEACON_COMM_CHANNEL="meeting" \
   BEACON_COMM_SOURCE_URL="<議事録 doc の Drive リンク>" \
@@ -102,6 +102,12 @@ BEACON_COMM_TARGET="<$OPP または act-id>" \
   BEACON_COMM_OCCURRED="<面談の日時>" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
+
+証跡は **満たした活動 (act-/nrt-) に紐づけて記録する**のが既定 (ms-176 e-6604)。商談 (opp-) /
+顧客 (acc-) 直付けで記録した場合、CLI がその商談の未消化な活動を候補として echo する — 該当する
+活動が在れば `beacon communication retarget <comm-id> <act-id> --reason "<この証跡がその活動を
+満たした理由>"` で綴じ直す。活動に紐づいた証跡だけが fold の証跡ベース done とフェーズ後始末の
+材料になる。どの活動も満たさない連絡 (お礼・案内のみ 等) なら直付けのままで正しい。
 
 ## Step 3.5: 顧客ドキュメントへ知見を追記 (dossier 自動蓄積、ms-106 e-3550/e-3747)
 

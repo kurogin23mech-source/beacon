@@ -2517,6 +2517,112 @@ def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
     return record
 
 
+# ms-176 e-6604: the sales grains that are deliberately NOT profession_manifest
+# Target-classes (accounts, ms-143 option A) still own a work-item arm — the same
+# honest seam ``_resolve_evidence_parent`` uses to reach the sales resolvers rather
+# than forcing accounts into the manifest.
+_NON_MANIFEST_WORK_ITEM_ARMS = {"account": "nurturings"}
+
+
+def _evidence_work_item_arm(data: dict, container_id: str) -> tuple:
+    """``(arm, item_type)`` of the work-item arm whose items a piece of evidence on
+    ``container_id`` could have fulfilled — the manifest's declared ``work_item_arm``
+    for a Target-class, falling back to ``_NON_MANIFEST_WORK_ITEM_ARMS`` for the sales
+    grains that are not Target-classes. ``("", None)`` when the container has no
+    work-item arm at all (an acquisition). ``item_type`` discriminates a SHARED arm
+    (dev ``entries`` hold tasks AND commits) exactly as ``iter_work_items`` does."""
+    kind = _wm.target_kind(container_id)
+    try:
+        tc = target_class(data, kind)
+    except ValueError:
+        return _NON_MANIFEST_WORK_ITEM_ARMS.get(kind, ""), None
+    wia = tc.get("work_item_arm") or {}
+    return wia.get("arm") or "", wia.get("item_type")
+
+
+def evidence_link_candidates(data: dict, parent_id: str) -> dict:
+    """The still-open work items a piece of evidence recorded at TARGET grain could
+    have fulfilled (ms-176 e-6604). Pure read — never writes.
+
+    ``add_evidence`` accepts either grain: an act-/nrt- parent nests the record under
+    that work item and stamps ``linked_id`` (the fulfilled 予定), while an opp-/acc-
+    parent files it at Target level with an empty ``linked_id``. Only the first grain
+    feeds the downstream consumers — ``fold_phase_activities`` closes an activity
+    because a Communication links to it, and ``communications_of(linked_id=…)`` is the
+    work-item-grain history. So evidence filed at Target grain while the deal still
+    has open work items is the structural shape of "the記録 did not weld to the予定"
+    (opp-4 dogfood: 13 activities, evidence arm empty).
+
+    This is the DETECTION half; the write is never blocked (SPEC 方針3 / permissive:
+    master=人間 — filing at Target grain is a legitimate choice for a連絡 that
+    fulfills no planned activity). The CLI surface consumes it to echo the candidates
+    plus a ready-to-run re-filing command, so the welding is one step away instead of
+    a thing the caller has to remember.
+
+    Returns ``{"grain", "container_id", "arm", "candidates"}``:
+
+      - ``grain``      ``"work-item"`` when ``parent_id`` already names a work item
+                       (nothing to echo), ``"target"`` at Target grain, ``""`` when
+                       ``parent_id`` is unresolvable (the write raises anyway).
+      - ``candidates`` open (= neither done nor cancelled) work items of the
+                       container as ``{"id", "description", "status"}``, in arm order.
+                       Always empty for the work-item grain."""
+    container, linked_id = sales_entities.resolve_communication_target(
+        data, parent_id)
+    if container is None:
+        return {"grain": "", "container_id": "", "arm": "", "candidates": []}
+    container_id = container.get("id", "")
+    if linked_id:
+        # Already welded to a work item — there is nothing to propose.
+        return {"grain": "work-item", "container_id": container_id,
+                "arm": "", "candidates": []}
+    arm, item_type = _evidence_work_item_arm(data, container_id)
+    candidates = []
+    for item in (container.get(arm, []) or []) if arm else []:
+        if not isinstance(item, dict):
+            continue
+        if item_type is not None and item.get("type") != item_type:
+            continue
+        if not _wm.is_open(item):
+            continue
+        candidates.append({"id": item.get("id", ""),
+                           "description": item.get("description", ""),
+                           "status": _wm.work_item_status(item)})
+    return {"grain": "target", "container_id": container_id, "arm": arm,
+            "candidates": candidates}
+
+
+def format_evidence_link_echo(result: dict, *, evidence_id: str,
+                              limit: int = 8) -> str:
+    """Render ``evidence_link_candidates``' result as the band a recording surface
+    echoes after filing evidence at Target grain (ms-176 e-6604), or ``""`` when
+    there is nothing to say (work-item grain / no open work item / unresolvable).
+
+    Empty-means-silent is the same contract as ``dm_pending.format_pending_dm_summary``
+    — a surface prints this verbatim and shows no section when it is blank, so a deal
+    with no open 予定 produces no noise. The band names the re-filing verb WITH the
+    ids already substituted: the fix has to be cheaper than ignoring it, or the echo
+    decays into another unread warning."""
+    if result.get("grain") != "target":
+        return ""
+    candidates = result.get("candidates") or []
+    if not candidates:
+        return ""
+    container_id = result.get("container_id", "")
+    lines = [f"ℹ この証跡 ({evidence_id}) は {container_id} 直付けで記録しました "
+             f"(満たした予定に紐づいていません)。"]
+    for c in candidates[:limit]:
+        lines.append(f"    [{c['id']}] {c['description']} ({c['status']})")
+    if len(candidates) > limit:
+        lines.append(f"    … 他 {len(candidates) - limit} 件")
+    lines.append(f"  → 満たした予定があるなら綴じ直してください: "
+                 f"beacon communication retarget {evidence_id} <act-/nrt-id> "
+                 f"--reason \"<この証跡がその予定を満たした理由>\"")
+    lines.append("  → どの予定も満たさない連絡ならこのままで正しい "
+                 "(直付けも有効な選択)。")
+    return "\n".join(lines)
+
+
 def iter_work_items(data: dict):
     """Yield ``(work_item, target, arm)`` for every planned work item across
     occupations, profession-agnostically (ms-142 e-5009).

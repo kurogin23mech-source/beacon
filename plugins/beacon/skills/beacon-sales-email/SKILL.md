@@ -258,7 +258,7 @@ PERMALINK_EXIT=$?
 
 ```bash
 # $SOURCE_URL は上の sales_gmail_permalink の出力 (空なら --source-url は実質無効な空文字)。
-BEACON_COMM_TARGET="<act-id または $OPP>" \
+BEACON_COMM_TARGET="<満たした活動の act-id を優先、無ければ $OPP>" \
   BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
   BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
   BEACON_COMM_BODY="<件名 + 本文の骨子>" \
@@ -266,6 +266,12 @@ BEACON_COMM_TARGET="<act-id または $OPP>" \
   BEACON_COMM_SOURCE_URL="$SOURCE_URL" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
+
+証跡は **満たした活動 (act-/nrt-) に紐づけて記録する**のが既定 (ms-176 e-6604)。商談 (opp-) /
+顧客 (acc-) 直付けで記録した場合、CLI がその商談の未消化な活動を候補として echo する — 該当する
+活動が在れば `beacon communication retarget <comm-id> <act-id> --reason "<この証跡がその活動を
+満たした理由>"` で綴じ直す。活動に紐づいた証跡だけが fold の証跡ベース done とフェーズ後始末の
+材料になる。どの活動も満たさない連絡 (お礼・案内のみ 等) なら直付けのままで正しい。
 
 **このメールが返信を必要とする** (日程打診・確認依頼・見積送付後の返答待ち 等) なら、
 その活動に **watch を立てる** — 返信ウォッチャー (E, `/beacon-sales-reply-watch`) が

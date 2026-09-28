@@ -10206,9 +10206,20 @@ def cmd_communication_add():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6604: 証跡が商談/顧客直付け (= 満たした予定に未紐付け) で記録されたら、
+    # その商談の未消化な予定を候補として echo し、綴じ直しコマンドまで出す。DETECTION は
+    # occupation.evidence_link_candidates、整形は format_evidence_link_echo が所管
+    # (空文字なら section ごと出さない contract)。ここが全営業 Skill (メール / 議事録
+    # 取込 / 日次取込) と `beacon communication add` が通る唯一の記録 seam なので、Skill
+    # ごとの prompt 追記ではなくこの 1 箇所で echo を担保する。hard block はしない
+    # (SPEC 方針3 = permissive、直付けも有効な選択)。
+    link_echo = occupation.format_evidence_link_echo(
+        occupation.evidence_link_candidates(data, target_id), evidence_id=comm_id)
     save_project(data)
     print(f"Recorded communication {comm_id} on {target_id} "
           f"({direction}/{channel}): {summary}")
+    if link_echo:
+        print(link_echo)
 
 
 def cmd_communication_cancel():
