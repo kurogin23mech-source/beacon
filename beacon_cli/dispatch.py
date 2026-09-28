@@ -649,6 +649,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_amount.add_argument("opp_id", nargs="?", default="")
     p_opp_amount.add_argument("amount", nargs="?", default="")
 
+    # ms-176 e-6606: 商談そのものの期日を後から設定/クリアする。
+    p_opp_deadline = opp_sub.add_parser("deadline", add_help=False)
+    p_opp_deadline.add_argument("opp_id", nargs="?", default="")
+    p_opp_deadline.add_argument("date", nargs="?", default="")
+    p_opp_deadline.add_argument("--clear", action="store_true")
+
     p_opp_phase_prob = opp_sub.add_parser("phase-prob", add_help=False)
     p_opp_phase_prob.add_argument("phase", nargs="?", default="")
     p_opp_phase_prob.add_argument("prob", nargs="?", default="")
@@ -2867,6 +2873,15 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "BEACON_OPP_AMOUNT": args.amount or "",
         }
         return _run_commands_py(root, "opportunity_amount", env)
+    if cmd == "deadline":
+        if not args.opp_id or (not args.date and not args.clear):
+            print("Usage: beacon opportunity deadline <opp-id> <YYYY-MM-DD> | --clear")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_OPP_DEADLINE": "" if args.clear else (args.date or ""),
+        }
+        return _run_commands_py(root, "opportunity_deadline", env)
     if cmd == "phase-prob":
         if not args.phase or not args.prob:
             print("Usage: beacon opportunity phase-prob <phase> <n>")

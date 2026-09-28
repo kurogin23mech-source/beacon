@@ -1290,6 +1290,32 @@ def set_opportunity_amount(data: dict, opp_id: str, amount) -> dict:
     return occupation.update_entry(data, opp_id, goal_amount=amount)
 
 
+def set_opportunity_deadline(data: dict, opp_id: str, date_str: str) -> dict:
+    """Set (or clear) an opportunity's own ``deadline`` (商談の期日) and return the
+    mutated deal — ms-176 e-6606.
+
+    Until now the deadline could only be given at 起票 (``opportunity add --deadline``)
+    with no way to add or fix it afterwards, so a deal created without one could never
+    appear in the期日 reminders. The 期日 is the deal's own due date read by the L2
+    締切エンジン (``occupation.iter_deadline_candidates``); it is NOT the advance gate's
+    ``transition_date`` (= 判定予定日, when we decide whether the phase is achieved),
+    which is why pointing a 期日 nudge at ``transition-date`` would be wrong.
+
+    ``YYYY-MM-DD`` only; an empty string clears it (= 期日未定に戻す). Patches through
+    the profession-generic ``occupation.update_entry``, mirroring
+    ``set_opportunity_amount``."""
+    import datetime
+    import occupation
+    txt = (date_str or "").strip()
+    if txt:
+        try:
+            datetime.date.fromisoformat(txt)
+        except ValueError:
+            raise ValueError(
+                f"deadline must be YYYY-MM-DD (got {date_str!r})") from None
+    return occupation.update_entry(data, opp_id, deadline=txt)
+
+
 def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
     """Set a per-company win probability (成約率, 0-100) on an opportunity phase
     definition. Config-level edit (per-company funnel tuning). Returns the def."""
@@ -4062,6 +4088,72 @@ def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
         return (True, f"from='{from_value}' は pin された identity と一致")
     return (False, f"from='{from_value}' が pin された identity '{pinned}' と"
                    "一致しません。取り違えの恐れ。送信を止めます")
+
+
+# ---------------------------------------------------------------------------
+# 骨格フィールドの取りこぼし検知 (ms-176 e-6606)
+# ---------------------------------------------------------------------------
+# 想定金額 / 期日 が空のまま残る。「埋めましょう」と促す運動は形骸化するので、見積が
+# 確定した・面談が確定した という **どうせ通る業務イベント** の中で、まだ空いている
+# 骨格フィールドを 1 度だけ差し出す。強度は警告 + 明示スキップ (hard block しない) —
+# 記録の鮮度は後から直せる可逆な問題で、既存の opportunity_phase_warnings (警告のみ、
+# master=人間) と同じ permissive の系列に置く。送信台帳 (e-6608、外部発行で不可逆) だけを
+# hard gate にする非対称が、この MS の設計方針3 / 4 の骨。
+#
+# 成約率 (probability) は意図的に対象外: 見込み売上は goal_amount × **フェーズの**
+# probability で積むので、商談ごとの probability が空でも積み上げは壊れない (フェーズ側の
+# 設定が土台)。「空だが何も壊れないフィールド」を促すと、促し全体が読み飛ばされる。
+
+
+def skeleton_field_gaps(data: dict, opp: dict) -> list:
+    """The deal's still-empty 骨格フィールド with WHY each one matters and HOW to fill
+    it — ``[{"field", "label", "why", "how"}]``, empty when nothing is missing.
+
+    Only fields whose emptiness actually degrades a downstream reader are reported
+    (a gap nobody feels is noise, and noise makes the whole nudge unread):
+
+    * ``goal_amount`` — 見込み売上 (``pipeline_forecast``) は金額 × フェーズ成約率 で
+      積むので、空の商談は 0 円として積まれ、パイプラインが実態より小さく見える。
+    * ``deadline``   — L2 締切エンジン (``occupation.iter_deadline_candidates`` →
+      ``beacon deadline due`` / サーバの締切リマインダ) が拾う商談の期日。空だと
+      その商談は期日リマインダに一度も乗らない (前進ゲートの遷移日は「判定予定日」で
+      あって商談そのものの期日ではない)。
+    """
+    gaps = []
+    if _amount_is_unset(opp.get("goal_amount")) and _amount_is_unset(opp.get("amount")):
+        gaps.append({
+            "field": "goal_amount",
+            "label": "想定金額",
+            "why": "見込み売上 (金額 × フェーズ成約率) に 0 円として積まれ、"
+                   "パイプラインが実態より小さく見えます",
+            "how": f"beacon opportunity amount {opp.get('id', '<opp-id>')} <円>",
+        })
+    if not (opp.get("deadline") or "").strip():
+        gaps.append({
+            "field": "deadline",
+            "label": "期日",
+            "why": "期日リマインダ / 締切精査 (beacon deadline due) にこの商談が"
+                   "一度も乗りません (前進ゲートの遷移日は判定予定日で、商談の期日とは別)",
+            "how": f"beacon opportunity deadline {opp.get('id', '<opp-id>')} "
+                   f"<YYYY-MM-DD>",
+        })
+    return gaps
+
+
+def format_skeleton_gap_echo(gaps: list, *, event: str) -> str:
+    """Render ``skeleton_field_gaps`` as the band a business-event surface echoes, or
+    ``""`` when there is nothing missing (empty-means-silent, same contract as the
+    other echo helpers). ``event`` names the業務イベント this rode in on (例
+    ``"面談を確定しました"``) so the nudge reads as part of the work just done rather
+    than as a standalone scolding."""
+    if not gaps:
+        return ""
+    lines = [f"ℹ {event}。この機会に、まだ空いている商談の骨格を埋めておけます "
+             f"(任意 — 埋めずに進んで構いません):"]
+    for g in gaps:
+        lines.append(f"    {g['label']} が未設定 — {g['why']}")
+        lines.append(f"      → {g['how']}")
+    return "\n".join(lines)
 
 
 # Channels whose evidence means something actually left for the counterpart (=

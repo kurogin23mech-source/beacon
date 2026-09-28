@@ -9124,8 +9124,37 @@ def cmd_opportunity_amount():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6606: 金額を入れた = 見積が固まった瞬間。「どうせ通る」この業務イベントに
+    # 乗せて、まだ空いている骨格フィールド (期日) を差し出す。hard block はしない
+    # (既存の opportunity_phase_warnings と同じ permissive の系列、SPEC 方針3)。
+    import occupation as _occ
+    opp = _occ.find_target(data, opp_id, kind="opportunity")
+    gap_echo = sales_entities.format_skeleton_gap_echo(
+        sales_entities.skeleton_field_gaps(data, opp) if opp else [],
+        event="想定金額を設定しました")
     save_project(data)
     print(f"Set amount on {opp_id}: {amount if amount is not None else '(cleared)'}")
+    if gap_echo:
+        print(gap_echo)
+
+
+def cmd_opportunity_deadline():
+    """商談そのものの期日 (deadline) を後から設定/クリアする — ms-176 e-6606。
+    起票時 (`opportunity add --deadline`) しか入れられず、後から付け直す経路が無かった
+    ため、期日なしで作った商談は期日リマインダに一度も乗れなかった。前進ゲートの遷移日
+    (= 判定予定日、`opportunity transition-date`) とは別物。Env: BEACON_OPP_ID,
+    BEACON_OPP_DEADLINE (空文字でクリア)。"""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    date_str = os.environ.get("BEACON_OPP_DEADLINE", "")
+    data = load_project()
+    try:
+        sales_entities.set_opportunity_deadline(data, opp_id, date_str)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Set deadline on {opp_id}: {date_str.strip() or '(cleared)'}")
 
 
 def cmd_opportunity_rename():
@@ -10346,12 +10375,20 @@ def cmd_meeting_schedule():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6606: 面談確定は「どうせ通る」業務イベント。この機会にまだ空いている
+    # 商談の骨格 (想定金額 / 期日) を差し出す (任意、hard block しない)。
+    opp = sales_entities.find_opportunity(data, opp_id)
+    gap_echo = sales_entities.format_skeleton_gap_echo(
+        sales_entities.skeleton_field_gaps(data, opp) if opp else [],
+        event="面談を確定しました")
     save_project(data)
     tag = sales_entities.meeting_calendar_tag(mtg_id)
     print(f"Scheduled meeting {mtg_id} on {opp_id} at {at}")
     if set_transition:
         print(f"  遷移日 → {at[:10]}")
     print(f"  calendar tag (説明文に埋め込む): {tag}")
+    if gap_echo:
+        print(gap_echo)
 
 
 def cmd_meeting_reschedule():
@@ -10823,6 +10860,7 @@ if __name__ == "__main__":
         "phase_remove": cmd_phase_remove,
         # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
         # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)
+        "opportunity_deadline": cmd_opportunity_deadline,  # ms-176 e-6606
         "sales_identity_set": cmd_sales_identity_set,
         "sales_identity_show": cmd_sales_identity_show,
         "sales_identity_check": cmd_sales_identity_check,

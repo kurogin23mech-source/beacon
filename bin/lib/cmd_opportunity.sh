@@ -111,6 +111,27 @@ cmd_opportunity_amount() {
         python3 "$COMMANDS_PY" opportunity_amount
 }
 
+# ms-176 e-6606: 商談そのものの期日を後から設定/クリアする (起票時しか入れられなかった)。
+# 前進ゲートの遷移日 (= 判定予定日、opportunity transition-date) とは別物。
+cmd_opportunity_deadline() {
+    ensure_project
+    local opp_id="" date_str="" clear_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --clear) clear_flag="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon opportunity deadline <opp-id> <YYYY-MM-DD> | --clear" ;;
+            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else date_str="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || { [ -z "$date_str" ] && [ -z "$clear_flag" ]; }; then
+        echo "Usage: beacon opportunity deadline <opp-id> <YYYY-MM-DD> | --clear"
+        exit 1
+    fi
+    [ -n "$clear_flag" ] && date_str=""
+    BEACON_OPP_ID="$opp_id" BEACON_OPP_DEADLINE="$date_str" \
+        python3 "$COMMANDS_PY" opportunity_deadline
+}
+
 cmd_opportunity_phase_prob() {
     ensure_project
     local phase="" prob=""
