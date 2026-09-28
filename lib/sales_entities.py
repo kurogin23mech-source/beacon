@@ -1686,9 +1686,8 @@ def advance_transition(data: dict, target_id: str, *,
         raise ValueError(
             f"'{cur}' は最終ステージです (次の非terminalフェーズがありません)。"
             "advance ではなく terminal (決着) を宣言してください")
-    gate = current_gate(data, target_id)
-    if gate is not None:
-        settle_gate(data, gate["id"], outcome=GATE_ADVANCE, reason=note, at=at, actor=actor)
+    settle_current_gate(data, target_id, outcome=GATE_ADVANCE, reason=note, at=at,
+                        actor=actor)
     # e-3553: fold the phase we are leaving BEFORE the exclusive phase moves —
     # evidence-linked activities auto-close, the rest surface for a human call.
     fold = fold_phase_activities(data, target_id, cur, at=at, actor=actor)
@@ -1719,9 +1718,8 @@ def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
     if opp is None:
         raise ValueError(f"Opportunity not found: {target_id}")
     cur = opp.get("phase", "")
-    gate = current_gate(data, target_id)
-    if gate is not None:
-        settle_gate(data, gate["id"], outcome=GATE_RETRY, reason=note, at=at, actor=actor)
+    settle_current_gate(data, target_id, outcome=GATE_RETRY, reason=note, at=at,
+                        actor=actor)
     open_advance_gate(data, target_id, phase=cur,
                       transition_date=new_transition_date, at=at)
     return {"phase": cur, "transition_date": get_transition_date(data, target_id)}
@@ -1765,9 +1763,8 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
         raise ValueError(block)
     opp = find_opportunity(data, target_id)
     cur = opp.get("phase", "") if opp else ""
-    gate = current_gate(data, target_id)
-    if gate is not None:
-        settle_gate(data, gate["id"], outcome=GATE_TERMINAL, reason=note, at=at, actor=actor)
+    settle_current_gate(data, target_id, outcome=GATE_TERMINAL, reason=note, at=at,
+                        actor=actor)
     # e-3553: fold the phase being decided out of before the terminal phase is
     # set. On a 決着 there is no "carry" (no next phase), but evidence-linked
     # activities still auto-close and the rest surface for a done/cancel call.
@@ -1812,11 +1809,9 @@ def jump_transition(data: dict, target_id: str, new_phase: str, *,
     if block:
         raise ValueError(block)
     terminal = opportunity_phase_is_terminal(data, new_phase)
-    gate = current_gate(data, target_id)
-    if gate is not None:
-        settle_gate(data, gate["id"],
-                    outcome=(GATE_TERMINAL if terminal else GATE_ADVANCE),
-                    reason=note or "manual phase jump", at=at, actor=actor)
+    settle_current_gate(data, target_id,
+                        outcome=(GATE_TERMINAL if terminal else GATE_ADVANCE),
+                        reason=note or "manual phase jump", at=at, actor=actor)
     rec = phase_set(data, target_id, new_phase, note=note, at=at)
     if not terminal:
         open_advance_gate(data, target_id, phase=new_phase, at=at)
@@ -2346,6 +2341,30 @@ def anchor_opportunity_gate(data: dict, opportunity_id: str,
     return gate, True, synced_date
 
 
+def settle_current_gate(data: dict, target_id: str, *, outcome: str, reason: str = "",
+                        actor: str = "", at: str = "") -> Optional[dict]:
+    """Settle the Opportunity's open前進ゲート for ``outcome`` — the single funnel every
+    phase transition passes through (ms-166 e-6599). Returns the settled gate, or None
+    when none was open.
+
+    advance / retry / terminal / jump each used to inline ``current_gate`` + ``if gate is
+    not None: settle_gate(...)``. That triple hid a silent gap: **when no gate is open the
+    transition still moves the phase, so a judgement happened with nothing recording it.**
+    It is reachable — a corrective ``jump`` out of a決着済み phase (a mistaken 失注 being
+    undone) has no open gate, and so does data that predates the gate model. Routing all
+    four through here means the judgement is captured in BOTH branches: the gate closes
+    when there is one, and the decision is staged either way.
+    """
+    gate = current_gate(data, target_id)
+    if gate is not None:
+        return settle_gate(data, gate["id"], outcome=outcome, reason=reason,
+                           actor=actor, at=at)
+    # 閉じるゲートは無いが、判断そのものは起きている — 記録だけ残す。
+    stage_gate_judgement_decision(find_opportunity(data, target_id), {},
+                                  outcome=outcome, reason=reason, actor=actor)
+    return None
+
+
 def settle_gate(data: dict, gate_id: str, *, outcome: str, reason: str = "",
                 actor: str = "", at: str = "") -> dict:
     """Settle an open advance gate with its判定 outcome and evidence; return it.
@@ -2371,7 +2390,71 @@ def settle_gate(data: dict, gate_id: str, *, outcome: str, reason: str = "",
     work_base.record_audit_event(
         gate.setdefault("history", []), kind="settled",
         reason=reason, actor=actor, at=at, outcome=outcome)
+    # ms-166 e-6599: 判断 (gate judgement) を decision arm に機械発行する。cmd 層では
+    # なくデータ層に置くのは、advance / retry / terminal / jump の 4 遷移がここへ収束
+    # するから (cmd_opportunity_phase→jump_transition は handler を経由せず完遂を発火
+    # しない = ms-174 の jump-bypass 型。同じ穴を再生産しない)。開いたゲートが無い枝は
+    # settle_current_gate 側が拾う。書き込み自体は outbox 経由で保存 seam に遅延させ、
+    # この関数の純粋さ (data in / data out、I/O なし) を保つ。
+    stage_gate_judgement_decision(opp, gate, outcome=outcome, reason=reason, actor=actor)
     return gate
+
+
+def stage_gate_judgement_decision(opp: dict, gate: dict, *, outcome: str,
+                                  reason: str = "", actor: str = "") -> dict:
+    """フェーズ判断を decision として積む (ms-166 e-6599)。積んだ payload を返す。
+
+    ``gate`` は settle したゲート。開いたゲートが無かった遷移では空 dict を渡す
+    (``settle_current_gate`` の else 枝) — 判断は起きているので記録は残す。
+
+    書かずに積むだけ — 実際の書き込みは ``commands_shared.save_project`` が
+    ``decision_outbox.flush`` で行い、**保存後の data でゲートが本当に done になって
+    いること**を述語で確認してからになる。途中で例外が出て保存に至らなかった遷移は、
+    保存 seam を通らないので decision も残らない (= 「判断したことになっているが商談は
+    動いていない」記録が構造的に作れない)。
+
+    載せる内容:
+
+    * ``decision`` = outcome (advance / retry / terminal) = 何を選んだか
+    * ``rationale`` = settle の理由 = なぜ
+    * ``decided_by`` = ``actor`` からの機械導出 (固定文字列にしない、AC)
+    * ``related.target_id`` = 当該 Opportunity (= 判断が指す対象、AC)
+    * ``evidence`` = ゲートの **anchor work item** (その完了が判定を促した面談 / 活動)
+      が在るときだけ。ゲート自身の id は evidence に積まない — それは判断そのものの
+      自己参照で、実 link を持たない決定を非空に見せかける旧挙動 (e-5650 で廃止) の
+      再演になる。空 evidence は「物理的な裏付けの無い判断」という監査シグナルとして
+      正しく残す。位置情報 (opp / phase / gate id) は ``context`` が運ぶ。
+    """
+    import decision_outbox
+    gate = gate or {}
+    gate_id = (gate.get("id") or "").strip()
+    opp_id = ((opp or {}).get("id") or "").strip()
+    phase = (gate.get("phase") or (opp or {}).get("phase") or "").strip()
+    anchor = (gate.get("anchor") or "").strip()
+    payload = {
+        "kind": decision_outbox.GATE_JUDGEMENT_KIND,
+        "decision": outcome,
+        "context": (f"opportunity={opp_id or '?'} phase={phase or '?'} "
+                    f"gate={gate_id or 'none-open'}"),
+        "rationale": (reason or None),
+        "decided_by": decision_outbox.decided_by_for_actor(actor),
+        "evidence": ([f"work-item:{anchor}"] if anchor else []),
+        "related": {"target_id": opp_id or None},
+    }
+    # 開いていたゲートがある形だけ「保存後に本当に done か」を検証できる。開いた
+    # ゲートが無い判断 (決着済みからの corrective jump / ゲート導入前の legacy データ)
+    # は閉じる work item を持たないので述語を付けない — その場合も flush 自体が保存
+    # 成功後にしか走らないので、保存されなかった遷移が decision に残ることはない。
+    verify = (lambda d, _g=gate_id: _gate_is_settled(d, _g)) if gate_id else None
+    return decision_outbox.stage(payload, verify=verify)
+
+
+def _gate_is_settled(data: dict, gate_id: str) -> bool:
+    """``gate_id`` が保存後の ``data`` で実際に done になっているか (outbox の検証述語)。"""
+    if not gate_id:
+        return False
+    _, gate = find_gate(data, gate_id)
+    return bool(gate is not None and gate.get("status") == GATE_DONE)
 
 
 def cancel_gate(data: dict, gate_id: str, *, reason: str = "") -> dict:

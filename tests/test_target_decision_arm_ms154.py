@@ -34,7 +34,10 @@ def _cloud(monkeypatch, fake, *, human=False):
     monkeypatch.setattr(commands_shared, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(commands_shared, "_get_api_client",
                         lambda: (fake, {"project_id": "p1"}))
-    monkeypatch.setattr(cmd_target, "_session_kind_is_human", lambda: human)
+    # ms-166 e-6601 保守性 M-1: ゲート判断の decided_by 写像は commands_shared へ集約した
+    # ので、session kind の差し替えも単一真実源側に当てる (姉妹の
+    # test_pr_review_decision_arm_ms154 / test_review_adjudication_weld_ms166 と同じ点)。
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: human)
 
 
 # --- completion verdict (target approve) ------------------------------------
@@ -97,7 +100,7 @@ def test_completion_verdict_best_effort_swallows(monkeypatch):
         raise SystemExit(1)
     monkeypatch.setattr(commands_shared, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(commands_shared, "_get_api_client", _boom)
-    monkeypatch.setattr(cmd_target, "_session_kind_is_human", lambda: False)
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
     cmd_target._record_completion_verdict_decision("ms-9", "done", _approval_entry(), "x")
 
 

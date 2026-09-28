@@ -6470,7 +6470,7 @@ def _help_registry():
         {"command": "beacon sales target <user> <amount>", "flags": [], "description": "Set a member's 目標売上 (sales quota; empty amount clears)"},
         {"command": "beacon sales target list", "flags": ["--json"], "description": "List members' 目標売上 with their 見込み売上 (weighted pipeline)"},
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
-        {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
+        {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (記録先は前進ゲート列; master=人間). 決着フェーズを宣言すると完遂 (生み出した価値の記帳 + 目的達成 decision) も発火する"},
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
         {"command": "beacon opportunity anchor <opp-id> <work-item-id>", "flags": [], "description": "Bind a meeting or activity (mtg-/act-) as the 発火源 of the open 前進ゲート; its completion fires the phase judgement (idempotent, ownership-checked)"},
         {"command": "beacon opportunity judge <opp-id> advance|retry|terminal", "flags": ["--note <text>"], "description": "Judge a reached 遷移日 (3-way: 次へ/やり直し/決着; human-confirmed, master=人間)"},
@@ -9352,6 +9352,22 @@ def cmd_opportunity_phase():
     if opp_id.startswith("opp-"):
         seeded = sales_entities.instantiate_phase_activities(
             data, opp_id, at=core._now_iso())
+    # ms-166 e-6601: 手動フェーズ宣言で決着 (`beacon opportunity phase <opp> 失注`) しても
+    # 完遂 (= 生み出した価値の記録 + 目的達成 decision) が発火していなかった。判断 (judge)
+    # 経由の決着だけが完遂 seam を叩いており、こちらは checker の terminal handler 台帳にも
+    # 載っていなかったため、穴が機構的に見えないまま残っていた (ms-174 の jump-bypass と同型)。
+    # judge terminal と同じ生成物を出す。on_target_completion は handler 本体から DIRECT に
+    # 呼ぶ (helper へ抽出すると被覆 credit が落ちる — COMPLETION_PRODUCER_CALLS 参照)。
+    # 判定は rec["phase"] (= 実際に設定されたフェーズ) を見る。env 由来の new_phase は
+    # 未 strip で、jump_transition が内部で strip した結果とズレうる (" 失注" で決着した
+    # のに完遂が飛ばない、の類)。書かれた値を真値源にする。
+    # opp は上の警告ブロックで同じガード内に解決済み。jump_transition / phase_set は
+    # その同じ dict をインプレース更新するので、再取得は同じレコードを返すだけになる。
+    if opp_id.startswith("opp-") and \
+            sales_entities.opportunity_phase_is_terminal(data, rec.get("phase", "")):
+        import target_completion
+        target_completion.on_target_completion(data, opp,
+                                               verdict=rec.get("phase", ""), reason=note)
     save_project(data)
     # C-6: opportunities record the change on the advance-gate列 (前進ゲート),
     # not phase_history (that field left the opportunity in the e-3580 fold);

@@ -708,6 +708,32 @@ def _completion_scan_paths() -> list:
     return out
 
 
+def _decision_scan_paths() -> list:
+    """Files the DECISION-capture scan walks — every ``lib/*.py`` + ``server/*.py``.
+
+    Deliberately WIDER than :func:`_completion_scan_paths` (which is the CLI verb family +
+    server). The two axes ask different questions, so they need different populations:
+
+    * completion-seam coverage asks "does every terminable target-CLASS reach the 完遂
+      producer **at a terminal verb handler**" → the handler population is the point.
+    * decision-capture coverage asks "is this judgment kind's producer invoked **anywhere
+      in the system**" → a producer welded into a pure data-layer seam (e.g.
+      ``sales_entities.settle_gate``, the single funnel all four phase transitions pass
+      through — ms-166 e-6599) is genuinely wired, and the narrow handler population would
+      read it as unwired and force the weld back up into the cmd layer, which is precisely
+      the ms-174 jump-bypass shape this MS is removing.
+
+    This also makes the code match what ``find_decision_capture_gaps`` always documented
+    ("across the scanned lib/ + server/ population"). Best-effort parse, same as the
+    completion scan."""
+    out = []
+    for pat in (os.path.join(REPO, "lib", "*.py"), os.path.join(REPO, "server", "*.py")):
+        for p in sorted(glob.glob(pat)):
+            if os.path.exists(p):
+                out.append(p)
+    return out
+
+
 def _direct_call_tokens(trees: list) -> dict:
     """Return ``{function_name: {call_token, ...}}`` for every function across ``trees``,
     where a call_token is the bare name (``foo(...)``) or attribute attr
@@ -835,20 +861,214 @@ def find_completion_seam_gaps() -> list:
 
     gaps = []
     for kind, gate in targets:
-        if kind == cl.DESCRIPTOR_TERMINAL_SENTINEL:
-            handlers = cl.DESCRIPTOR_TERMINAL_HANDLERS
-        else:
-            handlers = cl.COMPLETION_TERMINAL_HANDLERS.get(kind, ())
-        # A GATE_SPINE class also reaches terminal through the shared review-gated approve
-        # path (which writes the decision generically).
-        if gate == _ts.GATE_SPINE:
-            handlers = tuple(handlers) + cl.SHARED_SPINE_TERMINAL_HANDLERS
+        # ms-166 e-6601: the terminal-handler set (descriptor sentinel + the GATE_SPINE
+        # shared approve path) comes from ONE accessor shared with the terminal-derivation
+        # check, so the two cannot drift on which handlers count for a class.
+        handlers = cl.terminal_handlers_for(kind, gate_is_spine=(gate == _ts.GATE_SPINE))
         for dim in cl.COMPLETION_DIMENSIONS:
             if not _reaches(handlers, cl.COMPLETION_PRODUCER_CALLS.get(dim, frozenset())):
                 status, advice = cl.classify_completion_seam(kind, dim)
                 gaps.append({"class": kind, "dimension": dim, "terminals": list(handlers),
                              "status": status, "advice": advice})
     return sorted(gaps, key=lambda g: (g["class"], g["dimension"]))
+
+
+def _definition_sites(trees: list) -> list:
+    """Every function DEFINITION SITE as ``(chain, own_call_tokens)`` (ms-166 e-6601).
+
+    ``chain`` is the enclosing name path outermost-last (e.g. a closure ``op`` inside route
+    ``done_milestone`` inside ``make_router`` → ``["op", "done_milestone", "make_router"]``).
+    ``own_call_tokens`` are the calls in that function's OWN body, excluding nested ``def``s
+    (innermost attribution, matching :func:`_direct_call_tokens`).
+
+    Per-SITE rather than per-NAME because this check asks "which addressable entry point
+    reaches a terminal?", and bare names cannot answer it in this codebase: dozens of routes
+    use a nested ``def op(...)`` transaction callback, so keying by name merges them into one
+    phantom function, while folding every nested def into its outermost parent merges all of
+    ``server/routers_projects.py`` into ``make_router``. Keeping the chain lets the caller ask
+    "is this site, or anything it lives inside, accounted for in the台帳?" — which is the
+    real question and needs no name heuristics."""
+    sites = []
+
+    def _tok(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return None
+
+    def _own_tokens(fn_node):
+        tokens = set()
+        nested = {n for n in ast.walk(fn_node)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n is not fn_node}
+        nested_nodes = set()
+        for n in nested:
+            nested_nodes |= set(ast.walk(n))
+        for node in ast.walk(fn_node):
+            if isinstance(node, ast.Call) and node not in nested_nodes:
+                t = _tok(node.func)
+                if t:
+                    tokens.add(t)
+        return tokens
+
+    def _walk(node, chain):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                here = [child.name] + chain
+                sites.append((here, _own_tokens(child)))
+                _walk(child, here)
+            elif isinstance(child, ast.ClassDef):
+                _walk(child, [child.name] + chain)
+
+    for _rel, tree, _funcs in trees:
+        _walk(tree, [])
+    return sites
+
+
+_SITES_CACHE: dict = {}
+
+
+def _route_entry_points(trees: list) -> set:
+    """Names of HTTP route handlers — functions decorated with ``@router.<verb>`` /
+    ``@app.<verb>`` (ms-166 e-6601). Together with the ``cmd_`` prefix these are the two
+    shapes of ENTRY POINT the完遂台帳 ever names (``done_milestone`` is a route, the rest are
+    CLI verb handlers), derived from the code rather than re-listed by hand."""
+    names: set = set()
+    for _rel, tree, _funcs in trees:
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for deco in node.decorator_list:
+                f = deco.func if isinstance(deco, ast.Call) else deco
+                if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                        and f.value.id in ("router", "app")):
+                    names.add(node.name)
+                    break
+    return names
+
+
+def _completion_scan_index() -> dict:
+    """``{"sites": [...], "routes": {...}}`` over the completion scan population, parsed once
+    per process. The AST walk is this script's expensive part and both terminal-derivation
+    checks need the same index. Source files cannot change mid-run, so one cache is safe; the
+    ledger tables the checks read are NOT cached (tests monkeypatch them to inject synthetic
+    drift and must still see fresh results)."""
+    if not _SITES_CACHE:
+        trees = _load_trees(_completion_scan_paths())
+        _SITES_CACHE["sites"] = _definition_sites(trees)
+        _SITES_CACHE["routes"] = _route_entry_points(trees)
+    return _SITES_CACHE
+
+
+def _terminal_reaching_names(sites: list, prims: set) -> set:
+    """Every function NAME that reaches ``prims`` — directly or through other functions.
+
+    A least-fixed-point over the call graph, and the reason this check cannot stop at direct
+    calls: ``cmd_target_approve`` writes a milestone terminal through ``_apply_transition``,
+    so a direct-call-only rule would have to exempt that helper by hand — and then a NEW entry
+    point calling the same helper would inherit the exemption and slip through unseen (a hole
+    of exactly the kind this MS exists to remove). Names are merged across modules, which
+    over-approximates; over-approximation fails SAFE here (more paths look terminal-reaching,
+    so more entry points must be accounted for, never fewer)."""
+    by_name: dict = {}
+    for chain, tokens in sites:
+        by_name.setdefault(chain[0], set()).update(tokens)
+    reaching = set(prims)
+    changed = True
+    while changed:
+        changed = False
+        for name, tokens in by_name.items():
+            if name not in reaching and (tokens & reaching):
+                reaching.add(name)
+                changed = True
+    return reaching
+
+
+def _unregistered_terminal_rows(sites: list, routes: set, cls: str, prims: set,
+                                registered: set) -> list:
+    """The ENTRY POINTS reaching ``cls``'s terminal that the台帳 does not account for.
+
+    An entry point is a ``cmd_*`` verb handler or an HTTP route (:func:`_route_entry_points`)
+    — the only two shapes ``COMPLETION_TERMINAL_HANDLERS`` ever names. An entry point reaches
+    the terminal when its body, or any closure nested inside it, calls something in
+    :func:`_terminal_reaching_names` (server routes do their writing inside a nested ``def op``
+    transaction callback, so the nesting must count as the route's own body). Anything left
+    after removing the registered names is a path that closes a target without the台帳
+    knowing — so the完遂 seam check never asks whether it fires完遂, and it silently doesn't."""
+    reaching = _terminal_reaching_names(sites, prims)
+    rows = []
+    seen = set()
+    for chain, tokens in sites:
+        hit = tokens & reaching
+        if not hit:
+            continue
+        # the nearest enclosing entry point (a closure is its route's / verb's own body)
+        entry = next((name for name in chain
+                      if name.startswith("cmd_") or name in routes), "")
+        if not entry or entry in registered or entry in seen:
+            continue
+        seen.add(entry)
+        status, advice = cl.classify_unregistered_terminal(cls, entry)
+        rows.append({"class": cls, "function": entry, "primitives": sorted(hit),
+                     "registered": sorted(registered), "status": status,
+                     "advice": advice})
+    return rows
+
+
+def find_unregistered_terminal_gaps() -> list:
+    """terminal 到達経路の AST 導出 (ms-166 e-6601): 完遂 terminal を **手で** 並べた台帳
+    ``COMPLETION_TERMINAL_HANDLERS`` の *列挙漏れ* 自体を機構で検出する。
+
+    既存の完遂 seam 被覆 (:func:`find_completion_seam_gaps`) は「台帳に載っている handler が
+    producer を呼ぶか」を問う。台帳に **載っていない** 経路はその問いの外に居るので、決着に
+    到達しながら完遂 (deliverable + 目的達成 decision) を出さずに素通りできた。実際
+    ``cmd_opportunity_phase`` (手動フェーズ宣言 → jump_transition → 決着) がそれで、ms-174 の
+    jump-bypass と同じ「1 経路だけ塞いで構造で閉じたと誤称する」形だった。
+
+    この検査は逆から問う: ``cl.COMPLETION_TERMINAL_PRIMITIVES`` が宣言する **terminal 状態を
+    書くデータ層 primitive** に (直接またはヘルパ経由で) 届く **入口** — ``cmd_*`` verb か
+    HTTP route — を AST から導出し、台帳に載っていないものを violation にする。宣言するのが
+    handler ではなく primitive なのが要点: handler は verb を足すたびに増えるが terminal を
+    書く primitive は増えないので、台帳の手入れを忘れた側が赤くなる。
+
+    到達判定を **推移的** にしている理由は :func:`_terminal_reaching_names` を参照 (直接呼び
+    だけを見て「登録済 handler が呼ぶヘルパは免除」とすると、同じヘルパを呼ぶ新しい入口が
+    その免除を相続して素通りする = ここで消している穴と同じ形が checker 側に生まれる)。
+
+    走査母集団は :func:`_completion_scan_paths` (= CLI verb family + server)。
+
+    判断族は混ぜない (e-6599 独立 judge の語彙混同 finding): 商談の ``settle_current_gate`` は
+    advance / retry も通る **判断** の漏斗であって完遂の漏斗ではない。混ぜると advance が完遂
+    扱いになって壊れる。判断族は :func:`find_decision_capture_gaps` が別軸で見る。
+
+    各要素は ``{class, function, primitives, registered, status, advice}``。``status`` は
+    ``pending_debt`` (``KNOWN_UNREGISTERED_TERMINAL`` で受理済) か ``new_violation`` (新規、
+    checker を FAIL させる)。"""
+    index = _completion_scan_index()
+    spine_kinds = {kind for kind, gate in _terminable_builtin_classes()
+                   if gate == _ts.GATE_SPINE}
+    gaps = []
+    for cls in sorted(cl.COMPLETION_TERMINAL_PRIMITIVES):
+        gaps.extend(_unregistered_terminal_rows(
+            index["sites"], index["routes"], cls,
+            set(cl.COMPLETION_TERMINAL_PRIMITIVES[cls]),
+            set(cl.terminal_handlers_for(cls, gate_is_spine=(cls in spine_kinds)))))
+    return gaps
+
+
+def find_unregistered_spine_terminal_gaps() -> list:
+    """GATE_SPINE 共有承認経路 (beacon target approve) の導出被覆 (ms-166 e-6601)。
+
+    :func:`find_unregistered_terminal_gaps` の姉妹。クラス別 primitive ではなく、全 GATE_SPINE
+    クラスが共有する承認 primitive (``cl.SHARED_SPINE_TERMINAL_PRIMITIVES``) を呼ぶ関数が
+    ``SHARED_SPINE_TERMINAL_HANDLERS`` に載っているかを見る。共有経路はクラスに紐づかないので
+    別関数にしている (クラス別ループに混ぜると全クラス分の重複 violation が出る)。"""
+    index = _completion_scan_index()
+    return _unregistered_terminal_rows(
+        index["sites"], index["routes"], "*shared-spine*",
+        set(cl.SHARED_SPINE_TERMINAL_PRIMITIVES),
+        set(cl.SHARED_SPINE_TERMINAL_HANDLERS))
 
 
 def find_decision_capture_gaps() -> list:
@@ -863,12 +1083,14 @@ def find_decision_capture_gaps() -> list:
     Population = ``cl.DECISION_CAPTURE_PRODUCERS`` keys (kept in agreement with
     ``decision_event.KNOWN_DECISION_KINDS`` by ``test_decision_capture_covers_known_kinds``
     so the checker stays server-import-free). A producer is WIRED when its token is invoked
-    at ≥1 site across the scanned lib/ + server/ population (same wired-ness test as
-    ``find_producer_coverage_gaps``). Returns the gaps — each
+    (or dispatch-registered) at ≥1 site across :func:`_decision_scan_paths` — the FULL
+    lib/ + server/ population, wider than the completion-seam scan, so a producer welded
+    into a pure data-layer seam counts (see that function for why the two axes differ).
+    Returns the gaps — each
     ``{kind, producers, status, advice}``. ``status`` (via ``cl.classify_decision_capture``)
     is ``pending_debt`` (allowlisted in ``KNOWN_DECISION_CAPTURE_GAP``) or ``new_violation``
     (a fresh unwired kind that FAILS the checker)."""
-    trees = _load_trees(_completion_scan_paths())
+    trees = _load_trees(_decision_scan_paths())
     # Wiredness counts INVOCATIONS + dispatch REGISTRATIONS (not every identifier): a producer
     # may be a builder the routes CALL, or a CLI verb handler the dispatch table REGISTERS by
     # reference (cmd_decision_record). Both mean "hooked into the system"; a bare local/param
@@ -973,13 +1195,23 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     all_decision_capture = find_decision_capture_gaps()
     new_decision_capture = [g for g in all_decision_capture if g["status"] == "new_violation"]
     pending_decision_capture = [g for g in all_decision_capture if g["status"] == "pending_debt"]
+    # Terminal-enumeration coverage (ms-166 e-6601) — a THIRD axis: the completion-seam check
+    # above asks "does a REGISTERED terminal reach the producer", which says nothing about a
+    # terminal that was never registered. This derives terminal-reaching entry points from the
+    # code and fails on one the台帳 does not account for (the cmd_opportunity_phase hole).
+    all_unregistered_terminal = (find_unregistered_terminal_gaps()
+                                 + find_unregistered_spine_terminal_gaps())
+    new_unregistered_terminal = [g for g in all_unregistered_terminal
+                                 if g["status"] == "new_violation"]
+    pending_unregistered_terminal = [g for g in all_unregistered_terminal
+                                     if g["status"] == "pending_debt"]
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
           and not new_symbol and not new_collection and not new_arm
           and not new_iterator_narrowing
           and not l0_leak and not l0_skill_leak
           and not producer_coverage and not new_completion_seam
-          and not new_decision_capture)
+          and not new_decision_capture and not new_unregistered_terminal)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
             # the canonical family-token list — iterate this × {all,new,pending,
@@ -1023,7 +1255,12 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
             # = the unwired-kind gaps by status (new fails CI, pending is allowlisted debt).
             "all_decision_capture": all_decision_capture,
             "new_decision_capture": new_decision_capture,
-            "pending_decision_capture": pending_decision_capture}
+            "pending_decision_capture": pending_decision_capture,
+            # terminal-enumeration coverage (ms-166 e-6601) — its own axis again: an entry
+            # point that reaches a terminal but is absent from COMPLETION_TERMINAL_HANDLERS.
+            "all_unregistered_terminal": all_unregistered_terminal,
+            "new_unregistered_terminal": new_unregistered_terminal,
+            "pending_unregistered_terminal": pending_unregistered_terminal}
 
 
 def render_proposal(prop: dict) -> None:
@@ -1266,13 +1503,30 @@ def main() -> int:
               f"producer then drop from KNOWN_DECISION_CAPTURE_GAP):")
         for g in pending_dcap:
             print(f"    · kind '{g['kind']}' produces no decision yet")
+    # Terminal-enumeration coverage (ms-166 e-6601) — a terminal path missing from the台帳.
+    new_term = result["new_unregistered_terminal"]
+    pending_term = result["pending_unregistered_terminal"]
+    if new_term:
+        print(f"  NEW UNREGISTERED TERMINAL ({len(new_term)}) — a path reaches a completion "
+              f"terminal but is not in COMPLETION_TERMINAL_HANDLERS (ms-166):")
+        for g in new_term:
+            print(f"    - {g['class']}: '{g['function']}' calls "
+                  f"{', '.join(g['primitives'])} (registered: "
+                  f"{', '.join(g['registered']) or '—'})")
+            print(f"      → {g['advice']}")
+    if pending_term:
+        print(f"  pending unregistered terminal ({len(pending_term)}, allowlisted — register "
+              f"the handler then drop from KNOWN_UNREGISTERED_TERMINAL):")
+        for g in pending_term:
+            print(f"    · {g['class']}: '{g['function']}' reaches a terminal unregistered")
     if result["ok"]:
         print("  OK: every capability is classified, no profession-shared capability "
               "reaches a profession concrete (no NEW symbol reach / collection coupling / "
               "arm coupling / iterator narrowing), every L2 completion-dimension has a "
               "producer reached by every terminable class (no producer-coverage or "
-              "完遂-seam gap), and every judgment-seam decision kind has a wired producer "
-              "(no decision-capture gap).")
+              "完遂-seam gap), every judgment-seam decision kind has a wired producer "
+              "(no decision-capture gap), and every code path reaching a completion "
+              "terminal is accounted for in the台帳 (no unregistered terminal).")
     else:
         print("  → Fix the items above, then re-run "
               "python3 scripts/check-capability-scope.py:")

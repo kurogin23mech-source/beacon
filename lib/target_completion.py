@@ -31,16 +31,16 @@ import deliverable_capture as _dc
 def _record_completion_decision(target: dict, verdict: str, reason: str) -> None:
     """Record a 完遂 (目的達成) verdict for ``target`` on the decision arm — best-effort,
     cloud-only (ms-163 e-5880). ``verdict`` is what the completion settled to (the terminal
-    phase / status / "done"); ``reason`` is the why. No-ops in local mode. decided_by follows
-    the human/AI session signal (a completion verdict is human-owned; an AI-assisted session
-    is AI-proposed-human-chose), matching ``cmd_target._decided_by_for_gate``.
+    phase / status / "done"); ``reason`` is the why. No-ops in local mode. decided_by comes from
+    the shared ``commands_shared.decided_by_for_gate`` (ms-166 e-6601 保守性 M-1 — 旧: この
+    写像を 3 箇所に別コピーし、docstring で「matching ...」と注記し合うだけで共有していなかった)。
 
     ms-166 e-5978: the write-failure contract (a failed audit write is LOGGED, not silently
     swallowed, and never breaks the completion flow) is the single source
     ``commands_shared.best_effort_completion_decision`` — shared with the milestone/target
     approve path so the two never drift."""
     from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
-                                 _get_api_client, _session_kind_is_human)
+                                 _get_api_client, decided_by_for_gate)
     tid = ((target or {}).get("id") or "").strip()
     with best_effort_completion_decision(tid, verdict):
         if not _is_cloud_mode():
@@ -51,8 +51,7 @@ def _record_completion_decision(target: dict, verdict: str, reason: str) -> None
         project_id = config.get("project_id", "")
         if not project_id:
             return
-        decided_by = "human-delegated" if _session_kind_is_human() \
-            else "AI-proposed-human-chose"
+        decided_by = decided_by_for_gate()
         client.record_decision(project_id, {
             "kind": "completion-verdict",
             "decision": (verdict or "done"),
