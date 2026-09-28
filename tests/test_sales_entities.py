@@ -477,27 +477,45 @@ def test_send_identity_set_requires_value():
 
 
 def test_check_send_from_no_pin_blocks():
+    # 台帳も pin も無い素の状態: ms-176 e-6608 以降は先に台帳の hard gate が効く
+    # (どちらの理由でも「止まる」ことは不変)。
     ok, msg = se.check_send_from(_fresh(), "anyone@corp.example")
+    assert ok is False and "台帳が空" in msg
+    # 台帳は在るが default pin が無い (かつ label 指定なし) → 従来の「未設定」
+    data = _fresh()
+    se.add_send_account(data, "会社", "sales@corp.example")
+    ok, msg = se.check_send_from(data, "anyone@corp.example")
     assert ok is False and "未設定" in msg
+
+
+# ms-176 e-6608: 台帳が空だと check_send_from は legacy bare pin でも通さなくなった
+# (外部発行は取り消せないので permissive の意図的な例外 = hard gate)。以下 3 本は
+# legacy bare pin の照合そのものを見るテストなので、台帳に別 label を 1 件置いて
+# 「土台は在るが pin は台帳 entry でない」= legacy 経路が生きる条件に揃える。
+# 台帳が空のときの hard gate 自体は tests/test_send_ledger_hard_gate_ms176.py。
+def _legacy_pin(data, pinned: str):
+    """台帳は非空 (無関係な 1 件)、pin は台帳に無い bare email。"""
+    se.add_send_account(data, "別アカウント", "other@corp.example")
+    se.set_send_identity(data, pinned)
 
 
 def test_check_send_from_empty_from_blocks():
     data = _fresh()
-    se.set_send_identity(data, "sales@corp.example")
+    _legacy_pin(data, "sales@corp.example")
     ok, msg = se.check_send_from(data, "")
     assert ok is False and "空" in msg
 
 
 def test_check_send_from_match_ok():
     data = _fresh()
-    se.set_send_identity(data, "Sales@Corp.Example")
+    _legacy_pin(data, "Sales@Corp.Example")
     ok, _ = se.check_send_from(data, "sales@corp.example")  # case-insensitive
     assert ok is True
 
 
 def test_check_send_from_mismatch_blocks():
     data = _fresh()
-    se.set_send_identity(data, "sales@corp.example")
+    _legacy_pin(data, "sales@corp.example")
     ok, msg = se.check_send_from(data, "personal@gmail.example")
     assert ok is False and "取り違え" in msg
 

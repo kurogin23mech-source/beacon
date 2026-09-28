@@ -10232,11 +10232,19 @@ def cmd_communication_add():
     # (SPEC 方針3 = permissive、直付けも有効な選択)。
     link_echo = occupation.format_evidence_link_echo(
         occupation.evidence_link_candidates(data, target_id), evidence_id=comm_id)
+    # ms-176 e-6608 (検知側): 外部への送信が台帳無しで記録された = 送信前ゲートが
+    # 呼ばれなかった証拠。送信自体は MCP tool 経由で Beacon が止められないので、
+    # 記録の時点で「次の送信の前に登録せよ」と出す (記録は止めない — 事実の記録を
+    # 失う方が害が大きい)。
+    ledger_warning = sales_entities.send_ledger_gap_warning(
+        data, direction=direction, channel=channel)
     save_project(data)
     print(f"Recorded communication {comm_id} on {target_id} "
           f"({direction}/{channel}): {summary}")
     if link_echo:
         print(link_echo)
+    if ledger_warning:
+        print(ledger_warning)
 
 
 def cmd_communication_cancel():

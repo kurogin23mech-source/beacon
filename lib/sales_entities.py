@@ -4017,11 +4017,27 @@ def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
     * No ledger entry resolves → legacy bare-string pin compare (back-compat).
 
     Branches (either path):
+    * 台帳が空                  → ok=False, HARD GATE (ms-176 e-6608, below).
     * Nothing pinned/configured → ok=False, ask to pin/register first.
     * from empty                → ok=False, from must be explicit.
     * matches (case/space-insensitive) → ok=True.
     * mismatch                  → ok=False, name both so the human sees it.
+
+    ms-176 e-6608 — 台帳が空なら、たとえ legacy の bare pin と from が一致していても
+    通さない (意図的な hard gate)。営業の既定は permissive (警告するが止めない、master=
+    人間) だが、送信アカウントの取り違えは「別人格の Google アカウントから顧客にメールが
+    飛ぶ」外部発行で、取り消せない。可逆な記録の鮮度 (骨格フィールドの未反映など) とは
+    強度を変えるのが筋で、ここは permissive の例外として停止させる。実データで「照合ゲート
+    は在るのに台帳が空のまま運用を始められた」= ゲートが土台無しで素通りしていた穴を、
+    ゲート自身が閉じる形に直す。
     """
+    if not list_send_accounts(data):
+        return (False,
+                "送信アカウント台帳が空です。取り違え照合の土台が無いまま送信はしません "
+                "(ms-176 e-6608 = 外部発行は取り消せないため、ここは止めます)。"
+                "先に登録してください: BEACON_SEND_LABEL=\"<会社/個人など呼び名>\" "
+                "BEACON_SEND_EMAIL=\"<アドレス>\" python3 \"$(beacon _lib-path)/commands.py\" "
+                "sales_account_add")
     target = label.strip() if (label and label.strip()) else get_send_identity(data)
     entry = get_send_account(data, target) if target else None
     if entry is not None:
@@ -4046,6 +4062,35 @@ def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
         return (True, f"from='{from_value}' は pin された identity と一致")
     return (False, f"from='{from_value}' が pin された identity '{pinned}' と"
                    "一致しません。取り違えの恐れ。送信を止めます")
+
+
+# Channels whose evidence means something actually left for the counterpart (=
+# 外部発行). A meeting / phone note is a記録 of a conversation, not a send through
+# one of our accounts, so it carries no send-account foundation requirement.
+OUTWARD_SEND_CHANNELS = ("email", "slack")
+
+
+def send_ledger_gap_warning(data: dict, *, direction: str, channel: str) -> str:
+    """The band a surface echoes when an OUTBOUND send on an external channel was
+    recorded while the send-account ledger is still empty (ms-176 e-6608), or ``""``
+    when it does not apply (inbound / internal channel / ledger already registered).
+
+    The hard gate in ``check_send_from`` only bites when it is actually called; the
+    send itself leaves through an MCP tool that Beacon cannot intercept. So this is
+    the detection half: evidence of an outward send with no ledger behind it means
+    the gate was bypassed, and the next send will be too unless someone registers
+    the account. Empty-means-silent, same contract as the other echo helpers."""
+    if direction != COMM_OUTBOUND:
+        return ""
+    if _norm(channel) not in OUTWARD_SEND_CHANNELS:
+        return ""
+    if list_send_accounts(data):
+        return ""
+    return ("⚠ 送信アカウント台帳が空のまま、外部への送信 (" + (channel or "") + ") が"
+            "記録されました。取り違え照合 (送信前ゲート) が土台無しで機能していません。"
+            "次の送信の前に登録してください: BEACON_SEND_LABEL=\"<呼び名>\" "
+            "BEACON_SEND_EMAIL=\"<アドレス>\" python3 \"$(beacon _lib-path)/commands.py\" "
+            "sales_account_add")
 
 
 # ---------------------------------------------------------------------------
