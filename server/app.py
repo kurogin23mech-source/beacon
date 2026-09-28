@@ -1748,8 +1748,8 @@ _ATTENTIVE_HEARTBEAT_MAX_AGE_S = int(
 # ms-159 (e-6245): post-death grace window for the work-unit state projection.
 # bus_liveness.derive_state consults it ONLY on the not-live path — a session
 # whose transport just dropped keeps its last declared state for this long
-# before flipping to `unknown` (a just-crashed session is indistinguishable from
-# a brief pause for a few minutes). While LIVE the declaration is trusted
+# before flipping to `interrupted` (ms-177; was `unknown`) — a just-crashed
+# session is indistinguishable from a brief pause for a few minutes. While LIVE the declaration is trusted
 # regardless of age (the heartbeat re-affirms it), so this is NOT a general
 # freshness clock. Env-overridable.
 _STATE_DECL_GRACE_S = int(
@@ -1976,7 +1976,11 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # ms-159 (e-6245): project the canonical work-unit `state` + `state_since`
     # onto the row so `bus directory --json` (and the attention面) can read them.
     # `state` is derived from the session's self-declaration (方針1) with the
-    # server filling `unknown` in the gap (方針1/判断4); see bus_liveness.derive_state.
+    # server filling the non-declarable states in the gap: `unknown` (live but
+    # never stated) and `interrupted` (ms-177: was working, transport died without
+    # `session end`); see bus_liveness.derive_state. This stamp is a pure pass-
+    # through of the derivation — the range widens by adding a state to
+    # bus_liveness.ALL_STATES, with no change needed here (e-6641).
     declared_state = session.get("declared_state") or ""
     declared_at = session.get("declared_at") or ""
     state = bus_liveness.derive_state(
@@ -1985,10 +1989,13 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # `state_since` = when the session entered `state`. When the derived state
     # matches what the session declared, the hook-tracked entry time is authoritative
     # (preserved across re-declarations, so a long wait sorts correctly). When the
-    # server INFERRED a divergent state (unknown / fallback terminated), the marker's
-    # state_since is for a now-superseded state, so fall back to the freshest known
-    # timestamp as a best-effort "since" (unknown/terminated are not sorted in the
-    # attention面, so precision there is not load-bearing).
+    # server INFERRED a divergent state (unknown / interrupted / fallback
+    # terminated), the marker's state_since is for a now-superseded state, so fall
+    # back to the freshest known timestamp as a best-effort "since". `declared_at`
+    # is tried FIRST, which is what makes this adequate for `interrupted` (ms-177):
+    # the last declaration is the last moment the session was known to be working,
+    # i.e. roughly when it was cut off — the sensible "中断 since" for the ops room
+    # and for the roster's oldest-first ordering.
     if state == declared_state and declared_state:
         session["state_since"] = (session.get("state_since") or declared_at
                                   or session.get("last_poll_at") or "")
