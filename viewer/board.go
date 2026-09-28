@@ -166,7 +166,10 @@ type SessionRow struct {
 	// Harness は端末の種類 (apple-terminal / iterm2 等)。端末へ飛ぶ分岐に使う。
 	Harness string `json:"harness"`
 	// State はサーバが導出する正典の作業状態 (running / idle / awaiting_human /
-	// blocked / terminated / unknown、lib/bus_liveness.derive_state が所管)。
+	// blocked / terminated / interrupted / unknown、lib/bus_liveness.derive_state
+	// が所管)。interrupted = 作業中のまま受信経路が途切れた「中断」 (ms-177) で、
+	// 人が幕を引いた terminated (= 正常終了) とは別物 — 運用室はこの 2 つを別の
+	// 見た目に割るので、ここで両者を畳んではならない。
 	// awaiting_human = 質問・選択肢・許可で人を待っている。ローカル道具の申告
 	// (busy/idle) とは別系統なので、SessionOverview では server_state として運ぶ
 	// (e-6562 — 確認待ち判定の源)。

@@ -88,8 +88,13 @@ type SessionOverview struct {
 	// (ms-159 e-6533, #755 review AX-F1/F2)。
 	ActivityKind string `json:"activity_kind,omitempty"`
 	// ServerState はサーバが導出する正典の作業状態 (running / idle /
-	// awaiting_human / blocked / terminated / unknown)。**State (ローカル道具の
-	// busy/idle 申告) とは別系統** — 出自を混ぜない (e-6454 と同じ原則)。
+	// awaiting_human / blocked / terminated / interrupted / unknown)。**State
+	// (ローカル道具の busy/idle 申告) とは別系統** — 出自を混ぜない (e-6454 と
+	// 同じ原則)。
+	// 止まり方の判定源: interrupted は「作業中のまま受信経路が途切れた」= 中断
+	// (端末を閉じた・エラーで落ちた・コンテキスト制限で終わった) で、人が
+	// `beacon session end` で幕を引いた terminated とは別物 (ms-177)。運用室は
+	// これを赤い「中断」として既定で表示し、「終了」だけを畳む。
 	// 確認待ち (橙) の判定源: awaiting_human は「質問・選択肢・許可で人を待って
 	// いる」の宣言そのものなので、待機内容 (Activity) が引けなくても確認待ちに
 	// する (e-6562 — 内容の有無と待っている事実を混同しない)。
