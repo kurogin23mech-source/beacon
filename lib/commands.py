@@ -9352,6 +9352,21 @@ def cmd_opportunity_phase():
     if opp_id.startswith("opp-"):
         seeded = sales_entities.instantiate_phase_activities(
             data, opp_id, at=core._now_iso())
+    # ms-166 e-6601: 手動フェーズ宣言で決着 (`beacon opportunity phase <opp> 失注`) しても
+    # 完遂 (= 生み出した価値の記録 + 目的達成 decision) が発火していなかった。判断 (judge)
+    # 経由の決着だけが完遂 seam を叩いており、こちらは checker の terminal handler 台帳にも
+    # 載っていなかったため、穴が機構的に見えないまま残っていた (ms-174 の jump-bypass と同型)。
+    # judge terminal と同じ生成物を出す。on_target_completion は handler 本体から DIRECT に
+    # 呼ぶ (helper へ抽出すると被覆 credit が落ちる — COMPLETION_PRODUCER_CALLS 参照)。
+    # 判定は rec["phase"] (= 実際に設定されたフェーズ) を見る。env 由来の new_phase は
+    # 未 strip で、jump_transition が内部で strip した結果とズレうる (" 失注" で決着した
+    # のに完遂が飛ばない、の類)。書かれた値を真値源にする。
+    if opp_id.startswith("opp-") and \
+            sales_entities.opportunity_phase_is_terminal(data, rec.get("phase", "")):
+        import target_completion
+        done_opp = occupation.find_target(data, opp_id, kind="opportunity")
+        target_completion.on_target_completion(data, done_opp,
+                                               verdict=rec.get("phase", ""), reason=note)
     save_project(data)
     # C-6: opportunities record the change on the advance-gate列 (前進ゲート),
     # not phase_history (that field left the opportunity in the e-3580 fold);

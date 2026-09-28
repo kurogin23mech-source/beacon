@@ -905,7 +905,10 @@ COMPLETION_PRODUCER_CALLS = {
 COMPLETION_TERMINAL_HANDLERS = {
     "milestone": ("cmd_milestone_done", "done_milestone"),
     "operation": ("cmd_operation_close",),
-    "opportunity": ("cmd_opportunity_judge",),
+    # ms-166 e-6601: cmd_opportunity_phase (手動フェーズ宣言) も決着に到達する 2 本目の経路。
+    # 手で並べていたこの表に載っていなかったため「決着したのに完遂が発火しない」穴が機構的に
+    # 見えなかった。COMPLETION_TERMINAL_PRIMITIVES からの AST 導出がこの行の欠落を赤くする。
+    "opportunity": ("cmd_opportunity_judge", "cmd_opportunity_phase"),
     "acquisition": ("cmd_acquisition_status",),
 }
 # Descriptor-defined classes share ONE generic terminal (``beacon target close``); keyed
@@ -924,6 +927,90 @@ DESCRIPTOR_TERMINAL_HANDLERS = ("cmd_target_close",)
 # not deliverable — operation stays a deliverable gap, milestone gets deliverable from its
 # own ``cmd_milestone_done`` seam.
 SHARED_SPINE_TERMINAL_HANDLERS = ("cmd_target_approve",)
+
+# --- terminal 到達経路の AST 導出 (ms-166 e-6601) ---------------------------------
+#
+# 上の COMPLETION_TERMINAL_HANDLERS は「どの handler が完遂を閉じるか」を **手で** 並べた表
+# で、その列挙漏れ自体は誰も検査していなかった。実際 cmd_opportunity_phase (手動フェーズ宣言
+# → jump_transition → 決着) が抜けており、「決着したのに完遂が発火しない」穴が checker から
+# 不可視のまま残った (ms-174 の jump-bypass と同型の、1 経路だけ塞いで構造で閉じたと誤称する
+# 病理)。
+#
+# そこで「どの handler が terminal に到達するか」を手の列挙ではなく **コードから導出** する。
+# ここで宣言するのは handler ではなく、terminal 状態を実際に書く **データ層の primitive**
+# (= 少数で安定。handler は verb を足すたびに増えるが、terminal を書く primitive は増えない)。
+# checker はこの primitive を呼ぶ関数を AST で洗い出し、COMPLETION_TERMINAL_HANDLERS に
+# 載っていない経路を violation にする。
+#
+# **判断族を混ぜないこと** (e-6599 独立 judge の語彙混同 finding): 商談の
+# ``settle_current_gate`` / ``settle_gate`` は advance / retry / terminal / jump の全部が
+# 通る **判断 (judgement)** の漏斗であって完遂の漏斗ではない。ここに混ぜると advance が
+# 完遂扱いになって壊れる。判断族は DECISION_CAPTURE_PRODUCERS の 'gate-judgement' 行が
+# 別軸で見ている。
+COMPLETION_TERMINAL_PRIMITIVES = {
+    "milestone": frozenset({"milestone_done"}),
+    "operation": frozenset({"operation_close"}),
+    # terminal_transition = 決着宣言、jump_transition = 手動宣言 (宣言先が terminal なら決着)。
+    # advance_transition / retry_transition は構造的に terminal へ到達しない (advance は次の
+    # 非 terminal フェーズが無ければ raise、retry は同フェーズ維持) ので primitive ではない。
+    "opportunity": frozenset({"terminal_transition", "jump_transition"}),
+    "acquisition": frozenset({"acquisition_set_status"}),
+    # descriptor 定義クラスは共通の close (beacon target close) 1 本で決着する。
+    DESCRIPTOR_TERMINAL_SENTINEL: frozenset({"close_target"}),
+}
+
+# GATE_SPINE クラスが共有する承認経路 (beacon target approve) の terminal primitive。
+SHARED_SPINE_TERMINAL_PRIMITIVES: frozenset = frozenset({"_apply_transition"})
+
+# Ratchet allowlist: terminal に到達するのに COMPLETION_TERMINAL_HANDLERS へ未登録な関数を
+# 「債務として受理」する一方通行の許可リスト。``(class_kind, function_name)`` で持つ。
+# 登録したら **行を消す** (``test_no_stale_unregistered_terminal_allowlist`` が削除を強制
+# するので、許可リストが嘘に腐ることを防ぐ)。EMPTY today: e-6601 で cmd_opportunity_phase を登録 +
+# 完遂発火を配線したので受理済みの穴は無い。新しい未登録経路は FAIL する。
+KNOWN_UNREGISTERED_TERMINAL: frozenset = frozenset()
+
+
+def is_known_unregistered_terminal(cls: str, fn: str) -> bool:
+    """``(cls, fn)`` が受理済みの未登録 terminal 経路か (ms-166 e-6601)。"""
+    return (cls, fn) in KNOWN_UNREGISTERED_TERMINAL
+
+
+def classify_unregistered_terminal(cls: str, fn: str) -> tuple:
+    """未登録の terminal 到達経路を ``(status, advice)`` に分類する (ms-166 e-6601)。
+
+      * ``("pending_debt", advice)`` — ``KNOWN_UNREGISTERED_TERMINAL`` で受理済み。
+      * ``("new_violation", advice)`` — 新規。checker を FAIL させる。
+
+    ``reviewed_correct`` は無い: terminal に到達するのに台帳へ載っていない経路が「設計上
+    正しい」ことはない (載せないと完遂被覆の検査対象にならず、そこだけ静かに素通りする)。
+    """
+    advice = (
+        f"'{fn}' は {cls} の terminal 状態を書く primitive を呼んでいるが "
+        f"COMPLETION_TERMINAL_HANDLERS['{cls}'] に載っていない。台帳に無い経路は完遂被覆の"
+        f"検査対象にならないので、そこだけ完遂 (deliverable + 目的達成 decision) を発火せずに"
+        f"素通りできてしまう。この関数を台帳に足し、その本体から "
+        f"target_completion.on_target_completion を DIRECT に呼ぶこと。terminal へ到達しない"
+        f"経路なら primitive の宣言 (COMPLETION_TERMINAL_PRIMITIVES) 側が広すぎる。")
+    if is_known_unregistered_terminal(cls, fn):
+        return "pending_debt", advice
+    return "new_violation", advice
+
+
+def terminal_handlers_for(cls: str, *, gate_is_spine: bool = False) -> tuple:
+    """``cls`` の完遂 terminal handler 集合 (ms-166 e-6601 — 2 つの検査の単一ソース)。
+
+    descriptor sentinel は共通の ``beacon target close``、GATE_SPINE クラスは共有の
+    ``beacon target approve`` を加える。完遂 seam 被覆と terminal 導出被覆がこの 1 関数を
+    共有するので、片方だけが spine を足し忘れて判定がずれることが起きない。
+    """
+    if cls == DESCRIPTOR_TERMINAL_SENTINEL:
+        handlers = tuple(DESCRIPTOR_TERMINAL_HANDLERS)
+    else:
+        handlers = tuple(COMPLETION_TERMINAL_HANDLERS.get(cls, ()))
+    if gate_is_spine:
+        handlers = handlers + tuple(SHARED_SPINE_TERMINAL_HANDLERS)
+    return handlers
+
 
 # Ratchet allowlist for accepted-pending completion-seam gaps (owner ms-163). Each entry
 # is (class_kind, dimension) — a terminable class whose completion does NOT yet reach the
