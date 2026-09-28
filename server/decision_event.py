@@ -52,6 +52,9 @@ KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
         "dm-send", "trek-review", "scope-approval", "halt", "resume",
         # ms-154 decision arm の捕獲対象 (e-5592 / e-5593 / e-5594)
         "task-done", "completion-verdict", "review-adjudication", "log-backstop",
+        # ms-166 e-6599: 判断 (gate judgement) = 対象を次のどの状態へ倒すか の決定。
+        # 完遂 (completion-verdict) とは別族 — advance / retry は完遂ではない。
+        "gate-judgement",
     }
 )
 

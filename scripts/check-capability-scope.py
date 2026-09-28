@@ -708,6 +708,32 @@ def _completion_scan_paths() -> list:
     return out
 
 
+def _decision_scan_paths() -> list:
+    """Files the DECISION-capture scan walks — every ``lib/*.py`` + ``server/*.py``.
+
+    Deliberately WIDER than :func:`_completion_scan_paths` (which is the CLI verb family +
+    server). The two axes ask different questions, so they need different populations:
+
+    * completion-seam coverage asks "does every terminable target-CLASS reach the 完遂
+      producer **at a terminal verb handler**" → the handler population is the point.
+    * decision-capture coverage asks "is this judgment kind's producer invoked **anywhere
+      in the system**" → a producer welded into a pure data-layer seam (e.g.
+      ``sales_entities.settle_gate``, the single funnel all four phase transitions pass
+      through — ms-166 e-6599) is genuinely wired, and the narrow handler population would
+      read it as unwired and force the weld back up into the cmd layer, which is precisely
+      the ms-174 jump-bypass shape this MS is removing.
+
+    This also makes the code match what ``find_decision_capture_gaps`` always documented
+    ("across the scanned lib/ + server/ population"). Best-effort parse, same as the
+    completion scan."""
+    out = []
+    for pat in (os.path.join(REPO, "lib", "*.py"), os.path.join(REPO, "server", "*.py")):
+        for p in sorted(glob.glob(pat)):
+            if os.path.exists(p):
+                out.append(p)
+    return out
+
+
 def _direct_call_tokens(trees: list) -> dict:
     """Return ``{function_name: {call_token, ...}}`` for every function across ``trees``,
     where a call_token is the bare name (``foo(...)``) or attribute attr
@@ -863,12 +889,14 @@ def find_decision_capture_gaps() -> list:
     Population = ``cl.DECISION_CAPTURE_PRODUCERS`` keys (kept in agreement with
     ``decision_event.KNOWN_DECISION_KINDS`` by ``test_decision_capture_covers_known_kinds``
     so the checker stays server-import-free). A producer is WIRED when its token is invoked
-    at ≥1 site across the scanned lib/ + server/ population (same wired-ness test as
-    ``find_producer_coverage_gaps``). Returns the gaps — each
+    (or dispatch-registered) at ≥1 site across :func:`_decision_scan_paths` — the FULL
+    lib/ + server/ population, wider than the completion-seam scan, so a producer welded
+    into a pure data-layer seam counts (see that function for why the two axes differ).
+    Returns the gaps — each
     ``{kind, producers, status, advice}``. ``status`` (via ``cl.classify_decision_capture``)
     is ``pending_debt`` (allowlisted in ``KNOWN_DECISION_CAPTURE_GAP``) or ``new_violation``
     (a fresh unwired kind that FAILS the checker)."""
-    trees = _load_trees(_completion_scan_paths())
+    trees = _load_trees(_decision_scan_paths())
     # Wiredness counts INVOCATIONS + dispatch REGISTRATIONS (not every identifier): a producer
     # may be a builder the routes CALL, or a CLI verb handler the dispatch table REGISTERS by
     # reference (cmd_decision_record). Both mean "hooked into the system"; a bare local/param

@@ -999,6 +999,8 @@ DECISION_CAPTURE_PRODUCERS = {
     "resume": frozenset({"decision_event_from_halt"}),
     "review-adjudication": frozenset({"_record_review_decision"}),
     "log-backstop": frozenset({"cmd_decision_record"}),
+    # ms-166 e-6599: 判断 seam は営業の商談ゲート settle (全 4 遷移の唯一の漏斗)。
+    "gate-judgement": frozenset({"stage_gate_judgement_decision"}),
     # 導出 kind (KNOWN_DECISION_KINDS 外だが判断軌跡の一級 source): PR intent から導出。
     # Must be listed in DECISION_CAPTURE_DERIVED_KINDS below (the orphan-guard's exception set).
     "pr-intent": frozenset({"build_pr_intent_decision"}),

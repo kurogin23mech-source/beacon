@@ -340,6 +340,13 @@ def save_project(data, op=None):
         raise
     if op:
         _append_changelog(op)
+    # ms-166 e-6599: 純粋なデータ層 seam (sales_entities.settle_gate 等) が積んだ
+    # decision を、保存が成功した **後で** 書き出す。ここが唯一の flush 点なので、
+    # verb ごとの溶接コードは要らない (= 新しい判断 seam を足しても cmd 層は無改造)。
+    # 保存前に例外が出た経路はそもそもここへ来ないので、保存されていない判断が
+    # decision として残ることは構造的に無い。
+    import decision_outbox
+    decision_outbox.flush(data)
 
 
 def verify_cloud_write_persisted(predicate, *, what: str, reader=None) -> None:
