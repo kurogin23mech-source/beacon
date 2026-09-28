@@ -281,6 +281,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity phase <opp-id> <phase> [--note <text>]` | Move an opportunity to a new phase (recorded in history) / 商談のフェーズを変更（履歴に記録） |
 | `beacon opportunity assign <opp-id> <user>` | Set the assignee (担当ユーザー) on an opportunity / 商談の担当ユーザーを設定 |
 | `beacon opportunity amount <opp-id> <amount>` | Set the deal amount (金額) on an opportunity / 商談の金額を設定 |
+| `beacon opportunity deadline <opp-id> <YYYY-MM-DD>` \| `--clear` | Set/clear the opportunity's own deadline (期日) — read by the deadline engine, distinct from the advance gate's transition date / 商談自身の期日を後から設定・クリア (前進ゲートの遷移日とは別物) |
 | `beacon opportunity describe <opp-id> <text>` | Set an opportunity's 背景/経緯/メモ (free-text; empty clears) / 商談の背景メモを設定 |
 | `beacon opportunity rename <opp-id> <new-title>` | Rename an opportunity's title / 商談名の変更 (e-3909) |
 | `beacon acquisition add "<title>" [--description <text>] [--assignee <user>]` | Add a 顧客獲得ターゲット (取引先の無い獲得・準備作業の器) / 顧客獲得ターゲットを追加 |

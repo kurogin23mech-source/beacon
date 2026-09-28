@@ -115,20 +115,30 @@ cmd_opportunity_amount() {
 # 前進ゲートの遷移日 (= 判定予定日、opportunity transition-date) とは別物。
 cmd_opportunity_deadline() {
     ensure_project
-    local opp_id="" date_str="" clear_flag=""
+    # ms-176 独立 AX レビュー (high): <YYYY-MM-DD> と --clear は「期日を設定する /
+    # クリアする」で意味が排他。両方渡したとき --clear が黙って勝つと、指定した日付が
+    # 無言で捨てられ AI は成功したと誤認する。姉妹コマンド transition-date が e-3909 で
+    # 同じ穴を塞いでいるので、同じ形 (別変数で受けて明示的に排他判定) に揃える。
+    local opp_id="" pos_date="" clear_flag=""
+    local _usage="Usage: beacon opportunity deadline <opp-id> (<YYYY-MM-DD> | --clear)   # 商談自身の期日 (前進ゲートの判定日 = transition-date とは別物)"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --clear) clear_flag="1"; shift ;;
-            -?*) _guard_positional "$1" "Usage: beacon opportunity deadline <opp-id> <YYYY-MM-DD> | --clear" ;;
-            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else date_str="$1"; fi; shift ;;
+            -?*) _guard_positional "$1" "$_usage" ;;
+            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else pos_date="$1"; fi; shift ;;
         esac
     done
-    if [ -z "$opp_id" ] || { [ -z "$date_str" ] && [ -z "$clear_flag" ]; }; then
-        echo "Usage: beacon opportunity deadline <opp-id> <YYYY-MM-DD> | --clear"
+    if [ -n "$clear_flag" ] && [ -n "$pos_date" ]; then
+        echo "Error: <YYYY-MM-DD> と --clear は排他です (期日を設定する か クリアする かのどちらか一方)。" >&2
+        echo "$_usage" >&2
+        exit 2
+    fi
+    if [ -z "$opp_id" ] || { [ -z "$clear_flag" ] && [ -z "$pos_date" ]; }; then
+        echo "$_usage"
         exit 1
     fi
-    [ -n "$clear_flag" ] && date_str=""
-    BEACON_OPP_ID="$opp_id" BEACON_OPP_DEADLINE="$date_str" \
+    # --clear passes an empty date through (set_opportunity_deadline treats it as clear).
+    BEACON_OPP_ID="$opp_id" BEACON_OPP_DEADLINE="$pos_date" \
         python3 "$COMMANDS_PY" opportunity_deadline
 }
 

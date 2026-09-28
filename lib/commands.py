@@ -6451,6 +6451,7 @@ def _help_registry():
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart", "--assignee <user>"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
         {"command": "beacon opportunity amount <opp-id> <amount>", "flags": [], "description": "Set an opportunity's 金額 (goal_amount, 円)"},
+        {"command": "beacon opportunity deadline <opp-id> <YYYY-MM-DD>", "flags": ["--clear"], "description": "Set/clear an opportunity's own 期日 (deadline — 締切エンジンが読む商談の期日。前進ゲートの遷移日とは別物)"},
         {"command": "beacon opportunity describe <opp-id> <text>", "flags": [], "description": "Set an opportunity's 背景/経緯/メモ (free-text; empty clears)"},
         {"command": "beacon opportunity rename <opp-id> <new-title>", "flags": [], "description": "Rename an opportunity's title (e-3909; parallels milestone rename)"},
         {"command": "beacon acquisition add <title>", "flags": ["--description <text>", "--assignee <user>"], "description": "Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器; 営業専用)"},
@@ -9127,8 +9128,7 @@ def cmd_opportunity_amount():
     # ms-176 e-6606: 金額を入れた = 見積が固まった瞬間。「どうせ通る」この業務イベントに
     # 乗せて、まだ空いている骨格フィールド (期日) を差し出す。hard block はしない
     # (既存の opportunity_phase_warnings と同じ permissive の系列、SPEC 方針3)。
-    import occupation as _occ
-    opp = _occ.find_target(data, opp_id, kind="opportunity")
+    opp = occupation.find_target(data, opp_id, kind="opportunity")
     gap_echo = sales_entities.format_skeleton_gap_echo(
         sales_entities.skeleton_field_gaps(data, opp) if opp else [],
         event="想定金額を設定しました")
@@ -10088,21 +10088,28 @@ def cmd_activity_update():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6605 + 独立 AX レビュー (misleading): 確認行に出すボールは、他の全読み手
+    # (opportunity list --json / project_targets / overdue_activities) と同じ effective_ball
+    # にする。同じ who_has_the_ball が 1 つの出力内で 2 つの値に見えると、確認行だけ読んだ
+    # AI は盤面と食い違ったまま作業を続ける。宣言と導出が食い違うときは 1 度でまとめて
+    # 「出る値 / 宣言は土台 / 直すのは証跡側」を言い、復旧コマンドには実 comm-id を埋める
+    # (プレースホルダのままにしない = この差分が自ら掲げた基準)。
+    opp, _item = sales_entities.find_activity(data, act_id)
+    shown = sales_entities.effective_ball(opp, act) if opp else \
+        act.get("who_has_the_ball", "")
+    declared = act.get("who_has_the_ball", "")
     save_project(data)
     print(f"activity {act_id} updated "
-          f"(deadline={act.get('deadline', '')}, ball={act.get('who_has_the_ball', '')})")
-    # ms-176 e-6605: ボールは証跡からの導出が優先される (手で宣言した値は証跡が無い
-    # ときの土台)。宣言と導出が食い違うときは黙って無視せず、盤面に出る値と
-    # 食い違いの直し方を伝える (取消 / 綴じ直しが正しい直し方で、宣言の上書きではない)。
-    if ball:
-        opp, item = sales_entities.find_activity(data, act_id)
-        derived = sales_entities.derive_ball(opp, linked_id=act_id) if opp else None
-        if derived and derived != act.get("who_has_the_ball", ""):
-            print(f"  ℹ 盤面に出るボールは証跡からの導出値 '{derived}' です "
-                  f"(宣言した '{ball}' は証跡が無いときの土台)。"
-                  f"導出を変えるには証跡側を直します: 誤記録なら "
-                  f"`beacon communication cancel <comm-id> --reason ...`、"
-                  f"綴じ先違いなら `beacon communication retarget <comm-id> <act-id>`")
+          f"(deadline={act.get('deadline', '')}, ball={shown})")
+    if ball and opp is not None and shown != declared:
+        evidence = sales_entities.communications_of(
+            opp, linked_id=act_id, include_cancelled=False)
+        comm_id = evidence[-1].get("id", "") if evidence else ""
+        print(f"  ℹ 盤面に出るボールは証跡 {comm_id} からの導出値 '{shown}' です "
+              f"(宣言した '{declared}' は証跡が無いときの土台)。"
+              f"導出を変えるには証跡側を直します: 誤記録なら "
+              f"beacon communication cancel {comm_id} --reason \"<理由>\"、"
+              f"綴じ先違いなら beacon communication retarget {comm_id} <act-/nrt-id>")
 
 
 def cmd_opportunity_contract_add():

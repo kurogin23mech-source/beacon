@@ -191,3 +191,12 @@ def test_activity_update_discloses_when_the_declaration_is_overridden(tmp_path,
     # 宣言が黙って効かないのではなく、盤面に出る値と直し方を伝える
     assert "導出値" in out and THEIRS in out
     assert "communication cancel" in out and "retarget" in out
+    # 独立 AX レビュー (misleading) の 2 点を釘付けにする:
+    # (1) 確認行そのものが他の読み手と同じ値 (導出値) を出す — 同じ who_has_the_ball が
+    #     1 つの出力内で 2 つの値に見えてはならない。
+    assert f"ball={THEIRS}" in out and f"ball={SELF}" not in out
+    # (2) 復旧コマンドは実際の comm-id を埋める (プレースホルダのまま出さない)。
+    assert "<comm-id>" not in out
+    comm_id = se.communications_of(se.find_opportunity(data, opp_id),
+                                   linked_id=a1, include_cancelled=False)[-1]["id"]
+    assert f"communication cancel {comm_id}" in out

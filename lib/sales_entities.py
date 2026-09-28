@@ -4069,9 +4069,12 @@ def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
         return (False,
                 "送信アカウント台帳が空です。取り違え照合の土台が無いまま送信はしません "
                 "(ms-176 e-6608 = 外部発行は取り消せないため、ここは止めます)。"
-                "先に登録してください: BEACON_SEND_LABEL=\"<会社/個人など呼び名>\" "
+                "登録は /beacon-sales-email の Step 2 (送信アカウントの登録) が正規の経路です。"
+                "その Step が実際に叩く内部コマンドは "
+                "BEACON_SEND_LABEL=\"<会社/個人など呼び名>\" "
                 "BEACON_SEND_EMAIL=\"<アドレス>\" python3 \"$(beacon _lib-path)/commands.py\" "
-                "sales_account_add")
+                "sales_account_add です (この登録は公開 verb を持たない内部コマンド。"
+                "beacon <名詞> <動詞> の形を探しても見つかりません)")
     target = label.strip() if (label and label.strip()) else get_send_identity(data)
     entry = get_send_account(data, target) if target else None
     if entry is not None:
@@ -4188,9 +4191,11 @@ def send_ledger_gap_warning(data: dict, *, direction: str, channel: str) -> str:
         return ""
     return ("⚠ 送信アカウント台帳が空のまま、外部への送信 (" + (channel or "") + ") が"
             "記録されました。取り違え照合 (送信前ゲート) が土台無しで機能していません。"
-            "次の送信の前に登録してください: BEACON_SEND_LABEL=\"<呼び名>\" "
-            "BEACON_SEND_EMAIL=\"<アドレス>\" python3 \"$(beacon _lib-path)/commands.py\" "
-            "sales_account_add")
+            "次の送信の前に登録してください — 正規の経路は /beacon-sales-email の Step 2 "
+            "(送信アカウントの登録)。その Step が叩く内部コマンドは "
+            "BEACON_SEND_LABEL=\"<呼び名>\" BEACON_SEND_EMAIL=\"<アドレス>\" "
+            "python3 \"$(beacon _lib-path)/commands.py\" sales_account_add "
+            "(公開 verb は無いので beacon <名詞> <動詞> の形では見つかりません)")
 
 
 # ---------------------------------------------------------------------------

@@ -2874,8 +2874,17 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         }
         return _run_commands_py(root, "opportunity_amount", env)
     if cmd == "deadline":
+        usage = ("Usage: beacon opportunity deadline <opp-id> (<YYYY-MM-DD> | --clear)"
+                 "   # 商談自身の期日 (前進ゲートの判定日 = transition-date とは別物)")
+        # ms-176 独立 AX レビュー (high): 日付と --clear の同時指定を黙って片方優先に
+        # しない (transition-date が e-3909 で置いたガードと同型)。
+        if args.clear and args.date:
+            print("Error: <YYYY-MM-DD> と --clear は排他です (期日を設定する か "
+                  "クリアする かのどちらか一方)。", file=sys.stderr)
+            print(usage, file=sys.stderr)
+            return 2
         if not args.opp_id or (not args.date and not args.clear):
-            print("Usage: beacon opportunity deadline <opp-id> <YYYY-MM-DD> | --clear")
+            print(usage)
             return 1
         env = {
             "BEACON_OPP_ID": args.opp_id or "",

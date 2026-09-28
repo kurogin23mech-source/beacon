@@ -171,6 +171,61 @@ def test_no_echo_when_the_skeleton_is_complete(tmp_path, monkeypatch, capsys):
     assert "Scheduled meeting" in out and "未設定" not in out
 
 
+def _local_project(tmp_path, data, name="cliproj"):
+    cwd = tmp_path / name
+    (cwd / ".beacon").mkdir(parents=True)
+    (cwd / ".beacon" / "project.json").write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return cwd
+
+
+def test_date_and_clear_are_refused_together_on_both_frontends(tmp_path):
+    """<YYYY-MM-DD> と --clear の同時指定は拒否する (独立 AX レビュー high)。
+
+    黙って --clear を優先すると、指定した日付が無言で捨てられ、AI は成功したと誤認する
+    (成功終了 + 期日クリア)。姉妹コマンド transition-date が e-3909 で同じ穴を塞いでいるので
+    同じ形に揃えた。ここでは **両フロントが実際に refuse し、記録が変わらない** ことを見る
+    (配線の存在確認ではなく挙動)。"""
+    import subprocess
+    root = Path(__file__).parent.parent
+    data, opp_id = _deal()
+    se.set_opportunity_deadline(data, opp_id, "2026-12-31")
+    cwd = _local_project(tmp_path, data)
+
+    def _stored():
+        saved = json.loads(
+            (cwd / ".beacon" / "project.json").read_text(encoding="utf-8"))
+        return se.find_opportunity(saved, opp_id)["deadline"]
+
+    # bash フロント
+    r = subprocess.run(["bash", str(root / "bin" / "beacon"), "opportunity", "deadline",
+                        opp_id, "2027-03-01", "--clear"],
+                       cwd=str(cwd), capture_output=True, text=True)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "排他" in r.stderr
+    assert _stored() == "2026-12-31"        # 記録は一切動かない
+
+    # Python dispatch フロント (Windows / pipx 経路)
+    sys.path.insert(0, str(root))
+    from beacon_cli import dispatch as d
+    import os
+    prev = os.getcwd()
+    os.chdir(cwd)
+    try:
+        assert d.dispatch(root, ["opportunity", "deadline", opp_id,
+                                 "2027-03-01", "--clear"]) == 2
+    finally:
+        os.chdir(prev)
+    assert _stored() == "2026-12-31"
+
+    # 片方だけなら通る (ガードが正常系を塞いでいない)
+    r_ok = subprocess.run(["bash", str(root / "bin" / "beacon"), "opportunity", "deadline",
+                           opp_id, "2027-03-01"],
+                          cwd=str(cwd), capture_output=True, text=True)
+    assert r_ok.returncode == 0, r_ok.stdout + r_ok.stderr
+    assert _stored() == "2027-03-01"
+
+
 def test_the_deadline_verb_is_wired_on_both_cli_frontends():
     # 両フロント配線 (bin/beacon の bash 経路と Python dispatch の argparse 経路)。
     # 片方だけだと Windows / pipx 利用者が invalid choice で落ちる (ms-44 e-1171)。
@@ -182,5 +237,11 @@ def test_the_deadline_verb_is_wired_on_both_cli_frontends():
     dispatch_src = (root / "beacon_cli" / "dispatch.py").read_text(encoding="utf-8")
     assert 'opp_sub.add_parser("deadline"' in dispatch_src
     assert '"opportunity_deadline", env' in dispatch_src
-    assert "opportunity_deadline" in \
-        (LIB / "commands.py").read_text(encoding="utf-8")
+    commands_src = (LIB / "commands.py").read_text(encoding="utf-8")
+    assert "opportunity_deadline" in commands_src
+    # 単一真実源である help 台帳 (_help_registry) と README にも載っていること。
+    # 台帳に無いと beacon help / README は『コマンドが無い』と答え、cli-drift ガードは
+    # 台帳ごと欠けているため自己無矛盾で沈黙する (独立保守性レビュー medium)。
+    assert "beacon opportunity deadline <opp-id> <YYYY-MM-DD>" in commands_src
+    assert "beacon opportunity deadline <opp-id> <YYYY-MM-DD>" in \
+        (root / "README.md").read_text(encoding="utf-8")
