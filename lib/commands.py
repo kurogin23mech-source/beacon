@@ -6451,6 +6451,7 @@ def _help_registry():
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart", "--assignee <user>"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
         {"command": "beacon opportunity amount <opp-id> <amount>", "flags": [], "description": "Set an opportunity's 金額 (goal_amount, 円)"},
+        {"command": "beacon opportunity deadline <opp-id> <YYYY-MM-DD>", "flags": ["--clear"], "description": "Set/clear an opportunity's own 期日 (deadline — 締切エンジンが読む商談の期日。前進ゲートの遷移日とは別物)"},
         {"command": "beacon opportunity describe <opp-id> <text>", "flags": [], "description": "Set an opportunity's 背景/経緯/メモ (free-text; empty clears)"},
         {"command": "beacon opportunity rename <opp-id> <new-title>", "flags": [], "description": "Rename an opportunity's title (e-3909; parallels milestone rename)"},
         {"command": "beacon acquisition add <title>", "flags": ["--description <text>", "--assignee <user>"], "description": "Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器; 営業専用)"},
@@ -9124,8 +9125,36 @@ def cmd_opportunity_amount():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6606: 金額を入れた = 見積が固まった瞬間。「どうせ通る」この業務イベントに
+    # 乗せて、まだ空いている骨格フィールド (期日) を差し出す。hard block はしない
+    # (既存の opportunity_phase_warnings と同じ permissive の系列、SPEC 方針3)。
+    opp = occupation.find_target(data, opp_id, kind="opportunity")
+    gap_echo = sales_entities.format_skeleton_gap_echo(
+        sales_entities.skeleton_field_gaps(data, opp) if opp else [],
+        event="想定金額を設定しました")
     save_project(data)
     print(f"Set amount on {opp_id}: {amount if amount is not None else '(cleared)'}")
+    if gap_echo:
+        print(gap_echo)
+
+
+def cmd_opportunity_deadline():
+    """商談そのものの期日 (deadline) を後から設定/クリアする — ms-176 e-6606。
+    起票時 (`opportunity add --deadline`) しか入れられず、後から付け直す経路が無かった
+    ため、期日なしで作った商談は期日リマインダに一度も乗れなかった。前進ゲートの遷移日
+    (= 判定予定日、`opportunity transition-date`) とは別物。Env: BEACON_OPP_ID,
+    BEACON_OPP_DEADLINE (空文字でクリア)。"""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    date_str = os.environ.get("BEACON_OPP_DEADLINE", "")
+    data = load_project()
+    try:
+        sales_entities.set_opportunity_deadline(data, opp_id, date_str)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Set deadline on {opp_id}: {date_str.strip() or '(cleared)'}")
 
 
 def cmd_opportunity_rename():
@@ -9229,7 +9258,12 @@ def cmd_opportunity_list():
         # projected symmetrically (e-5203): the cockpit reads gate_needs_anchor AND
         # needs_transition_date as facts, not one翼 from a flag and the other from a
         # raw gates[] walk. Projection only — not persisted onto the record.
+        # ms-176 e-6605: who_has_the_ball も投影で上書きする。生のレコードをそのまま
+        # 出すと、コックピット (この JSON の主な読み手) は起票時の宣言値を読み続け、
+        # やり取り後も全商談が「自分のボール」に見える。derive_ball を唯一の規則に
+        # 保ったまま、読み手に出す値だけを導出優先にする (記録は書き換えない)。
         enriched = [{**o,
+                     "who_has_the_ball": sales_entities.effective_ball(o),
                      "gate_needs_anchor": sales_entities.gate_needs_anchor(data, o["id"]),
                      "needs_transition_date": sales_entities.needs_transition_date(data, o["id"])}
                     for o in opps]
@@ -9250,7 +9284,7 @@ def cmd_opportunity_list():
             continue
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
-        ball = o.get("who_has_the_ball", "")
+        ball = sales_entities.effective_ball(o)  # ms-176 e-6605: 導出優先
         # e-3580 fold: 遷移日は商談ではなく open な前進ゲートが持つ。
         td = sales_entities.get_transition_date(data, o["id"])
         # 遷移日 = 判定予定日 (SPEC §2/§3). 判定待ちの overdue/due は距離を強調して促す。
@@ -10070,9 +10104,28 @@ def cmd_activity_update():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6605 + 独立 AX レビュー (misleading): 確認行に出すボールは、他の全読み手
+    # (opportunity list --json / project_targets / overdue_activities) と同じ effective_ball
+    # にする。同じ who_has_the_ball が 1 つの出力内で 2 つの値に見えると、確認行だけ読んだ
+    # AI は盤面と食い違ったまま作業を続ける。宣言と導出が食い違うときは 1 度でまとめて
+    # 「出る値 / 宣言は土台 / 直すのは証跡側」を言い、復旧コマンドには実 comm-id を埋める
+    # (プレースホルダのままにしない = この差分が自ら掲げた基準)。
+    opp, _item = sales_entities.find_activity(data, act_id)
+    shown = sales_entities.effective_ball(opp, act) if opp else \
+        act.get("who_has_the_ball", "")
+    declared = act.get("who_has_the_ball", "")
     save_project(data)
     print(f"activity {act_id} updated "
-          f"(deadline={act.get('deadline', '')}, ball={act.get('who_has_the_ball', '')})")
+          f"(deadline={act.get('deadline', '')}, ball={shown})")
+    if ball and opp is not None and shown != declared:
+        evidence = sales_entities.communications_of(
+            opp, linked_id=act_id, include_cancelled=False)
+        comm_id = evidence[-1].get("id", "") if evidence else ""
+        print(f"  ℹ 盤面に出るボールは証跡 {comm_id} からの導出値 '{shown}' です "
+              f"(宣言した '{declared}' は証跡が無いときの土台)。"
+              f"導出を変えるには証跡側を直します: 誤記録なら "
+              f"beacon communication cancel {comm_id} --reason \"<理由>\"、"
+              f"綴じ先違いなら beacon communication retarget {comm_id} <act-/nrt-id>")
 
 
 def cmd_opportunity_contract_add():
@@ -10222,9 +10275,28 @@ def cmd_communication_add():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6604: 証跡が商談/顧客直付け (= 満たした予定に未紐付け) で記録されたら、
+    # その商談の未消化な予定を候補として echo し、綴じ直しコマンドまで出す。DETECTION は
+    # occupation.evidence_link_candidates、整形は format_evidence_link_echo が所管
+    # (空文字なら section ごと出さない contract)。ここが全営業 Skill (メール / 議事録
+    # 取込 / 日次取込) と `beacon communication add` が通る唯一の記録 seam なので、Skill
+    # ごとの prompt 追記ではなくこの 1 箇所で echo を担保する。hard block はしない
+    # (SPEC 方針3 = permissive、直付けも有効な選択)。
+    link_echo = occupation.format_evidence_link_echo(
+        occupation.evidence_link_candidates(data, target_id), evidence_id=comm_id)
+    # ms-176 e-6608 (検知側): 外部への送信が台帳無しで記録された = 送信前ゲートが
+    # 呼ばれなかった証拠。送信自体は MCP tool 経由で Beacon が止められないので、
+    # 記録の時点で「次の送信の前に登録せよ」と出す (記録は止めない — 事実の記録を
+    # 失う方が害が大きい)。
+    ledger_warning = sales_entities.send_ledger_gap_warning(
+        data, direction=direction, channel=channel)
     save_project(data)
     print(f"Recorded communication {comm_id} on {target_id} "
           f"({direction}/{channel}): {summary}")
+    if link_echo:
+        print(link_echo)
+    if ledger_warning:
+        print(ledger_warning)
 
 
 def cmd_communication_cancel():
@@ -10326,12 +10398,20 @@ def cmd_meeting_schedule():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-176 e-6606: 面談確定は「どうせ通る」業務イベント。この機会にまだ空いている
+    # 商談の骨格 (想定金額 / 期日) を差し出す (任意、hard block しない)。
+    opp = sales_entities.find_opportunity(data, opp_id)
+    gap_echo = sales_entities.format_skeleton_gap_echo(
+        sales_entities.skeleton_field_gaps(data, opp) if opp else [],
+        event="面談を確定しました")
     save_project(data)
     tag = sales_entities.meeting_calendar_tag(mtg_id)
     print(f"Scheduled meeting {mtg_id} on {opp_id} at {at}")
     if set_transition:
         print(f"  遷移日 → {at[:10]}")
     print(f"  calendar tag (説明文に埋め込む): {tag}")
+    if gap_echo:
+        print(gap_echo)
 
 
 def cmd_meeting_reschedule():
@@ -10803,6 +10883,7 @@ if __name__ == "__main__":
         "phase_remove": cmd_phase_remove,
         # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
         # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)
+        "opportunity_deadline": cmd_opportunity_deadline,  # ms-176 e-6606
         "sales_identity_set": cmd_sales_identity_set,
         "sales_identity_show": cmd_sales_identity_show,
         "sales_identity_check": cmd_sales_identity_check,

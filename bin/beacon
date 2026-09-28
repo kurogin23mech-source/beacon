@@ -505,6 +505,7 @@ case "${1:-}" in
             phase)    shift 2; cmd_opportunity_phase "$@" ;;
             assign)   shift 2; cmd_opportunity_assign "$@" ;;
             amount)   shift 2; cmd_opportunity_amount "$@" ;;
+            deadline) shift 2; cmd_opportunity_deadline "$@" ;;
             describe|desc) shift 2; cmd_opportunity_describe "$@" ;;
             rename)   shift 2; cmd_opportunity_rename "$@" ;;
             phase-prob) shift 2; cmd_opportunity_phase_prob "$@" ;;
@@ -515,7 +516,7 @@ case "${1:-}" in
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             contract) shift 2; cmd_opportunity_contract "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|rename|phase-prob|transition-date|anchor|judge|due|activity|contract|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|deadline|describe|rename|phase-prob|transition-date|anchor|judge|due|activity|contract|delete]" ;;
         esac
         ;;
     communication|comm)

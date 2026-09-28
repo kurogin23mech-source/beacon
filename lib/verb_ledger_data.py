@@ -302,6 +302,7 @@ VERB_LEDGER = {
     "opportunity_amount": {"cls": "R", "secondary": [], "note": ""},
     "opportunity_anchor": {"cls": "R", "secondary": [], "note": "[ms-144] 発火源(work-item)を前進ゲートに結ぶ記録(R)、opportunity_transition_date と同型"},
     "opportunity_assign": {"cls": "R", "secondary": [], "note": ""},
+    "opportunity_deadline": {"cls": "R", "secondary": [], "note": "[ms-176] 商談の期日を後から設定/クリアする記録(R)、opportunity_amount と同型 (前進ゲートの遷移日=opportunity_transition_date とは別物)"},
     "opportunity_contract_add": {"cls": "R", "secondary": [], "note": "[ms-174] 契約(締結の有無を第一級で持つ work-item)の起票(R)、opportunity_activity と同族"},
     "opportunity_contract_cancel": {"cls": "R", "secondary": [], "note": "[ms-174] 誤起票契約の取消(R)、activity_cancel と同型"},
     "opportunity_contract_list": {"cls": "Q", "secondary": [], "note": "[ms-174] 商談の契約一覧(Q)"},

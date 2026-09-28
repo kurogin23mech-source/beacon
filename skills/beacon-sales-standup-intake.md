@@ -73,7 +73,7 @@ beacon account list --json
 Communication の記録（対象は商談 opp- / 顧客 acc- / 活動 act- / ナーチャリング nrt-）:
 
 ```bash
-BEACON_COMM_TARGET="<target-id>" \
+BEACON_COMM_TARGET="<満たした活動の act-/nrt-id を優先、無ければ opp-/acc-id>" \
   BEACON_COMM_SUMMARY="<やり取りの1行要約>" \
   BEACON_COMM_DIRECTION="<inbound: 相手発 / outbound: 自分発>" \
   BEACON_COMM_CHANNEL="<email / slack>" \
@@ -82,6 +82,12 @@ BEACON_COMM_TARGET="<target-id>" \
   BEACON_COMM_OCCURRED="<やり取りの時刻>" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
+
+証跡は **満たした活動 (act-/nrt-) に紐づけて記録する**のが既定 (ms-176 e-6604)。商談 (opp-) /
+顧客 (acc-) 直付けで記録した場合、CLI がその商談の未消化な活動を候補として echo する — 該当する
+活動が在れば `beacon communication retarget <comm-id> <act-id> --reason "<この証跡がその活動を
+満たした理由>"` で綴じ直す。活動に紐づいた証跡だけが fold の証跡ベース done とフェーズ後始末の
+材料になる。どの活動も満たさない連絡 (お礼・案内のみ 等) なら直付けのままで正しい。
 
 `--body` (`BEACON_COMM_BODY`, 任意) はメール/Slack 本文の骨子を数行でまとめる欄
 (e-3544)。1 行要約は一覧の見出し、body は Web UI 詳細で読む中身。短い一言のやり取りは空でよい。

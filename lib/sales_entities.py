@@ -76,9 +76,12 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "商談準備", "probability": 10, "terminal": False,
      "allowed_terminals": ["不成立"],
      "goal": "初回面談の実施により、商談として進行可能な状態にする",
-     "activity_template": ["初回面談を打診",
+     # ms-176 e-6607: 各 seed は「何のための活動か」を括弧で持つ (定型だけの一行は AI も
+     # 人も読み飛ばし、活動一覧の信号対雑音比を下げる)。面談の「実施」は kind=meeting が
+     # 意味を運ぶので文言はそのまま (発火源の紐付け先として他所から名前で参照される)。
+     "activity_template": ["初回面談を打診（相手の課題を聞く場をもらう）",
                            {"desc": "初回面談を実施", "kind": "meeting"},
-                           "提案の方向性を確定"],
+                           "提案の方向性を確定（聞いた課題のどれに応えるかを決める）"],
      "default_lead": 7},
     {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
@@ -87,21 +90,26 @@ DEFAULT_OPPORTUNITY_PHASES = [
      # require_amount は phase 定義側のフラグにして「どのフェーズから金額を課すか」を
      # per-company に設定可能にする (block でなく警告、master = 人間)。
      "require_amount": True,
-     "activity_template": ["提案面談を打診",
+     "activity_template": ["提案面談を打診（提案を聞いてもらう場をもらう）",
                            {"desc": "提案面談を実施", "kind": "meeting"},
-                           "提案内容を準備"],
+                           "提案内容を準備（課題への答え・規模・進め方を形にする）"],
      "default_lead": 14},
     {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
      "require_amount": True,
-     "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
+     # ms-176 e-6607: 旧 seed は「合意確認日を確定」と「合意の確認を取る」が同義重複で、
+     # どちらを done にすべきか読めなかった。前者を「待ちを無期限にしない」ための期限合意、
+     # 後者を「可否を聞いて次のフェーズを決める」判断に切り分け、重複を解消する。
+     "activity_template": ["回答期限を先方と決める（待ちを無期限にしない）",
+                           "実行合意の可否を確認する（合意なら合意済みへ、難色なら論点を持ち帰る）"],
      "default_lead": 14},
     {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
      "require_amount": True,
-     "activity_template": ["契約書を送付", "締結"],
+     "activity_template": ["契約書を送付（合意した条件を書面にする）",
+                           "締結を記録（署名済み契約を beacon opportunity contract sign で残す。成約判定の前提）"],
      "default_lead": 7},
     # 決着フェーズ (terminal): outcome は有限ターゲットの結末種別。
     {"name": "成約",       "probability": 100,  "terminal": True,  "outcome": "won"},
@@ -1290,6 +1298,32 @@ def set_opportunity_amount(data: dict, opp_id: str, amount) -> dict:
     return occupation.update_entry(data, opp_id, goal_amount=amount)
 
 
+def set_opportunity_deadline(data: dict, opp_id: str, date_str: str) -> dict:
+    """Set (or clear) an opportunity's own ``deadline`` (商談の期日) and return the
+    mutated deal — ms-176 e-6606.
+
+    Until now the deadline could only be given at 起票 (``opportunity add --deadline``)
+    with no way to add or fix it afterwards, so a deal created without one could never
+    appear in the期日 reminders. The 期日 is the deal's own due date read by the L2
+    締切エンジン (``occupation.iter_deadline_candidates``); it is NOT the advance gate's
+    ``transition_date`` (= 判定予定日, when we decide whether the phase is achieved),
+    which is why pointing a 期日 nudge at ``transition-date`` would be wrong.
+
+    ``YYYY-MM-DD`` only; an empty string clears it (= 期日未定に戻す). Patches through
+    the profession-generic ``occupation.update_entry``, mirroring
+    ``set_opportunity_amount``."""
+    import datetime
+    import occupation
+    txt = (date_str or "").strip()
+    if txt:
+        try:
+            datetime.date.fromisoformat(txt)
+        except ValueError:
+            raise ValueError(
+                f"deadline must be YYYY-MM-DD (got {date_str!r})") from None
+    return occupation.update_entry(data, opp_id, deadline=txt)
+
+
 def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
     """Set a per-company win probability (成約率, 0-100) on an opportunity phase
     definition. Config-level edit (per-company funnel tuning). Returns the def."""
@@ -1919,11 +1953,11 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
         "phase": o.get("phase", ""),
         "transition_date": get_transition_date(data, o["id"]),
         "transition_status": st,
-        # C-3 (e-3692): the live ball is derived from Communications; the static
-        # who_has_the_ball field is only the initial declaration and goes stale
-        # after an email exchange. Read derived-first so the 判定/催促 split is
-        # not a lie; fall back to the static field only when there is no comm.
-        "who_has_the_ball": derive_ball(o) or o.get("who_has_the_ball", ""),
+        # C-3 (e-3692) / ms-176 e-6605: the live ball is derived from
+        # Communications; the static who_has_the_ball field is only the initial
+        # declaration and goes stale after an exchange. ``effective_ball`` is the
+        # one named home of that derive-first precedence (was inlined here).
+        "who_has_the_ball": effective_ball(o),
     } for o, st in pairs]
 
 
@@ -1949,7 +1983,9 @@ def overdue_activities(data: dict, today: str) -> list:
                 "description": act.get("description", ""),
                 "deadline": act.get("deadline", ""),
                 "activity_status": st,  # deadline.TRANSITION_DUE / _OVERDUE
-                "who_has_the_ball": act.get("who_has_the_ball", ""),
+                # ms-176 e-6605: 活動の「次に動く責任」も証跡から導出する (静的
+                # フィールドは起票時の宣言で、やり取りの後は古い)。
+                "who_has_the_ball": effective_ball(opp, act),
             })
     out.sort(key=lambda r: r["deadline"] or "")
     return out
@@ -2585,7 +2621,7 @@ def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
             "anchor": (gate or {}).get("anchor", ""),
             "transition_date": (gate or {}).get("transition_date", ""),
             # C-3 (e-3692): derived-first ball (see opportunities_awaiting_judgement).
-            "who_has_the_ball": derive_ball(opp) or opp.get("who_has_the_ball", ""),
+            "who_has_the_ball": effective_ball(opp),  # ms-176 e-6605
         })
     out.sort(key=lambda r: (r["transition_date"] or "9999-99-99"))
     return out
@@ -3472,8 +3508,8 @@ def communications_of(target: dict, *, linked_id: Optional[str] = None,
     return [c for _, c in ordered]
 
 
-def derive_ball(target: dict) -> Optional[str]:
-    """Whose court the deal is in, derived from the latest Communication
+def derive_ball(target: dict, *, linked_id: Optional[str] = None) -> Optional[str]:
+    """Whose court the work is in, derived from the latest Communication
     (SPEC §6): the newest inbound means the counterpart just played → the ball
     is ours (BALL_SELF); the newest outbound means we played → theirs
     (BALL_COUNTERPART). Returns None when there's no communication to derive
@@ -3481,8 +3517,19 @@ def derive_ball(target: dict) -> Optional[str]:
     engine keeps it as the reply-watcher's (E) driver.
 
     e-3537: cancelled (取消済) communications are excluded — a mis-recorded
-    exchange must not decide whose court the deal is in."""
+    exchange must not decide whose court the deal is in.
+
+    ms-176 e-6605: ``linked_id`` narrows the derivation to the evidence that
+    fulfilled ONE work item (act-/nrt-), so the SAME rule serves both grains —
+    the deal's ball (no linked_id = every communication on the deal) and a single
+    activity's ball. This is deliberately a parameter on the ONE derivation
+    function rather than a second function or a stamped field: whose court an
+    activity is in must not be able to disagree with whose court the deal is in
+    by using a different rule, and a stamped copy would go stale the moment a
+    communication is cancelled (e-3537) or re-filed (e-3585)."""
     comms = communications_of(target, include_cancelled=False)
+    if linked_id is not None:
+        comms = [c for c in comms if c.get("linked_id") == linked_id]
     if not comms:
         return None
     latest = comms[-1]
@@ -3491,6 +3538,29 @@ def derive_ball(target: dict) -> Optional[str]:
     if latest.get("direction") == COMM_OUTBOUND:
         return BALL_COUNTERPART
     return None
+
+
+def effective_ball(target: dict, work_item: Optional[dict] = None) -> str:
+    """The ball a READER should surface (ms-176 e-6605) — derived from the
+    evidence first, falling back to the statically declared field only when there
+    is no communication to derive from.
+
+    The single named home of the derive-first idiom introduced piecemeal by C-3
+    (e-3692): the static ``who_has_the_ball`` is only the INITIAL declaration
+    (起票時 / 手で宣言した値) and goes stale after the first exchange, so a surface
+    that reads the raw field alone reports "自分のボール" forever — which is exactly
+    what the营業 instance saw on every deal. Readers call THIS instead of repeating
+    ``derive_ball(x) or x.get(who_has_the_ball, "")`` so the precedence lives in one
+    place.
+
+    ``work_item`` (an activity / nurturing) switches to the work-item grain: the
+    derivation looks only at evidence linked to that item, and the fallback is that
+    item's own declared field. Returns ``""`` when neither source knows (no
+    communication and no declaration) — "unknown", not a default of 自分."""
+    if work_item is None:
+        return derive_ball(target) or target.get(work_model.BALL_FIELD, "") or ""
+    return (derive_ball(target, linked_id=work_item.get("id", ""))
+            or work_item.get(work_model.BALL_FIELD, "") or "")
 
 
 # ---------------------------------------------------------------------------
@@ -4064,11 +4134,30 @@ def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
     * No ledger entry resolves → legacy bare-string pin compare (back-compat).
 
     Branches (either path):
+    * 台帳が空                  → ok=False, HARD GATE (ms-176 e-6608, below).
     * Nothing pinned/configured → ok=False, ask to pin/register first.
     * from empty                → ok=False, from must be explicit.
     * matches (case/space-insensitive) → ok=True.
     * mismatch                  → ok=False, name both so the human sees it.
+
+    ms-176 e-6608 — 台帳が空なら、たとえ legacy の bare pin と from が一致していても
+    通さない (意図的な hard gate)。営業の既定は permissive (警告するが止めない、master=
+    人間) だが、送信アカウントの取り違えは「別人格の Google アカウントから顧客にメールが
+    飛ぶ」外部発行で、取り消せない。可逆な記録の鮮度 (骨格フィールドの未反映など) とは
+    強度を変えるのが筋で、ここは permissive の例外として停止させる。実データで「照合ゲート
+    は在るのに台帳が空のまま運用を始められた」= ゲートが土台無しで素通りしていた穴を、
+    ゲート自身が閉じる形に直す。
     """
+    if not list_send_accounts(data):
+        return (False,
+                "送信アカウント台帳が空です。取り違え照合の土台が無いまま送信はしません "
+                "(ms-176 e-6608 = 外部発行は取り消せないため、ここは止めます)。"
+                "登録は /beacon-sales-email の Step 2 (送信アカウントの登録) が正規の経路です。"
+                "その Step が実際に叩く内部コマンドは "
+                "BEACON_SEND_LABEL=\"<会社/個人など呼び名>\" "
+                "BEACON_SEND_EMAIL=\"<アドレス>\" python3 \"$(beacon _lib-path)/commands.py\" "
+                "sales_account_add です (この登録は公開 verb を持たない内部コマンド。"
+                "beacon <名詞> <動詞> の形を探しても見つかりません)")
     target = label.strip() if (label and label.strip()) else get_send_identity(data)
     entry = get_send_account(data, target) if target else None
     if entry is not None:
@@ -4093,6 +4182,103 @@ def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
         return (True, f"from='{from_value}' は pin された identity と一致")
     return (False, f"from='{from_value}' が pin された identity '{pinned}' と"
                    "一致しません。取り違えの恐れ。送信を止めます")
+
+
+# ---------------------------------------------------------------------------
+# 骨格フィールドの取りこぼし検知 (ms-176 e-6606)
+# ---------------------------------------------------------------------------
+# 想定金額 / 期日 が空のまま残る。「埋めましょう」と促す運動は形骸化するので、見積が
+# 確定した・面談が確定した という **どうせ通る業務イベント** の中で、まだ空いている
+# 骨格フィールドを 1 度だけ差し出す。強度は警告 + 明示スキップ (hard block しない) —
+# 記録の鮮度は後から直せる可逆な問題で、既存の opportunity_phase_warnings (警告のみ、
+# master=人間) と同じ permissive の系列に置く。送信台帳 (e-6608、外部発行で不可逆) だけを
+# hard gate にする非対称が、この MS の設計方針3 / 4 の骨。
+#
+# 成約率 (probability) は意図的に対象外: 見込み売上は goal_amount × **フェーズの**
+# probability で積むので、商談ごとの probability が空でも積み上げは壊れない (フェーズ側の
+# 設定が土台)。「空だが何も壊れないフィールド」を促すと、促し全体が読み飛ばされる。
+
+
+def skeleton_field_gaps(data: dict, opp: dict) -> list:
+    """The deal's still-empty 骨格フィールド with WHY each one matters and HOW to fill
+    it — ``[{"field", "label", "why", "how"}]``, empty when nothing is missing.
+
+    Only fields whose emptiness actually degrades a downstream reader are reported
+    (a gap nobody feels is noise, and noise makes the whole nudge unread):
+
+    * ``goal_amount`` — 見込み売上 (``pipeline_forecast``) は金額 × フェーズ成約率 で
+      積むので、空の商談は 0 円として積まれ、パイプラインが実態より小さく見える。
+    * ``deadline``   — L2 締切エンジン (``occupation.iter_deadline_candidates`` →
+      ``beacon deadline due`` / サーバの締切リマインダ) が拾う商談の期日。空だと
+      その商談は期日リマインダに一度も乗らない (前進ゲートの遷移日は「判定予定日」で
+      あって商談そのものの期日ではない)。
+    """
+    gaps = []
+    if _amount_is_unset(opp.get("goal_amount")) and _amount_is_unset(opp.get("amount")):
+        gaps.append({
+            "field": "goal_amount",
+            "label": "想定金額",
+            "why": "見込み売上 (金額 × フェーズ成約率) に 0 円として積まれ、"
+                   "パイプラインが実態より小さく見えます",
+            "how": f"beacon opportunity amount {opp.get('id', '<opp-id>')} <円>",
+        })
+    if not (opp.get("deadline") or "").strip():
+        gaps.append({
+            "field": "deadline",
+            "label": "期日",
+            "why": "期日リマインダ / 締切精査 (beacon deadline due) にこの商談が"
+                   "一度も乗りません (前進ゲートの遷移日は判定予定日で、商談の期日とは別)",
+            "how": f"beacon opportunity deadline {opp.get('id', '<opp-id>')} "
+                   f"<YYYY-MM-DD>",
+        })
+    return gaps
+
+
+def format_skeleton_gap_echo(gaps: list, *, event: str) -> str:
+    """Render ``skeleton_field_gaps`` as the band a business-event surface echoes, or
+    ``""`` when there is nothing missing (empty-means-silent, same contract as the
+    other echo helpers). ``event`` names the業務イベント this rode in on (例
+    ``"面談を確定しました"``) so the nudge reads as part of the work just done rather
+    than as a standalone scolding."""
+    if not gaps:
+        return ""
+    lines = [f"ℹ {event}。この機会に、まだ空いている商談の骨格を埋めておけます "
+             f"(任意 — 埋めずに進んで構いません):"]
+    for g in gaps:
+        lines.append(f"    {g['label']} が未設定 — {g['why']}")
+        lines.append(f"      → {g['how']}")
+    return "\n".join(lines)
+
+
+# Channels whose evidence means something actually left for the counterpart (=
+# 外部発行). A meeting / phone note is a記録 of a conversation, not a send through
+# one of our accounts, so it carries no send-account foundation requirement.
+OUTWARD_SEND_CHANNELS = ("email", "slack")
+
+
+def send_ledger_gap_warning(data: dict, *, direction: str, channel: str) -> str:
+    """The band a surface echoes when an OUTBOUND send on an external channel was
+    recorded while the send-account ledger is still empty (ms-176 e-6608), or ``""``
+    when it does not apply (inbound / internal channel / ledger already registered).
+
+    The hard gate in ``check_send_from`` only bites when it is actually called; the
+    send itself leaves through an MCP tool that Beacon cannot intercept. So this is
+    the detection half: evidence of an outward send with no ledger behind it means
+    the gate was bypassed, and the next send will be too unless someone registers
+    the account. Empty-means-silent, same contract as the other echo helpers."""
+    if direction != COMM_OUTBOUND:
+        return ""
+    if _norm(channel) not in OUTWARD_SEND_CHANNELS:
+        return ""
+    if list_send_accounts(data):
+        return ""
+    return ("⚠ 送信アカウント台帳が空のまま、外部への送信 (" + (channel or "") + ") が"
+            "記録されました。取り違え照合 (送信前ゲート) が土台無しで機能していません。"
+            "次の送信の前に登録してください — 正規の経路は /beacon-sales-email の Step 2 "
+            "(送信アカウントの登録)。その Step が叩く内部コマンドは "
+            "BEACON_SEND_LABEL=\"<呼び名>\" BEACON_SEND_EMAIL=\"<アドレス>\" "
+            "python3 \"$(beacon _lib-path)/commands.py\" sales_account_add "
+            "(公開 verb は無いので beacon <名詞> <動詞> の形では見つかりません)")
 
 
 # ---------------------------------------------------------------------------
@@ -4300,7 +4486,10 @@ def project_targets(data: dict) -> list:
             "work_items_done": done,
             "detail": {
                 "phase": opp.get("phase", ""),
-                "who_has_the_ball": opp.get("who_has_the_ball", ""),
+                # ms-176 e-6605: 盤面に出すボールは証跡からの導出を優先する。生の
+                # フィールドだけを載せると、やり取りの後も全商談が「自分のボール」に
+                # 見え続ける (営業インスタンスで実際にそう見えていた)。
+                "who_has_the_ball": effective_ball(opp),
                 "goal_amount": opp.get("goal_amount"),
                 "probability": opp.get("probability"),
                 "deadline": opp.get("deadline", ""),
