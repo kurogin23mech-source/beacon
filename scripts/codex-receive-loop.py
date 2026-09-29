@@ -43,15 +43,14 @@ def _resolve_lib_dir(install_root: Path) -> Path:
     pipx/brew wheel remaps it to ``beacon_cli/_bundled_lib``. When this
     daemon is spawned from the bundled ``_bundled_scripts/`` dir, its
     self-resolved install_root is the ``beacon_cli`` package, so lib lives at
-    the ``_bundled_lib`` sibling. Fall back to it when ``lib/`` is absent.
+    the ``_bundled_lib`` sibling.
+
+    The layout rule itself now lives in ``scripts/_install_paths.py`` (one
+    definition for every script under ``scripts/``); this stays as the name
+    four call sites in this file already use.
     """
-    lib_dir = install_root / "lib"
-    if lib_dir.is_dir():
-        return lib_dir
-    bundled = install_root / "_bundled_lib"
-    if bundled.is_dir():
-        return bundled
-    return lib_dir
+    from _install_paths import resolve_lib_dir
+    return resolve_lib_dir(install_root)
 
 
 def _beacon_version(install_root: Path) -> str:
@@ -242,6 +241,24 @@ def _now_iso_for_pointer() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _pid_alive(pid: int) -> bool:
+    """Cross-platform liveness probe (ms-133 / e-6591).
+
+    Delegates to ``lib/pid_liveness.py``. This used to be ``os.kill(pid, 0)``,
+    which on Windows TERMINATES the target: the daemon's own stale-pidfile
+    check would kill the daemon already running. ``lib`` is on ``sys.path`` by
+    the time ``main()`` reaches the pidfile check (``_import_modules`` runs
+    first), but the import is kept local and fail-open so an unexpected call
+    order degrades to "assume alive" (= refuse to start a second daemon)
+    instead of raising.
+    """
+    try:
+        from pid_liveness import pid_alive
+    except Exception:
+        return True
+    return pid_alive(pid)
+
+
 def _check_existing_daemon(cwd: Path) -> int:
     """Return the live pid of an existing daemon, or 0 if none.
 
@@ -256,15 +273,7 @@ def _check_existing_daemon(cwd: Path) -> int:
         return 0
     if pid <= 0:
         return 0
-    try:
-        os.kill(pid, 0)
-        return pid
-    except ProcessLookupError:
-        return 0
-    except PermissionError:
-        return pid
-    except Exception:
-        return 0
+    return pid if _pid_alive(pid) else 0
 
 
 def main() -> int:

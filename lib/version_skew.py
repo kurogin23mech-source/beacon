@@ -194,10 +194,10 @@ def _probe_daemon_version(cwd: str) -> str:
     ``<cwd>/.beacon/codex/receive-loop.session.json``. We only report it when
     the daemon pid (``receive-loop.pid``) is still alive — a stale pointer from
     a dead daemon must not raise a false skew warning. Impure (reads files /
-    signals a pid); fail-open to "".
+    probes a pid — without signalling it, see ``lib/pid_liveness.py``);
+    fail-open to "".
     """
     import json
-    import os
     from pathlib import Path
 
     try:
@@ -209,13 +209,11 @@ def _probe_daemon_version(cwd: str) -> str:
         pid = int(pid_file.read_text().strip())
         if pid <= 0:
             return ""
-        # Liveness probe: signal 0 raises if the pid is gone.
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        # Liveness probe. ms-133 / e-6591: must NOT be os.kill(pid, 0) — on
+        # Windows that terminates the daemon we are only trying to ask about.
+        from pid_liveness import pid_alive
+        if not pid_alive(pid):
             return ""
-        except PermissionError:
-            pass  # alive but owned by another user — still counts as running
         data = json.loads(pointer.read_text(encoding="utf-8"))
         return str(data.get("beacon_version") or "").strip()
     except Exception:

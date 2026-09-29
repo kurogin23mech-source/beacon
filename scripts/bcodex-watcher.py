@@ -260,13 +260,51 @@ class Watcher:
         return True
 
     def wrapper_gone(self) -> bool:
+        """True once the bcodex wrapper process has exited.
+
+        ms-133 / e-6591: this was ``os.kill(self.wrapper_pid, 0)``. On Windows
+        that KILLS the wrapper — the watcher whose job is to keep the session
+        alive would terminate the very process it watches, every poll. The
+        probe in ``lib/pid_liveness.py`` never signals. Unknown degrades to
+        "still there" so the watcher keeps working rather than exiting early.
+        """
         if not self.wrapper_pid:
             return False
+        return not self._pid_alive(self.wrapper_pid)
+
+    def _pid_alive(self, pid: int) -> bool:
+        """Liveness probe via ``lib/pid_liveness.py``; fail-open to alive.
+
+        The lib dir is resolved by the shared ``scripts/_install_paths`` helper
+        rather than re-deriving the layout rule here — two independent reviews of
+        PR #764 flagged the local copy, and a duplicated layout rule is the same
+        class of silent divergence this whole change exists to close.
+        """
         try:
-            os.kill(self.wrapper_pid, 0)
-        except OSError:
-            return True
-        return False
+            from pid_liveness import pid_alive
+        except Exception:
+            if not self._put_lib_on_path():
+                return True
+            try:
+                from pid_liveness import pid_alive
+            except Exception:
+                return True
+        return pid_alive(pid)
+
+    def _put_lib_on_path(self) -> bool:
+        """Add this install's lib dir to ``sys.path``. False if it can't be found."""
+        if not self.install_root:
+            return False
+        try:
+            from _install_paths import resolve_lib_dir
+        except Exception:
+            return False
+        lib_dir = resolve_lib_dir(self.install_root)
+        if not lib_dir.is_dir():
+            return False
+        if str(lib_dir) not in sys.path:
+            sys.path.insert(0, str(lib_dir))
+        return True
 
     def run(self) -> int:
         self.start_pull_only()

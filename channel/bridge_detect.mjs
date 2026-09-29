@@ -22,6 +22,12 @@ import path from 'node:path'
 // True iff `pid` is a live process on this host. `process.kill(pid, 0)` sends
 // no signal but throws ESRCH when the pid is dead. EPERM = the process exists
 // but we may not signal it (another user) → still alive.
+//
+// This is safe on Windows and its Python-looking twin is NOT (ms-133 / e-6591).
+// libuv special-cases signum 0 (open the process handle, report existence);
+// CPython's `os.kill` does not — it routes every signal, 0 included, through
+// TerminateProcess. So do not "align" the two by copying either idiom across
+// languages: Python-side liveness goes through lib/pid_liveness.py.
 export function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
