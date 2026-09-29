@@ -75,7 +75,8 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes (cloud mode: 他セッション分も統合) / メモ一覧 |
-| `beacon note clear --yes` | Clear all session notes / メモ全削除 (`--yes` 必須) |
+| `beacon note clear --yes` | Clear all session notes / メモ全削除 (`--yes` 必須、退避を取ってから削除) |
+| `beacon note restore` | Restore notes from backups / 退避からメモを復元 |
 
 <!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
 ### Entry Writing Principle / エントリ記述原則

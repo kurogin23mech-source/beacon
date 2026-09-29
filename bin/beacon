@@ -2227,6 +2227,18 @@ EOF
                 done
                 BEACON_JSON="$note_json" python3 "$COMMANDS_PY" note_list
                 ;;
+            restore)
+                # ms-178 e-6656: recover from the backups `note clear` left.
+                # Additive + idempotent, so no confirmation flag is needed.
+                shift 2
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -?*) _guard_flag "$1" ;;
+                        *)   shift ;;
+                    esac
+                done
+                python3 "$COMMANDS_PY" note_restore
+                ;;
             clear)
                 # ms-178 e-6654: clear wipes the LOCAL file (recoverable via
                 # .bak) *and* the project's shared cloud notes (not recoverable
@@ -2248,6 +2260,7 @@ EOF
                 echo "Usage: beacon note \"<text>\" [--context \"<label>\"]"
                 echo "       beacon note list [--json]"
                 echo "       beacon note clear -y|--yes"
+                echo "       beacon note restore"
                 ;;
             *)
                 shift

@@ -11,7 +11,7 @@ PowerShell user needs on Day 1:
 * ``beacon milestone add|list|start|done|observe|show|update``
 * ``beacon doc add|list|show|update|delete``
 * ``beacon summary "text"``
-* ``beacon note "<text>"`` / ``note list`` / ``note clear --yes``
+* ``beacon note "<text>"`` / ``note list`` / ``note clear --yes`` / ``note restore``
 * ``beacon trigger fire|check|clear``
 * ``beacon search "query"``
 * ``beacon cycle status``
@@ -3679,6 +3679,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
             "       beacon note clear -y|--yes\n"
+            "       beacon note restore\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 0
@@ -3696,11 +3697,16 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
             root, "note_clear",
             {"BEACON_NOTE_CLEAR_YES": "1" if args.assume_yes else ""},
         )
+    if sub == "restore":
+        # ms-178 e-6656: recover from the backups clear left. Additive and
+        # idempotent, so it needs no confirmation flag.
+        return _run_commands_py(root, "note_restore", {})
     if not sub:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
             "       beacon note clear -y|--yes\n"
+            "       beacon note restore\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 1
@@ -5977,7 +5983,7 @@ def _print_top_help() -> None:
         "  beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms id]\n"
         "  beacon doc list [--scope S] [--ms id]\n"
         "  beacon doc show <doc-id>\n"
-        "  beacon note \"<text>\" | note list | note clear --yes\n"
+        "  beacon note \"<text>\" | note list | note clear --yes | note restore\n"
         "  beacon search \"query\" [--ms id] [--scope S]\n"
         "  beacon trigger fire|check|clear [name]\n"
         "  beacon retro [--prepare|--catch-up] [--since X] [--until Y]\n"

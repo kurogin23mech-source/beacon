@@ -160,6 +160,15 @@ def _fetch_cloud_notes(project_id: str):
         return [], f"{type(exc).__name__}: {exc}"
 
 
+def _cloud_backup_path() -> str:
+    """Where `note clear` snapshots the cloud notes before deleting them.
+
+    Sits beside the local .bak so the two legs of a clear are recovered from one
+    place (ms-178 e-6656: the local .bak alone made "already restored" look true
+    while a cloud-only note stayed lost)."""
+    return _get_notes_path().replace(".jsonl", "") + ".cloud.bak"
+
+
 def _note_key(note: dict):
     """Dedup identity of a note across the two stores.
 
@@ -251,32 +260,131 @@ def cmd_note_clear():
               file=sys.stderr)
         print(f"  local: {path} (moved to {path}.bak, recoverable)",
               file=sys.stderr)
-        if os.path.exists(_get_cloud_config_path()):
+        if _cloud_project_id():
             print("  cloud: this project's notes are SHARED by every session — "
-                  "clearing removes other sessions' handoff notes too.",
-                  file=sys.stderr)
+                  "clearing removes other sessions' handoff notes too "
+                  f"(snapshotted to {_cloud_backup_path()} first; "
+                  "restore with 'beacon note restore').", file=sys.stderr)
         print("Re-run as 'beacon note clear --yes' to proceed.", file=sys.stderr)
         sys.exit(1)
+    # ms-178 e-6656: take the CLOUD snapshot before deleting anything. The local
+    # file was always moved to .bak, but the cloud notes were deleted outright —
+    # so ".bak exists, therefore it is recovered" was structurally false, and a
+    # note really did stay lost after a restore was reported as complete.
+    #
+    # Ordering is the guarantee: no backup ⇒ no delete. If the cloud cannot be
+    # read we abort BOTH legs rather than clearing local and leaving the two
+    # stores disagreeing about what happened.
+    project_id = _cloud_project_id()
+    cloud_notes = []
+    if project_id:
+        cloud_notes, cloud_error = _fetch_cloud_notes(project_id)
+        if cloud_error:
+            print(f"Aborted: cloud のメモを取得できず退避が取れません ({cloud_error})。",
+                  file=sys.stderr)
+            print("  何も削除していません (退避の取れない削除は行いません)。"
+                  "接続を回復してから再実行してください。", file=sys.stderr)
+            sys.exit(1)
+        backup = _cloud_backup_path()
+        try:
+            os.makedirs(os.path.dirname(backup) or ".", exist_ok=True)
+            with open(backup, "w", encoding="utf-8") as f:
+                for n in cloud_notes:
+                    f.write(json.dumps(n, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            print(f"Aborted: cloud の退避を書けません ({backup}: {exc})。"
+                  f"何も削除していません。", file=sys.stderr)
+            sys.exit(1)
+
     if os.path.exists(path):
         import shutil
         shutil.move(path, path + ".bak")
-    try:
-        config_path = _get_cloud_config_path()
-        if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            project_id = config.get("project_id", "")
-            api_url = _resolve_active_api_url()
-            if project_id:
-                from auth import load_credentials
-                creds = load_credentials()
-                if creds:
-                    from api_client import ApiClient
-                    def _token():
-                        from auth import load_credentials as _lc
-                        c = _lc()
-                        return _extract_token(c) if c else ""
-                    ApiClient(api_url, _token).clear_notes(project_id)
-    except Exception:
-        pass
+
+    cloud_cleared = True
+    if project_id:
+        try:
+            from auth import load_credentials
+            creds = load_credentials()
+            if creds is None:
+                raise RuntimeError("未認証")
+            from api_client import ApiClient
+
+            def _token():
+                from auth import load_credentials as _lc
+                c = _lc()
+                return _extract_token(c) if c else ""
+
+            ApiClient(_resolve_active_api_url(), _token).clear_notes(project_id)
+        except Exception as exc:
+            # Previously swallowed: a failed cloud delete still printed
+            # "Session notes cleared.", so the two stores silently diverged.
+            cloud_cleared = False
+            print(f"Warning: cloud のメモを削除できませんでした ({exc})。"
+                  f"ローカルのみクリアされ、cloud 側は残っています。", file=sys.stderr)
+
     print("Session notes cleared.")
+    if os.path.exists(path + ".bak"):
+        print(f"  local 退避: {path}.bak")
+    if project_id and cloud_cleared:
+        print(f"  cloud 退避: {_cloud_backup_path()} ({len(cloud_notes)} 件)")
+    print("  復元: beacon note restore")
+
+
+def cmd_note_restore():
+    """Restore session notes from the backups `note clear` left (ms-178 e-6656).
+
+    A backup nobody can restore from is not a backup, so the recovery path is a
+    first-class verb rather than a documented hand-written loop. Restoring is
+    additive and idempotent: notes already present are matched by `_note_key`
+    and skipped, so running it twice does not duplicate anything.
+    """
+    path = _get_notes_path()
+    local_bak = path + ".bak"
+    cloud_bak = _cloud_backup_path()
+    if not os.path.exists(local_bak) and not os.path.exists(cloud_bak):
+        print(f"復元できる退避がありません ({local_bak} / {cloud_bak})。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # --- local leg: union current ∪ backup, keeping timeline order ---
+    current = _read_local_notes(path)
+    restored_local = 0
+    if os.path.exists(local_bak):
+        have = {_note_key(n) for n in current}
+        merged = list(current)
+        for n in _read_local_notes(local_bak):
+            if _note_key(n) not in have:
+                have.add(_note_key(n))
+                merged.append(n)
+                restored_local += 1
+        if restored_local:
+            merged.sort(key=lambda n: n.get("ts", ""))
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                for n in merged:
+                    f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
+    # --- cloud leg: re-post only what the cloud is missing ---
+    restored_cloud = 0
+    project_id = _cloud_project_id()
+    if project_id and os.path.exists(cloud_bak):
+        live, cloud_error = _fetch_cloud_notes(project_id)
+        if cloud_error:
+            print(f"Warning: cloud の現状を取得できず cloud への復元は行いません "
+                  f"({cloud_error})。退避 {cloud_bak} は残っているので接続回復後に"
+                  f"再実行してください。", file=sys.stderr)
+        else:
+            have = {_note_key(n) for n in live}
+            for n in _read_local_notes(cloud_bak):
+                if _note_key(n) in have:
+                    continue
+                # Strip the provenance tag the merge adds on read; it is a view
+                # concern, not part of the stored note.
+                payload = {k: v for k, v in n.items() if k != "origin"}
+                _push_note_to_cloud(payload)
+                have.add(_note_key(n))
+                restored_cloud += 1
+
+    print(f"復元しました: local {restored_local} 件 / cloud {restored_cloud} 件")
+    if restored_local == 0 and restored_cloud == 0:
+        print("  (どちらの退避も既に反映済みでした — 重複は作りません)")

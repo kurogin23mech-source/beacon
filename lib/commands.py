@@ -174,7 +174,9 @@ from cmd_task import (  # noqa: F401
 # call made inside cmd_<family>, which resolves _foo in its own namespace). Their
 # canonical home + patch target is cmd_<family>._foo; a missing commands._foo now
 # fails loudly (AttributeError) instead of silently.
-from cmd_note import cmd_note_add, cmd_note_list, cmd_note_clear  # noqa: F401
+from cmd_note import (  # noqa: F401
+    cmd_note_add, cmd_note_list, cmd_note_clear, cmd_note_restore,
+)
 from cmd_decision import (cmd_decision_record, cmd_decision_list,  # noqa: F401  (ms-154 e-5594/e-5595)
                           cmd_decision_derive)  # noqa: F401  (ms-166 e-5972)
 from cmd_incident import (  # noqa: F401
@@ -590,7 +592,8 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes (cloud mode: 他セッション分も統合) / メモ一覧 |
-| `beacon note clear --yes` | Clear all session notes / メモ全削除 (`--yes` 必須) |
+| `beacon note clear --yes` | Clear all session notes / メモ全削除 (`--yes` 必須、退避を取ってから削除) |
+| `beacon note restore` | Restore notes from backups / 退避からメモを復元 |
 
 <!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
 ### Entry Writing Principle / エントリ記述原則
@@ -6519,7 +6522,8 @@ def _help_registry():
         # notes. Registered here so help renders from the single source instead.
         {"command": "beacon note <text>", "flags": ["--context <label>"], "description": "Add an ephemeral session note (survives compaction; cleared at session end)"},
         {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
-        {"command": "beacon note clear", "flags": ["-y|--yes"], "description": "Delete all session notes. Requires --yes: local is moved to .bak, but the cloud copy is shared by every session on the project"},
+        {"command": "beacon note clear", "flags": ["-y|--yes"], "description": "Delete all session notes. Requires --yes. Both stores are backed up first (local .bak + cloud .cloud.bak); the cloud copy is shared by every session on the project"},
+        {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
         {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
@@ -11023,6 +11027,7 @@ if __name__ == "__main__":
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
+        "note_restore": cmd_note_restore,
         "decision_record": cmd_decision_record,
         "decision_list": cmd_decision_list,
         "decision_derive": cmd_decision_derive,

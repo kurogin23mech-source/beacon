@@ -210,7 +210,8 @@ Ephemeral memos that survive context compaction within a session — cleared at 
 |---------|-------------|--------|
 | `beacon note "text" [--context "label"]` | Add a session note | - |
 | `beacon note list` | Show session notes. Cloud mode merges the local file with the project's cloud notes so a fork worktree sees the parent's; each note carries `origin` = local/both/cloud | Yes |
-| `beacon note clear --yes` | Clear all session notes (moved to .bak). `--yes` required: the cloud copy is shared by every session on the project | - |
+| `beacon note clear --yes` | Clear all session notes. `--yes` required. Snapshots BOTH stores first (local `.bak` + cloud `.cloud.bak`) and aborts without deleting if the cloud snapshot cannot be taken; the cloud copy is shared by every session on the project | - |
+| `beacon note restore` | Restore notes from the backups `note clear` left. Additive and idempotent (already-present notes are skipped) | - |
 
 Storage: `.beacon/session_notes.jsonl` (local only, not cloud-synced). Say "remember this" and Claude calls `/beacon-note` automatically. At session end, `/beacon-session-end` prompts to promote important notes to Documents before clearing.
 
