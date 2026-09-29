@@ -474,7 +474,7 @@ Ephemeral memos that survive context compaction within a session — cleared at 
 | Command | Description |
 |---------|-------------|
 | `beacon note "text" [--context "label"]` | Add a session note / セッションメモ追加 |
-| `beacon note list [--json]` | Show session notes / メモ一覧 |
+| `beacon note list [--json]` | Show session notes; cloud mode merges other sessions' notes (origin=local\|both\|cloud) / メモ一覧 (cloud mode は他セッション分も統合) |
 | `beacon note clear --yes` | Clear all session notes / 全削除 (`--yes` 必須) |
 
 Say "メモして" or "remember this" and Claude will call `/beacon-note` automatically. At session end, `/beacon-session-end` prompts to promote important notes to permanent Documents before clearing.

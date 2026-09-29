@@ -589,7 +589,7 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
 | `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
-| `beacon note list` | Show session notes / メモ一覧 |
+| `beacon note list` | Show session notes (cloud mode: 他セッション分も統合) / メモ一覧 |
 | `beacon note clear --yes` | Clear all session notes / メモ全削除 (`--yes` 必須) |
 
 <!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
@@ -6518,7 +6518,7 @@ def _help_registry():
         # fell through to the dispatcher, and `note clear --help` deleted the
         # notes. Registered here so help renders from the single source instead.
         {"command": "beacon note <text>", "flags": ["--context <label>"], "description": "Add an ephemeral session note (survives compaction; cleared at session end)"},
-        {"command": "beacon note list", "flags": ["--json"], "description": "List this session's notes"},
+        {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
         {"command": "beacon note clear", "flags": ["-y|--yes"], "description": "Delete all session notes. Requires --yes: local is moved to .bak, but the cloud copy is shared by every session on the project"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},

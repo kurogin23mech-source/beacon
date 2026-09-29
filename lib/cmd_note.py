@@ -25,15 +25,12 @@ from commands_shared import (
 def _push_note_to_cloud(note: dict) -> None:
     """Push a session note to cloud API. Best-effort: silently ignores all errors."""
     try:
-        config_path = _get_cloud_config_path()
-        if not os.path.exists(config_path):
-            return
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        project_id = config.get("project_id", "")
-        api_url = _resolve_active_api_url()
+        # ms-178 e-6655: share one project_id resolver with the read path so the
+        # two directions can never disagree about whether this is cloud mode.
+        project_id = _cloud_project_id()
         if not project_id:
             return
+        api_url = _resolve_active_api_url()
         from auth import load_credentials
         creds = load_credentials()
         if creds is None:
@@ -104,9 +101,8 @@ def cmd_note_add():
     print(f"Note: {text[:60]}{'...' if len(text) > 60 else ''}")
 
 
-def cmd_note_list():
-    path = _get_notes_path()
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+def _read_local_notes(path: str) -> list:
+    """Parse the local JSONL note file. Missing file = no notes (not an error)."""
     notes = []
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -117,15 +113,124 @@ def cmd_note_list():
                         notes.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
+    return notes
+
+
+def _cloud_project_id() -> str:
+    """The cloud project_id for this working directory, or "" in local mode."""
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return ""
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f).get("project_id", "") or ""
+    except Exception:
+        return ""
+
+
+def _fetch_cloud_notes(project_id: str):
+    """Return ``(notes, error)`` for the project's cloud notes.
+
+    ms-178 e-6655: notes are written to BOTH stores but were only ever read
+    back from the local file, so a fork worktree (its own .beacon/) could not
+    see notes the parent session wrote — they read as "no notes exist" and an
+    assignment was missed for a day.
+
+    ``error`` is a short human string on failure and MUST be surfaced, never
+    swallowed: the whole defect was "unreadable" being indistinguishable from
+    "empty". The WRITE path may stay best-effort silent (the note is still on
+    disk), but a silent read failure invents absence.
+    """
+    try:
+        api_url = _resolve_active_api_url()
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return [], "未認証 (beacon cloud login が必要)"
+        from api_client import ApiClient
+
+        def _token():
+            from auth import load_credentials as _lc
+            c = _lc()
+            return _extract_token(c) if c else ""
+
+        notes = ApiClient(api_url, _token).list_notes(project_id)
+        return (notes if isinstance(notes, list) else []), ""
+    except Exception as exc:  # network / auth / server error
+        return [], f"{type(exc).__name__}: {exc}"
+
+
+def _note_key(note: dict):
+    """Dedup identity of a note across the two stores.
+
+    The CLI stamps ``ts`` itself and the server persists that same value
+    (routers_projects.add_note uses ``body.ts or now()``), so a note written in
+    cloud mode lands in both stores with an identical ts/text/session_id. That
+    triple is the join key; nothing else is stable (the cloud copy's Firestore
+    document id is not stored in the document).
+    """
+    return (note.get("ts", ""), note.get("text", ""), note.get("session_id", ""))
+
+
+def cmd_note_list():
+    path = _get_notes_path()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    local = _read_local_notes(path)
+
+    project_id = _cloud_project_id()
+    cloud, cloud_error = ([], "")
+    if project_id:
+        cloud, cloud_error = _fetch_cloud_notes(project_id)
+
+    # Merge local ∪ cloud, tagging provenance so a reader can tell "this came
+    # from another session / worktree" from "this is mine" (AC4).
+    merged = []
+    seen = {}
+    for n in local:
+        item = dict(n)
+        item["origin"] = "local"
+        seen[_note_key(n)] = item
+        merged.append(item)
+    for n in cloud:
+        key = _note_key(n)
+        if key in seen:
+            seen[key]["origin"] = "both"
+            continue
+        item = dict(n)
+        item["origin"] = "cloud"
+        seen[key] = item
+        merged.append(item)
+    merged.sort(key=lambda n: n.get("ts", ""))
+
     if json_mode:
-        print(json.dumps(notes, ensure_ascii=False))
+        print(json.dumps(merged, ensure_ascii=False))
+        if cloud_error:
+            print(f"Warning: cloud のメモを取得できませんでした ({cloud_error})。"
+                  f"下の一覧はこの作業フォルダのローカル分のみで、"
+                  f"他セッションのメモが欠けている可能性があります。", file=sys.stderr)
         return
-    if not notes:
-        print("(メモなし)")
+
+    if cloud_error:
+        print(f"Warning: cloud のメモを取得できませんでした ({cloud_error})。"
+              f"表示はローカル分のみです — 「メモなし」= 存在しない、とは判断できません。",
+              file=sys.stderr)
+    if not merged:
+        if project_id and not cloud_error:
+            # Distinguish "checked both stores, genuinely empty" from the
+            # local-only reading that used to be reported the same way.
+            print("(メモなし — この作業フォルダも cloud も空です)")
+        else:
+            print("(メモなし)")
         return
-    for n in notes:
+    # AC4: when nothing was written from THIS working directory, say so, so a
+    # fork worktree does not read the parent's notes as its own.
+    if project_id and not local and cloud:
+        print(f"(この作業フォルダのメモはありません。以下 {len(cloud)} 件は"
+              f"cloud にある他セッション由来のメモです)")
+    for n in merged:
         ctx = f" [{n['context']}]" if n.get("context") else ""
-        print(f"  {n['ts'][:16]}{ctx}: {n['text']}")
+        mark = " (他セッション)" if n.get("origin") == "cloud" else ""
+        print(f"  {n['ts'][:16]}{ctx}: {n['text']}{mark}")
 
 
 def cmd_note_clear():
