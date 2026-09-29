@@ -165,7 +165,7 @@ cmd_target_close() {
             --class)  kind="${2:-}";   shift 2 ;;
             --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --reason) reason="${2:-}"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon target close --class <kind> <target-id> [--field key=value ...] [--reason <text>]" ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target close --class <kind> <target-id> [--field <照合結果field>=<値>] [--reason <text>]" ;;
             *)        target_id="$1";  shift ;;
         esac
     done

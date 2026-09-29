@@ -196,7 +196,8 @@ def next_phase_after(desc: dict, rec) -> str:
 
 def advance_target(data: dict, desc: dict, target_id: str, *,
                   to_phase: str = "", fields: Optional[dict] = None,
-                  actor: str = "", reason: str = "") -> tuple:
+                  actor: str = "", reason: str = "",
+                  reference_shown: bool = True) -> tuple:
     """Move a target to its next declared phase (or to ``to_phase`` when given)
     and record the change on its append-only ``phase_history``. Returns
     ``(record, old_phase, new_phase)``.
@@ -279,7 +280,8 @@ def advance_target(data: dict, desc: dict, target_id: str, *,
     _check = None
     if is_terminal_phase(desc, new):
         _check = require_completion_check(desc, rec, target_id,
-                                          incoming=fields or {})
+                                          incoming=fields or {},
+                                          reference_shown=reference_shown)
 
     # Apply per-phase field values (validated against what the NEW phase makes
     # visible), then enforce that new phase's required fields are satisfied.
@@ -396,6 +398,13 @@ def is_terminal_phase(desc: dict, phase_key: str) -> bool:
 # collapses the two, and a person who cannot later tell which ending they took
 # cannot learn where their own line sits.
 #
+# NOT the same thing as target_state.py's ``completion_gate`` (GATE_SPINE /
+# GATE_SALES_JUDGE / GATE_SELF_CLOSE_BAN). That one answers "may THIS SESSION
+# declare the target complete at all" (the anti-self-close / human-signal layer);
+# this one answers "has the owner checked the result against the line they drew".
+# A descriptor close passes through BOTH, independently — grepping "completion"
+# finds the two, and treating either as covering the other loses a gate.
+#
 # DECLARATION-DRIVEN, like budget_tracking / stall_signal: the class names the
 # field that holds the verdict and which of its values count as "met" —
 #
@@ -473,25 +482,38 @@ def completion_check_status(desc: dict, rec: dict) -> dict:
     }
 
 
-def _completion_check_missing_message(desc: dict, target_id: str,
-                                      status: dict) -> str:
+def _completion_check_missing_message(desc: dict, target_id: str, status: dict,
+                                      *, reference_shown: bool = True) -> str:
+    """The refusal text when the 照合 verdict is missing.
+
+    ``reference_shown`` says whether the caller actually PRINTED the reference
+    block just above. It can be empty — completion_reference returns nothing for a
+    class that declared no earlier fields, and budget_status nothing without budget
+    tracking — and telling someone to compare against 「上に出ている照合の材料」
+    when stdout is blank sends them hunting for output that was never written
+    (they conclude the command is broken and retry, when the truth is just that
+    this class records nothing up front)."""
     choices = status.get("choices") or []
     field = status["verdict_field"]
     decl = _verdict_field_decl(desc, field)
     label = (decl.get("label") or field) if isinstance(decl, dict) else field
     how = (f"--field {field}=<{' | '.join(choices)}>" if choices
            else f"--field {field}=<照合結果>")
+    compare = ("  上に出ている「照合の材料」と突き合わせて、"
+               if reference_shown
+               else "  このクラスは着手時に記録する項目を持たないため照合の材料は"
+                    "ありません。")
     return (
         f"{target_id}: 着手時に書いた十分ラインとの照合 ({label}) が未記録のため"
         f"終わらせられません (ms-146 e-5336)。\n"
-        f"  上に出ている「照合の材料」と突き合わせて、{how} で結果を記録して"
-        f"ください。\n"
+        f"{compare}{how} で結果を記録してください。\n"
         f"  「満たしていないが閉じる」も正当な結末です — 機構が止めているのは"
         f"『どちらの結末だったか分からないまま閉じること』だけです。")
 
 
 def require_completion_check(desc: dict, rec: dict, target_id: str, *,
-                             incoming: Optional[dict] = None) -> dict:
+                             incoming: Optional[dict] = None,
+                             reference_shown: bool = True) -> dict:
     """Refuse a completion claim that has not been checked against the line drawn
     at the start, and return the resulting status (ms-146 e-5336).
 
@@ -509,7 +531,8 @@ def require_completion_check(desc: dict, rec: dict, target_id: str, *,
     status = completion_check_status(desc, merged)
     if not status.get("recorded"):
         raise TargetEngineError(
-            _completion_check_missing_message(desc, target_id, status))
+            _completion_check_missing_message(desc, target_id, status,
+                                              reference_shown=reference_shown))
     choices = status.get("choices") or []
     if choices and status["verdict"] not in choices:
         raise TargetEngineError(
@@ -541,7 +564,8 @@ def record_completion_check(rec: dict, status: dict, *, actor: str = "",
 # ---------------------------------------------------------------------------
 
 def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
-                 reason: str = "", fields: Optional[dict] = None) -> dict:
+                 reason: str = "", fields: Optional[dict] = None,
+                 reference_shown: bool = True) -> dict:
     """Mark a target done (via the shared ``work_model.mark_done`` — stamps
     status=done + done_at + done_by/done_reason). Idempotent-safe: closing an
     already-done target re-stamps the done metadata. Returns the record.
@@ -581,18 +605,33 @@ def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
             f"(受領: {', '.join(sorted(unknown))})。ほかの field は "
             f"beacon target advance で記録してください")
 
+    # DENY BY DEFAULT. An earlier cut wrote `if terminals and current_phase(...)
+    # not in terminals`, which made the EMPTY case permissive: a class declaring a
+    # 照合 but no terminal phase closed from any phase, i.e. the gate failed open
+    # in exactly the shape it exists to prevent. A class in that state is not
+    # "unconstrained", it is malformed — td.validate_completion_check rejects it at
+    # load time, and reaching here means it slipped past that, so refuse and say so.
     terminals = td.terminal_phase_keys(desc)
-    if terminals and current_phase(rec) not in terminals:
+    if not terminals:
+        raise TargetEngineError(
+            f"{target_id}: 記述子 '{desc.get('kind')}' は照合 (completion_check) を"
+            f"宣言していますが終端 (terminal) phase がありません。照合を掛ける場所が"
+            f"無いため終わらせられません — 記述子の宣言を直してください "
+            f"(ms-146 e-5336)")
+    if not is_terminal_phase(desc, current_phase(rec)):
         _cur = current_phase(rec) or "(未設定)"
+        _how = (f"--to {terminals[0]}" if len(terminals) == 1
+                else f"--to <{' | '.join(terminals)} のどれか>")
         raise TargetEngineError(
             f"{target_id}: まだ最終フェーズに居ないため終わらせられません "
             f"(現在: '{_cur}' / 最終: "
             f"{' / '.join(terminals)})。\n"
             f"  先に beacon target advance --class {desc.get('kind')} "
-            f"{target_id} --to {terminals[0]} で照合を通してください "
+            f"{target_id} {_how} で照合を通してください "
             f"(ms-146 e-5336)")
 
-    status = require_completion_check(desc, rec, target_id, incoming=fields)
+    status = require_completion_check(desc, rec, target_id, incoming=fields,
+                                      reference_shown=reference_shown)
     # Validated — now write. A verdict supplied at close lands on the record so a
     # later read sees the same value the audit row names.
     if cfg["verdict_field"] in fields:

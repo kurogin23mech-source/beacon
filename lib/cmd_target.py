@@ -779,18 +779,21 @@ def cmd_target_create():
         print(f"  phase: {phase}")
 
 
-def _print_completion_reference(desc, rec, new_phase) -> None:
+def _print_completion_reference(desc, rec, new_phase) -> bool:
     """Print what the owner committed to earlier, plus how the time budget
     actually went, before a terminal-phase advance is attempted (ms-146 e-5345).
 
     Printed BEFORE validation on purpose. The common path is that the first
     attempt FAILS because the 照合 field is missing — and that failure is exactly
     the moment the owner needs the line in front of them, so they can write an
-    honest comparison on the retry instead of one from memory."""
+    honest comparison on the retry instead of one from memory.
+
+    Returns whether anything was actually PRINTED, so the refusal that follows can
+    stop claiming 「上に出ている照合の材料」 when this class had none to show."""
     ref = _te.completion_reference(desc, rec, new_phase)
     budget = _te.budget_status(desc, rec)
     if not ref and not budget:
-        return
+        return False
     print("■ 照合の材料 (着手時に決めたこと)")
     for row in ref:
         print(f"  {row['label']}: {row['value']}")
@@ -812,6 +815,7 @@ def _print_completion_reference(desc, rec, new_phase) -> None:
     # error on stderr. stdout is block-buffered when piped, so without this the
     # reference block lands AFTER the error it is supposed to explain.
     sys.stdout.flush()
+    return True
 
 
 def cmd_target_advance():
@@ -837,12 +841,14 @@ def cmd_target_advance():
     # missing 照合 field. There is no path into a terminal phase that skips this.
     _target_now = _te.find_target(data, desc, target_id)
     _intended = (to_phase.strip() or _te.next_phase_after(desc, _target_now))
+    _shown = True
     if _target_now is not None and _te.is_terminal_phase(desc, _intended):
-        _print_completion_reference(desc, _target_now, _intended)
+        _shown = _print_completion_reference(desc, _target_now, _intended)
     try:
         rec, old, new = _te.advance_target(data, desc, target_id,
                                            to_phase=to_phase, fields=fields,
-                                           actor=_actor_str(), reason=reason)
+                                           actor=_actor_str(), reason=reason,
+                                           reference_shown=_shown)
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -870,17 +876,29 @@ def cmd_target_advance():
             is_completion=True)
 
 
+# ms-146 e-5336 (AX review): ONE spelling of close's usage. It previously read
+# four different ways (bin/beacon, the bash unknown-flag guard, this docstring,
+# and the missing-target-id Usage), and an AI learns the syntax from whichever
+# error it happens to hit. The placeholder names the VERDICT field rather than a
+# generic ``key=value``: unlike create / advance / split, close accepts only the
+# one declared 照合結果 field, so a spelling that looks like the generic
+# multi-field flag mis-teaches its scope.
+TARGET_CLOSE_USAGE = (
+    "beacon target close --class <kind> <target-id> "
+    "[--field <照合結果field>=<値>] [--reason <text>]")
+
+
 def cmd_target_close():
     """Close (mark done) a data-defined target (e-3956).
 
-    beacon target close --class <kind> <target-id> [--reason <text>]
+    Usage: see TARGET_CLOSE_USAGE (single source, shared with bin/ and the
+    unknown-flag guard).
     """
     kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
     reason = os.environ.get("BEACON_REASON", "").strip()
     if not target_id:
-        print("Usage: beacon target close --class <kind> <target-id> "
-              "[--field key=value] [--reason <text>]", file=sys.stderr)
+        print(f"Usage: {TARGET_CLOSE_USAGE}", file=sys.stderr)
         sys.exit(1)
     # ms-142 T3 / e-5158 — closing a data-defined target is a completion claim.
     # Every target-class must carry an anti-self-close gate; a descriptor class
@@ -907,13 +925,22 @@ def cmd_target_close():
     # phase drops that phase's own fields, which for a close attempted from 着手
     # would hide the 十分ライン itself: the one line the 照合 is against.
     _rec_now = _te.find_target(data, desc, target_id)
+    _shown = True
     if _rec_now is not None:
+        # Which phase counts as "the one being entered". When the record already
+        # SITS at a terminal phase, that IS the answer — a class may declare more
+        # than one terminal (done / cancelled), and assuming terminals[0] there
+        # would build the reference against a phase the record never entered.
+        # Only fall back to the first declared terminal when it is not there yet.
         _terminals = _td.terminal_phase_keys(desc)
-        _ref_phase = _terminals[0] if _terminals else _te.current_phase(_rec_now)
-        _print_completion_reference(desc, _rec_now, _ref_phase)
+        _cur = _te.current_phase(_rec_now)
+        _ref_phase = _cur if _cur in _terminals else (
+            _terminals[0] if _terminals else _cur)
+        _shown = _print_completion_reference(desc, _rec_now, _ref_phase)
     try:
         _te.close_target(data, desc, target_id, actor=_actor_str(),
-                         reason=reason, fields=fields)
+                         reason=reason, fields=fields,
+                         reference_shown=_shown)
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1672,47 +1699,29 @@ def cmd_target_class_update():
         trial["stall_signal"] = stall_cfg
 
     if check_cfg is not None:
-        # The verdict field must be declared on a TERMINAL phase. Anywhere else
-        # and the "gate" would sit off the path a completion actually walks:
-        # the class would look guarded while nothing ever demands the value.
-        terminals = _td.terminal_phase_keys(trial)
-        if not terminals:
-            print(f"Error: --completion-check はこのクラスに最終フェーズ "
-                  f"(terminal) が宣言されてから指定してください "
-                  f"(照合は完了主張の瞬間に行うものなので、終端が無いと"
-                  f"発火する場所がありません)", file=sys.stderr)
-            sys.exit(1)
-        field = check_cfg["verdict_field"]
-        term_known = set()
-        for pkey in terminals:
-            phase = _td.get_phase(trial, pkey) or {}
-            term_known |= {(f.get("key") or "").strip()
-                           for f in (phase.get("fields") or [])
-                           if isinstance(f, dict)}
-        if field not in term_known:
-            print(f"Error: --completion-check の照合結果 field '{field}' は"
-                  f"最終フェーズ ({' / '.join(terminals)}) に宣言されていません "
-                  f"(宣言済: {', '.join(sorted(x for x in term_known if x)) or 'なし'})\n"
-                  f"  先に beacon target-class update --kind {kind} "
-                  f"--required-phase-field {terminals[0]}:{field}:照合結果:text "
-                  f"で足してください", file=sys.stderr)
-            sys.exit(1)
-        # A met value the field cannot hold would make "満たした" unreachable —
-        # the class would look ranked while every ending scored as not-met.
-        decl = next((f for pkey in terminals
-                     for f in ((_td.get_phase(trial, pkey) or {}).get("fields") or [])
-                     if isinstance(f, dict) and (f.get("key") or "").strip() == field),
-                    {})
-        allowed = _td.field_choices(decl)
-        if allowed:
-            stray = [v for v in check_cfg["met_values"] if v not in allowed]
-            if stray:
-                print(f"Error: --completion-check の「満たした」値 "
-                      f"{' / '.join(stray)} は field '{field}' の選択肢に"
-                      f"ありません (選択肢: {' / '.join(allowed)})",
-                      file=sys.stderr)
-                sys.exit(1)
+        # ms-146 e-5336 (保守性 review high): the SAME predicate the descriptor
+        # validator runs at load time. It previously lived only here, so a
+        # descriptor arriving any other way (target-class add --stdin, a seed
+        # module, a restore) skipped every one of these invariants while the CLI
+        # path looked fully guarded. Sharing the function is what makes "wherever
+        # you write it, the same rules reject it" true rather than aspirational.
         trial["completion_check"] = check_cfg
+        problems = _td.validate_completion_check(trial, kind)
+        if problems:
+            print("Error: --completion-check を設定できません:", file=sys.stderr)
+            for pb in problems:
+                print(f"  - {pb}", file=sys.stderr)
+            _terms = _td.terminal_phase_keys(trial)
+            if _terms:
+                # Name every terminal rather than asserting the first one: a class
+                # may declare several (done / cancelled) and pointing at one as
+                # though it were THE terminal sends the author to the wrong phase.
+                _where = _terms[0] if len(_terms) == 1 else f"<{' | '.join(_terms)} のどれか>"
+                print(f"  照合結果 field を足すには: beacon target-class update "
+                      f"--kind {kind} --required-phase-field "
+                      f"{_where}:{check_cfg['verdict_field']}:照合結果:text",
+                      file=sys.stderr)
+            sys.exit(1)
 
     if prof_new:
         trial["profession"] = prof_new

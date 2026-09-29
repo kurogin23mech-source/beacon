@@ -353,7 +353,7 @@ case "${1:-}" in
   記述子駆動 target (data 定義 target-class の操作, ms-122):
     create --class <kind> --label <text> [--field key=value ...]
     advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]
-    close --class <kind> <target-id> [--field key=value ...] [--reason <text>]
+    close --class <kind> <target-id> [--field <照合結果field>=<値>] [--reason <text>]
                        # 照合 (completion_check) を宣言したクラスは、終端フェーズに居て
                        # 照合結果が記録済みでないと閉じられない (ms-146 e-5336)
     purge --class <kind> <target-id> --reason <text>   # 物理削除 (移設済みデータの掃除用、--reason 必須)

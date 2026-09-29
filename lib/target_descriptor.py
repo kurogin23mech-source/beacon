@@ -477,6 +477,94 @@ def deliverable_projection(desc: dict) -> Optional[dict]:
     return normalize_deliverable(raw)
 
 
+COMPLETION_CHECK_KEY = "completion_check"
+
+
+def validate_completion_check(desc: dict, label: str) -> list:
+    """Return problems for a class's ``completion_check`` slot (ms-146 e-5336).
+    Empty list = valid OR absent.
+
+    The 照合 slot names the field that must hold a verdict before the class can be
+    completed, and which of that field's values count as having met the line::
+
+        "completion_check": {"verdict_field": "enough_verdict",
+                             "met_values": ["満たした"]}
+
+    Validated HERE, at load time, for the same reason the changelog and deliverable
+    slots are (ms-142 e-5255 / ms-155 e-5598): the CLI is not the only writer. A
+    descriptor can also arrive through ``target-class add --stdin``, a seed module,
+    or a restore — and a slot whose invariants are only enforced on the CLI path
+    degrades, on every other path, into a gate that LOOKS declared and silently
+    does less. That failure is worse than no gate, because it reads as closed.
+
+    Three invariants:
+
+      * the class must declare at least one terminal phase — 照合 happens at the
+        moment of the completion claim, so with no terminal there is nowhere for
+        the gate to fire, and ``close_target`` would have no phase to hold the
+        record to.
+      * the verdict field must be declared ON a terminal phase — a gate keyed to a
+        field that sits off the path a completion actually walks demands nothing.
+      * any declared ``met_values`` must be values the field can actually hold —
+        otherwise "満たした" is unreachable and every ending silently scores
+        not-met.
+    """
+    raw = desc.get(COMPLETION_CHECK_KEY) if isinstance(desc, dict) else None
+    if raw is None:
+        return []
+    problems: list = []
+    if not isinstance(raw, dict):
+        return [f"[{label}] 'completion_check' は辞書である必要があります "
+                f"(現在: {raw!r})"]
+    field = (raw.get("verdict_field") or "").strip()
+    if not field:
+        problems.append(f"[{label}] 'completion_check.verdict_field' が未設定です")
+    met_values = raw.get("met_values")
+    if met_values is not None and not isinstance(met_values, list):
+        problems.append(
+            f"[{label}] 'completion_check.met_values' は配列である必要があります "
+            f"(現在: {met_values!r})")
+        met_values = None
+
+    terminals = terminal_phase_keys(desc)
+    if not terminals:
+        problems.append(
+            f"[{label}] 'completion_check' を宣言していますが終端 (terminal) "
+            f"phase がありません。照合は完了主張の瞬間に行うものなので、終端が"
+            f"無いと発火する場所がありません")
+        return problems
+    if not field:
+        return problems
+
+    decl = {}
+    term_known = set()
+    for pkey in terminals:
+        phase = get_phase(desc, pkey) or {}
+        for f in (phase.get("fields") or []):
+            if not isinstance(f, dict):
+                continue
+            key = (f.get("key") or "").strip()
+            term_known.add(key)
+            if key == field:
+                decl = f
+    if field not in term_known:
+        problems.append(
+            f"[{label}] 'completion_check.verdict_field' の '{field}' は終端 phase "
+            f"({' / '.join(terminals)}) に宣言されていません "
+            f"(宣言済: {', '.join(sorted(x for x in term_known if x)) or 'なし'})")
+        return problems
+
+    allowed = field_choices(decl)
+    if allowed and met_values:
+        stray = [v for v in met_values if v not in allowed]
+        if stray:
+            problems.append(
+                f"[{label}] 'completion_check.met_values' の "
+                f"{' / '.join(str(s) for s in stray)} は field '{field}' の"
+                f"選択肢にありません (選択肢: {' / '.join(allowed)})")
+    return problems
+
+
 def validate_deliverable(raw, label: str) -> list:
     """Return problems for a deliverable slot (empty list = valid OR absent) —
     the ONE validation both descriptor classes (``validate_descriptor``) and
@@ -715,6 +803,10 @@ def validate_descriptor(desc: dict) -> list:
     # the root union. Delegates to the shared ``validate_deliverable`` so code
     # classes (``target_state``) enforce the identical rule (ms-155 e-5598).
     problems.extend(validate_deliverable(desc.get(DELIVERABLE_KEY), label))
+    # 照合 slot (ms-146 e-5336) — same load-time surfacing rule as the
+    # changelog / deliverable slots above: every writer of a descriptor goes
+    # through here, the CLI is only one of them.
+    problems.extend(validate_completion_check(desc, label))
 
     return problems
 

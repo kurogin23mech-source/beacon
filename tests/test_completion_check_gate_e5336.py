@@ -292,3 +292,112 @@ def test_cli_close_accepts_the_verdict_and_records_the_ending(
     rows = [r for r in rec["phase_history"] if r.get("kind") == "completion_check"]
     assert [r["verdict"] for r in rows] == ["満たしていないが閉じる"]
     assert rows[0]["met"] is False
+
+
+# ---------------------------------------------------------------------------
+# 独立レビュー由来 (PR #767, AX + 保守性) — 修正を固定する。
+# ---------------------------------------------------------------------------
+
+import target_descriptor as td  # noqa: E402
+
+
+# completion_check を宣言しているのに終端フェーズが無い、壊れた記述子。CLI は
+# これを作らせないが、target-class add --stdin / シード / 復元は CLI を通らない。
+BROKEN_NO_TERMINAL = {
+    "kind": "broken",
+    "label": "こわれ",
+    "profession": "dev",
+    "type": "single-shot",
+    "id_prefix": "bk-",
+    "collection": "brokens",
+    "decomposition": {"id_field": "id", "arms": ["work_items", "evidence"]},
+    "fields": [{"key": "enough_verdict", "label": "照合結果", "type": "string"}],
+    "phases": [{"key": "open", "label": "開"}, {"key": "doing", "label": "作業中"}],
+    "completion_check": {"verdict_field": "enough_verdict",
+                         "met_values": ["満たした"]},
+}
+
+
+def test_no_terminal_phase_is_rejected_at_load_time():
+    """保守性 review high: 検証が CLI の中だけに在ると、CLI を通らない書き込み
+    経路 (--stdin / シード / 復元) が素通りする。記述子の検証器が持つべき。"""
+    problems = td.validate_completion_check(BROKEN_NO_TERMINAL, "broken")
+    assert problems, "終端フェーズ無しの completion_check は弾かれるべき"
+    assert "terminal" in problems[0]
+
+
+def test_verdict_field_off_the_terminal_phase_is_rejected():
+    desc = dict(UNDERTAKING)
+    desc["completion_check"] = {"verdict_field": "purpose"}   # 基本 field = 終端に無い
+    problems = td.validate_completion_check(desc, "undertaking")
+    assert problems and "purpose" in problems[0]
+
+
+def test_met_value_outside_the_field_choices_is_rejected():
+    desc = dict(UNDERTAKING)
+    desc["completion_check"] = {"verdict_field": "enough_verdict",
+                                "met_values": ["ぜんぶOK"]}
+    problems = td.validate_completion_check(desc, "undertaking")
+    assert problems and "選択肢" in problems[0]
+
+
+def test_valid_declaration_passes_the_validator():
+    assert td.validate_completion_check(UNDERTAKING, "undertaking") == []
+    assert td.validate_completion_check(PLAIN, "plain") == []   # 未宣言も valid
+
+
+def test_close_denies_by_default_when_the_class_has_no_terminal_phase():
+    """保守性 review high (実測で再現した穴): 旧実装は
+    `if terminals and current_phase(...) not in terminals` と書いており、終端が
+    ゼロだと条件全体が False になってガードを素通りした。= ゲートが fail-open。
+    終端ゼロは『制約なし』ではなく『記述子が壊れている』なので拒否する。"""
+    data = {"name": "t"}
+    rec = te.create_target(data, BROKEN_NO_TERMINAL, label="x",
+                           fields={"enough_verdict": "満たした"})
+    assert te.current_phase(rec) == "open"           # 終端ではない
+    with pytest.raises(te.TargetEngineError) as e:
+        te.close_target(data, BROKEN_NO_TERMINAL, rec["id"])
+    assert "terminal" in str(e.value)
+    assert rec.get("status") != "done"
+
+
+def test_refusal_does_not_claim_material_is_on_screen_when_none_was_shown():
+    """AX review (misleading): 照合の材料が空でも拒否文が常に『上に出ている
+    照合の材料と突き合わせて』と言うと、AI は出ていない出力を探して壊れたと
+    誤診する。材料を出していないときはそう言う。"""
+    data, rec = _started()
+    msg_shown = ""
+    try:
+        te.advance_target(data, UNDERTAKING, rec["id"], to_phase="enough",
+                          reference_shown=True)
+    except te.TargetEngineError as e:
+        msg_shown = str(e)
+    msg_hidden = ""
+    try:
+        te.advance_target(data, UNDERTAKING, rec["id"], to_phase="enough",
+                          reference_shown=False)
+    except te.TargetEngineError as e:
+        msg_hidden = str(e)
+    assert "上に出ている" in msg_shown
+    assert "上に出ている" not in msg_hidden
+    assert "材料はありません" in msg_hidden
+    # どちらの経路でも、記録の仕方は必ず示す (回復経路を落とさない)。
+    for m in (msg_shown, msg_hidden):
+        assert "enough_verdict" in m
+
+
+def test_cli_advance_into_terminal_is_gated_too(proj, monkeypatch, capsys):
+    """AX/保守性 review: close だけ CLI レベルで試験されており、advance 側の
+    bash→環境変数→python の受け渡しが壊れても気づけない非対称があった。"""
+    monkeypatch.setenv("BEACON_TARGET_CLASS", "undertaking")
+    monkeypatch.setenv("BEACON_TARGET_ID", "ut-1")
+    monkeypatch.setenv("BEACON_TO_PHASE", "enough")
+    with pytest.raises(SystemExit):
+        cmd_target.cmd_target_advance()
+    cap = capsys.readouterr()
+    assert "照合の材料" in cap.out
+    assert "照合" in cap.err
+    # BEACON_FIELDS 経由で照合結果を渡せば通る (受け渡しが生きていることの確認)。
+    monkeypatch.setenv("BEACON_FIELDS", "enough_verdict=満たした\n")
+    cmd_target.cmd_target_advance()
+    assert "フェーズ進行" in capsys.readouterr().out
