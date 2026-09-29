@@ -149,9 +149,17 @@ def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
 
     ``True`` when the declaration is older than ``stale_after_seconds`` — OR when
     its timestamp is missing/unparseable. A declaration we cannot date is treated
-    as stale (safe side: we would rather raise ``unknown`` for human attention
-    than trust an undatable self-report). ``False`` only when the stamp parses AND
-    is within the freshness window.
+    as stale: safe side, since we would rather surface something for human
+    attention than trust an undatable self-report. ``False`` only when the stamp
+    parses AND is within the freshness window.
+
+    This predicate answers only "is the stamp too old to trust". **What a stale
+    declaration then projects to is NOT described here** — ``derive_state`` is the
+    single source of truth for that mapping (it depends on liveness too). Naming
+    the outcome in this docstring as well is how it went stale once already: it
+    said ``unknown`` and kept saying so after ms-177 changed the outcome to
+    ``interrupted``. Read ``derive_state`` for the mapping; keep this one about
+    the stamp.
     """
     if not declared_at:
         return True
@@ -169,7 +177,7 @@ def derive_state(declared_state, declared_at, live, now,
                  stale_after_seconds) -> str:
     """Project a work unit's canonical ``state`` (ms-159 / e-6243).
 
-    The one place the 5 canonical states + ``unknown`` are decided. Pure: the
+    The one place every value in ``ALL_STATES`` is decided. Pure: the
     impure liveness scan that produces ``live`` lives on the server; keeping the
     derivation pure lets every branch be pinned without a bus fixture (same
     discipline as ``derive_draining``).

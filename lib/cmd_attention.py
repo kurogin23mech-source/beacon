@@ -33,7 +33,8 @@ def _fetch_sessions(client, config, all_projects: bool):
     instead of an empty ``(no target)/—`` shell. No ``live_only`` filter: a
     ``terminated:failed`` session is not live but is attention-worthy, and the
     pure filter drops everything non-attention anyway (a stale live-less session
-    projects to ``unknown``/``terminated`` and is folded out)."""
+    projects to a non-attention state — ``unknown`` / ``interrupted`` /
+    ``terminated`` — and is folded out; ``derive_state`` owns which one)."""
     if all_projects:
         rows = client.list_user_sessions() or []
     else:

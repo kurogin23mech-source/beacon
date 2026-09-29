@@ -1011,7 +1011,7 @@ func TestStopBucketSplitAndInterruptNotHiddenByDefault(t *testing.T) {
 	}
 
 	// 2. 語彙に中断があること。
-	if !strings.Contains(page, `interrupt: {label: "中断"`) {
+	if !strings.Contains(page, `interrupted: {label: "中断"`) {
 		t.Error("page.html の状態語彙 (OPS_STATES) に中断が無い")
 	}
 

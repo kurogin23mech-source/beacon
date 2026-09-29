@@ -235,7 +235,7 @@
   /* 中断 (事故で落ちた) は赤。確認待ちの橙とは別の色にする — 「あなたを待っている」
      のではなく「壊れて止まった」なので、同じ色にすると読み分けられない。鼓動は
      させない (動いていないものが脈打つと live と誤読される)。 */
-  html.ops .dot.interrupt { background: var(--cancelled); box-shadow: 0 0 8px var(--cancelled); }
+  html.ops .dot.interrupted { background: var(--cancelled); box-shadow: 0 0 8px var(--cancelled); }
   @keyframes ops-pulse { 50% { opacity: .4; } }
 
   /* --- 状態札 (語が主・色は補助)。確認待ちだけ塗りで「あなた待ち」を目立たせる。 --- */
@@ -251,7 +251,7 @@
   /* 中断は輪郭 + 赤文字で目立たせる。塗り (確認待ちの形) は使わない — 塗りは
      「いま応答が要る」の予約席で、中断は「気づいて再開してほしい」なので一段弱い
      強調にとどめる。淡くしないことが肝 (灰色で沈めたら中断を分けた意味が無い)。 */
-  html.ops .st.interrupt {
+  html.ops .st.interrupted {
     color: var(--cancelled); font-weight: 600;
     border-color: color-mix(in srgb, var(--cancelled) 60%, transparent);
     background: color-mix(in srgb, var(--cancelled) 10%, transparent);
@@ -451,7 +451,10 @@ const OPS_STATES = {
   // 再開したいもの。以前は両方が同じ「停止」で、事故で落ちた作業が片付いたものと
   // 同じ見た目で沈んでいた。
   stop:      {label: "終了",   legend: "人が幕を引いた。もう見なくてよい"},
-  interrupt: {label: "中断",   legend: "正常に終わらずに止まった。気づいて再開したい"},
+  // キーは wire 値 (server_state) と綴りを揃える。work / confirm / idle / stop は
+  // 元からある別語彙だが、この 1 つは wire 値の途中切りにすると grep で見つからず、
+  // 後から key === "interrupted" と書いた人のフィルタが黙って何にも一致しなくなる。
+  interrupted: {label: "中断", legend: "正常に終わらずに止まった。気づいて再開したい"},
 };
 // 既定で畳む状態を決める唯一の場所 (ms-177)。**「終了」だけ**。中断をここに足すと、
 // 赤くしても既定では誰の目にも入らず、色を変えただけで「事故死が沈む」穴が残る
@@ -472,7 +475,7 @@ function liveness(s) {
     // live でない」を画面側で再計算すると、導出が正典と画面の 2 箇所に割れて、次に
     // 穴が空いたときどちらが正か分からなくなる。画面は受け取った語を色に変えるだけ。
     if (s.server_state === "interrupted") {
-      return {key: "interrupt", label: OPS_STATES.interrupt.label, on: false,
+      return {key: "interrupted", label: OPS_STATES.interrupted.label, on: false,
               hint: "作業中のまま受信経路が途切れました (端末を閉じた・エラーで落ちた・"
                   + "コンテキスト制限で終わった等)。正常に終了したセッションではないので、"
                   + "再開が要るかもしれません"};
@@ -1390,7 +1393,7 @@ function renderSessions(d) {
   const hidden = s => HIDDEN_BY_DEFAULT_STATES.includes(liveness(s).key);
   const ended = all.filter(hidden);
   const rows = showEnded ? all : all.filter(s => !hidden(s));
-  const interrupted = rows.filter(s => liveness(s).key === "interrupt");
+  const interrupted = rows.filter(s => liveness(s).key === "interrupted");
 
   // プロジェクトごとにまとめる。どのプロジェクトの作業かが一目で分かるように。
   const groups = new Map();
