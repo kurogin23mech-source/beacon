@@ -277,6 +277,7 @@ VERB_LEDGER = {
     "note_add": {"cls": "R", "secondary": [], "note": ""},
     "note_clear": {"cls": "B", "secondary": [], "note": ""},
     "note_list": {"cls": "Q", "secondary": [], "note": ""},
+    "note_restore": {"cls": "R", "secondary": ["B"], "note": "[post-memo/ms-178] note clear が残した退避からメモを復元=台帳への再追記(R)、退避読取と重複判定は機構(B)"},
 
     # --- operation ---
     "operation_approve": {"cls": "C", "secondary": ["B"], "note": "人間承認(C)/gate反映(B)"},

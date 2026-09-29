@@ -11,7 +11,7 @@ PowerShell user needs on Day 1:
 * ``beacon milestone add|list|start|done|observe|show|update``
 * ``beacon doc add|list|show|update|delete``
 * ``beacon summary "text"``
-* ``beacon note "<text>"`` / ``note list`` / ``note clear``
+* ``beacon note "<text>"`` / ``note list`` / ``note clear --yes`` / ``note restore``
 * ``beacon trigger fire|check|clear``
 * ``beacon search "query"``
 * ``beacon cycle status``
@@ -1059,6 +1059,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_note.add_argument("--json", action="store_true")
     # ms-54 / e-1293: persistence poisoning defense.
     p_note.add_argument("--bus-origin", dest="bus_origin",
+                        action="store_true")
+    # ms-178 e-6654: `note clear` needs an explicit confirmation on BOTH CLI
+    # frontends. Without it here, this dispatcher would hit the python gate's
+    # refusal instead of clearing, and the two frontends would disagree.
+    # ms-178 (AX review PR#766): --confirm accepted as an alias, matching the
+    # bash frontend, so an agent that learned the sibling spelling is not
+    # refused on one frontend and accepted on the other.
+    p_note.add_argument("--yes", "-y", "--confirm", dest="assume_yes",
                         action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
@@ -3674,7 +3682,8 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear\n"
+            "       beacon note clear --yes   (-y / --confirm も可)\n"
+            "       beacon note restore\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 0
@@ -3686,12 +3695,22 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "note_list", env)
     if sub == "clear":
-        return _run_commands_py(root, "note_clear", {})
+        # ms-178 e-6654: pass the confirmation through; the python side
+        # refuses without it (the cloud notes are shared project-wide).
+        return _run_commands_py(
+            root, "note_clear",
+            {"BEACON_NOTE_CLEAR_YES": "1" if args.assume_yes else ""},
+        )
+    if sub == "restore":
+        # ms-178 e-6656: recover from the backups clear left. Additive and
+        # idempotent, so it needs no confirmation flag.
+        return _run_commands_py(root, "note_restore", {})
     if not sub:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear\n"
+            "       beacon note clear --yes   (-y / --confirm も可)\n"
+            "       beacon note restore\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 1
@@ -5968,7 +5987,7 @@ def _print_top_help() -> None:
         "  beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms id]\n"
         "  beacon doc list [--scope S] [--ms id]\n"
         "  beacon doc show <doc-id>\n"
-        "  beacon note \"<text>\" | note list | note clear\n"
+        "  beacon note \"<text>\" | note list | note clear --yes | note restore\n"
         "  beacon search \"query\" [--ms id] [--scope S]\n"
         "  beacon trigger fire|check|clear [name]\n"
         "  beacon retro [--prepare|--catch-up] [--since X] [--until Y]\n"
