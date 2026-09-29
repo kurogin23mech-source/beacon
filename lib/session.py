@@ -756,25 +756,16 @@ def _bridges_dir() -> Path:
 def _pid_alive(pid: int) -> bool:
     """Return True iff ``pid`` is a live process on this host.
 
-    Uses ``os.kill(pid, 0)``: ``ProcessLookupError`` means dead,
-    ``PermissionError`` (the signalling process can't reach the target)
-    counts as alive — the bridge may belong to another user but still
-    legitimately own the claim. Anything else is degraded to "unknown,
-    treat as alive" so the CLI doesn't silently fall through on
-    transient OS quirks.
+    Delegates to the single cross-platform probe in ``lib/pid_liveness.py``.
+    ms-133 / e-6591: this used to call ``os.kill(pid, 0)`` directly, which on
+    Windows TERMINATES the target — so merely asking "who owns this bridge
+    claim?" killed the bridge. The probe keeps the POSIX semantics (dead /
+    another user's process counts as alive / unknown degrades to alive so the
+    CLI never silently steals a live claim) and adds a Windows path that does
+    not signal anything.
     """
-    import os
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except Exception:
-        return True
+    from pid_liveness import pid_alive
+    return pid_alive(pid)
 
 
 def _get_ancestor_pids(start_pid: int | None = None, max_depth: int = 20) -> set:

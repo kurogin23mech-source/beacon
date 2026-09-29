@@ -260,13 +260,42 @@ class Watcher:
         return True
 
     def wrapper_gone(self) -> bool:
+        """True once the bcodex wrapper process has exited.
+
+        ms-133 / e-6591: this was ``os.kill(self.wrapper_pid, 0)``. On Windows
+        that KILLS the wrapper — the watcher whose job is to keep the session
+        alive would terminate the very process it watches, every poll. The
+        probe in ``lib/pid_liveness.py`` never signals. Unknown degrades to
+        "still there" so the watcher keeps working rather than exiting early.
+        """
         if not self.wrapper_pid:
             return False
+        return not self._pid_alive(self.wrapper_pid)
+
+    def _pid_alive(self, pid: int) -> bool:
+        """Liveness probe via ``lib/pid_liveness.py``; fail-open to alive."""
         try:
-            os.kill(self.wrapper_pid, 0)
-        except OSError:
-            return True
-        return False
+            from pid_liveness import pid_alive
+        except Exception:
+            lib_dir = self._lib_dir()
+            if lib_dir and str(lib_dir) not in sys.path:
+                sys.path.insert(0, str(lib_dir))
+            try:
+                from pid_liveness import pid_alive
+            except Exception:
+                return True
+        return pid_alive(pid)
+
+    def _lib_dir(self) -> Path | None:
+        """Resolve this install's ``lib`` dir (source) or ``_bundled_lib`` (wheel)."""
+        root = Path(self.install_root) if self.install_root else None
+        if root is None:
+            return None
+        for sub in ("lib", "_bundled_lib"):
+            candidate = root / sub
+            if candidate.is_dir():
+                return candidate
+        return None
 
     def run(self) -> int:
         self.start_pull_only()

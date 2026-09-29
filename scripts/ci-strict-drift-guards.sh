@@ -37,4 +37,13 @@ echo "[ci-strict-drift-guards] capability scope invariant (ms-134 e-4721)…"
 # regression from shipping.
 python3 "$ROOT/scripts/check-capability-scope.py"
 
+echo "[ci-strict-drift-guards] Windows-unsafe pid liveness probes (ms-133 e-6591)…"
+# Python's os.kill maps EVERY signal — 0 included — onto TerminateProcess on
+# Windows, so the POSIX idiom `os.kill(pid, 0)` asks "are you alive?" by killing.
+# Four of Beacon's five liveness probes did exactly that (bridge claim, Codex
+# daemon pidfile, bcodex wrapper watch, version skew). They now share
+# lib/pid_liveness.py. This blocks a re-introduction: the idiom keeps working on
+# the Mac/Linux machines where it gets written, so only a machine check catches it.
+python3 "$ROOT/scripts/check-pid-liveness.py" --strict
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."
