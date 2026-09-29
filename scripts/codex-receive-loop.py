@@ -43,15 +43,14 @@ def _resolve_lib_dir(install_root: Path) -> Path:
     pipx/brew wheel remaps it to ``beacon_cli/_bundled_lib``. When this
     daemon is spawned from the bundled ``_bundled_scripts/`` dir, its
     self-resolved install_root is the ``beacon_cli`` package, so lib lives at
-    the ``_bundled_lib`` sibling. Fall back to it when ``lib/`` is absent.
+    the ``_bundled_lib`` sibling.
+
+    The layout rule itself now lives in ``scripts/_install_paths.py`` (one
+    definition for every script under ``scripts/``); this stays as the name
+    four call sites in this file already use.
     """
-    lib_dir = install_root / "lib"
-    if lib_dir.is_dir():
-        return lib_dir
-    bundled = install_root / "_bundled_lib"
-    if bundled.is_dir():
-        return bundled
-    return lib_dir
+    from _install_paths import resolve_lib_dir
+    return resolve_lib_dir(install_root)
 
 
 def _beacon_version(install_root: Path) -> str:

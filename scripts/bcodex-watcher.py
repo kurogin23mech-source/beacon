@@ -273,29 +273,38 @@ class Watcher:
         return not self._pid_alive(self.wrapper_pid)
 
     def _pid_alive(self, pid: int) -> bool:
-        """Liveness probe via ``lib/pid_liveness.py``; fail-open to alive."""
+        """Liveness probe via ``lib/pid_liveness.py``; fail-open to alive.
+
+        The lib dir is resolved by the shared ``scripts/_install_paths`` helper
+        rather than re-deriving the layout rule here — two independent reviews of
+        PR #764 flagged the local copy, and a duplicated layout rule is the same
+        class of silent divergence this whole change exists to close.
+        """
         try:
             from pid_liveness import pid_alive
         except Exception:
-            lib_dir = self._lib_dir()
-            if lib_dir and str(lib_dir) not in sys.path:
-                sys.path.insert(0, str(lib_dir))
+            if not self._put_lib_on_path():
+                return True
             try:
                 from pid_liveness import pid_alive
             except Exception:
                 return True
         return pid_alive(pid)
 
-    def _lib_dir(self) -> Path | None:
-        """Resolve this install's ``lib`` dir (source) or ``_bundled_lib`` (wheel)."""
-        root = Path(self.install_root) if self.install_root else None
-        if root is None:
-            return None
-        for sub in ("lib", "_bundled_lib"):
-            candidate = root / sub
-            if candidate.is_dir():
-                return candidate
-        return None
+    def _put_lib_on_path(self) -> bool:
+        """Add this install's lib dir to ``sys.path``. False if it can't be found."""
+        if not self.install_root:
+            return False
+        try:
+            from _install_paths import resolve_lib_dir
+        except Exception:
+            return False
+        lib_dir = resolve_lib_dir(self.install_root)
+        if not lib_dir.is_dir():
+            return False
+        if str(lib_dir) not in sys.path:
+            sys.path.insert(0, str(lib_dir))
+        return True
 
     def run(self) -> int:
         self.start_pull_only()

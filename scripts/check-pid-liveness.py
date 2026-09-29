@@ -18,9 +18,16 @@ Windows 利用者だけが壊れる)。この guard は再導入を機械的に�
 
 検査ルール
 ----------
-1. 追跡対象の ``*.py`` を AST で走査し、``os.kill(x, 0)`` / ``kill(x, 0)``
-   (= ``from os import kill``) の呼び出しを列挙する。第 2 引数が literal 0 の
-   ものだけを対象にする (``SIGTERM`` 等の本物の kill は正当な操作)。
+1. 追跡対象の ``*.py`` を AST で走査し、``os.kill`` / ``kill``
+   (= ``from os import kill``) の呼び出しを列挙する。
+   **安全側に倒す**: signal 引数が 0 でないと **静的に証明できる** 呼び出し
+   (literal の非 0、``signal.SIGTERM`` 等の本物の signal 名) だけを正当な kill と
+   して除外し、**それ以外はすべて検出する**。literal 0 だけを見る検査は
+   ``_PROBE = 0`` のような定数化や ``os.kill(*args)`` で素通りしてしまい、
+   「ok と出るのに Windows-unsafe な呼び出しが残る」偽の安全を作る
+   (2026-09-29 の独立 AX レビューで実証された穴)。誤検出 (false positive) は
+   人間が 1 行 allowlist に足せば済むが、検出漏れ (false negative) は Windows
+   利用者のプロセスが落ちるまで誰も気づかない — 非対称なので安全側を選ぶ。
 2. 見つかった各サイトを ``ALLOWLIST`` (ファイル + 囲む関数) と突き合わせる。
    載っていないものは drift。
 3. allowlist は **コメントを信用しない**: ``os.name != "posix"`` gate を根拠に
@@ -80,11 +87,36 @@ def _iter_python_files() -> list[Path]:
     return sorted(out)
 
 
-def _kill_zero_sites(tree: ast.AST, imports_bare_kill: bool) -> list[tuple[int, str]]:
-    """``os.kill(x, 0)`` の呼び出しを ``(行番号, 囲む関数名)`` で返す。
+# ``signal`` の定数のうち値が 0 のもの (= 実際には生存判定に使われる)。
+# これらは「本物の signal 名だから正当」とは扱わない。
+_ZERO_VALUED_SIGNAL_NAMES = {"SIG_DFL"}
 
-    第 2 引数が literal ``0`` のものだけ。``signal.SIGTERM`` 等で本当に殺す
-    呼び出しは正当なので対象外。
+
+def _signal_is_provably_nonzero(node: ast.expr) -> bool:
+    """signal 引数が **0 ではないと静的に断定できる** ときだけ True。
+
+    断定できるのは 2 通りだけ:
+      * literal の非 0 (``os.kill(pid, 9)``)
+      * ``signal.SIGTERM`` のような本物の signal 名 (値 0 の ``SIG_DFL`` は除く)
+
+    変数・呼び出し・属性参照など「読んだだけでは 0 か分からない」ものは False を
+    返す = 検出対象にする (安全側)。0 と分からないものを見逃すと、定数化リファクタ
+    で穴が開く。
+    """
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, int) and node.value != 0
+    if isinstance(node, ast.Attribute):
+        return node.attr.startswith("SIG") and node.attr not in _ZERO_VALUED_SIGNAL_NAMES
+    return False
+
+
+def _kill_zero_sites(tree: ast.AST, imports_bare_kill: bool) -> list[tuple[int, str]]:
+    """Windows-unsafe になりうる ``os.kill`` 呼び出しを ``(行番号, 囲む関数名)`` で返す。
+
+    signal 引数が非 0 と証明できる呼び出し (= 本物の kill) だけを除外し、残りは
+    すべて返す。``os.kill(pid, _PROBE)`` / ``os.kill(*args)`` / ``os.kill(pid, sig=0)``
+    のような形も拾う (前 2 つは実際に実行可能な Windows-unsafe 経路、3 つ目は
+    CPython では TypeError だが検出しても害がないので安全側に含める)。
     """
     # 各ノード → 囲む関数名 を先に引けるようにする。
     enclosing: dict[ast.AST, str] = {}
@@ -95,7 +127,7 @@ def _kill_zero_sites(tree: ast.AST, imports_bare_kill: bool) -> list[tuple[int, 
 
     sites: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or len(node.args) < 2:
+        if not isinstance(node, ast.Call):
             continue
         func = node.func
         is_os_kill = (
@@ -108,9 +140,26 @@ def _kill_zero_sites(tree: ast.AST, imports_bare_kill: bool) -> list[tuple[int, 
         )
         if not is_os_kill:
             continue
-        sig = node.args[1]
-        if not (isinstance(sig, ast.Constant) and sig.value == 0):
-            continue
+
+        # 引数の形が不透明 (``*args`` / ``**kwargs``) なら signal を読めない → 安全側。
+        opaque = any(isinstance(a, ast.Starred) for a in node.args) or any(
+            kw.arg is None for kw in node.keywords
+        )
+        sig: ast.expr | None = None
+        if len(node.args) >= 2:
+            sig = node.args[1]
+        else:
+            for kw in node.keywords:
+                if kw.arg == "sig":
+                    sig = kw.value
+                    break
+
+        if not opaque:
+            if sig is None:
+                # signal 引数が無い = そもそも呼べない (TypeError)。危険ではない。
+                continue
+            if _signal_is_provably_nonzero(sig):
+                continue  # 本物の kill = 正当な操作
         sites.append((node.lineno, enclosing.get(node, "<module>")))
     return sites
 
@@ -204,8 +253,9 @@ def main() -> int:
             entry = ALLOWLIST.get((rel, func_name))
             if entry is None:
                 problems.append(
-                    f"{rel}:{lineno}: os.kill(pid, 0) in {func_name}() — Windows では "
-                    f"これは生存判定ではなく TerminateProcess です。"
+                    f"{rel}:{lineno}: os.kill in {func_name}() の signal が 0 でないと "
+                    f"証明できません — Windows ではこれは生存判定ではなく "
+                    f"TerminateProcess になります。"
                     f"`from pid_liveness import pid_alive` を使ってください "
                     f"(lib/pid_liveness.py)。"
                 )
@@ -232,7 +282,10 @@ def main() -> int:
         )
         return 1 if args.strict else 0
 
-    print("[check-pid-liveness] ok — 素の os.kill(pid, 0) は allowlist 内のみ。")
+    print(
+        "[check-pid-liveness] ok — signal が非 0 と証明できない os.kill は "
+        "allowlist 内のみ (literal 0 / 定数 / *args / sig= の各形を検査)。"
+    )
     return 0
 
 

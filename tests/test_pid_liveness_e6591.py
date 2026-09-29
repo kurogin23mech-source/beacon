@@ -142,12 +142,125 @@ def test_guard_goes_red_on_from_os_import_kill(tmp_path):
 
 
 def test_guard_ignores_real_signals(tmp_path):
-    """本物の kill (SIGTERM 等) は正当な操作なので false positive にしない。"""
+    """本物の kill (SIGTERM / literal 非 0 / SIGKILL) は正当なので false positive にしない。"""
     (tmp_path / "stopper.py").write_text(
-        "import os, signal\ndef stop(pid):\n    os.kill(pid, signal.SIGTERM)\n",
+        "import os, signal\n"
+        "def stop(pid):\n"
+        "    os.kill(pid, signal.SIGTERM)\n"
+        "def hard(pid):\n"
+        "    os.kill(pid, 9)\n"
+        "def kill9(pid):\n"
+        "    os.kill(pid, signal.SIGKILL)\n",
         encoding="utf-8",
     )
     assert _run_guard(tmp_path).returncode == 0
+
+
+# --- literal 0 以外の抜け道 (2026-09-29 独立 AX レビューが実証した穴) ------- #
+#
+# 当初 guard は「第 2 引数が literal 0」だけを見ていた。独立 judge が合成入力を
+# 実際に走らせて 2 つの素通りを実証し (定数化 / *args)、レビュー中に 3 つ目
+# (キーワード) も確認された。literal だけを見る検査は「ok と出るのに Windows-unsafe
+# な呼び出しが残る」偽の安全を作る。現在の guard は「signal が非 0 と *証明できない*
+# 呼び出しはすべて検出」に倒しており、以下がその回帰テスト。
+
+def test_guard_catches_named_constant_signal(tmp_path):
+    """``_PROBE = 0`` のような定数化リファクタで素通りしないこと。
+
+    AI が自発的にやりがちな『マジックナンバーの定数化』で穴が開く形。実行可能な
+    Windows-unsafe 経路そのもの。
+    """
+    (tmp_path / "named.py").write_text(
+        "import os\n_PROBE = 0\ndef alive(pid):\n    os.kill(pid, _PROBE)\n",
+        encoding="utf-8",
+    )
+    assert _run_guard(tmp_path).returncode == 1
+
+
+def test_guard_catches_starred_args(tmp_path):
+    """``os.kill(*args)`` で引数が不透明な形も検出すること (実行可能な経路)。"""
+    (tmp_path / "starred.py").write_text(
+        "import os\nARGS = (4242, 0)\ndef alive():\n    os.kill(*ARGS)\n",
+        encoding="utf-8",
+    )
+    assert _run_guard(tmp_path).returncode == 1
+
+
+def test_guard_catches_keyword_signal(tmp_path):
+    """``os.kill(pid, sig=0)`` も検出すること。
+
+    CPython では実際には TypeError (posix.kill はキーワードを取らない) なので
+    runtime の危険ではないが、検出しても害が無いので安全側に含めている。
+    """
+    (tmp_path / "kw.py").write_text(
+        "import os\ndef alive(pid):\n    os.kill(pid, sig=0)\n",
+        encoding="utf-8",
+    )
+    assert _run_guard(tmp_path).returncode == 1
+
+
+def test_guard_catches_zero_valued_signal_name(tmp_path):
+    """``signal.SIG_DFL`` は値 0 なので『本物の signal 名』として免除しないこと。"""
+    (tmp_path / "sigdfl.py").write_text(
+        "import os, signal\ndef probe(pid):\n    os.kill(pid, signal.SIG_DFL)\n",
+        encoding="utf-8",
+    )
+    assert _run_guard(tmp_path).returncode == 1
+
+
+def test_guard_ignores_uncallable_single_arg_form(tmp_path):
+    """``os.kill(pid)`` は signal が無く TypeError になるだけなので騒がないこと."""
+    (tmp_path / "onearg.py").write_text(
+        "import os\ndef broken(pid):\n    os.kill(pid)\n", encoding="utf-8"
+    )
+    assert _run_guard(tmp_path).returncode == 0
+
+
+# --- 共有 lib-dir リゾルバ (両 judge が指摘した重複の解消先) ---------------- #
+
+def test_shared_resolver_prefers_source_then_wheel(tmp_path):
+    """``lib/`` → ``_bundled_lib/`` の順、どちらも無ければ ``lib/`` に fail-open。
+
+    PR #764 の独立レビュー 2 体が、この規則が bcodex-watcher に写されている点を
+    指摘した (保守性 medium / AX low の consensus)。解消先がこの 1 関数。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from _install_paths import resolve_lib_dir
+
+    src_root = tmp_path / "src"
+    (src_root / "lib").mkdir(parents=True)
+    assert resolve_lib_dir(src_root) == src_root / "lib"
+
+    whl_root = tmp_path / "beacon_cli"
+    (whl_root / "_bundled_lib").mkdir(parents=True)
+    assert resolve_lib_dir(whl_root) == whl_root / "_bundled_lib"
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert resolve_lib_dir(empty) == empty / "lib"
+
+
+def test_daemon_resolver_delegates_to_the_shared_one(tmp_path):
+    """codex-receive-loop の ``_resolve_lib_dir`` が共有リゾルバと同じ答えを返すこと。
+
+    既存の 4 呼び出し元が使う名前は残しつつ、規則の定義は 1 箇所であることを固定する
+    (重複を消したのに答えがズレたら意味がない)。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "crl_shared_resolver", ROOT / "scripts" / "codex-receive-loop.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from _install_paths import resolve_lib_dir
+
+    for layout in ("lib", "_bundled_lib"):
+        root = tmp_path / layout
+        (root / layout).mkdir(parents=True)
+        assert mod._resolve_lib_dir(root) == resolve_lib_dir(root)
 
 
 def _write_context_monitor(tmp_path: Path, *, gated: bool) -> None:

@@ -44,6 +44,9 @@ echo "[ci-strict-drift-guards] Windows-unsafe pid liveness probes (ms-133 e-6591
 # daemon pidfile, bcodex wrapper watch, version skew). They now share
 # lib/pid_liveness.py. This blocks a re-introduction: the idiom keeps working on
 # the Mac/Linux machines where it gets written, so only a machine check catches it.
+# The check fails SAFE — it flags every os.kill whose signal it cannot PROVE is
+# non-zero, so a `_PROBE = 0` constant or `os.kill(*args)` cannot slip past it
+# (both did, before the 2026-09-29 independent AX review caught the hole).
 python3 "$ROOT/scripts/check-pid-liveness.py" --strict
 
 echo "[ci-strict-drift-guards] all strict drift guards passed."
