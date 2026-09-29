@@ -17,6 +17,7 @@ These pin BOTH halves:
 from __future__ import annotations
 
 import importlib.util
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,6 +97,51 @@ def test_prose_naming_the_antipattern_does_not_trip_the_guard(tmp_path):
         '実装の在り処は `lib/commands.py` の `cmd_<verb>` ハンドラ。\n',
     )
     assert mod.find_violations(root) == []
+
+
+def test_runtime_guidance_is_in_scope(tmp_path):
+    """エラー文言も Skill 面 (ms-160 e-5981, 独立 AX レビュー A-1)。
+
+    `lib/sales_entities.py` の 2 つのエラー文言が「この登録に公開 verb は無い、
+    commands.py を直叩きしろ」と読み手に指示しており、この CLI 動詞が生えた瞬間に
+    事実と反する指示になった。しかも AI が**行き詰まった瞬間**に出る文言なので、
+    手順書の散文より従われやすい。skills/*.md だけを見ていては届かない。
+    """
+    mod = _load()
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "guide.py").write_text(
+        textwrap.dedent("""\
+            def f():
+                return (
+                    '登録は BEACON_SEND_LABEL="x" '
+                    'python3 "$(beacon _lib-path)/commands.py" sales_account_add です'
+                )
+            """),
+        encoding="utf-8")
+    found = mod.find_violations(tmp_path)
+    assert [v for _, _, v in found] == ["sales_account_add"]
+
+
+def test_a_comment_naming_the_antipattern_is_not_a_violation(tmp_path):
+    """コメントは読み手への指示ではない — ここを分けないとガードが自壊する。
+
+    このガード自身の修復手順も、bin/lib/*.sh の設計コメントも、禁止形を名指しする。
+    行単位の正規表現で見ていた最初の版はそれらを自分で赤にしており、使えなかった。
+    Python は AST の文字列定数だけ、shell は非コメント行だけを見る。
+    """
+    mod = _load()
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "mod.py").write_text(
+        '# 以前は python3 "$(beacon _lib-path)/commands.py" watch_set を直叩きしていた。\n'
+        'X = 1\n', encoding="utf-8")
+    binlib = tmp_path / "bin" / "lib"
+    binlib.mkdir(parents=True)
+    (binlib / "cmd_x.sh").write_text(
+        '# `python3 commands.py sales_account_add` 等を直叩きしていた。\n'
+        'cmd_x() { :; }\n', encoding="utf-8")
+    assert mod.find_violations(tmp_path) == []
 
 
 def test_the_two_verbs_that_had_gone_unreachable_are_on_the_cli():

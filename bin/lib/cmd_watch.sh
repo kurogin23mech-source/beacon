@@ -6,7 +6,7 @@
 # No shebang on purpose: this is an include, not a standalone program.
 # Pure function definitions only — no top-level execution.
 #
-# requires-fn: ensure_project _guard_flag
+# requires-fn: ensure_project _guard_flag _guard_extra_positional
 # requires-var: COMMANDS_PY
 #   Defined in bin/beacon (the dispatcher) before this file is sourced;
 #   bash resolves them at call time (late binding). Verified by
@@ -33,7 +33,8 @@ cmd_watch() {
                     --thread)   thread="${2:-}"; shift 2 ;;
                     --cadence)  cadence="${2:-}"; shift 2 ;;
                     -?*)        _guard_flag "$1" ;;
-                    *)          wi_id="$1"; shift ;;
+                    *)          _guard_extra_positional "$wi_id" "$1" "Usage: beacon watch set <work-item-id> --channel <ch> [--thread <ref>] [--cadence <min>]"
+                                wi_id="$1"; shift ;;
                 esac
             done
             if [ -z "$wi_id" ] || [ -z "$channel" ]; then
@@ -64,7 +65,8 @@ cmd_watch() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     -?*) _guard_flag "$1" ;;
-                    *)   wi_id="$1"; shift ;;
+                    *)   _guard_extra_positional "$wi_id" "$1" "Usage: beacon watch clear <work-item-id>"
+                         wi_id="$1"; shift ;;
                 esac
             done
             if [ -z "$wi_id" ]; then

@@ -6,7 +6,7 @@
 # No shebang on purpose: this is an include, not a standalone program.
 # Pure function definitions only — no top-level execution.
 #
-# requires-fn: ensure_project _guard_positional
+# requires-fn: ensure_project _guard_positional _guard_extra_positional
 # requires-var: COMMANDS_PY
 #   Defined in bin/beacon (the dispatcher) before this file is sourced;
 #   bash resolves them at call time (late binding). Verified by
@@ -64,7 +64,8 @@ cmd_sales_send_account() {
                 case "$1" in
                     --email) email="${2:-}"; shift 2 ;;
                     -?*) _guard_positional "$1" "Usage: beacon sales send-account add <label> --email <address>" ;;
-                    *)   label="$1"; shift ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account add <label> --email <address>"
+                         label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ] || [ -z "$email" ]; then
@@ -90,7 +91,8 @@ cmd_sales_send_account() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     -?*) _guard_positional "$1" "Usage: beacon sales send-account remove <label>" ;;
-                    *)   label="$1"; shift ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account remove <label>"
+                         label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ]; then
@@ -107,7 +109,8 @@ cmd_sales_send_account() {
                     --namespace) namespace="${2:-}"; shift 2 ;;
                     --alias)     alias_val="${2:-}"; shift 2 ;;
                     -?*) _guard_positional "$1" "Usage: beacon sales send-account route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]" ;;
-                    *)   label="$1"; shift ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
+                         label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ] || [ -z "$service" ] || [ -z "$namespace" ]; then
@@ -124,7 +127,8 @@ cmd_sales_send_account() {
                 case "$1" in
                     --service) service="${2:-}"; shift 2 ;;
                     -?*) _guard_positional "$1" "Usage: beacon sales send-account resolve [<label>] --service <gmail|calendar|drive>" ;;
-                    *)   label="$1"; shift ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account resolve [<label>] --service <gmail|calendar|drive>"
+                         label="$1"; shift ;;
                 esac
             done
             if [ -z "$service" ]; then
@@ -142,12 +146,13 @@ cmd_sales_send_account() {
                 case "$1" in
                     --signature) signature="${2:-}"; shift 2 ;;
                     --clear)     clear="1"; shift ;;
-                    -?*) _guard_positional "$1" "Usage: beacon sales send-account signature <label> --signature <text> | --clear" ;;
-                    *)   label="$1"; shift ;;
+                    -?*) _guard_positional "$1" "Usage: beacon sales send-account signature <label> (--signature <text> | --clear)" ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account signature <label> (--signature <text> | --clear)"
+                         label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ]; then
-                echo "Usage: beacon sales send-account signature <label> --signature <text> | --clear"
+                echo "Usage: beacon sales send-account signature <label> (--signature <text> | --clear)"
                 exit 1
             fi
             BEACON_SEND_LABEL="$label" BEACON_SEND_SIGNATURE="$signature" \
@@ -162,7 +167,8 @@ cmd_sales_send_account() {
                     while [[ $# -gt 0 ]]; do
                         case "$1" in
                             -?*) _guard_positional "$1" "Usage: beacon sales send-account transcript-source get <acc-id>" ;;
-                            *)   acc_id="$1"; shift ;;
+                            *)   _guard_extra_positional "$acc_id" "$1" "Usage: beacon sales send-account transcript-source get <acc-id>"
+                                 acc_id="$1"; shift ;;
                         esac
                     done
                     if [ -z "$acc_id" ]; then
@@ -182,12 +188,13 @@ cmd_sales_send_account() {
                             --naming)    naming="${2:-}"; shift 2 ;;
                             --tool)      tool="${2:-}"; shift 2 ;;
                             --clear)     ts_clear="1"; shift ;;
-                            -?*) _guard_positional "$1" "Usage: beacon sales send-account transcript-source set <acc-id> --type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear" ;;
-                            *)   acc_id="$1"; shift ;;
+                            -?*) _guard_positional "$1" "Usage: beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear))" ;;
+                            *)   _guard_extra_positional "$acc_id" "$1" "Usage: beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear))"
+                                 acc_id="$1"; shift ;;
                         esac
                     done
                     if [ -z "$acc_id" ]; then
-                        echo "Usage: beacon sales send-account transcript-source set <acc-id> --type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear"
+                        echo "Usage: beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)"
                         exit 1
                     fi
                     BEACON_ACCOUNT_ID="$acc_id" BEACON_TS_TYPE="$ts_type" \
@@ -197,7 +204,7 @@ cmd_sales_send_account() {
                     ;;
                 *)
                     echo "Usage: beacon sales send-account transcript-source get <acc-id>"
-                    echo "       beacon sales send-account transcript-source set <acc-id> --type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear"
+                    echo "       beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)"
                     ;;
             esac
             ;;
@@ -207,7 +214,7 @@ cmd_sales_send_account() {
             echo "       beacon sales send-account remove <label>"
             echo "       beacon sales send-account route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
             echo "       beacon sales send-account resolve [<label>] --service <gmail|calendar|drive>"
-            echo "       beacon sales send-account signature <label> --signature <text> | --clear"
+            echo "       beacon sales send-account signature <label> (--signature <text> | --clear)"
             echo "       beacon sales send-account transcript-source get|set <acc-id> ..."
             ;;
     esac
@@ -233,7 +240,8 @@ cmd_sales_identity() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     -?*) _guard_positional "$1" "Usage: beacon sales identity set <label|email>" ;;
-                    *)   identity="$1"; shift ;;
+                    *)   _guard_extra_positional "$identity" "$1" "Usage: beacon sales identity set <label|email>"
+                         identity="$1"; shift ;;
                 esac
             done
             if [ -z "$identity" ]; then

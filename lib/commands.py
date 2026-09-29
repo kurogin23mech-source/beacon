@@ -10574,9 +10574,12 @@ def cmd_meeting_ended():
               f"event={r['calendar_event_id'] or '—'}")
 
 
-# ms-107 e-3437 — watch (返信待ち見張り) は内部コマンド。送信 Skill が arm し、
-# 返信ウォッチャー (E) が list/clear する。user 向け CLI 動詞ではない
-# (sales_identity_* と同じ内部専用、bin/beacon/README/dispatch には出さない)。
+# ms-107 e-3437 / ms-160 e-5981 — watch (返信待ち見張り) は送信 Skill が arm し、
+# 返信ウォッチャー (E) が list/clear する。e-5981 で `beacon watch set|list|clear`
+# として CLI 動詞になった (bin/lib/cmd_watch.sh + beacon_cli/dispatch.py + help
+# レジストリ + README)。以前ここには「user 向け CLI 動詞ではない」と書かれていたが、
+# それが Skill 側の commands.py 直叩きを正当化し、help から発見できない・Windows から
+# 到達できない状態を生んでいた。
 
 def cmd_watch_set():
     import sales_entities

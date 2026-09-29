@@ -20,6 +20,10 @@ repair is to add the verb to the CLI (bash ``bin/lib/cmd_*.sh`` + Windows
 ``beacon_cli/dispatch.py`` + the ``_help_registry()`` in ``lib/commands.py`` +
 the README table) and call *that* from the Skill.
 
+Scope: the 3 Skill copies, plus the runtime guidance that lib/, bin/lib/ and
+scripts/ print — an error message saying "run `python3 commands.py …`" teaches the
+same bypass, at the moment the reader is most likely to follow it.
+
 ``ALLOWED`` is deliberately EMPTY. The whole debt was paid off in e-5981; a
 non-empty allowlist would let the next one in quietly. If a verb genuinely has
 no place on the CLI, say so here in prose with the reason — an entry without a
@@ -28,6 +32,7 @@ reason is the failure mode this guard exists to prevent.
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -41,6 +46,19 @@ SKILL_GLOBS = (
     "plugins/beacon/skills/*/SKILL.md",
 )
 
+# Runtime guidance is a Skill surface too (ms-160 e-5981, 独立 AX レビュー A-1).
+# An error message that tells the reader to run `python3 commands.py <verb>` teaches
+# the boundary jump just as effectively as Skill prose does — and it teaches it at
+# the exact moment the AI is stuck, so it is MORE likely to be obeyed. Two such
+# strings in lib/sales_entities.py went stale the moment this CLI verb landed and
+# kept instructing readers to bypass it; scanning only skills/*.md could not see
+# them. Any file that can print guidance to a human or an AI is in scope.
+GUIDANCE_GLOBS = (
+    "lib/*.py",
+    "bin/lib/*.sh",
+    "scripts/*.py",
+)
+
 # Structural extraction, not a loose substring: match an actual invocation —
 # `commands.py` (optionally closing a quote) followed by a verb token. Prose
 # that merely NAMES the anti-pattern uses the literal placeholder `<cmd>`,
@@ -52,13 +70,80 @@ _INVOKE = re.compile(r'commands\.py["\']?\s+([a-z][a-z0-9_]*)\b')
 ALLOWED: dict[str, str] = {}
 
 
+# A guidance file legitimately mentions `commands.py` when it IS the dispatcher, or
+# when a COMMENT names the anti-pattern (this guard's own repair instructions do
+# exactly that). What must not exist is guidance *addressed to a reader* — an error
+# message or usage line telling them to run it. So the two file kinds are read
+# structurally rather than by line:
+#
+#   * Python  — parse with ast and inspect only string CONSTANTS (what can be
+#               printed). Comments are not in the AST, so prose naming the
+#               anti-pattern cannot false-positive, and a docstring that does is
+#               caught deliberately (a docstring IS guidance to the next reader).
+#   * Shell   — skip comment lines (`# …`); what remains is echo/usage text.
+#
+# A line-based regex cannot make this distinction: the first draft of this guard
+# flagged its own explanatory comments, which would have made it unusable.
+_RUNS_IT = re.compile(r'python3?[^\n]{0,80}commands\.py')
+
+
+def _python_guidance_strings(path: Path):
+    """Yield (lineno, text) for every string constant in a Python file.
+
+    If the file does not parse, fall back to scanning its lines. Returning nothing
+    would make an unparseable file a silent blind spot — the guard would go green
+    precisely where it can see least, which is the failure mode this whole module
+    exists to prevent.
+    """
+    source = path.read_text()
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError:
+        for lineno, line in enumerate(source.splitlines(), 1):
+            if not line.lstrip().startswith("#"):
+                yield lineno, line
+        return
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield getattr(node, "lineno", 0), node.value
+
+
+def _shell_guidance_lines(path: Path):
+    """Yield (lineno, text) for every non-comment line in a shell file."""
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        yield lineno, line
+
+
 def find_violations(root: Path = ROOT):
-    """Yield (relative path, line number, verb) for every boundary jump."""
+    """Yield (relative path, line number, verb) for every boundary jump.
+
+    Skill prose is checked line by line. Guidance files are checked only where the
+    text is something a reader could be shown (a Python string constant, or a
+    non-comment shell line) AND spells out a `python3 … commands.py <verb>`
+    invocation — so a module that merely references commands.py in a comment does
+    not trip.
+    """
     out = []
     for glob in SKILL_GLOBS:
         for path in sorted(root.glob(glob)):
             for lineno, line in enumerate(path.read_text().splitlines(), 1):
                 for verb in _INVOKE.findall(line):
+                    if verb in ALLOWED:
+                        continue
+                    out.append((str(path.relative_to(root)), lineno, verb))
+
+    for glob in GUIDANCE_GLOBS:
+        for path in sorted(root.glob(glob)):
+            if path.resolve() == Path(__file__).resolve():
+                continue
+            reader = (_python_guidance_strings if path.suffix == ".py"
+                      else _shell_guidance_lines)
+            for lineno, text in reader(path):
+                if not _RUNS_IT.search(text):
+                    continue
+                for verb in _INVOKE.findall(text):
                     if verb in ALLOWED:
                         continue
                     out.append((str(path.relative_to(root)), lineno, verb))

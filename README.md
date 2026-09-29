@@ -314,9 +314,9 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon sales send-account remove <label>` | Remove a send account / 送信元アカウントを削除 |
 | `beacon sales send-account route <label> --service <gmail\|calendar\|drive> --namespace <ns> [--alias <account>]` | Pin which MCP toolset + account this send account uses per service / サービスごとに使う MCP ツール群と account を決める |
 | `beacon sales send-account resolve [<label>] --service <gmail\|calendar\|drive>` | Resolve the concrete MCP route as JSON; exit 1 blocks the send when unregistered / 実際に使う MCP ルートを返す（未登録なら送信を止める） |
-| `beacon sales send-account signature <label> --signature <text> \| --clear` | Set/clear the mail signature; `--clear` is required to delete / メール署名の設定・削除（消すには `--clear` 必須） |
+| `beacon sales send-account signature <label> (--signature <text> \| --clear)` | Set/clear the mail signature; `--clear` is required to delete / メール署名の設定・削除（消すには `--clear` 必須） |
 | `beacon sales send-account transcript-source get <acc-id>` | Read the per-customer 議事録取得元 declaration / 顧客ごとの議事録取得元を読む |
-| `beacon sales send-account transcript-source set <acc-id> --type <meet_calendar\|drive_folder\|external\|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] \| --clear` | Declare where a customer's meeting notes come from / 顧客ごとの議事録取得元を宣言（消すには `--clear` 必須） |
+| `beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar\|drive_folder\|external\|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] \| --clear)` | Declare where a customer's meeting notes come from / 顧客ごとの議事録取得元を宣言（消すには `--clear` 必須） |
 | `beacon sales identity show [--json]` | Show the default send identity / 既定の送信 identity を表示 |
 | `beacon sales identity set <label\|email>` | Pin the project's default send identity / 既定の送信 identity を決める |
 | `beacon sales identity check --from <address> [--label <label>]` | Verify a proposed `from` against the ledger (exit 1 blocks the send) / 送信元の照合（不一致なら送信を止める） |

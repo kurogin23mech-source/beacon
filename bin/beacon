@@ -74,6 +74,26 @@ _guard_no_positional() {
     exit 1
 }
 
+# ms-160 e-5981: 位置引数を 1 つしか取らない動詞で、2 つ目が来たら止める。
+# main の _guard_no_positional (= 位置引数を一切取らない動詞用、ms-178) とは別物で、
+# こちらは「1 つだけ取る動詞で 2 つ目が来た」を止める。名前を分けているのは、
+# 共有すると呼び出し側の契約が silent に入れ替わるため (ms-178 のコメント参照)。
+#
+# bash の `*) var="$1"; shift` という catch-all は **最後の値で上書きする** ので、
+# 引用符の閉じ忘れや余計な語で生まれた 2 つ目の token が黙って採用され、
+# 「意図と違う対象に、成功したことにして」書き込む (独立 AX レビュー A-2)。
+# 実測: `sales send-account add A B --email x` は label=B で exit 0、
+# `watch set wi-1 wi-2 --channel email` は wi-2 を見張り始めていた。
+# 捨てる (silent drop) のでも最後を採る (silent swap) のでもなく、止める。
+_guard_extra_positional() {
+    # $1 = 既に埋まっている値 / $2 = 新しく来た token / $3 = Usage 行
+    [ -z "$1" ] && return 0
+    echo "Error: 余分な引数 '$2' があります ('$1' が既に指定されています)。" >&2
+    echo "  引用符の閉じ忘れではありませんか (例: 値に空白を含むなら \"...\" で囲む)。" >&2
+    echo "$3" >&2
+    exit 1
+}
+
 _guard_flag() {
     local tok="$1"
     local caller="${FUNCNAME[1]:-}"
