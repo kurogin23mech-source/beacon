@@ -27,7 +27,7 @@ version: 1.0.0
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && beacon account list --json >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
@@ -164,7 +164,7 @@ e-3694)。登録するのは **自分のカレンダー** への予定 (相手�
    Meeting を引く:
 
    ```bash
-   BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list
+   beacon meeting list "$OPP" --json
    ```
 
    出力の meetings に `status == "unscheduled"` の `mtg-N` があるか確認する。
@@ -173,20 +173,16 @@ e-3694)。登録するのは **自分のカレンダー** への予定 (相手�
      しない = 重複が構造的に不可能):
 
      ```bash
-     BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
-       BEACON_MTG_EVENT_ID="$EVENT_ID" BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
-       BEACON_MTG_SET_TRANSITION=1 \
-       python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
+     beacon meeting reschedule "$MTG_ID" --at "$WHEN_START" --end "$WHEN_END" \
+       --event-id "$EVENT_ID" --calendar-ns "$CALNS" --calendar-account "$CALACCT" --set-transition
      ```
 
    - **予定未定 mtg- が無い (seed されていない商談) → 従来どおり新規に予約**:
 
      ```bash
-     BEACON_MTG_OPP="$OPP" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
-       BEACON_MTG_LOCATION="$LOC" BEACON_MTG_EVENT_ID="$EVENT_ID" \
-       BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
-       BEACON_MTG_SET_TRANSITION=1 \
-       python3 "$(beacon _lib-path)/commands.py" meeting_schedule
+     beacon meeting schedule "$OPP" --at "$WHEN_START" --end "$WHEN_END" \
+       --location "$LOC" --event-id "$EVENT_ID" \
+       --calendar-ns "$CALNS" --calendar-account "$CALACCT" --set-transition
      ```
 
    確定した `mtg-N` が Beacon 識別 ID。埋め込む **識別 ID タグ** は
@@ -210,13 +206,11 @@ e-3694)。登録するのは **自分のカレンダー** への予定 (相手�
 Beacon 側は:
 
 ```bash
-BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHEN_END" \
-  BEACON_MTG_SET_TRANSITION=1 \
-  python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
+beacon meeting reschedule "$MTG_ID" --at "$NEW_WHEN_START" --end "$NEW_WHEN_END" --set-transition
 ```
 
 これで遷移日もカレンダーも新しい日時に揃う (AC: 予定変更時も両者が追従)。対象の
-`mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list`
+`mtg-N` は `beacon meeting list "$OPP" --json`
 で引ける。
 
 ## Step 7: 別途の「アポ確定」活動は作らない (e-3548 / e-3536)

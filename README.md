@@ -310,7 +310,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon communication cancel <comm-id> [--reason <text>]` | Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch / 誤記録の証跡を取消（物理削除でなく status=cancelled、履歴に残す） |
 | `beacon communication retarget <comm-id> <new opp-\|acc-\|act-\|nrt->` | Re-file a communication filed under the wrong work item (moves it; the evidence is unchanged) / 誤った活動に付けた証跡を正しい活動へ付け替える |
 | `beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Book a meeting (面談) with a Beacon 識別 ID; `--set-transition` moves the 遷移日 to the meeting date / 面談を予約し識別IDを付与、遷移日も同時更新 |
-| `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従 |
+| `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従（カレンダー旗は schedule と同義） |
 | `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
 | `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
 | `beacon meeting list [<opp-id>] [--json]` | List meetings; opp-id optional — omit for all opportunities / 面談一覧 (opp-id 省略で全商談横断, e-3909) |

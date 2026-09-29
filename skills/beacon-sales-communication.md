@@ -45,7 +45,7 @@ ROOT=$(beacon-find-root) && \
 `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
 以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`communication_add`) は
-ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" communication_add` で呼ぶ。
+`beacon communication add` で記録する (CLI 動詞として実在する)。
 
 ## Step 1: 対象の特定 (どの商談・顧客・予定のやり取りか)
 
@@ -112,15 +112,10 @@ beacon account list
 「記録する」なら内部コマンドで記録する:
 
 ```bash
-BEACON_COMM_TARGET="$TARGET" \
-  BEACON_COMM_SUMMARY="$SUMMARY" \
-  BEACON_COMM_DIRECTION="$DIRECTION" \
-  BEACON_COMM_CHANNEL="$CHANNEL" \
-  BEACON_COMM_BODY="$BODY" \
-  BEACON_COMM_SOURCE_URL="$SOURCE_URL" \
-  BEACON_COMM_SOURCE_REF="$SOURCE_REF" \
-  BEACON_COMM_OCCURRED="$OCCURRED" \
-  python3 "$(beacon _lib-path)/commands.py" communication_add
+beacon communication add "$TARGET" "$SUMMARY" \
+  --direction "$DIRECTION" --channel "$CHANNEL" \
+  --body "$BODY" --source-url "$SOURCE_URL" --source-ref "$SOURCE_REF" \
+  --occurred "$OCCURRED"
 ```
 
 - `$TARGET` が `act-` / `nrt-` の場合、内部で親商談 / 親顧客に格納され、その予定を

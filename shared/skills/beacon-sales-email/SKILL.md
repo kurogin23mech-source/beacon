@@ -19,7 +19,7 @@ version: 1.0.0
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && beacon account list --json >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
@@ -214,8 +214,7 @@ AI が自律で送信してはならない (SPEC §3: 送信は人間承認)。
 
 ```bash
 # この送信が満たした計画活動 (例: 「初回面談を打診」) を done にする
-BEACON_ACT_ID="<満たした act-id>" \
-  python3 "$(beacon _lib-path)/commands.py" activity_done
+beacon opportunity activity done "<満たした act-id>"
 ```
 
 満たした計画活動が無い単発の送信 (突発の連絡 等) なら、活動の done 化は不要 —
@@ -264,13 +263,11 @@ PERMALINK_EXIT=$?
 
 ```bash
 # $SOURCE_URL は上の sales_gmail_permalink の出力 (空なら --source-url は実質無効な空文字)。
-BEACON_COMM_TARGET="<満たした活動の act-id を優先、無ければ $OPP>" \
-  BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
-  BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
-  BEACON_COMM_BODY="<件名 + 本文の骨子>" \
-  BEACON_COMM_SOURCE_REF="<message-id / thread-id>" \
-  BEACON_COMM_SOURCE_URL="$SOURCE_URL" \
-  python3 "$(beacon _lib-path)/commands.py" communication_add
+beacon communication add "<満たした活動の act-id を優先、無ければ $OPP>" "<送信内容の1行要約>" \
+  --direction outbound --channel email \
+  --body "<件名 + 本文の骨子>" \
+  --source-ref "<message-id / thread-id>" \
+  --source-url "$SOURCE_URL"
 ```
 
 証跡は **満たした活動 (act-/nrt-) に紐づけて記録する**のが既定 (ms-176 e-6604)。商談 (opp-) /

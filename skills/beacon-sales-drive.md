@@ -28,7 +28,7 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && beacon account list --json >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
@@ -101,8 +101,7 @@ mcp__google-drive__shareFile 等で共有リンク / webViewLink を取得する
 これを飛ばすと後で資料の在り処を辿れなくなるため必須:
 
 ```bash
-BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[資料] <ファイル名> → <Driveリンク>" \
-  python3 "$(beacon _lib-path)/commands.py" opportunity_activity
+beacon opportunity activity "$OPP" "[資料] <ファイル名> → <Driveリンク>"
 ```
 
 ファイルが複数なら、それぞれ (または 1 行にまとめて) 記録する。

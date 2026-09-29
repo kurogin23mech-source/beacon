@@ -102,20 +102,18 @@ BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="" \
 
 - **終了 (ended)**:
   ```bash
-  BEACON_MTG_ID="<mtg-id>" python3 "$(beacon _lib-path)/commands.py" meeting_end
+  beacon meeting end "<mtg-id>"
   ```
   → status=ended。これが終了ワークフロー A の入力キューになる。
 
 - **追従 (reschedule)**: カレンダーの新しい日時に Beacon と遷移日を揃える:
   ```bash
-  BEACON_MTG_ID="<mtg-id>" BEACON_MTG_AT="<新 ISO8601>" BEACON_MTG_END="<新終了>" \
-    BEACON_MTG_SET_TRANSITION=1 \
-    python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
+  beacon meeting reschedule "<mtg-id>" --at "<新 ISO8601>" --end "<新終了>" --set-transition
   ```
 
 - **取消 (cancel)**:
   ```bash
-  BEACON_MTG_ID="<mtg-id>" python3 "$(beacon _lib-path)/commands.py" meeting_cancel
+  beacon meeting cancel "<mtg-id>"
   ```
 
 ## Step 3.5: 終了ワークフロー A への引き渡し

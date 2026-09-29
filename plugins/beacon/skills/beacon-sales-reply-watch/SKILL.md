@@ -34,7 +34,7 @@ ROOT=$(beacon-find-root) && \
 ```
 
 `NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。内部コマンドは
-`python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ (watch は user 向け CLI 動詞ではない)。
+`python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。張り込みの set / list / clear は `beacon watch` として CLI 動詞になっている (ms-160 e-5981)。
 
 ## Step 1: 確認対象スレッドの取得
 
@@ -56,7 +56,7 @@ beacon watch list --awaiting --json
 ```bash
 # 施策一覧 → 各施策のリスト doc-id → 返信待ち行
 beacon acquisition attack-lists <acq-id> --json
-BEACON_DOC_ID=<doc-id> BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" acquisition_attack_list_awaiting_reply
+beacon acquisition attack-list-awaiting-reply <doc-id> --json
 ```
 
 `awaiting[]` の各要素は `acc_id` / `email` / `message_id` (打診時に送ったメールの id) を
@@ -88,13 +88,10 @@ BEACON_DOC_ID=<doc-id> BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" a
 自然に集約される。
 
 ```bash
-BEACON_COMM_TARGET="<work_item_id>" \
-  BEACON_COMM_SUMMARY="<相手の返信の1行要約>" \
-  BEACON_COMM_DIRECTION="inbound" \
-  BEACON_COMM_CHANNEL="<channel>" \
-  BEACON_COMM_SOURCE_REF="<message-id>" BEACON_COMM_SOURCE_URL="<permalink>" \
-  BEACON_COMM_OCCURRED="<返信の時刻>" \
-  python3 "$(beacon _lib-path)/commands.py" communication_add
+beacon communication add "<work_item_id>" "<相手の返信の1行要約>" \
+  --direction inbound --channel "<channel>" \
+  --source-ref "<message-id>" --source-url "<permalink>" \
+  --occurred "<返信の時刻>"
 ```
 
 ball が自分に戻ると、そのスレッドは次回 Step 1 の「返信待ち」から外れる (= 二重に拾わ

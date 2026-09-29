@@ -62,7 +62,7 @@ namespace/account は商談・台帳から解決した値をそのまま使う (
    Meeting 確定プリミティブを使う。まず対象商談の予定未定 Meeting を引く:
 
    ```bash
-   BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list
+   beacon meeting list "$OPP" --json
    ```
 
    `status == "unscheduled"` の `mtg-N` があれば、それを承諾枠の日時で確定する (新規作成
@@ -70,10 +70,8 @@ namespace/account は商談・台帳から解決した値をそのまま使う (
    面談日に同時更新**される (遷移日はゲートが持つ、二重管理を無くす):
 
    ```bash
-   BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
-     BEACON_MTG_EVENT_ID="$EVENT_ID" BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
-     BEACON_MTG_SET_TRANSITION=1 \
-     python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
+   beacon meeting reschedule "$MTG_ID" --at "$WHEN_START" --end "$WHEN_END" \
+     --event-id "$EVENT_ID" --calendar-ns "$CALNS" --calendar-account "$CALACCT" --set-transition
    ```
 
    予定未定 Meeting が無ければ `meeting_schedule` で新規に確定する (同じく SET_TRANSITION)。
