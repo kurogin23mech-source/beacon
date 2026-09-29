@@ -1558,7 +1558,7 @@ if (!PROJECT_ID || !SESSION_ID) {
               .slice(0, 3)
               .map(([k, v]) => `${k}=${String(v).slice(0, 30)}`)
               .join(' ')
-        const slimPing = `[${ch}] from ${senderShort}: ${previewText}\n(full body は inbox-hook の additionalContext を参照、event_id=${evt.event_id})`
+        const slimPing = `[${ch}] from ${senderShort}: ${previewText}\n(全文は additionalContext (inbox-hook) 参照。載っていなければ 'beacon bus receive --channel dm' で取得できる。event_id=${evt.event_id})`
         // e-1417 (ms-60): operation-trigger + auto-execute event を MCP push
         // 経路でも自律起動指示として届ける検証ルート。現状 (Phase 1) は
         // AUTONOMOUS ACTION の明示 imperative が UserPromptSubmit hook 経由
