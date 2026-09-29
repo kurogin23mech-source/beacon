@@ -60,12 +60,15 @@ _guard_positional() {
 # they are never caught here; a lone "-" is a valid value (only `-?*` matches).
 #
 # $1 = the offending token (already matched `-?*` at the call site).
-_guard_positional() {
-    # ms-178 (AX review PR#766): refuse an unexpected non-flag argument. Sibling
-    # of _guard_flag: that one catches a bad -flag, this one catches a bare token
-    # (a typo'd flag missing its dash, or syntax copied from another command).
-    # Both must refuse — an accepted-but-ignored argument makes a malformed
-    # invocation indistinguishable from a correct one by its output.
+# Reject an unexpected NON-flag argument on a command that takes no positional
+# value (ms-178, AX review PR#766). Distinct from _guard_positional above, which
+# rejects a FLAG-LIKE token sitting in a slot that does take a value: these are
+# opposite cases and must not share a name (an earlier revision of this change
+# reused `_guard_positional` and silently shadowed it, breaking its four existing
+# call sites — caught by tests/test_milestone_add_flag_guard.py in CI).
+#
+# $1 = the command path (e.g. "note list"), $2 = the offending token.
+_guard_no_positional() {
     echo "Error: unexpected argument '${2}' for 'beacon ${1}'." >&2
     echo "Run 'beacon ${1} --help' to see the accepted form." >&2
     exit 1
@@ -2237,7 +2240,7 @@ EOF
                         # instead of shift-ing them away. Silently swallowing an
                         # unexpected token is the same defect class as the old
                         # `${3:+1}` — a malformed call looks like a correct one.
-                        *)      _guard_positional "note list" "$1" ;;
+                        *)      _guard_no_positional "note list" "$1" ;;
                     esac
                 done
                 BEACON_JSON="$note_json" python3 "$COMMANDS_PY" note_list
@@ -2249,7 +2252,7 @@ EOF
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         -?*) _guard_flag "$1" ;;
-                        *)   _guard_positional "note restore" "$1" ;;
+                        *)   _guard_no_positional "note restore" "$1" ;;
                     esac
                 done
                 python3 "$COMMANDS_PY" note_restore
@@ -2266,7 +2269,7 @@ EOF
                     case "$1" in
                         -y|--yes|--confirm) note_yes="1"; shift ;;
                         -?*)      _guard_flag "$1" ;;
-                        *)        _guard_positional "note clear" "$1" ;;
+                        *)        _guard_no_positional "note clear" "$1" ;;
                     esac
                 done
                 BEACON_NOTE_CLEAR_YES="$note_yes" python3 "$COMMANDS_PY" note_clear
