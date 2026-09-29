@@ -183,3 +183,61 @@ cmd_account_delete() {
     BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" account_delete
 }
+
+# ms-160 e-5981 — 顧客ごとの議事録取得元。
+#
+# 当初この動詞を送信元台帳 (beacon sales send-account) の配下に配線したが、
+# 中身は data["accounts"] = **顧客** の設定 (find_account で引く) で、
+# 送信元 (data["send_accounts"]) とは別の対象だった。「account」が相手と自分の
+# 両方を指す混乱を、私自身が配線で再生産していた (独立 AX レビュー A-3 の追跡)。
+# 顧客を扱うこのファイルへ移した。
+cmd_account_transcript_source() {
+    ensure_project
+    local ts_sub="${1:-}"; shift 2>/dev/null || true
+    case "$ts_sub" in
+        get)
+            local acc_id=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    -?*) _guard_positional "$1" "Usage: beacon account transcript-source get <acc-id>" ;;
+                    *)   _guard_extra_positional "$acc_id" "$1" "Usage: beacon account transcript-source get <acc-id>"
+                         acc_id="$1"; shift ;;
+                esac
+            done
+            if [ -z "$acc_id" ]; then
+                echo "Usage: beacon account transcript-source get <acc-id>"
+                exit 1
+            fi
+            BEACON_ACCOUNT_ID="$acc_id" \
+                python3 "$COMMANDS_PY" sales_account_transcript_source_get
+            ;;
+        set)
+            # clear と値の共存拒否は python 側が唯一の判定点。ここでは透過させる。
+            local acc_id="" ts_type="" folder_id="" naming="" tool="" ts_clear=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --type)      ts_type="${2:-}"; shift 2 ;;
+                    --folder-id) folder_id="${2:-}"; shift 2 ;;
+                    --naming)    naming="${2:-}"; shift 2 ;;
+                    --tool)      tool="${2:-}"; shift 2 ;;
+                    --clear)     ts_clear="1"; shift ;;
+                    -?*) _guard_positional "$1" "Usage: beacon account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear))" ;;
+                    *)   _guard_extra_positional "$acc_id" "$1" "Usage: beacon account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear))"
+                         acc_id="$1"; shift ;;
+                esac
+            done
+            if [ -z "$acc_id" ]; then
+                echo "Usage: beacon account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)"
+                exit 1
+            fi
+            BEACON_ACCOUNT_ID="$acc_id" BEACON_TS_TYPE="$ts_type" \
+                BEACON_TS_FOLDER_ID="$folder_id" BEACON_TS_NAMING="$naming" \
+                BEACON_TS_TOOL="$tool" BEACON_TS_CLEAR="$ts_clear" \
+                python3 "$COMMANDS_PY" sales_account_transcript_source_set
+            ;;
+        *)
+            echo "Usage: beacon account transcript-source get <acc-id>"
+            echo "       beacon account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)"
+            ;;
+    esac
+}

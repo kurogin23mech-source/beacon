@@ -53,7 +53,7 @@ beacon acquisition attack-lists <acq-id>      # その施策配下のリスト (
 複数 Google アカウントの取り違えを送信前に止める (既存 send-account ledger を流用)。
 
 ```bash
-beacon sales send-account resolve --service gmail
+beacon sales identity resolve --service gmail
 echo "RESOLVE_EXIT=$?"
 ```
 

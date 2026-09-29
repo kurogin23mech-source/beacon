@@ -4154,7 +4154,7 @@ def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
                 "(ms-176 e-6608 = 外部発行は取り消せないため、ここは止めます)。"
                 "登録は /beacon-sales-email の Step 2 (送信アカウントの登録) が正規の経路です。"
                 "その Step が叩くコマンドは "
-                "beacon sales send-account add \"<会社/個人など呼び名>\" "
+                "beacon sales identity add \"<会社/個人など呼び名>\" "
                 "--email \"<アドレス>\" です (ms-160 e-5981 で CLI 動詞になりました)")
     target = label.strip() if (label and label.strip()) else get_send_identity(data)
     entry = get_send_account(data, target) if target else None
@@ -4274,7 +4274,7 @@ def send_ledger_gap_warning(data: dict, *, direction: str, channel: str) -> str:
             "記録されました。取り違え照合 (送信前ゲート) が土台無しで機能していません。"
             "次の送信の前に登録してください — 正規の経路は /beacon-sales-email の Step 2 "
             "(送信アカウントの登録)。その Step が叩くコマンドは "
-            "beacon sales send-account add \"<呼び名>\" --email \"<アドレス>\" "
+            "beacon sales identity add \"<呼び名>\" --email \"<アドレス>\" "
             "(ms-160 e-5981 で CLI 動詞になりました)")
 
 

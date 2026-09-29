@@ -110,35 +110,35 @@ CASES = [
     (["watch", "clear", "act-2"], "watch_clear",
      {"BEACON_WATCH_TARGET": "act-2"}),
 
-    (["sales", "send-account", "add", "会社", "--email", "a@example.com"],
+    (["sales", "identity", "add", "会社", "--email", "a@example.com"],
      "sales_account_add",
      {"BEACON_SEND_LABEL": "会社", "BEACON_SEND_EMAIL": "a@example.com"}),
 
-    (["sales", "send-account", "remove", "会社"], "sales_account_remove",
+    (["sales", "identity", "remove", "会社"], "sales_account_remove",
      {"BEACON_SEND_LABEL": "会社"}),
 
-    (["sales", "send-account", "route", "会社", "--service", "calendar",
+    (["sales", "identity", "route", "会社", "--service", "calendar",
       "--namespace", "mcp__google-calendar", "--alias", "work"],
      "sales_account_route",
      {"BEACON_SEND_LABEL": "会社", "BEACON_SEND_SERVICE": "calendar",
       "BEACON_SEND_NAMESPACE": "mcp__google-calendar", "BEACON_SEND_ALIAS": "work"}),
 
-    (["sales", "send-account", "resolve", "会社", "--service", "gmail"],
+    (["sales", "identity", "resolve", "会社", "--service", "gmail"],
      "sales_account_resolve",
      {"BEACON_SEND_LABEL": "会社", "BEACON_SEND_SERVICE": "gmail"}),
 
     # 署名: --clear は値と別スロットで渡り、判定は python 側に委ねる (共存拒否の唯一点)。
-    (["sales", "send-account", "signature", "会社", "--clear"],
+    (["sales", "identity", "signature", "会社", "--clear"],
      "sales_account_signature",
      {"BEACON_SEND_LABEL": "会社", "BEACON_SEND_SIGNATURE_CLEAR": "1"}),
 
-    (["sales", "send-account", "transcript-source", "set", "acc-1",
+    (["account", "transcript-source", "set", "acc-1",
       "--type", "drive_folder", "--folder-id", "F1", "--naming", "N", "--tool", "T"],
      "sales_account_transcript_source_set",
      {"BEACON_ACCOUNT_ID": "acc-1", "BEACON_TS_TYPE": "drive_folder",
       "BEACON_TS_FOLDER_ID": "F1", "BEACON_TS_NAMING": "N", "BEACON_TS_TOOL": "T"}),
 
-    (["sales", "send-account", "transcript-source", "get", "acc-2"],
+    (["account", "transcript-source", "get", "acc-2"],
      "sales_account_transcript_source_get",
      {"BEACON_ACCOUNT_ID": "acc-2"}),
 
@@ -202,12 +202,12 @@ def test_both_frontends_agree(stub_tree, argv, subcmd, expected):
 MISSING = [
     (["watch", "set", "act-1"], "--channel なし"),
     (["watch", "clear"], "work-item-id なし"),
-    (["sales", "send-account", "add", "会社"], "--email なし"),
-    (["sales", "send-account", "remove"], "label なし"),
-    (["sales", "send-account", "route", "会社", "--service", "gmail"], "--namespace なし"),
-    (["sales", "send-account", "resolve"], "--service なし"),
-    (["sales", "send-account", "signature"], "label なし"),
-    (["sales", "send-account", "transcript-source", "get"], "acc-id なし"),
+    (["sales", "identity", "add", "会社"], "--email なし"),
+    (["sales", "identity", "remove"], "label なし"),
+    (["sales", "identity", "route", "会社", "--service", "gmail"], "--namespace なし"),
+    (["sales", "identity", "resolve"], "--service なし"),
+    (["sales", "identity", "signature"], "label なし"),
+    (["account", "transcript-source", "get"], "acc-id なし"),
     (["sales", "identity", "set"], "identity なし"),
     (["sales", "identity", "check"], "--from なし"),
     (["sales", "gmail-permalink", "--msgid", "<x@mail>"], "--from なし"),

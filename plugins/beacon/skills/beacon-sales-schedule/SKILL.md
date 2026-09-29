@@ -60,15 +60,15 @@ beacon account list
 台帳を通さず namespace を手書きしない (= 取り違え防止)。まず台帳を確認:
 
 ```bash
-beacon sales send-account list --json
+beacon sales identity list --json
 ```
 
 - **台帳が空 / calendar route 未設定** の場合、ユーザーに「どの Google アカウントの
   カレンダーで調整しますか？」と確認して登録する (label が既にあれば route だけ足す):
 
 ```bash
-beacon sales send-account add "会社" --email "<アドレス>"
-beacon sales send-account route "会社" --service calendar \
+beacon sales identity add "会社" --email "<アドレス>"
+beacon sales identity route "会社" --service calendar \
   --namespace "mcp__google-calendar" --alias "work"
 ```
 
@@ -78,7 +78,7 @@ beacon sales send-account route "会社" --service calendar \
 calendar の route を台帳から解決する。**これが使うカレンダーの唯一の決定経路**:
 
 ```bash
-beacon sales send-account resolve "$LABEL" --service calendar
+beacon sales identity resolve "$LABEL" --service calendar
 echo "RESOLVE_EXIT=$?"
 ```
 

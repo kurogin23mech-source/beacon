@@ -507,7 +507,10 @@ case "${1:-}" in
             assign)  shift 2; cmd_account_assign "$@" ;;
             nurturing) shift 2; cmd_account_nurturing "$@" ;;
             delete)  shift 2; cmd_account_delete "$@" ;;
-            *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|delete]  (cross-project 開示は: beacon disclose <acc-id> --to-project <id>)" ;;
+            # ms-160 e-5981: 顧客ごとの議事録取得元。中身は data["accounts"] = 顧客の
+            # 設定なので、送信元台帳 (beacon sales identity) ではなくここに置く。
+            transcript-source) shift 2; cmd_account_transcript_source "$@" ;;
+            *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|delete|transcript-source]  (cross-project 開示は: beacon disclose <acc-id> --to-project <id>)" ;;
         esac
         ;;
     disclose)   shift; cmd_disclose "$@" ;;
@@ -612,13 +615,11 @@ case "${1:-}" in
             target)  shift 2; cmd_sales_target "$@" ;;
             # ms-160 e-5981: 送信元アカウント / 送信 identity。body は bin/lib/cmd_sales.sh。
             # `send-account` は既存の `beacon account` (顧客) と別概念なので名前で分ける。
-            send-account) shift 2; cmd_sales_send_account "$@" ;;
             identity)     shift 2; cmd_sales_identity "$@" ;;
             gmail-permalink) shift 2; cmd_sales_gmail_permalink "$@" ;;
             reply-watch)  shift 2; cmd_sales_reply_watch "$@" ;;
             *)       echo "Usage: beacon sales target <user> <amount> | list"
-                     echo "       beacon sales send-account add|list|remove|route|resolve|signature|transcript-source ..."
-                     echo "       beacon sales identity show|set|check ..."
+                     echo "       beacon sales identity add|list|remove|route|resolve|signature|show|set|check ..."
                      echo "       beacon sales gmail-permalink --from <address> --msgid <rfc822 Message-ID>"
                      echo "       beacon sales reply-watch ensure" ;;
         esac

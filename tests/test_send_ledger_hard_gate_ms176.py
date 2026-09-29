@@ -52,7 +52,7 @@ def test_empty_ledger_blocks_even_when_the_legacy_pin_matches():
     # (sales_account_add) ではなく **読み手がそのまま叩ける形** を出すことを固定する
     # — 内部 verb 名を案内すると、行き詰まった瞬間の AI に CLI 境界の飛び越しを
     # 教えることになる (独立 AX レビュー A-1)。
-    assert "beacon sales send-account add" in msg
+    assert "beacon sales identity add" in msg
     assert "commands.py" not in msg
 
 
@@ -103,7 +103,7 @@ def test_gap_warning_only_for_outward_sends(direction, channel, expected):
     if expected:
         # 上と同じ契約: 直し方は叩ける CLI の形で出し、内部実装の直叩きは案内しない。
         assert "台帳が空" in band
-        assert "beacon sales send-account add" in band
+        assert "beacon sales identity add" in band
         assert "commands.py" not in band
 
 

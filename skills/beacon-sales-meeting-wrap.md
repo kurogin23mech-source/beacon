@@ -192,12 +192,12 @@ dossier の見出し (顧客の課題[経営/部署/現場] / 勝ち筋 / キー
 `/beacon-sales-drive` と同じ。
 
 [^wrap-source-get]: 実装上は顧客 (Account) に宣言された取得元を読む:
-`beacon sales send-account transcript-source get "$ACC"`。
+`beacon account transcript-source get "$ACC"`。
 返る JSON (`null` なら未宣言) の `type` (`meet_calendar` / `drive_folder` / `external` / `manual`) で
 上表の分岐に対応する。
 
 [^wrap-source-set]: 実装上は在処を顧客に書き込む (種類と、必要なら folder_id / naming / tool を
 まとめて渡す。宣言は 1 単位で書き替わる。`drive_folder` は folder_id 必須):
-`beacon sales send-account transcript-source set "$ACC" --type drive_folder --folder-id "<Drive フォルダ ID>" --naming "<命名の手掛かり (任意)>"`。
+`beacon account transcript-source set "$ACC" --type drive_folder --folder-id "<Drive フォルダ ID>" --naming "<命名の手掛かり (任意)>"`。
 宣言を消すのは明示 clear (`BEACON_TS_CLEAR=1`) のときだけ (#498 review: 空 `BEACON_TS_TYPE` は
 エラーになるだけで既存宣言は消えない — 渡し忘れ/typo で宣言が飛ぶ事故を防ぐ)。

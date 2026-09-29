@@ -408,6 +408,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_account_contact.add_argument("--role", default="")
     p_account_contact.add_argument("--email", default="")
 
+    # ms-160 e-5981: 顧客ごとの議事録取得元。中身は data["accounts"] = 顧客の設定
+    # なので、送信元台帳 (beacon sales identity) ではなくここに置く。
+    p_acc_ts = account_sub.add_parser("transcript-source", add_help=False)
+    ts_sub = p_acc_ts.add_subparsers(dest="ts_cmd", metavar="<get|set>")
+    p_ts_get = ts_sub.add_parser("get", add_help=False)
+    p_ts_get.add_argument("ts_acc_id", nargs="?", default="")
+    p_ts_set = ts_sub.add_parser("set", add_help=False)
+    p_ts_set.add_argument("ts_acc_id", nargs="?", default="")
+    p_ts_set.add_argument("--type", dest="ts_type", default="")
+    p_ts_set.add_argument("--folder-id", dest="folder_id", default="")
+    p_ts_set.add_argument("--naming", default="")
+    p_ts_set.add_argument("--tool", default="")
+    p_ts_set.add_argument("--clear", action="store_true")
+
     p_account_phase = account_sub.add_parser("phase", add_help=False)
     p_account_phase.add_argument("acc_id", nargs="?", default="")
     p_account_phase.add_argument("phase", nargs="?", default="")
@@ -484,57 +498,43 @@ def build_parser() -> argparse.ArgumentParser:
     # bash 側 bin/lib/cmd_sales.sh と対。これが無いと Windows は
     # `argparse invalid choice` で弾かれ、送信元台帳に到達する手段が無い。
     # 余分な位置引数を argparse に弾かせるため、サブ動詞ごとに専用パーサを持つ
-    # (同じ diff の `watch` と同じ形、repo の支配的パターン)。1 つのフラットな
-    # パーサに位置引数を共有させると、綴り間違いや引用符の閉じ忘れで生まれた
-    # 余分なトークンが黙って捨てられ、誤った値で成功したことになる
-    # (独立 AX レビュー A-2 high: `send-account add A B --email x` が rc=0 で
-    # B を捨て、`resolve extra1 extra2` は「extra1 の route が無い」という
-    # もっともらしい別原因のエラーに化けていた)。
-    p_sa = sales_sub.add_parser("send-account", add_help=False)
-    p_sa.add_argument("--help", "-h", action="store_true", dest="sa_help")
-    sa_sub = p_sa.add_subparsers(dest="sa_cmd", metavar="<subcmd>")
-
-    p_sa_add = sa_sub.add_parser("add", add_help=False)
-    p_sa_add.add_argument("label", nargs="?", default="")
-    p_sa_add.add_argument("--email", default="")
-
-    p_sa_list = sa_sub.add_parser("list", aliases=["ls"], add_help=False)
-    p_sa_list.add_argument("--json", action="store_true")
-
-    p_sa_rm = sa_sub.add_parser("remove", aliases=["rm"], add_help=False)
-    p_sa_rm.add_argument("label", nargs="?", default="")
-
-    p_sa_route = sa_sub.add_parser("route", add_help=False)
-    p_sa_route.add_argument("label", nargs="?", default="")
-    p_sa_route.add_argument("--service", default="")
-    p_sa_route.add_argument("--namespace", default="")
-    p_sa_route.add_argument("--alias", dest="alias_val", default="")
-
-    p_sa_resolve = sa_sub.add_parser("resolve", add_help=False)
-    p_sa_resolve.add_argument("label", nargs="?", default="")
-    p_sa_resolve.add_argument("--service", default="")
-
-    p_sa_sig = sa_sub.add_parser("signature", add_help=False)
-    p_sa_sig.add_argument("label", nargs="?", default="")
-    p_sa_sig.add_argument("--signature", default="")
-    p_sa_sig.add_argument("--clear", action="store_true")
-
-    # transcript-source はさらに get|set の 2 段目を持つので、そこも subparser で割る。
-    p_sa_ts = sa_sub.add_parser("transcript-source", add_help=False)
-    ts_sub = p_sa_ts.add_subparsers(dest="ts_cmd", metavar="<get|set>")
-    p_ts_get = ts_sub.add_parser("get", add_help=False)
-    p_ts_get.add_argument("acc_id", nargs="?", default="")
-    p_ts_set = ts_sub.add_parser("set", add_help=False)
-    p_ts_set.add_argument("acc_id", nargs="?", default="")
-    p_ts_set.add_argument("--type", dest="ts_type", default="")
-    p_ts_set.add_argument("--folder-id", dest="folder_id", default="")
-    p_ts_set.add_argument("--naming", default="")
-    p_ts_set.add_argument("--tool", default="")
-    p_ts_set.add_argument("--clear", action="store_true")
-
+    # (repo の支配的パターン)。1 つのフラットなパーサに位置引数を共有させると、
+    # 綴り間違いや引用符の閉じ忘れで生まれた余分なトークンが黙って捨てられ、
+    # 誤った値で成功したことになる (独立 AX レビュー A-2 high)。
+    #
+    # 動詞は `sales identity` に集約 (A-3, user 判断の rename)。当初の
+    # `send-account` は、既存の `beacon account` が顧客なので「account」が
+    # 相手と自分の両方を指してしまっていた。既に出荷済の `identity check` と
+    # 同じ概念なのでそこへ寄せる。
     p_sid = sales_sub.add_parser("identity", add_help=False)
     p_sid.add_argument("--help", "-h", action="store_true", dest="sid_help")
     sid_sub = p_sid.add_subparsers(dest="id_cmd", metavar="<subcmd>")
+
+    p_sid_add = sid_sub.add_parser("add", add_help=False)
+    p_sid_add.add_argument("label", nargs="?", default="")
+    p_sid_add.add_argument("--email", default="")
+
+    p_sid_list = sid_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_sid_list.add_argument("--json", action="store_true")
+
+    p_sid_rm = sid_sub.add_parser("remove", aliases=["rm"], add_help=False)
+    p_sid_rm.add_argument("label", nargs="?", default="")
+
+    p_sid_route = sid_sub.add_parser("route", add_help=False)
+    p_sid_route.add_argument("label", nargs="?", default="")
+    p_sid_route.add_argument("--service", default="")
+    p_sid_route.add_argument("--namespace", default="")
+    p_sid_route.add_argument("--alias", dest="alias_val", default="")
+
+    p_sid_resolve = sid_sub.add_parser("resolve", add_help=False)
+    p_sid_resolve.add_argument("label", nargs="?", default="")
+    p_sid_resolve.add_argument("--service", default="")
+
+    p_sid_sig = sid_sub.add_parser("signature", add_help=False)
+    p_sid_sig.add_argument("label", nargs="?", default="")
+    p_sid_sig.add_argument("--signature", default="")
+    p_sid_sig.add_argument("--clear", action="store_true")
+
     p_sid_show = sid_sub.add_parser("show", add_help=False)
     p_sid_show.add_argument("--json", action="store_true")
     p_sid_set = sid_sub.add_parser("set", add_help=False)
@@ -2509,6 +2509,30 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
             "BEACON_PHASE_NOTE": args.note or "",
         }
         return _run_commands_py(root, "account_phase", env)
+    if cmd == "transcript-source":
+        ts = args.ts_cmd
+        if ts == "get":
+            if not args.ts_acc_id:
+                print("Usage: beacon account transcript-source get <acc-id>")
+                return 1
+            return _run_commands_py(root, "sales_account_transcript_source_get",
+                                    {"BEACON_ACCOUNT_ID": args.ts_acc_id})
+        if ts == "set":
+            if not args.ts_acc_id:
+                print("Usage: beacon account transcript-source set <acc-id> "
+                      "(--type <meet_calendar|drive_folder|external|manual> "
+                      "[--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)")
+                return 1
+            # clear と値の共存拒否は python 側 verb が唯一の判定点。透過させる。
+            return _run_commands_py(root, "sales_account_transcript_source_set", {
+                "BEACON_ACCOUNT_ID": args.ts_acc_id,
+                "BEACON_TS_TYPE": args.ts_type,
+                "BEACON_TS_FOLDER_ID": args.folder_id,
+                "BEACON_TS_NAMING": args.naming,
+                "BEACON_TS_TOOL": args.tool,
+                "BEACON_TS_CLEAR": "1" if args.clear else ""})
+        print("Usage: beacon account transcript-source get|set <acc-id> ...")
+        return 1
     if cmd == "delete":
         if not args.acc_id:
             print("Usage: beacon account delete <acc-id> [--force]")
@@ -3137,24 +3161,19 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
 
 _SALES_USAGE = (
     "Usage: beacon sales target <user> <amount> | list\n"
-    "       beacon sales send-account add|list|remove|route|resolve|signature|"
-    "transcript-source ...\n"
-    "       beacon sales identity show|set|check ...\n"
+    "       beacon sales identity add|list|remove|route|resolve|signature|"
+    "show|set|check ...\n"
     "       beacon sales gmail-permalink --from <address> --msgid <rfc822 Message-ID>\n"
     "       beacon sales reply-watch ensure")
 
 _SALES_IDENTITY_USAGE = (
     "Usage: beacon sales identity "
-    "[show [--json] | set <label|email> | check --from <address> [--label <label>]]")
-
-
-_SALES_SEND_ACCOUNT_USAGE = (
-    "Usage: beacon sales send-account "
     "[add <label> --email <address> | list [--json] | remove <label> | "
     "route <label> --service <svc> --namespace <ns> [--alias <account>] | "
     "resolve [<label>] --service <svc> | "
     "signature <label> (--signature <text> | --clear) | "
-    "transcript-source get|set <acc-id> ...]")
+    "show [--json] | set <label|email> | check --from <address> [--label <label>]]"
+    "\n  注: 顧客ごとの議事録取得元は beacon account transcript-source (= 顧客の設定)。")
 
 
 def _handle_sales(root: Path, args: argparse.Namespace) -> int:
@@ -3180,29 +3199,29 @@ def _handle_sales(root: Path, args: argparse.Namespace) -> int:
     # ms-160 e-5981 — bash cmd_sales_send_account / cmd_sales_identity と同じ
     # env 契約。clear と値の共存拒否は python 側 verb が唯一の判定点なので、
     # ここでも先回りして弾かず透過させる (bash 側と同じ方針)。
-    if args.sales_cmd == "send-account":
-        sa = args.sa_cmd
-        if getattr(args, "sa_help", False) or sa is None:
-            print(_SALES_SEND_ACCOUNT_USAGE)
-            return 0 if getattr(args, "sa_help", False) else 2
-        if sa == "add":
+    if args.sales_cmd == "identity":
+        idc = args.id_cmd
+        if getattr(args, "sid_help", False) or idc is None:
+            print(_SALES_IDENTITY_USAGE)
+            return 0 if getattr(args, "sid_help", False) else 2
+        if idc == "add":
             if not args.label or not args.email:
-                print("Usage: beacon sales send-account add <label> --email <address>")
+                print("Usage: beacon sales identity add <label> --email <address>")
                 return 1
             return _run_commands_py(root, "sales_account_add", {
                 "BEACON_SEND_LABEL": args.label, "BEACON_SEND_EMAIL": args.email})
-        if sa in ("list", "ls"):
+        if idc in ("list", "ls"):
             return _run_commands_py(root, "sales_account_list", {
                 "BEACON_JSON": "1" if args.json else ""})
-        if sa in ("remove", "rm"):
+        if idc in ("remove", "rm"):
             if not args.label:
-                print("Usage: beacon sales send-account remove <label>")
+                print("Usage: beacon sales identity remove <label>")
                 return 1
             return _run_commands_py(root, "sales_account_remove", {
                 "BEACON_SEND_LABEL": args.label})
-        if sa == "route":
+        if idc == "route":
             if not args.label or not args.service or not args.namespace:
-                print("Usage: beacon sales send-account route <label> --service "
+                print("Usage: beacon sales identity route <label> --service "
                       "<gmail|calendar|drive> --namespace <ns> [--alias <account>]")
                 return 1
             return _run_commands_py(root, "sales_account_route", {
@@ -3210,16 +3229,16 @@ def _handle_sales(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_SEND_SERVICE": args.service,
                 "BEACON_SEND_NAMESPACE": args.namespace,
                 "BEACON_SEND_ALIAS": args.alias_val})
-        if sa == "resolve":
+        if idc == "resolve":
             if not args.service:
-                print("Usage: beacon sales send-account resolve [<label>] --service "
+                print("Usage: beacon sales identity resolve [<label>] --service "
                       "<gmail|calendar|drive>   (<label> 省略時は既定の送信 identity)")
                 return 1
             return _run_commands_py(root, "sales_account_resolve", {
                 "BEACON_SEND_LABEL": args.label, "BEACON_SEND_SERVICE": args.service})
-        if sa == "signature":
+        if idc == "signature":
             if not args.label:
-                print("Usage: beacon sales send-account signature <label> "
+                print("Usage: beacon sales identity signature <label> "
                       "(--signature <text> | --clear)")
                 return 1
             # clear と値の共存拒否は python 側 verb が唯一の判定点。透過させる。
@@ -3227,38 +3246,6 @@ def _handle_sales(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_SEND_LABEL": args.label,
                 "BEACON_SEND_SIGNATURE": args.signature,
                 "BEACON_SEND_SIGNATURE_CLEAR": "1" if args.clear else ""})
-        if sa == "transcript-source":
-            ts = args.ts_cmd
-            if ts == "get":
-                if not args.acc_id:
-                    print("Usage: beacon sales send-account transcript-source get <acc-id>")
-                    return 1
-                return _run_commands_py(
-                    root, "sales_account_transcript_source_get",
-                    {"BEACON_ACCOUNT_ID": args.acc_id})
-            if ts == "set":
-                if not args.acc_id:
-                    print("Usage: beacon sales send-account transcript-source set <acc-id> "
-                          "(--type <meet_calendar|drive_folder|external|manual> "
-                          "[--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)")
-                    return 1
-                return _run_commands_py(
-                    root, "sales_account_transcript_source_set", {
-                        "BEACON_ACCOUNT_ID": args.acc_id,
-                        "BEACON_TS_TYPE": args.ts_type,
-                        "BEACON_TS_FOLDER_ID": args.folder_id,
-                        "BEACON_TS_NAMING": args.naming,
-                        "BEACON_TS_TOOL": args.tool,
-                        "BEACON_TS_CLEAR": "1" if args.clear else ""})
-            print("Usage: beacon sales send-account transcript-source get|set <acc-id> ...")
-            return 1
-        print(_SALES_SEND_ACCOUNT_USAGE)
-        return 2
-    if args.sales_cmd == "identity":
-        idc = args.id_cmd
-        if getattr(args, "sid_help", False) or idc is None:
-            print(_SALES_IDENTITY_USAGE)
-            return 0 if getattr(args, "sid_help", False) else 2
         if idc == "show":
             return _run_commands_py(root, "sales_identity_show", {
                 "BEACON_JSON": "1" if args.json else ""})

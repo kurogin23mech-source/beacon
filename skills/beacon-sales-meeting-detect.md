@@ -75,7 +75,7 @@ beacon meeting ended --now "<現在時刻 ISO8601>" --json
 と同じ経路、手書きしない):
 
 ```bash
-beacon sales send-account resolve --service calendar
+beacon sales identity resolve --service calendar
 ```
 
 解決した namespace の MCP ツール群を `$CALNS`、account を `$CALACCT` とする。

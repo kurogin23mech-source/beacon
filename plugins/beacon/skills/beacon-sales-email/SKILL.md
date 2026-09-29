@@ -51,7 +51,7 @@ beacon account list
 namespace を手書きしない (= 取り違えが起きる経路を残さない)。まず台帳を確認:
 
 ```bash
-beacon sales send-account list --json
+beacon sales identity list --json
 ```
 
 - **台帳が空** の場合、ユーザーに「どの Google アカウント (メールアドレス) で送りますか？
@@ -62,8 +62,8 @@ beacon sales send-account list --json
   > 取り消せないため。登録を飛ばして送信に進むことはできない。
 
 ```bash
-beacon sales send-account add "会社" --email "<アドレス>"
-beacon sales send-account route "会社" --service gmail --namespace "mcp__gmail"
+beacon sales identity add "会社" --email "<アドレス>"
+beacon sales identity route "会社" --service gmail --namespace "mcp__gmail"
 # 既定の送信元にするなら default label を pin (次回から $LABEL 省略で使える):
 beacon sales identity set "会社"
 ```
@@ -75,7 +75,7 @@ beacon sales identity set "会社"
 送信に使う Gmail の route を台帳から解決する。**これが送信先アカウントの唯一の決定経路**:
 
 ```bash
-beacon sales send-account resolve "$LABEL" --service gmail
+beacon sales identity resolve "$LABEL" --service gmail
 echo "RESOLVE_EXIT=$?"
 ```
 
@@ -91,7 +91,7 @@ echo "RESOLVE_EXIT=$?"
 と 1 度だけ促し、登録する (中身はユーザーが決める soft guidance、システムは置き場だけ持つ):
 
 ```bash
-beacon sales send-account signature "$LABEL" --signature "<署名の複数行テキスト>"
+beacon sales identity signature "$LABEL" --signature "<署名の複数行テキスト>"
 ```
 
 空のままでも送信は妨げない (署名なしで進む)。ユーザーが不要と言えば以後聞かない。
@@ -99,7 +99,7 @@ beacon sales send-account signature "$LABEL" --signature "<署名の複数行テ
 review: 渡し忘れ/typo が署名を消す事故を防ぐため)。署名を**消す**のは明示 clear のときだけ:
 
 ```bash
-beacon sales send-account signature "$LABEL" --clear
+beacon sales identity signature "$LABEL" --clear
 ```
 
 > Gmail は `send_email` に account 引数が無いため、アカウント切替 = **namespace 切替**

@@ -39,7 +39,7 @@ cmd_sales_target() {
         python3 "$COMMANDS_PY" sales_target
 }
 
-# ms-160 e-5981 — 送信元アカウント / 送信 identity の CLI 化。
+# ms-160 e-5981 — 送信 identity (= 自分の送信元メールアカウント) の CLI 化。
 #
 # これらは commands.py にしか無く、営業の手順書 (Skill) が
 # `python3 commands.py sales_account_add` 等を環境変数ベタ書きで直叩きしていた。
@@ -47,14 +47,21 @@ cmd_sales_target() {
 # 飛ばす経路で、実際に sales_account_remove / sales_identity_show の 2 つは
 # 手順書からも呼ばれず到達不能になっていた。
 #
-# 動詞名は `send-account` (送信元) とし、既存の `beacon account` (顧客 = Account)
-# と読み違えないようにする。内部 verb 名 (sales_account_*) は据え置き。
+# 動詞は `beacon sales identity` に集約する。当初は `send-account` としたが、
+# 既存の `beacon account` が顧客 (Account) なので「account」が相手と自分の両方を
+# 指してしまい、読み手が取り違える (独立 AX レビュー A-3、user 判断で rename)。
+# 既に出荷済の `sales identity check` と同じ「送信 identity」概念なので、別の語に
+# 逃がさず そこへ寄せる。内部 verb 名 (sales_account_*) は据え置き。
+#
+# 議事録取得元 (transcript-source) はここに置かない: 中身は data["accounts"] =
+# **顧客** の設定で、送信元台帳 (data["send_accounts"]) とは別物。最初の配線で
+# 送信元の配下に置いていたのは誤りで、`beacon account transcript-source` へ移した。
 #
 # 値の受け渡しは「そのまま透過」を守る: 署名や議事録取得元の clear と値の共存拒否は
 # python 側 (lib/sales_entities.py) が唯一の判定点なので、bash 側で先回りして
 # 弾いたり空文字に潰したりしない。
 
-cmd_sales_send_account() {
+cmd_sales_identity() {
     ensure_project
     local sub="${1:-}"; shift 2>/dev/null || true
     case "$sub" in
@@ -63,13 +70,13 @@ cmd_sales_send_account() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --email) email="${2:-}"; shift 2 ;;
-                    -?*) _guard_positional "$1" "Usage: beacon sales send-account add <label> --email <address>" ;;
-                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account add <label> --email <address>"
+                    -?*) _guard_positional "$1" "Usage: beacon sales identity add <label> --email <address>" ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales identity add <label> --email <address>"
                          label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ] || [ -z "$email" ]; then
-                echo "Usage: beacon sales send-account add <label> --email <address>"
+                echo "Usage: beacon sales identity add <label> --email <address>"
                 exit 1
             fi
             BEACON_SEND_LABEL="$label" BEACON_SEND_EMAIL="$email" \
@@ -90,13 +97,13 @@ cmd_sales_send_account() {
             local label=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    -?*) _guard_positional "$1" "Usage: beacon sales send-account remove <label>" ;;
-                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account remove <label>"
+                    -?*) _guard_positional "$1" "Usage: beacon sales identity remove <label>" ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales identity remove <label>"
                          label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ]; then
-                echo "Usage: beacon sales send-account remove <label>"
+                echo "Usage: beacon sales identity remove <label>"
                 exit 1
             fi
             BEACON_SEND_LABEL="$label" python3 "$COMMANDS_PY" sales_account_remove
@@ -108,13 +115,13 @@ cmd_sales_send_account() {
                     --service)   service="${2:-}"; shift 2 ;;
                     --namespace) namespace="${2:-}"; shift 2 ;;
                     --alias)     alias_val="${2:-}"; shift 2 ;;
-                    -?*) _guard_positional "$1" "Usage: beacon sales send-account route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]" ;;
-                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
+                    -?*) _guard_positional "$1" "Usage: beacon sales identity route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]" ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales identity route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
                          label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ] || [ -z "$service" ] || [ -z "$namespace" ]; then
-                echo "Usage: beacon sales send-account route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
+                echo "Usage: beacon sales identity route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
                 exit 1
             fi
             BEACON_SEND_LABEL="$label" BEACON_SEND_SERVICE="$service" \
@@ -126,13 +133,13 @@ cmd_sales_send_account() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --service) service="${2:-}"; shift 2 ;;
-                    -?*) _guard_positional "$1" "Usage: beacon sales send-account resolve [<label>] --service <gmail|calendar|drive>" ;;
-                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account resolve [<label>] --service <gmail|calendar|drive>"
+                    -?*) _guard_positional "$1" "Usage: beacon sales identity resolve [<label>] --service <gmail|calendar|drive>" ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales identity resolve [<label>] --service <gmail|calendar|drive>"
                          label="$1"; shift ;;
                 esac
             done
             if [ -z "$service" ]; then
-                echo "Usage: beacon sales send-account resolve [<label>] --service <gmail|calendar|drive>"
+                echo "Usage: beacon sales identity resolve [<label>] --service <gmail|calendar|drive>"
                 echo "  <label> 省略時は既定の送信 identity を使う。"
                 exit 1
             fi
@@ -146,84 +153,19 @@ cmd_sales_send_account() {
                 case "$1" in
                     --signature) signature="${2:-}"; shift 2 ;;
                     --clear)     clear="1"; shift ;;
-                    -?*) _guard_positional "$1" "Usage: beacon sales send-account signature <label> (--signature <text> | --clear)" ;;
-                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales send-account signature <label> (--signature <text> | --clear)"
+                    -?*) _guard_positional "$1" "Usage: beacon sales identity signature <label> (--signature <text> | --clear)" ;;
+                    *)   _guard_extra_positional "$label" "$1" "Usage: beacon sales identity signature <label> (--signature <text> | --clear)"
                          label="$1"; shift ;;
                 esac
             done
             if [ -z "$label" ]; then
-                echo "Usage: beacon sales send-account signature <label> (--signature <text> | --clear)"
+                echo "Usage: beacon sales identity signature <label> (--signature <text> | --clear)"
                 exit 1
             fi
             BEACON_SEND_LABEL="$label" BEACON_SEND_SIGNATURE="$signature" \
                 BEACON_SEND_SIGNATURE_CLEAR="$clear" \
                 python3 "$COMMANDS_PY" sales_account_signature
             ;;
-        transcript-source)
-            local ts_sub="${1:-}"; shift 2>/dev/null || true
-            case "$ts_sub" in
-                get)
-                    local acc_id=""
-                    while [[ $# -gt 0 ]]; do
-                        case "$1" in
-                            -?*) _guard_positional "$1" "Usage: beacon sales send-account transcript-source get <acc-id>" ;;
-                            *)   _guard_extra_positional "$acc_id" "$1" "Usage: beacon sales send-account transcript-source get <acc-id>"
-                                 acc_id="$1"; shift ;;
-                        esac
-                    done
-                    if [ -z "$acc_id" ]; then
-                        echo "Usage: beacon sales send-account transcript-source get <acc-id>"
-                        exit 1
-                    fi
-                    BEACON_ACCOUNT_ID="$acc_id" \
-                        python3 "$COMMANDS_PY" sales_account_transcript_source_get
-                    ;;
-                set)
-                    # clear と値の共存拒否は python 側が唯一の判定点。ここでは透過させる。
-                    local acc_id="" ts_type="" folder_id="" naming="" tool="" ts_clear=""
-                    while [[ $# -gt 0 ]]; do
-                        case "$1" in
-                            --type)      ts_type="${2:-}"; shift 2 ;;
-                            --folder-id) folder_id="${2:-}"; shift 2 ;;
-                            --naming)    naming="${2:-}"; shift 2 ;;
-                            --tool)      tool="${2:-}"; shift 2 ;;
-                            --clear)     ts_clear="1"; shift ;;
-                            -?*) _guard_positional "$1" "Usage: beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear))" ;;
-                            *)   _guard_extra_positional "$acc_id" "$1" "Usage: beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear))"
-                                 acc_id="$1"; shift ;;
-                        esac
-                    done
-                    if [ -z "$acc_id" ]; then
-                        echo "Usage: beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)"
-                        exit 1
-                    fi
-                    BEACON_ACCOUNT_ID="$acc_id" BEACON_TS_TYPE="$ts_type" \
-                        BEACON_TS_FOLDER_ID="$folder_id" BEACON_TS_NAMING="$naming" \
-                        BEACON_TS_TOOL="$tool" BEACON_TS_CLEAR="$ts_clear" \
-                        python3 "$COMMANDS_PY" sales_account_transcript_source_set
-                    ;;
-                *)
-                    echo "Usage: beacon sales send-account transcript-source get <acc-id>"
-                    echo "       beacon sales send-account transcript-source set <acc-id> (--type <meet_calendar|drive_folder|external|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)"
-                    ;;
-            esac
-            ;;
-        *)
-            echo "Usage: beacon sales send-account add <label> --email <address>"
-            echo "       beacon sales send-account list [--json]"
-            echo "       beacon sales send-account remove <label>"
-            echo "       beacon sales send-account route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
-            echo "       beacon sales send-account resolve [<label>] --service <gmail|calendar|drive>"
-            echo "       beacon sales send-account signature <label> (--signature <text> | --clear)"
-            echo "       beacon sales send-account transcript-source get|set <acc-id> ..."
-            ;;
-    esac
-}
-
-cmd_sales_identity() {
-    ensure_project
-    local sub="${1:-}"; shift 2>/dev/null || true
-    case "$sub" in
         show)
             local json_flag=""
             while [[ $# -gt 0 ]]; do
@@ -269,9 +211,16 @@ cmd_sales_identity() {
                 python3 "$COMMANDS_PY" sales_identity_check
             ;;
         *)
-            echo "Usage: beacon sales identity show [--json]"
-            echo "       beacon sales identity set <label|email>"
-            echo "       beacon sales identity check --from <address> [--label <label>]"
+            echo "Usage: beacon sales identity add <label> --email <address>"
+            echo "       beacon sales identity list [--json]"
+            echo "       beacon sales identity remove <label>"
+            echo "       beacon sales identity route <label> --service <gmail|calendar|drive> --namespace <ns> [--alias <account>]"
+            echo "       beacon sales identity resolve [<label>] --service <gmail|calendar|drive>"
+            echo "       beacon sales identity signature <label> (--signature <text> | --clear)"
+            echo "       beacon sales identity show [--json]              (既定の送信元を表示)"
+            echo "       beacon sales identity set <label|email>          (既定の送信元を決める)"
+            echo "       beacon sales identity check --from <address> [--label <label>]  (送信前の照合)"
+            echo "  注: 顧客ごとの議事録取得元は beacon account transcript-source (= 顧客の設定)。"
             ;;
     esac
 }

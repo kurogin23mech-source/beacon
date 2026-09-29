@@ -154,12 +154,12 @@ def test_the_two_verbs_that_had_gone_unreachable_are_on_the_cli():
     bash += (ROOT / "bin" / "lib" / "cmd_sales.sh").read_text()
     assert "sales_account_remove" in bash
     assert "sales_identity_show" in bash
-    assert "send-account) shift 2; cmd_sales_send_account" in bash
+    assert "identity)     shift 2; cmd_sales_identity" in bash
 
     dispatch = (ROOT / "beacon_cli" / "dispatch.py").read_text()
     assert "sales_account_remove" in dispatch
     assert "sales_identity_show" in dispatch
 
     registry = (ROOT / "lib" / "commands.py").read_text()
-    assert '"beacon sales send-account remove <label>"' in registry
+    assert '"beacon sales identity remove <label>"' in registry
     assert '"beacon sales identity show"' in registry
