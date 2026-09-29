@@ -51,13 +51,34 @@ STATE_TERMINATED = "terminated"          # 終了(completed/aborted/failed)
 # セッションは自分が unknown だと報告できない (死んだ executor は「私は死んだ」と
 # 言えない)。server が不在検知 / 宣言不信で立てる、人間の注意を引く側の安全弁。
 STATE_UNKNOWN = "unknown"
+# ms-177 — ``interrupted`` (中断) is the OTHER server-raised state, and like
+# ``unknown`` it cannot be declared: a session killed by a closed terminal / an
+# API error / a context-limit exit does not get to file a report on its way out.
+# It means "this WAS a real working session (it declared running/idle/
+# awaiting_human/blocked) and then its receive path vanished WITHOUT going
+# through ``beacon session end``" — i.e. it stopped by accident, not on purpose.
+# Split out of ``unknown`` so the ops room can show an accidental death loudly
+# instead of burying it in the same grey "stopped" bucket as a clean exit
+# (ms-177 SPEC 方針1/2). ``unknown`` thereby returns to its one true meaning:
+# live but never stated what it is doing.
+STATE_INTERRUPTED = "interrupted"
 
-# The states a session may self-declare (方針1: 自己宣言が正)。``unknown`` は
-# 含まない — 宣言由来では決して現れない (判断4)。
+# The states a session may self-declare (方針1: 自己宣言が正)。``unknown`` /
+# ``interrupted`` は含まない — 宣言由来では決して現れない (判断4 / ms-177)。
 DECLARABLE_STATES = frozenset({
     STATE_RUNNING, STATE_IDLE, STATE_AWAITING_HUMAN, STATE_BLOCKED,
     STATE_TERMINATED,
 })
+
+# The COMPLETE range of ``derive_state`` — every value a consumer (ops room,
+# Go viewer, roster ordering, attention filter) may receive. Consumers that
+# enumerate states MUST check exhaustiveness against THIS set, not against
+# ``DECLARABLE_STATES | {STATE_UNKNOWN}``: the server-raised states are exactly
+# the ones a consumer forgets, and a guard written from the declarable set stays
+# green while a new state silently falls into some `.get(..., default)` bucket
+# (ms-177 — that is how ``interrupted`` would have slipped past the existing
+# ``_ROSTER_STATE_ORDER`` exhaustiveness test).
+ALL_STATES = DECLARABLE_STATES | frozenset({STATE_UNKNOWN, STATE_INTERRUPTED})
 
 
 def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[bool]:
@@ -128,9 +149,17 @@ def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
 
     ``True`` when the declaration is older than ``stale_after_seconds`` — OR when
     its timestamp is missing/unparseable. A declaration we cannot date is treated
-    as stale (safe side: we would rather raise ``unknown`` for human attention
-    than trust an undatable self-report). ``False`` only when the stamp parses AND
-    is within the freshness window.
+    as stale: safe side, since we would rather surface something for human
+    attention than trust an undatable self-report. ``False`` only when the stamp
+    parses AND is within the freshness window.
+
+    This predicate answers only "is the stamp too old to trust". **What a stale
+    declaration then projects to is NOT described here** — ``derive_state`` is the
+    single source of truth for that mapping (it depends on liveness too). Naming
+    the outcome in this docstring as well is how it went stale once already: it
+    said ``unknown`` and kept saying so after ms-177 changed the outcome to
+    ``interrupted``. Read ``derive_state`` for the mapping; keep this one about
+    the stamp.
     """
     if not declared_at:
         return True
@@ -148,13 +177,17 @@ def derive_state(declared_state, declared_at, live, now,
                  stale_after_seconds) -> str:
     """Project a work unit's canonical ``state`` (ms-159 / e-6243).
 
-    The one place the 5 canonical states + ``unknown`` are decided. Pure: the
+    The one place every value in ``ALL_STATES`` is decided. Pure: the
     impure liveness scan that produces ``live`` lives on the server; keeping the
     derivation pure lets every branch be pinned without a bus fixture (same
     discipline as ``derive_draining``).
 
     Authority model (作業単位状態モデル SPEC ``np2fSUqpE5LSIkOqHLuK`` 判断1/4 +
     slice SPEC ``Icb8zFtbnZZ1yXzMsLO6`` 方針1/4):
+
+    Since ms-177 the two server-raised states divide cleanly: ``interrupted``
+    means "it was working and its transport died" (not live), ``unknown`` means
+    "it is live but has never said what it is doing". Neither is declarable.
 
     - **``terminated`` is terminal.** A session that reported SessionEnd stays
       ``terminated`` regardless of liveness or age — it legitimately stops
@@ -175,12 +208,20 @@ def derive_state(declared_state, declared_at, live, now,
         * a *fresh* declaration is a very recent death — trust it through a short
           grace window (a just-crashed ``awaiting_human`` still reads
           ``awaiting_human`` for a moment, indistinguishable from a real pause);
-        * a *stale* declaration ⇒ ``unknown`` — transport gone AND the last
-          report is old, so a lingering non-terminal state must be neutralized
-          (判断4 固着 backstop: a dead session frozen in ``awaiting_human`` must
-          not nag the inbox forever);
+        * a *stale* declaration ⇒ ``interrupted`` (中断) — transport gone AND the
+          last report is old, so a lingering non-terminal state must be
+          neutralized (判断4 固着 backstop: a dead session frozen in
+          ``awaiting_human`` must not nag the inbox forever). ms-177 names this
+          outcome instead of folding it into ``unknown``: it is precisely the
+          accidental death (terminal closed / API error / context-limit exit) the
+          ops room must show LOUDLY, because the human wants to resume it. Note
+          this covers ``blocked`` too — a blocked session that then loses its
+          transport also died without ending, so it takes the same branch rather
+          than needing a second rule.
         * *no* declaration ⇒ ``terminated`` (no transport and nothing ever
-          declared = gone).
+          declared = gone). ms-177 SPEC 方針4 accepts that ``terminated`` stays a
+          mixed bucket (clean exit + never-declared death) for now: separating
+          those needs ``last_poll_at`` as a derivation input.
 
     So ``stale_after_seconds`` is a *post-death grace window*, not a general
     freshness clock — it is consulted only on the not-live path. (The precise
@@ -201,8 +242,9 @@ def derive_state(declared_state, declared_at, live, now,
             ``live`` is false).
 
     Returns:
-        One of ``STATE_RUNNING`` / ``STATE_IDLE`` / ``STATE_AWAITING_HUMAN`` /
-        ``STATE_BLOCKED`` / ``STATE_TERMINATED`` / ``STATE_UNKNOWN``.
+        One of ``ALL_STATES``: ``STATE_RUNNING`` / ``STATE_IDLE`` /
+        ``STATE_AWAITING_HUMAN`` / ``STATE_BLOCKED`` / ``STATE_TERMINATED`` /
+        ``STATE_INTERRUPTED`` / ``STATE_UNKNOWN``.
     """
     # 1. Terminal declaration is authoritative forever — never let age or a
     #    dropped transport flip an ended session to unknown.
@@ -218,7 +260,11 @@ def derive_state(declared_state, declared_at, live, now,
         # Not live: the heartbeat is gone, so staleness now decides.
         if not _declaration_is_stale(declared_at, now, stale_after_seconds):
             return declared_state          # very recent death: grace window
-        return STATE_UNKNOWN               # gone + stale ⇒ 固着 backstop
+        # Gone + stale, and it HAD declared real work ⇒ 中断 (ms-177). This is
+        # the 固着 backstop as before — the frozen awaiting_human stops nagging —
+        # but it is now named for what it actually is instead of being dumped in
+        # ``unknown``: a session that was working and died without ending.
+        return STATE_INTERRUPTED
 
     # 3. No (or unrecognized) declaration ⇒ liveness fallback (判断4 safe side).
     #    live ⇒ up but unstated ⇒ unknown; not live ⇒ gone ⇒ terminated.

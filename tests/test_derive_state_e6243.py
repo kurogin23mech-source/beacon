@@ -8,8 +8,9 @@ pin the authority model of ``lib/bus_liveness.derive_state`` from the two SPECs
 
   1. a FRESH self-declaration is authoritative — all 5 canonical states round-trip.
   2. ``terminated`` is terminal — authoritative even when stale / not live.
-  3. a STALE non-terminal declaration ⇒ ``unknown`` (方針1 live-but-silent +
-     判断4 固着 backstop), regardless of liveness.
+  3. a STALE non-terminal declaration, once NOT LIVE, ⇒ ``interrupted``
+     (判断4 固着 backstop, renamed by ms-177 — it died without ending); while
+     LIVE the declaration is still trusted regardless of age.
   4. NO declaration ⇒ liveness FALLBACK: live ⇒ unknown (never assume running),
      not live ⇒ terminated (gone).
   5. an undatable declaration is treated as stale (safe side ⇒ unknown).
@@ -104,7 +105,8 @@ class TestTerminatedIsTerminal:
 # 3. Staleness is a POST-DEATH grace window, not a general freshness clock.
 #    While LIVE, the heartbeat re-affirms the marker ⇒ trust it regardless of
 #    age (this keeps a long-waiting awaiting_human visible). Only once NOT LIVE
-#    does a stale declaration flip to unknown (判断4 固着 backstop).
+#    does a stale declaration flip to ``interrupted`` (判断4 固着 backstop,
+#    named by ms-177: worked, then died without ending).
 # ===========================================================================
 
 class TestStalenessOnlyAppliesWhenNotLive:
@@ -131,13 +133,15 @@ class TestStalenessOnlyAppliesWhenNotLive:
             bus_liveness.STATE_AWAITING_HUMAN, hours_ago, True, now, WINDOW
         ) == bus_liveness.STATE_AWAITING_HUMAN
 
-    def test_stale_awaiting_human_not_live_is_unknown_not_frozen(self):
+    def test_stale_awaiting_human_not_live_is_interrupted_not_frozen(self):
         # 判断4 固着 backstop: once the heartbeat is ALSO gone, a dead session
-        # frozen in awaiting_human must NOT keep nagging — it becomes unknown.
+        # frozen in awaiting_human must NOT keep nagging. ms-177: the outcome is
+        # now ``interrupted`` (it was working and died without ending) rather than
+        # the catch-all ``unknown``.
         now = _now()
         assert bus_liveness.derive_state(
             bus_liveness.STATE_AWAITING_HUMAN, _stale(now), False, now, WINDOW
-        ) == bus_liveness.STATE_UNKNOWN
+        ) == bus_liveness.STATE_INTERRUPTED
 
     def test_fresh_declaration_not_live_is_trusted_grace_window(self):
         # A just-crashed session (fresh declaration, transport just dropped) is
@@ -198,17 +202,18 @@ class TestUndatableDeclaration:
         ) == bus_liveness.STATE_RUNNING
 
     def test_declaration_without_timestamp_is_stale_when_not_live(self):
-        # Not live + a state we cannot date ⇒ can't confirm ⇒ unknown.
+        # Not live + a state we cannot date ⇒ can't confirm ⇒ treated as stale ⇒
+        # ``interrupted`` (ms-177; was ``unknown``).
         now = _now()
         assert bus_liveness.derive_state(
             bus_liveness.STATE_RUNNING, None, False, now, WINDOW
-        ) == bus_liveness.STATE_UNKNOWN
+        ) == bus_liveness.STATE_INTERRUPTED
 
     def test_unparseable_timestamp_is_stale_when_not_live(self):
         now = _now()
         assert bus_liveness.derive_state(
             bus_liveness.STATE_RUNNING, "not-a-date", False, now, WINDOW
-        ) == bus_liveness.STATE_UNKNOWN
+        ) == bus_liveness.STATE_INTERRUPTED
 
     def test_staleness_helper_boundaries(self):
         now = _now()

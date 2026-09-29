@@ -957,3 +957,75 @@ func TestNamedTranscriptionIdenticalAcrossBothPaths(t *testing.T) {
 			proj(a), proj(b))
 	}
 }
+
+// 中断 (interrupted) がサーバの正典 state として名簿から運用室の行まで運ばれること
+// (ms-177 / e-6643)。TestServerStateCarriedToOverview と同型だが、状態を 1 つ足した
+// ときに「転写は awaiting_human でだけ確かめられている」状態を残さないために、
+// このマシンの行・別マシンの行の両構築パスで実測する (転写の唯一の書き手 applyNamed を
+// 迂回する退行を赤くする)。
+func TestInterruptedStateCarriedToOverview(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	named := []SessionRow{
+		{ID: "sv-here", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: false, LastActive: fresh, State: "interrupted"},
+		{ID: "sv-far", Agent: "claude-code", Cwd: "/other/q", ProjectID: "q",
+			Live: false, LastActive: fresh, State: "interrupted"},
+	}
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh,
+		Running: false, SessionID: "sv-here",
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	got := map[string]string{}
+	for _, s := range view.Sessions {
+		got[s.SessionID] = s.ServerState
+	}
+	if got["sv-here"] != "interrupted" {
+		t.Errorf("このマシンの行に中断 (interrupted) が運ばれていない: %q — "+
+			"中断を運用室で赤く出せなくなる (ms-177)", got["sv-here"])
+	}
+	if got["sv-far"] != "interrupted" {
+		t.Errorf("別マシンの行に中断 (interrupted) が運ばれていない: %q — "+
+			"別マシンで事故死したセッションが「終了」に埋もれる (ms-177)", got["sv-far"])
+	}
+}
+
+// 画面が止まり方を 2 つに割って読むこと、かつ**中断を既定で畳まないこと** (ms-177)。
+// 後者がこのテストの主眼: 中断を赤くしても既定の畳み対象に入れてしまえば誰の目にも
+// 入らず、色を変えただけで「事故で落ちた作業が沈む」穴がそのまま残る。畳む対象は
+// page.html の HIDDEN_BY_DEFAULT_STATES 1 行だけで決まる形にしてあるので、その 1 行を
+// 実測する (prose の走査でなく判定点そのものを見る)。
+func TestStopBucketSplitAndInterruptNotHiddenByDefault(t *testing.T) {
+	raw, err := os.ReadFile("page.html")
+	if err != nil {
+		t.Fatalf("page.html が読めない: %v", err)
+	}
+	page := string(raw)
+
+	// 1. 止まり方の判定がサーバの正典 state を読むこと (画面側で live と宣言から
+	//    再計算する = 導出が 2 箇所に割れる退行を赤くする)。
+	if !strings.Contains(page, `s.server_state === "interrupted"`) {
+		t.Error("page.html が中断を server_state=interrupted で判定していない — " +
+			"中断が「終了」と同じ灰色に戻り、事故死が見分けられない (ms-177)")
+	}
+
+	// 2. 語彙に中断があること。
+	if !strings.Contains(page, `interrupted: {label: "中断"`) {
+		t.Error("page.html の状態語彙 (OPS_STATES) に中断が無い")
+	}
+
+	// 3. 既定で畳む状態は「終了」だけであること。ここが本命の drift ガード。
+	const wantHidden = `const HIDDEN_BY_DEFAULT_STATES = ["stop"];`
+	if !strings.Contains(page, wantHidden) {
+		t.Errorf("page.html の既定畳み対象が %s になっていない — "+
+			"中断が畳まれると赤くしても誰も気づけず、ms-177 が無意味になる", wantHidden)
+	}
+
+	// 4. 畳み判定が HIDDEN_BY_DEFAULT_STATES を経由すること (定数を置いたまま
+	//    フィルタ側が生の比較に戻ると、3 のガードは緑のまま素通りする)。
+	if !strings.Contains(page, `HIDDEN_BY_DEFAULT_STATES.includes(liveness(s).key)`) {
+		t.Error("page.html の畳み判定が HIDDEN_BY_DEFAULT_STATES を経由していない — " +
+			"定数が飾りになり、上の 1 行ガードが素通りする")
+	}
+}

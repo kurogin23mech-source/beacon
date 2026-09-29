@@ -225,12 +225,17 @@
       rgba(0,0,0,var(--scanline-opacity)) 4px);
   }
 
-  /* --- 状態ドット (作業中 = 緑鼓動 / 確認待ち = 橙鼓動 / 待機中 = 輪郭 / 停止 = 淡) --- */
+  /* --- 状態ドット (作業中 = 緑鼓動 / 確認待ち = 橙鼓動 / 待機中 = 輪郭 /
+         中断 = 赤 / 終了 = 淡) --- */
   html.ops .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; }
   html.ops .dot.work { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: ops-pulse 2s ease-in-out infinite; }
   html.ops .dot.confirm { background: var(--waiting); box-shadow: 0 0 9px var(--waiting); animation: ops-pulse 1.3s ease-in-out infinite; }
   html.ops .dot.idle { background: transparent; border: 1.5px solid var(--text-dim); }
   html.ops .dot.stop { background: var(--text-dim); opacity: .5; }
+  /* 中断 (事故で落ちた) は赤。確認待ちの橙とは別の色にする — 「あなたを待っている」
+     のではなく「壊れて止まった」なので、同じ色にすると読み分けられない。鼓動は
+     させない (動いていないものが脈打つと live と誤読される)。 */
+  html.ops .dot.interrupted { background: var(--cancelled); box-shadow: 0 0 8px var(--cancelled); }
   @keyframes ops-pulse { 50% { opacity: .4; } }
 
   /* --- 状態札 (語が主・色は補助)。確認待ちだけ塗りで「あなた待ち」を目立たせる。 --- */
@@ -243,6 +248,18 @@
   html.ops .st.confirm { color: #0a0a0c;        background: var(--waiting);     border-color: var(--waiting); font-weight: 600; }
   html.ops .st.idle    { color: var(--text-dim); border-color: var(--border); }
   html.ops .st.stop    { color: var(--text-dim); opacity: .6; border-color: var(--border-subtle); }
+  /* 中断は輪郭 + 赤文字で目立たせる。塗り (確認待ちの形) は使わない — 塗りは
+     「いま応答が要る」の予約席で、中断は「気づいて再開してほしい」なので一段弱い
+     強調にとどめる。淡くしないことが肝 (灰色で沈めたら中断を分けた意味が無い)。 */
+  html.ops .st.interrupted {
+    color: var(--cancelled); font-weight: 600;
+    border-color: color-mix(in srgb, var(--cancelled) 60%, transparent);
+    background: color-mix(in srgb, var(--cancelled) 10%, transparent);
+  }
+
+  /* 見出しの中断件数。既定で表示される唯一の「止まっているもの」なので、数だけでも
+     目に入るようにする (ms-177)。 */
+  html.ops .warn-count { color: var(--cancelled); }
 
   /* コンテキスト使用率。60% 以上で注意色、80% 以上で警告色 (閾値は従来と同じ e-6500)。 */
   html.ops .ctx {
@@ -351,8 +368,10 @@ let viewerState = {};
 let pickerOpen = false;
 // セッション一覧を見ている間は盤の自動更新を止める (画面を奪われないため)。
 let sessionsOpen = false;
-// 止まっているセッションを出すかどうか。既定は隠す。
-let showStopped = false;
+// 終了したセッション (人が幕を引いたもの) を出すかどうか。既定は隠す。
+// 中断 (事故で落ちたもの) はこの切り替えの対象外で常に出る (ms-177 — 畳む対象は
+// HIDDEN_BY_DEFAULT_STATES が唯一の真実源)。
+let showEnded = false;
 // 絞り込みの語。画面を作り直しても打ち直さずに済むよう覚えておく。
 let lastFilter = "";
 // 運用室の絞り込み。既定は「自分のみ」= 他人のセッションを畳んで並列作業を見失わない。
@@ -395,7 +414,8 @@ const TYPE_LABEL = {
 };
 function typeLabel(t) { return esc(TYPE_LABEL[t] || t || ""); }
 
-// セッションの状態は 3 つ + 停止に整理する (e-6549、正典 = ops-room mockup v3)。
+// セッションの状態は 3 つ + 止まり方 2 種に整理する (e-6549、正典 = ops-room
+// mockup v3。止まり方の 2 分割は ms-177)。
 //
 //  作業中   … 実際に手が動いている (道具の申告 busy、またはサーバ正典 state=running)。
 //             activity_kind を判定源にしてはならない — あれは「activity 文字列の
@@ -406,23 +426,43 @@ function typeLabel(t) { return esc(TYPE_LABEL[t] || t || ""); }
 //  確認待ち … 質問・選択肢・許可で止まって **あなたを待っている**
 //             (activity_kind=wait + 待機内容あり。ms-159 が produce する)
 //  待機中   … 生きているが手待ち・保留中 (理由は分からないものも含む)
-//  停止     … 生存を確かめられない (淡色で残す)
+//  終了     … 人が `beacon session end` で幕を引いた、または一度も名乗らずに
+//             消えた (淡色で残し、既定では畳む — もう見なくてよいもの)
+//  中断     … 作業中のまま受信経路が途切れた = 端末を閉じた / エラーで落ちた /
+//             コンテキスト制限で終わった (赤で出し、既定でも畳まない。ms-177 —
+//             事故で落ちた作業を「片付いたもの」と同じ見た目で沈めないため)。
+//             止まり方の判定はサーバ正典 state (terminated / interrupted) に
+//             委ね、画面側で live と宣言から組み直さない (導出を 2 箇所に
+//             割らない)
 //
 // 以前あった「稼働中 / 最近動いた」は廃止 — 「生きているのは分かるが何を
 // しているかは不明」は全部「待機中」に畳む (曖昧な中間ラベルは走査の邪魔)。
 // 生存はローカルのプロセス観測 (running) か、サーバの transport live
 // (transport_live)、または道具の台帳申告 (state) の合成 (e-6454)。
-// 状態の語彙 (3 状態 + 停止) の唯一の定義。label は liveness() が読む。
+// 状態の語彙 (3 状態 + 止まり方 2 種) の唯一の定義。label は liveness() が読む。
 // legend は各状態の意味の定義文 (現在は画面に描画しない — 凡例表示は説明過多として
 // 2026-09-18 に人間判断で撤去。語彙の意味はこの定義文が正で、復活時もここを読む)。
 const OPS_STATES = {
   work:    {label: "作業中",   legend: "手が動いている"},
   confirm: {label: "確認待ち", legend: "質問・選択肢・許可で止まってあなたを待っている"},
   idle:    {label: "待機中",   legend: "手待ち・保留"},
-  stop:    {label: "停止",     legend: null},
+  // 止まり方を 2 つに割る (ms-177)。「終了」は人が幕を引いたもの = もう見なくてよい。
+  // 「中断」は端末を閉じた・エラーで落ちた・コンテキスト制限で終わったもの = 気づいて
+  // 再開したいもの。以前は両方が同じ「停止」で、事故で落ちた作業が片付いたものと
+  // 同じ見た目で沈んでいた。
+  stop:      {label: "終了",   legend: "人が幕を引いた。もう見なくてよい"},
+  // キーは wire 値 (server_state) と綴りを揃える。work / confirm / idle / stop は
+  // 元からある別語彙だが、この 1 つは wire 値の途中切りにすると grep で見つからず、
+  // 後から key === "interrupted" と書いた人のフィルタが黙って何にも一致しなくなる。
+  interrupted: {label: "中断", legend: "正常に終わらずに止まった。気づいて再開したい"},
 };
+// 既定で畳む状態を決める唯一の場所 (ms-177)。**「終了」だけ**。中断をここに足すと、
+// 赤くしても既定では誰の目にも入らず、色を変えただけで「事故死が沈む」穴が残る
+// (= このMSがやったことが無意味になる)。足すときはそれを承知で足すこと。
+// viewer/sessions_view_test.go の drift ガードがこの 1 行を実測している。
+const HIDDEN_BY_DEFAULT_STATES = ["stop"];
 // s.server_state の値域 (サーバ正典、lib/bus_liveness.derive_state が所管):
-//   running | idle | awaiting_human | blocked | terminated | unknown
+//   running | idle | awaiting_human | blocked | terminated | interrupted | unknown
 // s.state はローカル道具の申告 (busy | idle) で別系統 — 混ぜない (e-6454)。
 // なお activity_kind は wait だけが判定材料になる (wait = 「待っている」という
 // 情報を運ぶ)。work は wait 以外の全行に付く既定値で情報量が無いため、状態判定に
@@ -431,6 +471,15 @@ function liveness(s) {
   const aliveNow = s.state === "busy" || s.state === "idle" ||
     s.running || s.transport_live;
   if (!aliveNow) {
+    // 止まり方の判定はサーバの正典 state に委ねる (ms-177)。ここで「宣言があるのに
+    // live でない」を画面側で再計算すると、導出が正典と画面の 2 箇所に割れて、次に
+    // 穴が空いたときどちらが正か分からなくなる。画面は受け取った語を色に変えるだけ。
+    if (s.server_state === "interrupted") {
+      return {key: "interrupted", label: OPS_STATES.interrupted.label, on: false,
+              hint: "作業中のまま受信経路が途切れました (端末を閉じた・エラーで落ちた・"
+                  + "コンテキスト制限で終わった等)。正常に終了したセッションではないので、"
+                  + "再開が要るかもしれません"};
+    }
     return {key: "stop", label: OPS_STATES.stop.label, on: false,
             hint: s.tool_running
               ? `${s.tool} は起動していますが、このセッションは最近動いていません`
@@ -1334,11 +1383,17 @@ function renderSessions(d) {
   const all = sessionRoot
     ? scoped.filter(s => projectName(s) === sessionRoot)
     : scoped;
-  // 止まっているものは既定で隠す。いま何が動いているかを読みに来ているのに、
+  // 終わったものは既定で隠す。いま何が動いているかを読みに来ているのに、
   // 終わった分に埋もれては意味がない (2026-09-10 の指摘)。
   // 「止まっている」の判定は liveness に一本化してある。
-  const stopped = all.filter(s => liveness(s).key === "stop");
-  const rows = showStopped ? all : all.filter(s => liveness(s).key !== "stop");
+  //
+  // ただし隠すのは「終了」(人が幕を引いたもの) だけで、「中断」(事故で落ちたもの) は
+  // 既定で出す (ms-177)。中断を分けた価値は人が気づいて再開できることなので、既定で
+  // 畳む側に入れると赤くしても誰も見ず、色を変えただけで穴は残る。
+  const hidden = s => HIDDEN_BY_DEFAULT_STATES.includes(liveness(s).key);
+  const ended = all.filter(hidden);
+  const rows = showEnded ? all : all.filter(s => !hidden(s));
+  const interrupted = rows.filter(s => liveness(s).key === "interrupted");
 
   // プロジェクトごとにまとめる。どのプロジェクトの作業かが一目で分かるように。
   const groups = new Map();
@@ -1382,9 +1437,10 @@ function renderSessions(d) {
       <div class="meta">
         <b>${rows.length}</b> セッション ・ <b>${groups.size}</b> プロジェクト
         ${d.no_project ? ` ・ プロジェクトに紐づかないもの <b>${d.no_project}</b>` : ""}
-        ${stopped.length ? ` &nbsp;·&nbsp; <button id="toggle-stopped" class="linkish">${
-          showStopped ? `停止中 ${stopped.length} 件を隠す`
-                      : `停止中 ${stopped.length} 件も表示`}</button>` : ""}
+        ${interrupted.length ? ` ・ <b class="warn-count">中断 ${interrupted.length}</b>` : ""}
+        ${ended.length ? ` &nbsp;·&nbsp; <button id="toggle-ended" class="linkish">${
+          showEnded ? `終了 ${ended.length} 件を隠す`
+                      : `終了 ${ended.length} 件も表示`}</button>` : ""}
         &nbsp;·&nbsp; <button id="to-board" class="linkish">盤に戻る</button>
       </div>
       <div class="meta filters">
@@ -1416,14 +1472,14 @@ function renderSessions(d) {
         trees.push(...loose.map(s => `<div class="tree">${opsCard(s, false)}</div>`));
         return `<div class="proj"><div class="section-title">${esc(name)} (${list.length})</div>${trees.join("")}</div>`;
       }).join("")}</div>`
-      : `<p class="empty">${stopped.length && !showStopped
-          ? `動いているセッションはありません (停止中が ${stopped.length} 件あります)。`
+      : `<p class="empty">${ended.length && !showEnded
+          ? `動いているセッションはありません (終了したものが ${ended.length} 件あります)。`
           : "セッションが見つかりませんでした。"}</p>`}
   `;
   wireSendButtons();
   wireCardJumps();
-  const toggle = document.getElementById("toggle-stopped");
-  if (toggle) toggle.onclick = () => { showStopped = !showStopped; openSessions(); };
+  const toggle = document.getElementById("toggle-ended");
+  if (toggle) toggle.onclick = () => { showEnded = !showEnded; openSessions(); };
   // 表示範囲 (自分のみ / 要対応のみ / 全て) の切り替え。
   document.querySelectorAll("button.scope").forEach(b => {
     b.onclick = () => { sessionScope = b.dataset.scope; openSessions(); };

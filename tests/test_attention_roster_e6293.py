@@ -67,8 +67,14 @@ class TestRosterInvariants:
         # #739 review (maintainability): _ROSTER_STATE_ORDER must rank every
         # canonical session state, else a newly-added state silently falls to the
         # bottom (dict.get default) with no test failure. Pin exhaustiveness.
+        # ms-177: the canonical set is ``ALL_STATES``, NOT
+        # ``DECLARABLE_STATES | {unknown}``. The old spelling re-derived the canon
+        # from the declarable set, so a newly added SERVER-RAISED state (exactly
+        # the kind a consumer forgets — ``interrupted``) was outside what this
+        # guard compared against and it stayed green while the rank was missing.
+        # Read the canon from one place so the guard fails on real drift.
         ranked = set(attention._ROSTER_STATE_ORDER)
-        canonical = set(bus_liveness.DECLARABLE_STATES) | {bus_liveness.STATE_UNKNOWN}
+        canonical = set(bus_liveness.ALL_STATES)
         missing = canonical - ranked
         assert not missing, f"_ROSTER_STATE_ORDER missing ranks for: {missing}"
 

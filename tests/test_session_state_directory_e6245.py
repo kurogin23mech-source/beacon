@@ -96,15 +96,21 @@ class TestStampState:
         # state_since falls back to a known timestamp (not empty).
         assert row["state_since"]
 
-    def test_not_live_stale_declaration_is_unknown(self, _app):
-        # 判断4 固着 backstop: transport gone + stale awaiting_human ⇒ unknown.
+    def test_not_live_stale_declaration_is_interrupted(self, _app):
+        # 判断4 固着 backstop: transport gone + stale awaiting_human ⇒ 中断.
+        # ms-177 / e-6641: the server projection is a pass-through of
+        # derive_state, so the NEW state reaches the row with no server change —
+        # this test is what proves that, rather than us asserting it in prose.
         now = _now()
         old = _iso(now - datetime.timedelta(hours=1))
         row = self._dead_row(now, declared_state="awaiting_human",
                              declared_at=old, state_since=old)
         _app._stamp_session_liveness(row, "proj", now)
         assert row["live"] is False
-        assert row["state"] == bus_liveness.STATE_UNKNOWN
+        assert row["state"] == bus_liveness.STATE_INTERRUPTED
+        # And `state_since` is the last declaration = when it was cut off, which
+        # is what the ops room / roster order need to read.
+        assert row["state_since"] == old
 
     def test_not_live_no_declaration_is_terminated(self, _app):
         now = _now()

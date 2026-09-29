@@ -16,6 +16,12 @@ The filter (slice SPEC AC4):
   * FOLD  ``running`` / ``idle`` — actively driving or resting, no attention.
   * FOLD  ``unknown`` — the server can't confirm the state; not an actionable
     "waiting for you" (AC4 lists only the three states above).
+  * FOLD  ``interrupted`` — a session that died without ending (ms-177). It is
+    worth a human's NOTICE, but it is not a decision waiting on them, and AC4
+    admits only the states above. Folding it also keeps this面 byte-identical to
+    before ms-177: these rows read ``unknown`` previously and were folded then
+    too. Surfacing 中断 is the ops room's job (SPEC 方針6); whether it should ALSO
+    join this面 is a separate, deliberate decision — not a side effect.
 
 Pure functions only, so the filter + sort can be pinned without a live bus. The
 CLI (both frontends) fetches the directory and hands the rows here.
@@ -105,13 +111,21 @@ def filter_attention(rows) -> list:
 # Row ordering within a root-target group: attention-worthy states first (so a
 # waiting session floats up even in the full roster), then active, then resting
 # / unknown. Rows tying on state fall back to oldest-`state_since` first.
+# ``interrupted`` (ms-177: worked, then died without ending) ranks just under
+# the two attention states and ABOVE ``terminated``: an accidental death is more
+# worth a glance than a clean exit, which is the whole point of splitting it out
+# of ``unknown``. Relative order of the pre-existing states is unchanged.
+# Exhaustiveness over ``bus_liveness.ALL_STATES`` is pinned by
+# tests/test_attention_roster_e6293.py — a new canonical state must be ranked
+# here, not left to the `.get(..., 9)` default.
 _ROSTER_STATE_ORDER = {
     bus_liveness.STATE_AWAITING_HUMAN: 0,
     bus_liveness.STATE_BLOCKED: 1,
-    bus_liveness.STATE_TERMINATED: 2,
-    bus_liveness.STATE_RUNNING: 3,
-    bus_liveness.STATE_IDLE: 4,
-    bus_liveness.STATE_UNKNOWN: 5,
+    bus_liveness.STATE_INTERRUPTED: 2,
+    bus_liveness.STATE_TERMINATED: 3,
+    bus_liveness.STATE_RUNNING: 4,
+    bus_liveness.STATE_IDLE: 5,
+    bus_liveness.STATE_UNKNOWN: 6,
 }
 
 # The scope vocabulary for `beacon attention` (器: 方針3). Single source of truth
