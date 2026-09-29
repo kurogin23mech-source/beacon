@@ -880,7 +880,7 @@ def cmd_target_close():
     reason = os.environ.get("BEACON_REASON", "").strip()
     if not target_id:
         print("Usage: beacon target close --class <kind> <target-id> "
-              "[--reason <text>]", file=sys.stderr)
+              "[--field key=value] [--reason <text>]", file=sys.stderr)
         sys.exit(1)
     # ms-142 T3 / e-5158 — closing a data-defined target is a completion claim.
     # Every target-class must carry an anti-self-close gate; a descriptor class
@@ -895,9 +895,25 @@ def cmd_target_close():
             f"beacon target close --class {kind} {target_id}")
     data = load_project()
     desc = _resolve_descriptor(data, kind)
+    fields = _parse_field_pairs()
+    # ms-146 e-5336: close is the OTHER route into completion (advance into the
+    # terminal phase is the first), so the line drawn at the start goes on screen
+    # here too — for the same reason e-5345 put it on the advance path: a 照合
+    # demanded while the line is off-screen is a check against memory and mood.
+    # Printed BEFORE validation, so it is there precisely on the attempt that
+    # bounces off the missing verdict.
+    # The reference is "everything decided BEFORE the phase being entered", so the
+    # phase to pass is the TERMINAL one — not the current one. Passing the current
+    # phase drops that phase's own fields, which for a close attempted from 着手
+    # would hide the 十分ライン itself: the one line the 照合 is against.
+    _rec_now = _te.find_target(data, desc, target_id)
+    if _rec_now is not None:
+        _terminals = _td.terminal_phase_keys(desc)
+        _ref_phase = _terminals[0] if _terminals else _te.current_phase(_rec_now)
+        _print_completion_reference(desc, _rec_now, _ref_phase)
     try:
         _te.close_target(data, desc, target_id, actor=_actor_str(),
-                         reason=reason)
+                         reason=reason, fields=fields)
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -911,8 +927,14 @@ def cmd_target_close():
     _rec_for_capture = _te.find_target(data, desc, target_id)
     if isinstance(_rec_for_capture, dict):
         import target_completion
-        target_completion.on_target_completion(data, _rec_for_capture, verdict="done",
-                                               reason=reason)
+        # ms-146 e-5336: when the class declares a 照合, the completion verdict on
+        # the decision arm is the 照合 result itself (満たした / 満たしていないが
+        # 閉じる), not a uniform "done" — otherwise the audit record flattens the
+        # two endings the gate exists to keep apart.
+        _cc = _te.completion_check_status(desc, _rec_for_capture)
+        _verdict = (_cc.get("verdict") or "done") if _cc else "done"
+        target_completion.on_target_completion(data, _rec_for_capture,
+                                               verdict=_verdict, reason=reason)
     save_project(data, op={"op": "target_close", "kind": kind,
                            "target_id": target_id})
     print(f"完了: [{target_id}] を done にしました")
@@ -1557,6 +1579,22 @@ def cmd_target_class_update():
         stall_cfg = {"evidence_field": segs[0], "value": segs[1],
                      "threshold": threshold}
 
+    # ms-146 e-5336: which field holds the 照合結果 (the check against the line
+    # drawn at the start), and which of its values count as "met". Declaring this
+    # is what turns the terminal phase from a place you can walk into, into a gate.
+    check_spec = os.environ.get("BEACON_TC_COMPLETION_CHECK", "").strip()
+    check_cfg = None
+    if check_spec:
+        segs = [x.strip() for x in check_spec.split(":")]
+        if len(segs) > 2 or not segs[0]:
+            print("Error: --completion-check は "
+                  "<照合結果field>[:<満たしたと見なす値>[,<値>...]] 形式です "
+                  f"(受領: {check_spec!r})", file=sys.stderr)
+            sys.exit(1)
+        met = [x.strip() for x in (segs[1] if len(segs) == 2 else "").split(",")
+               if x.strip()]
+        check_cfg = {"verdict_field": segs[0], "met_values": met}
+
     # ms-146 e-5352 / ms-147 e-5375: editing the class's PROVENANCE stamp. This is
     # not a field edit, so the additive-only rule does not apply: changing it
     # orphans nothing — every record keeps its collection, its id and its shape.
@@ -1565,11 +1603,13 @@ def cmd_target_class_update():
     # relabel; kept because a shared class file may still carry a wrong origin.
     prof_new = os.environ.get("BEACON_TC_PROFESSION", "").strip().lower()
 
-    if not pending and budget_cfg is None and stall_cfg is None and not prof_new:
+    if (not pending and budget_cfg is None and stall_cfg is None
+            and check_cfg is None and not prof_new):
         print(f"Error: 追加する field がひとつも指定されていません "
               f"(--field / --phase-field / --work-item-field / "
               f"--evidence-field / --budget-tracking / "
-              f"--stall-signal / --profession ...)", file=sys.stderr)
+              f"--stall-signal / --completion-check / --profession ...)",
+              file=sys.stderr)
         sys.exit(1)
 
     # Apply against a COPY first: either every field lands or none does, so a
@@ -1631,6 +1671,49 @@ def cmd_target_class_update():
             sys.exit(1)
         trial["stall_signal"] = stall_cfg
 
+    if check_cfg is not None:
+        # The verdict field must be declared on a TERMINAL phase. Anywhere else
+        # and the "gate" would sit off the path a completion actually walks:
+        # the class would look guarded while nothing ever demands the value.
+        terminals = _td.terminal_phase_keys(trial)
+        if not terminals:
+            print(f"Error: --completion-check はこのクラスに最終フェーズ "
+                  f"(terminal) が宣言されてから指定してください "
+                  f"(照合は完了主張の瞬間に行うものなので、終端が無いと"
+                  f"発火する場所がありません)", file=sys.stderr)
+            sys.exit(1)
+        field = check_cfg["verdict_field"]
+        term_known = set()
+        for pkey in terminals:
+            phase = _td.get_phase(trial, pkey) or {}
+            term_known |= {(f.get("key") or "").strip()
+                           for f in (phase.get("fields") or [])
+                           if isinstance(f, dict)}
+        if field not in term_known:
+            print(f"Error: --completion-check の照合結果 field '{field}' は"
+                  f"最終フェーズ ({' / '.join(terminals)}) に宣言されていません "
+                  f"(宣言済: {', '.join(sorted(x for x in term_known if x)) or 'なし'})\n"
+                  f"  先に beacon target-class update --kind {kind} "
+                  f"--required-phase-field {terminals[0]}:{field}:照合結果:text "
+                  f"で足してください", file=sys.stderr)
+            sys.exit(1)
+        # A met value the field cannot hold would make "満たした" unreachable —
+        # the class would look ranked while every ending scored as not-met.
+        decl = next((f for pkey in terminals
+                     for f in ((_td.get_phase(trial, pkey) or {}).get("fields") or [])
+                     if isinstance(f, dict) and (f.get("key") or "").strip() == field),
+                    {})
+        allowed = _td.field_choices(decl)
+        if allowed:
+            stray = [v for v in check_cfg["met_values"] if v not in allowed]
+            if stray:
+                print(f"Error: --completion-check の「満たした」値 "
+                      f"{' / '.join(stray)} は field '{field}' の選択肢に"
+                      f"ありません (選択肢: {' / '.join(allowed)})",
+                      file=sys.stderr)
+                sys.exit(1)
+        trial["completion_check"] = check_cfg
+
     if prof_new:
         trial["profession"] = prof_new
 
@@ -1663,6 +1746,10 @@ def cmd_target_class_update():
     if stall_cfg is not None:
         print(f"  + 打ち切りシグナル: 証跡 {stall_cfg['evidence_field']} が "
               f"「{stall_cfg['value']}」{stall_cfg['threshold']} 回連続で発火")
+    if check_cfg is not None:
+        _met = ' / '.join(check_cfg["met_values"]) or "(順位づけなし)"
+        print(f"  + 完了時の照合: field {check_cfg['verdict_field']} が未記録の"
+              f"うちは終わらせられません (「満たした」と見なす値: {_met})")
     if budget_cfg is not None:
         print(f"  + 時間予算の追跡: target={budget_cfg['target_budget_field'] or '-'} "
               f"/ 業務={budget_cfg['work_item_budget_field'] or '-'} "

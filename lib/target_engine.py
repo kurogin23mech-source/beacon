@@ -272,6 +272,15 @@ def advance_target(data: dict, desc: dict, target_id: str, *,
                 f"(完了は beacon target close)")
         new = phases[idx + 1]
 
+    # ms-146 e-5336: entering a terminal phase IS the completion claim, so the
+    # 照合 is demanded here — before _apply_phase_fields writes anything, so a
+    # refused claim leaves the record exactly as it was. This is one of the two
+    # routes into completion; close_target guards the other.
+    _check = None
+    if is_terminal_phase(desc, new):
+        _check = require_completion_check(desc, rec, target_id,
+                                          incoming=fields or {})
+
     # Apply per-phase field values (validated against what the NEW phase makes
     # visible), then enforce that new phase's required fields are satisfied.
     _apply_phase_fields(desc, rec, new, fields or {})
@@ -280,6 +289,8 @@ def advance_target(data: dict, desc: dict, target_id: str, *,
     history = rec.setdefault("phase_history", [])
     work_base.record_audit_event(history, kind="phase_change", actor=actor,
                                  reason=reason, **{"from": old, "to": new})
+    if _check:
+        record_completion_check(rec, _check, actor=actor, reason=reason)
     return rec, old, new
 
 
@@ -372,17 +383,221 @@ def is_terminal_phase(desc: dict, phase_key: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 照合ゲート — the check against the line drawn at the start (ms-146 e-5336).
+#
+# e-5345 put that line ON SCREEN at the moment of the completion claim. This is
+# the other half: the claim does not go through until the owner has actually
+# checked against it, and WHICH WAY the check came out is kept as a record.
+#
+# WHY a verdict and not free text: "満たした" and "満たしていないが閉じる" are
+# both legitimate endings — the mechanism's job is not to forbid the second one
+# (SPEC 方針2: 機構は理由を提示するだけで、続けるか切り上げるかは人間が決める) but to
+# stop it from being indistinguishable from the first one afterwards. Free prose
+# collapses the two, and a person who cannot later tell which ending they took
+# cannot learn where their own line sits.
+#
+# DECLARATION-DRIVEN, like budget_tracking / stall_signal: the class names the
+# field that holds the verdict and which of its values count as "met" —
+#
+#     "completion_check": {"verdict_field": "enough_verdict",
+#                          "met_values": ["満たした"]}
+#
+# — so the engine enforces a 照合 without knowing what an "executive" is. A class
+# that declares nothing is untouched (every pre-existing descriptor class keeps
+# its exact behaviour). For a class that DOES declare it, every route into
+# completion is gated: entering a terminal phase (advance_target) and closing
+# (close_target) both refuse without the verdict, and close additionally refuses
+# from a non-terminal phase — otherwise close would be a way to reach done while
+# never passing the terminal phase whose fields the 照合 lives on.
+# ---------------------------------------------------------------------------
+
+COMPLETION_CHECK_KEY = "completion_check"
+
+
+def completion_check_config(desc: dict) -> dict:
+    """Return the class's declared 照合 config as
+    ``{"verdict_field": key, "met_values": [...]}``, or ``{}`` when the class
+    declares none (or declares it without a field, which is the same thing —
+    a config pointing at nothing must not read as a live gate)."""
+    cfg = desc.get(COMPLETION_CHECK_KEY) if isinstance(desc, dict) else None
+    if not isinstance(cfg, dict):
+        return {}
+    field = (cfg.get("verdict_field") or "").strip()
+    if not field:
+        return {}
+    met = [str(v).strip() for v in (cfg.get("met_values") or [])
+           if str(v).strip()]
+    return {"verdict_field": field, "met_values": met}
+
+
+def _verdict_field_decl(desc: dict, key: str) -> dict:
+    """The declaration of the verdict field, looked up across the base fields and
+    every phase — the 照合 normally lives on the terminal phase, but the lookup
+    stays location-agnostic so the config is not silently blind to a class that
+    declares it elsewhere."""
+    for f in td.base_fields(desc):
+        if isinstance(f, dict) and (f.get("key") or "").strip() == key:
+            return f
+    for pkey in td.phase_keys(desc):
+        phase = td.get_phase(desc, pkey) or {}
+        for f in (phase.get("fields") or []):
+            if isinstance(f, dict) and (f.get("key") or "").strip() == key:
+                return f
+    return {}
+
+
+def completion_check_status(desc: dict, rec: dict) -> dict:
+    """Where a target stands against its 照合 requirement (ms-146 e-5336), or
+    ``{}`` for a class that declares none.
+
+    ``recorded`` = a verdict is on the record; ``met`` = that verdict is one the
+    class counts as having met the line. ``met`` is False for an unrecorded
+    verdict, so a caller can never read "no answer" as "yes"."""
+    cfg = completion_check_config(desc)
+    if not cfg or not isinstance(rec, dict):
+        return {}
+    raw = rec.get(cfg["verdict_field"])
+    verdict = "" if raw is None else str(raw).strip()
+    choices = td.field_choices(_verdict_field_decl(desc, cfg["verdict_field"]))
+    met_values = cfg["met_values"]
+    return {
+        "verdict_field": cfg["verdict_field"],
+        "met_values": met_values,
+        "choices": choices,
+        "verdict": verdict,
+        "recorded": bool(verdict),
+        # No declared met_values ⇒ the class records WHICH ending was taken but
+        # does not rank them; "met" then means nothing and stays False rather
+        # than defaulting to True (an unranked ending must not read as success).
+        "met": bool(verdict) and verdict in met_values,
+    }
+
+
+def _completion_check_missing_message(desc: dict, target_id: str,
+                                      status: dict) -> str:
+    choices = status.get("choices") or []
+    field = status["verdict_field"]
+    decl = _verdict_field_decl(desc, field)
+    label = (decl.get("label") or field) if isinstance(decl, dict) else field
+    how = (f"--field {field}=<{' | '.join(choices)}>" if choices
+           else f"--field {field}=<照合結果>")
+    return (
+        f"{target_id}: 着手時に書いた十分ラインとの照合 ({label}) が未記録のため"
+        f"終わらせられません (ms-146 e-5336)。\n"
+        f"  上に出ている「照合の材料」と突き合わせて、{how} で結果を記録して"
+        f"ください。\n"
+        f"  「満たしていないが閉じる」も正当な結末です — 機構が止めているのは"
+        f"『どちらの結末だったか分からないまま閉じること』だけです。")
+
+
+def require_completion_check(desc: dict, rec: dict, target_id: str, *,
+                             incoming: Optional[dict] = None) -> dict:
+    """Refuse a completion claim that has not been checked against the line drawn
+    at the start, and return the resulting status (ms-146 e-5336).
+
+    ``incoming`` is the field map the caller is about to write, so the check runs
+    on the value being supplied right now as well as one already on the record —
+    and runs BEFORE anything is written, so a refused claim leaves the record
+    untouched. A class that declares no 照合 returns ``{}`` and is not gated."""
+    cfg = completion_check_config(desc)
+    if not cfg:
+        return {}
+    field = cfg["verdict_field"]
+    merged = dict(rec or {})
+    if incoming and field in incoming:
+        merged[field] = incoming[field]
+    status = completion_check_status(desc, merged)
+    if not status.get("recorded"):
+        raise TargetEngineError(
+            _completion_check_missing_message(desc, target_id, status))
+    choices = status.get("choices") or []
+    if choices and status["verdict"] not in choices:
+        raise TargetEngineError(
+            f"{target_id}: 照合結果 '{status['verdict']}' は field "
+            f"'{field}' の選択肢にありません (選択肢: {' / '.join(choices)})")
+    return status
+
+
+def record_completion_check(rec: dict, status: dict, *, actor: str = "",
+                            reason: str = "") -> None:
+    """Append the 照合 outcome to the target's append-only audit log (e-5336 AC3).
+
+    The verdict also lives on the record as a field value, but a field holds only
+    the LAST value — the audit row is what keeps "checked, and it came out this
+    way, at this time, by this actor" after a later edit. Recording both endings
+    identically is the point: 満たしていないが閉じる must leave as legible a trace
+    as 満たした."""
+    if not status or not isinstance(rec, dict):
+        return
+    work_base.record_audit_event(
+        rec.setdefault("phase_history", []),
+        kind="completion_check", actor=actor, reason=reason,
+        field=status["verdict_field"], verdict=status["verdict"],
+        met=bool(status.get("met")))
+
+
+# ---------------------------------------------------------------------------
 # Close.
 # ---------------------------------------------------------------------------
 
 def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
-                 reason: str = "") -> dict:
+                 reason: str = "", fields: Optional[dict] = None) -> dict:
     """Mark a target done (via the shared ``work_model.mark_done`` — stamps
     status=done + done_at + done_by/done_reason). Idempotent-safe: closing an
-    already-done target re-stamps the done metadata. Returns the record."""
+    already-done target re-stamps the done metadata. Returns the record.
+
+    ms-146 e-5336 — for a class that declares a 照合 (``completion_check``), this
+    is the second of the two routes into completion and is gated the same way:
+
+      * the record must SIT at a terminal phase. Without this, close would be a
+        way to reach done having never entered the phase the 照合 lives on — the
+        gate would exist and be walkable around, which is worse than no gate
+        because it reads as closed.
+      * the verdict must be recorded (supplied in ``fields`` here, or already on
+        the record from the advance that entered the terminal phase).
+
+    ``fields`` accepts ONLY the declared verdict field: close is not a phase
+    entry, so letting it write arbitrary fields would smuggle a new capability in
+    through a completion verb. A class declaring no 照合 keeps its original
+    behaviour exactly (close from any phase, no fields accepted)."""
     rec = find_target(data, desc, target_id)
     if rec is None:
         raise TargetEngineError(f"target が見つかりません: {target_id}")
+    cfg = completion_check_config(desc)
+    fields = fields or {}
+    if not cfg:
+        if fields:
+            raise TargetEngineError(
+                f"記述子 '{desc.get('kind')}' は照合 (completion_check) を宣言して"
+                f"いないため close 時に書ける field がありません "
+                f"(--field は beacon target advance で指定してください)")
+        work_model.mark_done(rec, actor=actor, reason=reason)
+        return rec
+
+    unknown = [k for k in fields if k != cfg["verdict_field"]]
+    if unknown:
+        raise TargetEngineError(
+            f"close 時に指定できるのは照合結果 '{cfg['verdict_field']}' だけです "
+            f"(受領: {', '.join(sorted(unknown))})。ほかの field は "
+            f"beacon target advance で記録してください")
+
+    terminals = td.terminal_phase_keys(desc)
+    if terminals and current_phase(rec) not in terminals:
+        _cur = current_phase(rec) or "(未設定)"
+        raise TargetEngineError(
+            f"{target_id}: まだ最終フェーズに居ないため終わらせられません "
+            f"(現在: '{_cur}' / 最終: "
+            f"{' / '.join(terminals)})。\n"
+            f"  先に beacon target advance --class {desc.get('kind')} "
+            f"{target_id} --to {terminals[0]} で照合を通してください "
+            f"(ms-146 e-5336)")
+
+    status = require_completion_check(desc, rec, target_id, incoming=fields)
+    # Validated — now write. A verdict supplied at close lands on the record so a
+    # later read sees the same value the audit row names.
+    if cfg["verdict_field"] in fields:
+        rec[cfg["verdict_field"]] = fields[cfg["verdict_field"]]
+        record_completion_check(rec, status, actor=actor, reason=reason)
     work_model.mark_done(rec, actor=actor, reason=reason)
     return rec
 

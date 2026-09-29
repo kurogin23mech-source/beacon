@@ -155,17 +155,23 @@ cmd_target_advance() {
 
 cmd_target_close() {
     ensure_project
-    local kind="" target_id="" reason=""
+    # ms-146 e-5336: --field carries the 照合結果 (the check against the line drawn
+    # at the start) for a class that declares completion_check. The Python side
+    # accepts ONLY that one declared key and errors on anything else, so this is
+    # not a general field writer smuggled into the completion verb.
+    local kind="" target_id="" reason="" fields=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --class)  kind="${2:-}";   shift 2 ;;
+            --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --reason) reason="${2:-}"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon target close --class <kind> <target-id> [--reason <text>]" ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target close --class <kind> <target-id> [--field key=value ...] [--reason <text>]" ;;
             *)        target_id="$1";  shift ;;
         esac
     done
     BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
-        BEACON_REASON="$reason" python3 "$COMMANDS_PY" target_close
+        BEACON_REASON="$reason" BEACON_FIELDS="$fields" \
+        python3 "$COMMANDS_PY" target_close
 }
 
 cmd_target_split() {
@@ -351,6 +357,7 @@ cmd_target_class_update() {
     # NAME with the reason (ms-146 e-5346) — an "unknown flag" error would leave
     # the author unable to tell "missing" from "deliberately forbidden".
     local rm_fields="" rn_fields="" budget="" stall="" profession=""
+    local completion=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --kind|--class)             kind="${2:-}"; shift 2 ;;
@@ -366,6 +373,7 @@ cmd_target_class_update() {
             --rename-field)             rn_fields="${rn_fields}${2:-}"$'\n'; shift 2 ;;
             --budget-tracking)          budget="${2:-}"; shift 2 ;;
             --stall-signal)             stall="${2:-}"; shift 2 ;;
+            --completion-check)         completion="${2:-}"; shift 2 ;;
             --profession)               profession="${2:-}"; shift 2 ;;
             -?*)                        _guard_positional "$1" "Usage: beacon target-class update --kind <k> [--field key:label:type ...] [--phase-field <phase>:key:label:type ...] [--work-item-field ...] [--evidence-field ...]" ;;
             *)                          echo "Error: 余分な引数 '$1' — target-class update はフラグで指定します (--kind <k> --field ...)" >&2; exit 1 ;;
@@ -383,6 +391,7 @@ cmd_target_class_update() {
         BEACON_TC_RENAME_FIELDS="$rn_fields" \
         BEACON_TC_BUDGET_TRACKING="$budget" \
         BEACON_TC_STALL_SIGNAL="$stall" \
+        BEACON_TC_COMPLETION_CHECK="$completion" \
         BEACON_TC_PROFESSION="$profession" \
         python3 "$COMMANDS_PY" target_class_update
 }
