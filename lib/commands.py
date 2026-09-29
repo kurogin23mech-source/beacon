@@ -6486,6 +6486,22 @@ def _help_registry():
         {"command": "beacon communication list <target-id>", "flags": ["--json"], "description": "List communications (証跡) oldest→newest + derived ball; act-/nrt- lists only that work item's"},
         {"command": "beacon communication cancel <comm-id>", "flags": ["--reason <text>"], "description": "Cancel (取消) a mis-recorded communication — soft (status=cancelled + reason, kept struck-through); excluded from ball/watch derivation but shown in the log"},
         {"command": "beacon communication retarget <comm-id> <new-target>", "flags": [], "description": "Re-file a communication onto the correct target/work item (opp-/acc-/act-/nrt-); moves it — the evidence itself (summary/source/direction) is unchanged"},
+        # ms-160 e-5981: 送信元台帳 / 送信 identity は commands.py にしか無く、
+        # 営業 Skill が直叩きしていた。CLI に載せた以上ここにも載せる。
+        # `send-account` は既存の `beacon account` (顧客) と別概念なので名前で分ける。
+        {"command": "beacon sales send-account add <label>", "flags": ["--email <address>"], "description": "送信元メールアカウントを台帳に登録・更新する (label は冪等キー)"},
+        {"command": "beacon sales send-account list", "flags": ["--json"], "description": "送信元アカウント台帳の一覧 (既定の送信 identity に ★ が付く)"},
+        {"command": "beacon sales send-account remove <label>", "flags": [], "description": "送信元アカウントを台帳から削除する"},
+        {"command": "beacon sales send-account route <label>", "flags": ["--service <gmail|calendar|drive>", "--namespace <ns>", "--alias <account>"], "description": "そのアカウントで各サービスに使う MCP ツール群 (namespace) と account 引数を決める"},
+        {"command": "beacon sales send-account resolve [<label>]", "flags": ["--service <gmail|calendar|drive>"], "description": "実際に使う MCP ルートを JSON で返す (未登録なら exit 1 で送信を止める)。label 省略時は既定の送信 identity"},
+        {"command": "beacon sales send-account signature <label>", "flags": ["--signature <text>", "--clear"], "description": "メール署名を設定・削除する。消すには --clear が必須 (空文字では消えない)"},
+        {"command": "beacon sales send-account transcript-source get <acc-id>", "flags": [], "description": "顧客ごとの議事録取得元の宣言を読む (未設定なら null)"},
+        {"command": "beacon sales send-account transcript-source set <acc-id>", "flags": ["--type <meet_calendar|drive_folder|external|manual>", "--folder-id <id>", "--naming <pattern>", "--tool <name>", "--clear"], "description": "顧客ごとの議事録取得元を宣言する。消すには --clear が必須"},
+        {"command": "beacon sales identity show", "flags": ["--json"], "description": "既定の送信 identity を表示する"},
+        {"command": "beacon sales identity set <label|email>", "flags": [], "description": "このプロジェクトの既定の送信 identity を決める"},
+        {"command": "beacon sales identity check", "flags": ["--from <address>", "--label <label>"], "description": "送信しようとしている from が台帳と一致するか照合する (一致 exit 0 / 不一致 exit 1 で送信を止める)"},
+        {"command": "beacon sales gmail-permalink", "flags": ["--from <address>", "--msgid <rfc822 Message-ID>"], "description": "送信済みメールの Gmail 恒久リンクを組み立てる (thread-id ではなく rfc822 Message-ID を渡す)"},
+        {"command": "beacon sales reply-watch ensure", "flags": [], "description": "返信ウォッチャーを毎時回す Operation を用意する (冪等)"},
         {"command": "beacon meeting schedule <opp-id>", "flags": ["--at <datetime>", "--end <datetime>", "--location <text>", "--event-id <id>", "--calendar-ns <ns>", "--calendar-account <acct>", "--set-transition"], "description": "Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 to the meeting date"},
         {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--calendar-ns <ns>", "--calendar-account <acct>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日. カレンダー旗は schedule と同義 (ms-160 e-5981 で非対称を解消)"},
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},

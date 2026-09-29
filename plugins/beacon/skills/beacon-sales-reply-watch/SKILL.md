@@ -33,8 +33,8 @@ ROOT=$(beacon-find-root) && \
   && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
-`NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。内部コマンドは
-`python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。張り込みの set / list / clear は `beacon watch` として CLI 動詞になっている (ms-160 e-5981)。
+`NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。
+Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。 張り込みは `beacon watch set|list|clear`。
 
 ## Step 1: 確認対象スレッドの取得
 

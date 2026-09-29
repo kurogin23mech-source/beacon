@@ -46,7 +46,7 @@ beacon acquisition attack-lists <acq-id>      # その施策配下のリスト (
 複数 Google アカウントの取り違えを送信前に止める (既存 send-account ledger を流用)。
 
 ```bash
-BEACON_SEND_SERVICE="gmail" python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
+beacon sales send-account resolve --service gmail
 echo "RESOLVE_EXIT=$?"
 ```
 

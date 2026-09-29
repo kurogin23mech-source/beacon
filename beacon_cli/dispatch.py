@@ -480,6 +480,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_sales_target.add_argument("amount", nargs="?", default="")
     p_sales_target.add_argument("--json", action="store_true")
 
+    # ms-160 e-5981: 送信元アカウント / 送信 identity の Windows/pipx 経路。
+    # bash 側 bin/lib/cmd_sales.sh と対。これが無いと Windows は
+    # `argparse invalid choice` で弾かれ、送信元台帳に到達する手段が無い。
+    p_sa = sales_sub.add_parser("send-account", add_help=False)
+    p_sa.add_argument("sa_cmd", nargs="?", default="")
+    p_sa.add_argument("arg1", nargs="?", default="")
+    p_sa.add_argument("arg2", nargs="?", default="")
+    p_sa.add_argument("--email", default="")
+    p_sa.add_argument("--service", default="")
+    p_sa.add_argument("--namespace", default="")
+    p_sa.add_argument("--alias", dest="alias_val", default="")
+    p_sa.add_argument("--signature", default="")
+    p_sa.add_argument("--type", dest="ts_type", default="")
+    p_sa.add_argument("--folder-id", dest="folder_id", default="")
+    p_sa.add_argument("--naming", default="")
+    p_sa.add_argument("--tool", default="")
+    p_sa.add_argument("--clear", action="store_true")
+    p_sa.add_argument("--json", action="store_true")
+
+    p_sid = sales_sub.add_parser("identity", add_help=False)
+    p_sid.add_argument("id_cmd", nargs="?", default="")
+    p_sid.add_argument("identity", nargs="?", default="")
+    p_sid.add_argument("--from", dest="from_addr", default="")
+    p_sid.add_argument("--label", default="")
+    p_sid.add_argument("--json", action="store_true")
+
+    p_sgp = sales_sub.add_parser("gmail-permalink", add_help=False)
+    p_sgp.add_argument("--from", dest="from_addr", default="")
+    p_sgp.add_argument("--msgid", "--rfc822-msgid", dest="msgid", default="")
+
+    p_srw = sales_sub.add_parser("reply-watch", add_help=False)
+    p_srw.add_argument("rw_cmd", nargs="?", default="")
+
     # ---- acquisition (ms-115: 顧客獲得ターゲット, profession=sales) ----
     p_acq = sub.add_parser(
         "acquisition", aliases=["acq"], help="顧客獲得ターゲット operations",
@@ -3065,9 +3098,26 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
     return 2
 
 
+_SALES_USAGE = (
+    "Usage: beacon sales target <user> <amount> | list\n"
+    "       beacon sales send-account add|list|remove|route|resolve|signature|"
+    "transcript-source ...\n"
+    "       beacon sales identity show|set|check ...\n"
+    "       beacon sales gmail-permalink --from <address> --msgid <rfc822 Message-ID>\n"
+    "       beacon sales reply-watch ensure")
+
+_SALES_SEND_ACCOUNT_USAGE = (
+    "Usage: beacon sales send-account "
+    "[add <label> --email <address> | list [--json] | remove <label> | "
+    "route <label> --service <svc> --namespace <ns> [--alias <account>] | "
+    "resolve [<label>] --service <svc> | "
+    "signature <label> --signature <text> | --clear | "
+    "transcript-source get|set <acc-id> ...]")
+
+
 def _handle_sales(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.sales_cmd is None:
-        print("Usage: beacon sales target <user> <amount> | list")
+        print(_SALES_USAGE)
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -3085,7 +3135,113 @@ def _handle_sales(root: Path, args: argparse.Namespace) -> int:
             "BEACON_TARGET_AMOUNT": args.amount or "",
         }
         return _run_commands_py(root, "sales_target", env)
-    print("Usage: beacon sales target <user> <amount> | list")
+    # ms-160 e-5981 — bash cmd_sales_send_account / cmd_sales_identity と同じ
+    # env 契約。clear と値の共存拒否は python 側 verb が唯一の判定点なので、
+    # ここでも先回りして弾かず透過させる (bash 側と同じ方針)。
+    if args.sales_cmd == "send-account":
+        sa = args.sa_cmd
+        if sa == "add":
+            if not args.arg1 or not args.email:
+                print("Usage: beacon sales send-account add <label> --email <address>")
+                return 1
+            return _run_commands_py(root, "sales_account_add", {
+                "BEACON_SEND_LABEL": args.arg1, "BEACON_SEND_EMAIL": args.email})
+        if sa in ("list", "ls"):
+            return _run_commands_py(root, "sales_account_list", {
+                "BEACON_JSON": "1" if args.json else ""})
+        if sa in ("remove", "rm"):
+            if not args.arg1:
+                print("Usage: beacon sales send-account remove <label>")
+                return 1
+            return _run_commands_py(root, "sales_account_remove", {
+                "BEACON_SEND_LABEL": args.arg1})
+        if sa == "route":
+            if not args.arg1 or not args.service or not args.namespace:
+                print("Usage: beacon sales send-account route <label> --service "
+                      "<gmail|calendar|drive> --namespace <ns> [--alias <account>]")
+                return 1
+            return _run_commands_py(root, "sales_account_route", {
+                "BEACON_SEND_LABEL": args.arg1,
+                "BEACON_SEND_SERVICE": args.service,
+                "BEACON_SEND_NAMESPACE": args.namespace,
+                "BEACON_SEND_ALIAS": args.alias_val})
+        if sa == "resolve":
+            if not args.service:
+                print("Usage: beacon sales send-account resolve [<label>] --service "
+                      "<gmail|calendar|drive>   (<label> 省略時は既定の送信 identity)")
+                return 1
+            return _run_commands_py(root, "sales_account_resolve", {
+                "BEACON_SEND_LABEL": args.arg1, "BEACON_SEND_SERVICE": args.service})
+        if sa == "signature":
+            if not args.arg1:
+                print("Usage: beacon sales send-account signature <label> "
+                      "--signature <text> | --clear")
+                return 1
+            return _run_commands_py(root, "sales_account_signature", {
+                "BEACON_SEND_LABEL": args.arg1,
+                "BEACON_SEND_SIGNATURE": args.signature,
+                "BEACON_SEND_SIGNATURE_CLEAR": "1" if args.clear else ""})
+        if sa == "transcript-source":
+            ts, acc = args.arg1, args.arg2
+            if ts == "get":
+                if not acc:
+                    print("Usage: beacon sales send-account transcript-source get <acc-id>")
+                    return 1
+                return _run_commands_py(
+                    root, "sales_account_transcript_source_get",
+                    {"BEACON_ACCOUNT_ID": acc})
+            if ts == "set":
+                if not acc:
+                    print("Usage: beacon sales send-account transcript-source set <acc-id> "
+                          "--type <meet_calendar|drive_folder|external|manual> "
+                          "[--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear")
+                    return 1
+                return _run_commands_py(
+                    root, "sales_account_transcript_source_set", {
+                        "BEACON_ACCOUNT_ID": acc,
+                        "BEACON_TS_TYPE": args.ts_type,
+                        "BEACON_TS_FOLDER_ID": args.folder_id,
+                        "BEACON_TS_NAMING": args.naming,
+                        "BEACON_TS_TOOL": args.tool,
+                        "BEACON_TS_CLEAR": "1" if args.clear else ""})
+            print("Usage: beacon sales send-account transcript-source get|set <acc-id> ...")
+            return 1
+        print(_SALES_SEND_ACCOUNT_USAGE)
+        return 2
+    if args.sales_cmd == "identity":
+        idc = args.id_cmd
+        if idc == "show":
+            return _run_commands_py(root, "sales_identity_show", {
+                "BEACON_JSON": "1" if args.json else ""})
+        if idc == "set":
+            if not args.identity:
+                print("Usage: beacon sales identity set <label|email>")
+                return 1
+            return _run_commands_py(root, "sales_identity_set", {
+                "BEACON_SEND_IDENTITY": args.identity})
+        if idc == "check":
+            if not args.from_addr:
+                print("Usage: beacon sales identity check --from <address> [--label <label>]")
+                return 1
+            return _run_commands_py(root, "sales_identity_check", {
+                "BEACON_SEND_FROM": args.from_addr, "BEACON_SEND_LABEL": args.label})
+        print("Usage: beacon sales identity show [--json] | set <label|email> | "
+              "check --from <address> [--label <label>]")
+        return 2
+    if args.sales_cmd == "gmail-permalink":
+        if not args.from_addr:
+            print("Usage: beacon sales gmail-permalink --from <address> "
+                  "--msgid <rfc822 Message-ID>")
+            return 1
+        return _run_commands_py(root, "sales_gmail_permalink", {
+            "BEACON_SEND_FROM": args.from_addr, "BEACON_RFC822_MSGID": args.msgid})
+    if args.sales_cmd == "reply-watch":
+        if args.rw_cmd != "ensure":
+            print("Usage: beacon sales reply-watch ensure   "
+                  "(返信ウォッチャーを回す Operation を用意する; 冪等)")
+            return 2
+        return _run_commands_py(root, "sales_reply_watch_op_ensure", {})
+    print(_SALES_USAGE)
     return 2
 
 

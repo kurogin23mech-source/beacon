@@ -33,8 +33,8 @@ ROOT=$(beacon-find-root) && beacon account list --json >/dev/null 2>&1 && \
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
-以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`opportunity_activity`) は
-ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
+以降、`$ROOT` は `beacon-find-root` の出力。
+Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。
 
 ## Step 1: 対象商談の特定
 
@@ -60,17 +60,16 @@ beacon account list
 台帳を通さず namespace を手書きしない (= 取り違え防止)。まず台帳を確認:
 
 ```bash
-BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
+beacon sales send-account list --json
 ```
 
 - **台帳が空 / calendar route 未設定** の場合、ユーザーに「どの Google アカウントの
   カレンダーで調整しますか？」と確認して登録する (label が既にあれば route だけ足す):
 
 ```bash
-BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$(beacon _lib-path)/commands.py" sales_account_add
-BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="calendar" \
-  BEACON_SEND_NAMESPACE="mcp__google-calendar" BEACON_SEND_ALIAS="work" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_route
+beacon sales send-account add "会社" --email "<アドレス>"
+beacon sales send-account route "会社" --service calendar \
+  --namespace "mcp__google-calendar" --alias "work"
 ```
 
 - 既定 (default label) でよければ `$LABEL` は空のまま。この 1 件だけ別アカウントの
@@ -79,8 +78,7 @@ BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="calendar" \
 calendar の route を台帳から解決する。**これが使うカレンダーの唯一の決定経路**:
 
 ```bash
-BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
+beacon sales send-account resolve "$LABEL" --service calendar
 echo "RESOLVE_EXIT=$?"
 ```
 

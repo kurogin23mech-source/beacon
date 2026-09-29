@@ -32,8 +32,8 @@ ROOT=$(beacon-find-root) && beacon account list --json >/dev/null 2>&1 && \
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
-以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`sales_identity_*`) は
-ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
+以降、`$ROOT` は `beacon-find-root` の出力。
+Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。
 
 ## Step 1: 対象商談の特定
 
@@ -58,7 +58,7 @@ beacon account list
 namespace を手書きしない (= 取り違えが起きる経路を残さない)。まず台帳を確認:
 
 ```bash
-BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
+beacon sales send-account list --json
 ```
 
 - **台帳が空** の場合、ユーザーに「どの Google アカウント (メールアドレス) で送りますか？
@@ -69,11 +69,10 @@ BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
   > 取り消せないため。登録を飛ばして送信に進むことはできない。
 
 ```bash
-BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$(beacon _lib-path)/commands.py" sales_account_add
-BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="gmail" BEACON_SEND_NAMESPACE="mcp__gmail" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_route
+beacon sales send-account add "会社" --email "<アドレス>"
+beacon sales send-account route "会社" --service gmail --namespace "mcp__gmail"
 # 既定の送信元にするなら default label を pin (次回から $LABEL 省略で使える):
-BEACON_SEND_IDENTITY="会社" python3 "$(beacon _lib-path)/commands.py" sales_identity_set
+beacon sales identity set "会社"
 ```
 
 - **どの label で送るか**を決める。既定 (default label) でよければ `$LABEL` は空のまま。
@@ -83,8 +82,7 @@ BEACON_SEND_IDENTITY="会社" python3 "$(beacon _lib-path)/commands.py" sales_id
 送信に使う Gmail の route を台帳から解決する。**これが送信先アカウントの唯一の決定経路**:
 
 ```bash
-BEACON_SEND_SERVICE="gmail" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
+beacon sales send-account resolve "$LABEL" --service gmail
 echo "RESOLVE_EXIT=$?"
 ```
 
@@ -100,8 +98,7 @@ echo "RESOLVE_EXIT=$?"
 と 1 度だけ促し、登録する (中身はユーザーが決める soft guidance、システムは置き場だけ持つ):
 
 ```bash
-BEACON_SEND_LABEL="$LABEL" BEACON_SEND_SIGNATURE="<署名の複数行テキスト>" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_signature
+beacon sales send-account signature "$LABEL" --signature "<署名の複数行テキスト>"
 ```
 
 空のままでも送信は妨げない (署名なしで進む)。ユーザーが不要と言えば以後聞かない。
@@ -109,8 +106,7 @@ BEACON_SEND_LABEL="$LABEL" BEACON_SEND_SIGNATURE="<署名の複数行テキス�
 review: 渡し忘れ/typo が署名を消す事故を防ぐため)。署名を**消す**のは明示 clear のときだけ:
 
 ```bash
-BEACON_SEND_LABEL="$LABEL" BEACON_SEND_SIGNATURE_CLEAR=1 \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_signature
+beacon sales send-account signature "$LABEL" --clear
 ```
 
 > Gmail は `send_email` に account 引数が無いため、アカウント切替 = **namespace 切替**
@@ -172,8 +168,7 @@ Step 2 で `$SIGNATURE` が非空なら、**本文末尾に署名を付ける**�
 Step 2 と同じ `$LABEL` を渡す (= 解決した route と同じアカウントで gate する)。exit code で gate:
 
 ```bash
-BEACON_SEND_FROM="$FROM" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$(beacon _lib-path)/commands.py" sales_identity_check
+beacon sales identity check --from "$FROM" --label "$LABEL"
 echo "GATE_EXIT=$?"
 ```
 
@@ -241,8 +236,8 @@ Step 6.5 の Communication だけが記録になる。**いずれにせよ新規
 Message-ID を `$MSGID`、Step 2 で解決した送信 identity のメールアドレスを `$FROM` として渡す:
 
 ```bash
-SOURCE_URL=$(BEACON_SEND_FROM="$FROM" BEACON_RFC822_MSGID="<送信メールの rfc822 Message-ID>" \
-  python3 "$(beacon _lib-path)/commands.py" sales_gmail_permalink)
+SOURCE_URL=$(beacon sales gmail-permalink --from "$FROM" \
+  --msgid "<送信メールの rfc822 Message-ID>")
 PERMALINK_EXIT=$?
 ```
 
@@ -296,7 +291,7 @@ beacon watch set "<act-id>" --channel email --thread "<thread-id / message-id>"
 チェックが回らない (dogfood 報告④の実害):
 
 ```bash
-python3 "$(beacon _lib-path)/commands.py" sales_reply_watch_op_ensure
+beacon sales reply-watch ensure
 ```
 
 これは冪等 (返信ウォッチャー Operation が無ければ作り、あれば再利用)。出力に

@@ -35,3 +35,7 @@ iac/
 # session/fork ローカル artifact (絶対パス混入を防ぐ、fork channel install が worktree 毎に作る)
 .mcp.json
 .claude/
+
+# ms-160 e-5981: テストが作業フォルダに書き残す bus 予算ファイル。残ると後続の
+# bus テストが本物の残高を読んで落ちる (e-6621 の現象)。追跡対象にしない。
+.beacon/bus-budget.json

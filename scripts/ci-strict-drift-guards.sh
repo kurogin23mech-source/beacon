@@ -29,6 +29,14 @@ python3 "$ROOT/scripts/check-server-lib-collision.py" --strict
 echo "[ci-strict-drift-guards] INSTALL.md static validation…"
 python3 "$ROOT/scripts/check-install-md.py" --strict
 
+echo "[ci-strict-drift-guards] Skill → CLI 境界 (ms-160 e-5981)…"
+# Skill が lib/commands.py を直叩きしていないこと。直叩きは CORE doc
+# architecture-tool-skill-separation §2 の層を飛ばし、(1) beacon --help に
+# 出ないので発見できない (2) Windows/pipx から到達できない (3) 環境変数名が
+# 手順書と実装の 2 箇所に複製され改名で黙って壊れる、を同時に生む。実際に
+# 2 動詞が到達不能になっていたので、再発を CI で止める。
+python3 "$ROOT/scripts/check-skill-cli-boundary.py"
+
 echo "[ci-strict-drift-guards] capability scope invariant (ms-134 e-4721)…"
 # Every CLI verb must classify L0..L4, and no profession-shared (L1/L2)
 # capability may reach a profession concrete (core.save_entry /
