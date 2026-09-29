@@ -44,7 +44,7 @@ ROOT=$(beacon-find-root) && \
 beacon opportunity list --json                 # 全商談・フェーズ・遷移日・活動 + gate_needs_anchor（発火源 未紐づけの事実フラグ, ms-144 e-5178）
 beacon opportunity due --json                  # 遷移日 + 準備活動の期日が due/overdue → {opportunities, activities}
 beacon phase list --json                       # フェーズごとのゴール・活動テンプレ
-BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" watch_list  # 返信待ち
+beacon watch list --awaiting --json  # 返信待ち
 ```
 
 引数で商談 ID が渡っていれば、その 1 件に絞って深掘りする。無ければ全商談を横断する。

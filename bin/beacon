@@ -4784,6 +4784,13 @@ EOF
                 ;;
         esac
         ;;
+    watch)
+        # ms-160 e-5981 — 返信待ちスレッドの張り込み。body は bin/lib/cmd_watch.sh。
+        # それ以前は Skill が commands.py を直叩きしており、CLI 境界
+        # (CORE doc architecture-tool-skill-separation §2) を飛ばしていた。
+        shift
+        cmd_watch "$@"
+        ;;
     help|-h|--help)
         if [[ "${2:-}" == "--json" ]]; then
             python3 "$COMMANDS_PY" help_json

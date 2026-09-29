@@ -284,9 +284,7 @@ BEACON_COMM_TARGET="<満たした活動の act-id を優先、無ければ $OPP>
 hourly にこのスレッドを確認し、返信が来たら ball を自分に戻して通知する:
 
 ```bash
-BEACON_WATCH_TARGET="<act-id>" BEACON_WATCH_CHANNEL="email" \
-  BEACON_WATCH_THREAD="<thread-id / message-id>" \
-  python3 "$(beacon _lib-path)/commands.py" watch_set
+beacon watch set "<act-id>" --channel email --thread "<thread-id / message-id>"
 ```
 
 **watch を立てたら、それを hourly に回す Operation を必ず ensure する** (e-3504)。watch は

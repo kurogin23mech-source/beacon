@@ -315,6 +315,9 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
 | `beacon meeting list [<opp-id>] [--json]` | List meetings; opp-id optional — omit for all opportunities / 面談一覧 (opp-id 省略で全商談横断, e-3909) |
 | `beacon meeting list-ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 (e-3909 正式名, alias: meeting ended) |
+| `beacon watch set <work-item-id> --channel <ch> [--thread <ref>] [--cadence <min>]` | Arm a reply watch on a work item (default cadence 60m) / 返信待ちスレッドの張り込みを開始（既定 60 分間隔） |
+| `beacon watch list [--awaiting] [--json]` | List armed reply watches; `--awaiting` = ball is with the counterpart / 張り込み中の一覧（`--awaiting` は相手ボールのみ） |
+| `beacon watch clear <work-item-id>` | Disarm the reply watch on a work item / 張り込みを解除 |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 | `beacon phase add <account\|opportunity\|prospect> <name> [--index N]` | Add or insert a funnel stage / フェーズ段を追加・挿入 |
 | `beacon phase rename <account\|opportunity\|prospect> <old> <new>` | Rename a funnel stage (references follow) / フェーズ段を改名（参照も追随） |

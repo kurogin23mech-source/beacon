@@ -794,6 +794,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_phase_remove.add_argument("funnel", nargs="?", default="")
     p_phase_remove.add_argument("name", nargs="?", default="")
 
+    # ---- watch (ms-160 e-5981: 返信待ちスレッドの張り込み) ----
+    # bash 側 bin/lib/cmd_watch.sh と対の Windows/pipx 経路。これが無いと
+    # Windows は `argparse invalid choice: 'watch'` で弾かれ、watch_* に
+    # 到達する手段が一切なくなる (ms-44 e-1171 と同型のドリフト)。
+    p_watch = sub.add_parser(
+        "watch", help="Arm/inspect reply watches on work items", add_help=False,
+    )
+    p_watch.add_argument("--help", "-h", action="store_true", dest="show_help")
+    watch_sub = p_watch.add_subparsers(dest="watch_cmd", metavar="<subcmd>")
+
+    p_watch_set = watch_sub.add_parser("set", add_help=False)
+    p_watch_set.add_argument("wi_id", nargs="?", default="")
+    p_watch_set.add_argument("--channel", default="")
+    p_watch_set.add_argument("--thread", default="")
+    p_watch_set.add_argument("--cadence", default="")
+    p_watch_list = watch_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_watch_list.add_argument("--json", action="store_true")
+    p_watch_list.add_argument("--awaiting", action="store_true")
+    p_watch_clear = watch_sub.add_parser("clear", add_help=False)
+    p_watch_clear.add_argument("wi_id", nargs="?", default="")
+
     # ---- sync ----
     p_sync = sub.add_parser("sync", help="Auto-sync recent git commits", add_help=False)
     p_sync.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -3184,6 +3205,44 @@ def _handle_phase(root: Path, args: argparse.Namespace) -> int:
                "BEACON_PHASE_NAME": args.name or ""}
         return _run_commands_py(root, "phase_remove", env)
     print(_PHASE_USAGE)
+    return 2
+
+
+_WATCH_USAGE = (
+    "Usage: beacon watch "
+    "[set <work-item-id> --channel <ch> [--thread <ref>] [--cadence <min>] | "
+    "list [--awaiting] [--json] | clear <work-item-id>]")
+
+
+def _handle_watch(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.watch_cmd is None:
+        print(_WATCH_USAGE)
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.watch_cmd
+    if cmd == "set":
+        if not args.wi_id or not args.channel:
+            print("Usage: beacon watch set <work-item-id> --channel <ch> "
+                  "[--thread <ref>] [--cadence <minutes; default 60>]")
+            return 1
+        env = {"BEACON_WATCH_TARGET": args.wi_id or "",
+               "BEACON_WATCH_CHANNEL": args.channel or "",
+               "BEACON_WATCH_THREAD": args.thread or "",
+               "BEACON_WATCH_CADENCE": args.cadence or ""}
+        return _run_commands_py(root, "watch_set", env)
+    if cmd in ("list", "ls"):
+        env = {"BEACON_JSON": "1" if args.json else "",
+               "BEACON_WATCH_AWAITING": "1" if args.awaiting else ""}
+        return _run_commands_py(root, "watch_list", env)
+    if cmd == "clear":
+        if not args.wi_id:
+            print("Usage: beacon watch clear <work-item-id>")
+            return 1
+        return _run_commands_py(root, "watch_clear",
+                                {"BEACON_WATCH_TARGET": args.wi_id or ""})
+    print(_WATCH_USAGE)
     return 2
 
 
@@ -5916,6 +5975,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "sales": _handle_sales,
     "org": _handle_org,  # ms-118: 組織 tenancy (bin/beacon parity)
     "phase": _handle_phase,
+    "watch": _handle_watch,
     "sync": _handle_sync,
     "task": _handle_task,
     "milestone": _handle_milestone,

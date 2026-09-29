@@ -6492,6 +6492,11 @@ def _help_registry():
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
         {"command": "beacon meeting list [<opp-id>]", "flags": ["--json"], "description": "List meetings; <opp-id> optional — omit to list across all opportunities (e-3909)"},
         {"command": "beacon meeting list-ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補; e-3909 canonical read verb, alias: meeting ended)"},
+        # ms-160 e-5981: watch_* は commands.py にしか無く Skill が直叩きしていた。
+        # CLI に載せた以上ここにも載せる (= help が唯一の真値源; ms-120 e-3897)。
+        {"command": "beacon watch set <work-item-id>", "flags": ["--channel <ch>", "--thread <ref>", "--cadence <minutes>"], "description": "Arm a reply watch on a work item (返信待ちスレッドの張り込み; 既定 cadence 60 分)"},
+        {"command": "beacon watch list", "flags": ["--awaiting", "--json"], "description": "List armed reply watches; --awaiting narrows to threads where the ball is with the counterpart"},
+        {"command": "beacon watch clear <work-item-id>", "flags": [], "description": "Disarm the reply watch on a work item"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity / prospect vocabulary)"},
         {"command": "beacon phase add <account|opportunity|prospect> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
         {"command": "beacon phase rename <account|opportunity|prospect> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},

@@ -47,7 +47,7 @@ ROOT=$(beacon-find-root) && \
 「watch あり かつ ball=相手 (= まだ返信待ち)」のスレッドだけを取る:
 
 ```bash
-BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" watch_list
+beacon watch list --awaiting --json
 ```
 
 `watches[]` が空なら「返信待ちのスレッドはありません」と記録して終了。各要素は
@@ -122,7 +122,7 @@ beacon acquisition attack-list-reply-record <doc-id> <acc-id> \
 終える:
 
 ```bash
-BEACON_WATCH_TARGET="<work_item_id>" python3 "$(beacon _lib-path)/commands.py" watch_clear
+beacon watch clear "<work_item_id>"
 ```
 
 完結かどうか機械で決めきれない時は watch を残し、報告で人に委ねる。
