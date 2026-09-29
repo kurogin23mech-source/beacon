@@ -280,8 +280,14 @@ def test_note_add_list_clear_e2e(capfd, fresh_dir):
     notes = json.loads(out)
     assert any("remember this" in (n.get("text") or "") for n in notes)
 
+    # ms-178 e-6654: a bare `note clear` is refused — clearing also wipes the
+    # project's SHARED cloud notes, so it needs an explicit confirmation.
     capfd.readouterr()
     rc = main_mod.main(["note", "clear"])
+    assert rc != 0, "bare `note clear` must be refused (e-6654)"
+    capfd.readouterr()
+
+    rc = main_mod.main(["note", "clear", "--yes"])
     assert rc == 0
 
     capfd.readouterr()

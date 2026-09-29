@@ -291,7 +291,9 @@ beacon doc update <doc-id> --content "<既存本文 + 新セクション>"
 
 書き込み（または「全て残す価値なし」と判定）後、Bash ツールで実行:
 ```bash
-beacon note clear
+# ms-178 e-6654: clear は明示確認 (--yes) を要求する。素の `beacon note clear`
+# は拒否される (help を求めただけでメモが消える事故を構造で塞いだため)。
+beacon note clear --yes
 ```
 
 ## Step 4.7: セッションの判断 (decision) 過不足チェック (ms-164 e-6031)
@@ -385,4 +387,4 @@ Active: [ms-id] [title] ([progress]%)
 - データ取得は Bash ツール経由の beacon CLI のみ。project.json を直接読まない。
 - サマリーの書き込みは `beacon session end --summary "<text>"` 経由のみ (旧 `beacon summary "<text>"` は ms-57 e-1040 で廃止、ignored を返す)。
 - 未コミット変更がある場合、勝手にコミットしない。ユーザーに判断を委ねる。
-- `beacon note clear` はメモのレビュー後にのみ実行する。スキップしない。
+- `beacon note clear --yes` はメモのレビュー後にのみ実行する。スキップしない。

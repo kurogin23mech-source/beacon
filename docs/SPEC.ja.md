@@ -210,7 +210,7 @@ scheduleに応じて `operation_check_<op-id>` トリガーがsession-start時�
 |---------|------|--------|
 | `beacon note "text" [--context "ラベル"]` | セッションメモを追加 | - |
 | `beacon note list` | メモ一覧 | 対応済 |
-| `beacon note clear` | メモを全削除（.bakに退避） | - |
+| `beacon note clear --yes` | メモを全削除（.bakに退避）。`--yes` 必須: cloud 側のメモはプロジェクト共有なので他セッションの引き継ぎメモも消える | - |
 
 保存先: `.beacon/session_notes.jsonl`（クラウド非同期・ローカルのみ）
 

@@ -130,6 +130,28 @@ def cmd_note_list():
 
 def cmd_note_clear():
     path = _get_notes_path()
+    # ms-178 e-6654: refuse without an explicit confirmation. Clearing removes
+    # the local file (recoverable from .bak) AND the project's cloud notes,
+    # which are a store SHARED by every session on the project — one session
+    # tidying up deletes the other sessions' handoff notes (observed 2026-09-28:
+    # a fork's 3 notes were lost to the parent's cleanup). The gate lives here,
+    # not only in bin/beacon, so the python entrypoint is safe no matter which
+    # front end (bash dispatcher, Windows/Codex shim, direct call) reaches it.
+    if os.environ.get("BEACON_NOTE_CLEAR_YES") != "1":
+        count = 0
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                count = sum(1 for line in f if line.strip())
+        print(f"Refusing to clear {count} session note(s) without confirmation.",
+              file=sys.stderr)
+        print(f"  local: {path} (moved to {path}.bak, recoverable)",
+              file=sys.stderr)
+        if os.path.exists(_get_cloud_config_path()):
+            print("  cloud: this project's notes are SHARED by every session — "
+                  "clearing removes other sessions' handoff notes too.",
+                  file=sys.stderr)
+        print("Re-run as 'beacon note clear --yes' to proceed.", file=sys.stderr)
+        sys.exit(1)
     if os.path.exists(path):
         import shutil
         shutil.move(path, path + ".bak")

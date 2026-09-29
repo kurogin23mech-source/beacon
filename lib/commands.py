@@ -590,7 +590,7 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes / メモ一覧 |
-| `beacon note clear` | Clear all session notes / メモ全削除 |
+| `beacon note clear --yes` | Clear all session notes / メモ全削除 (`--yes` 必須) |
 
 <!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
 ### Entry Writing Principle / エントリ記述原則
@@ -6514,6 +6514,12 @@ def _help_registry():
         {"command": "beacon pr sync", "flags": ["--dry-run", "--json"], "description": "Align beacon PR entries with GitHub state (merged/closed) — ms-61 / e-2005"},
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
+        # ms-178 e-6654: note was absent from this registry, so `--help` missed,
+        # fell through to the dispatcher, and `note clear --help` deleted the
+        # notes. Registered here so help renders from the single source instead.
+        {"command": "beacon note <text>", "flags": ["--context <label>"], "description": "Add an ephemeral session note (survives compaction; cleared at session end)"},
+        {"command": "beacon note list", "flags": ["--json"], "description": "List this session's notes"},
+        {"command": "beacon note clear", "flags": ["-y|--yes"], "description": "Delete all session notes. Requires --yes: local is moved to .bak, but the cloud copy is shared by every session on the project"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
         {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
@@ -11160,6 +11166,30 @@ if __name__ == "__main__":
         "view": cmd_view,
     }
     fn = commands.get(cmd)
+    # ms-178 e-6654: help must never mutate. bin/beacon sets BEACON_HELP_ONLY
+    # when -h/--help was on the command line but the help registry had no entry
+    # for that command, so the bash dispatcher fell through to the command's own
+    # parser. A parser that ignores trailing flags then EXECUTES the verb —
+    # `beacon note clear --help` wiped every session note exactly this way.
+    #
+    # The gate is the verb ledger rather than a hand-written list of dangerous
+    # verbs: reconcile() pins the ledger against the live dispatch surface, so
+    # every key here is classified and a new verb cannot be forgotten. Only
+    # Q (read-only) may run under --help; an unclassified verb is treated as
+    # unsafe (fail-closed), since "no classification" is not evidence of safety.
+    if fn and os.environ.get("BEACON_HELP_ONLY") == "1":
+        try:
+            from verb_ledger import classify as _vl_classify
+            _entry = _vl_classify(cmd)
+        except Exception:
+            _entry = None
+        if not (_entry and _entry.get("cls") == "Q"):
+            _path = (os.environ.get("BEACON_HELP_QUERY") or cmd.replace("_", " ")).strip()
+            print(f"beacon {_path} — no help entry is registered for this command, "
+                  f"and it is not read-only, so it was NOT executed.")
+            print("Run 'beacon help' for the command list, or re-run without "
+                  "--help to actually perform it.")
+            sys.exit(0)
     # ms-54 e-1319: the CLI-side heartbeat (formerly bumped here, ms-57 e-1035)
     # has been retired. Post Option C (PR #111 / commit 78048b6) the bridge
     # poll loop is the truth source for both ``last_active`` (proof of life)

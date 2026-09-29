@@ -218,6 +218,17 @@ if [ -n "$_beacon_wants_help" ]; then
     if BEACON_HELP_QUERY="$_BEACON_CMD" python3 "$COMMANDS_PY" help_render; then
         exit 0
     fi
+    # ms-178 e-6654: the registry had no entry (exit 3), so we fall through to
+    # the command's own bespoke help. That fall-through was only ever SAFE for
+    # commands whose parser actually reads -h/--help; a parser that ignores
+    # trailing flags EXECUTES instead of explaining. `beacon note clear --help`
+    # deleted every session note that way (data loss from asking for help).
+    #
+    # Rather than special-casing note, mark the whole remainder of this process
+    # as "the operator asked for help" and let the python chokepoint refuse any
+    # non-read-only verb. The class is then closed for every command, including
+    # ones added later: a missing registry entry can degrade help, never data.
+    export BEACON_HELP_ONLY=1
 fi
 
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
@@ -2202,15 +2213,41 @@ EOF
         ensure_project
         case "${2:-}" in
             list)
-                BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" note_list
+                # ms-178 e-6654: only --json selects JSON. The old `${3:+1}`
+                # treated ANY third token as "json", so `note list --help`
+                # dumped the notes instead of explaining the command.
+                shift 2
+                note_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) note_json="1"; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      shift ;;
+                    esac
+                done
+                BEACON_JSON="$note_json" python3 "$COMMANDS_PY" note_list
                 ;;
             clear)
-                python3 "$COMMANDS_PY" note_clear
+                # ms-178 e-6654: clear wipes the LOCAL file (recoverable via
+                # .bak) *and* the project's shared cloud notes (not recoverable
+                # before e-6656), so every parallel session's handoff notes go
+                # with it. Require an explicit -y/--yes rather than deleting on
+                # a bare verb.
+                shift 2
+                note_yes=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -y|--yes) note_yes="1"; shift ;;
+                        -?*)      _guard_flag "$1" ;;
+                        *)        shift ;;
+                    esac
+                done
+                BEACON_NOTE_CLEAR_YES="$note_yes" python3 "$COMMANDS_PY" note_clear
                 ;;
             "")
                 echo "Usage: beacon note \"<text>\" [--context \"<label>\"]"
                 echo "       beacon note list [--json]"
-                echo "       beacon note clear"
+                echo "       beacon note clear -y|--yes"
                 ;;
             *)
                 shift

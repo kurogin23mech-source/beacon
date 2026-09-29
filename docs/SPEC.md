@@ -210,7 +210,7 @@ Ephemeral memos that survive context compaction within a session — cleared at 
 |---------|-------------|--------|
 | `beacon note "text" [--context "label"]` | Add a session note | - |
 | `beacon note list` | Show session notes | Yes |
-| `beacon note clear` | Clear all session notes (moved to .bak) | - |
+| `beacon note clear --yes` | Clear all session notes (moved to .bak). `--yes` required: the cloud copy is shared by every session on the project | - |
 
 Storage: `.beacon/session_notes.jsonl` (local only, not cloud-synced). Say "remember this" and Claude calls `/beacon-note` automatically. At session end, `/beacon-session-end` prompts to promote important notes to Documents before clearing.
 
