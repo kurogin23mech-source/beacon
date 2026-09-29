@@ -1063,7 +1063,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ms-178 e-6654: `note clear` needs an explicit confirmation on BOTH CLI
     # frontends. Without it here, this dispatcher would hit the python gate's
     # refusal instead of clearing, and the two frontends would disagree.
-    p_note.add_argument("--yes", "-y", dest="assume_yes", action="store_true")
+    # ms-178 (AX review PR#766): --confirm accepted as an alias, matching the
+    # bash frontend, so an agent that learned the sibling spelling is not
+    # refused on one frontend and accepted on the other.
+    p_note.add_argument("--yes", "-y", "--confirm", dest="assume_yes",
+                        action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- decision (ms-154 e-5594: log-time decision backstop の記録口) ----
@@ -3678,7 +3682,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear -y|--yes\n"
+            "       beacon note clear --yes   (-y / --confirm も可)\n"
             "       beacon note restore\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
@@ -3705,7 +3709,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear -y|--yes\n"
+            "       beacon note clear --yes   (-y / --confirm も可)\n"
             "       beacon note restore\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )

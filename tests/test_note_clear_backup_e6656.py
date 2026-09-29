@@ -60,8 +60,12 @@ def _stub_cloud(monkeypatch, notes, error="", clear_raises=None):
 
     monkeypatch.setattr(cmd_note, "_fetch_cloud_notes",
                         lambda pid: (list(notes), error))
-    monkeypatch.setattr(cmd_note, "_push_note_to_cloud",
-                        lambda n: state["pushed"].append(n))
+
+    def _push_ok(n):
+        state["pushed"].append(n)
+        return ""  # "" == success, per _push_note_to_cloud_or_error's contract
+
+    monkeypatch.setattr(cmd_note, "_push_note_to_cloud_or_error", _push_ok)
 
     class _Client:
         def __init__(self, *a, **k):
@@ -231,3 +235,123 @@ def test_cloud_backup_path_sits_beside_the_local_one(local_only):
     notes = cmd_note._get_notes_path()
     assert cmd_note._cloud_backup_path() == notes.replace(".jsonl", "") + ".cloud.bak"
     assert os.path.dirname(cmd_note._cloud_backup_path()) == os.path.dirname(notes)
+
+
+# --- independent review findings (PR #766) ---------------------------------
+#
+# AX + maintainability judges BOTH flagged the same defect independently: the
+# restore path counted an ATTEMPTED cloud re-post as a restored one, because
+# `_push_note_to_cloud` swallows every exception and cannot report failure. On
+# the one path with no backup behind it, that turns a silent write failure into
+# an invented success. No test covered it — the only cloud-restore test stubbed
+# the push with an always-succeeding lambda.
+
+def _stub_failing_push(monkeypatch, error="ConnectionError: down"):
+    calls = []
+
+    def _fake(note):
+        calls.append(note)
+        return error
+
+    monkeypatch.setattr(cmd_note, "_push_note_to_cloud_or_error", _fake)
+    return calls
+
+
+def test_restore_does_not_count_a_failed_cloud_repost(fake_cloud_config, monkeypatch, capsys):
+    """A re-post that failed must NOT be reported as restored."""
+    _write_local(fake_cloud_config, MINE)
+    _stub_cloud(monkeypatch, [MINE, PARENT])
+    cmd_note.cmd_note_clear()
+    capsys.readouterr()
+    monkeypatch.setattr(cmd_note, "_fetch_cloud_notes", lambda pid: ([], ""))
+    attempted = _stub_failing_push(monkeypatch)
+    cmd_note.cmd_note_restore()
+    out = capsys.readouterr()
+    assert attempted, "restore never tried to re-post"
+    assert "cloud 0 件" in out.out, (
+        "a failed re-post was counted as restored: " + out.out)
+    assert "cloud への再投稿に" in out.err, out.err
+
+
+def test_restore_keeps_backup_after_a_failed_repost(fake_cloud_config, monkeypatch, capsys):
+    """The snapshot must survive a failed re-post — it is the only copy left, so
+    discarding it would make the failure unrecoverable."""
+    _write_local(fake_cloud_config, MINE)
+    _stub_cloud(monkeypatch, [MINE, PARENT])
+    cmd_note.cmd_note_clear()
+    capsys.readouterr()
+    monkeypatch.setattr(cmd_note, "_fetch_cloud_notes", lambda pid: ([], ""))
+    _stub_failing_push(monkeypatch)
+    cmd_note.cmd_note_restore()
+    capsys.readouterr()
+    assert os.path.exists(cmd_note._cloud_backup_path())
+
+
+def test_restore_partial_success_counts_only_what_landed(fake_cloud_config, monkeypatch, capsys):
+    """Mixed outcome: one note lands, one fails. The count must be the landed
+    one, not the attempted two."""
+    _write_local(fake_cloud_config)
+    _stub_cloud(monkeypatch, [MINE, PARENT])
+    cmd_note.cmd_note_clear()
+    capsys.readouterr()
+    monkeypatch.setattr(cmd_note, "_fetch_cloud_notes", lambda pid: ([], ""))
+
+    def _half(note):
+        return "" if note.get("text") == "mine" else "HTTPError: 500"
+
+    monkeypatch.setattr(cmd_note, "_push_note_to_cloud_or_error", _half)
+    cmd_note.cmd_note_restore()
+    out = capsys.readouterr()
+    assert "cloud 1 件" in out.out, out.out
+    assert "1 件失敗" in out.err, out.err
+
+
+def test_note_add_push_stays_silent_on_failure(fake_cloud_config, monkeypatch, capsys):
+    """The asymmetry is deliberate and must be preserved: `note add` keeps the
+    best-effort silence (the note is on local disk, so nothing is lost), while
+    only the recovery path reports. A future edit that makes add noisy — or
+    restore silent — breaks one half of the contract."""
+    monkeypatch.setattr(cmd_note, "_note_api_client",
+                        lambda: (None, "ConnectionError: down"))
+    monkeypatch.setenv("BEACON_NOTE_TEXT", "hello")
+    cmd_note.cmd_note_add()
+    out = capsys.readouterr()
+    assert "ConnectionError" not in out.err, (
+        "note add surfaced a push failure; it is best-effort by design: " + out.err)
+    assert cmd_note._read_local_notes(cmd_note._get_notes_path()), "note not stored"
+
+
+def test_refusal_sizes_the_shared_cloud_store(fake_cloud_config, monkeypatch, capsys):
+    """AX: the confirmation gate must state how many OTHER sessions' notes are at
+    stake. "some others exist" cannot distinguish 0 from 200."""
+    monkeypatch.delenv("BEACON_NOTE_CLEAR_YES", raising=False)
+    _write_local(fake_cloud_config, MINE)
+    _stub_cloud(monkeypatch, [MINE, PARENT])
+    with pytest.raises(SystemExit):
+        cmd_note.cmd_note_clear()
+    err = capsys.readouterr().err
+    assert "他セッション分 1 件" in err, err
+
+
+def test_refusal_says_count_unknown_when_cloud_unreadable(fake_cloud_config, monkeypatch, capsys):
+    """...and when the size cannot be fetched, say so rather than implying zero."""
+    monkeypatch.delenv("BEACON_NOTE_CLEAR_YES", raising=False)
+    _write_local(fake_cloud_config, MINE)
+    _stub_cloud(monkeypatch, [], error="ConnectionError: down")
+    with pytest.raises(SystemExit):
+        cmd_note.cmd_note_clear()
+    err = capsys.readouterr().err
+    assert "件数不明" in err, err
+
+
+def test_one_api_client_factory_is_shared_by_all_three_legs(monkeypatch, fake_cloud_config):
+    """Maintainability: the credential + ApiClient construction existed in three
+    near-verbatim copies. Pin that they now route through ONE factory, so an
+    auth/transport change lands in one place instead of drifting."""
+    calls = []
+    monkeypatch.setattr(cmd_note, "_note_api_client",
+                        lambda: (calls.append("x"), (None, "stubbed"))[1])
+    cmd_note._fetch_cloud_notes("proj-1")
+    cmd_note._push_note_to_cloud_or_error({"ts": "t", "text": "x"})
+    assert len(calls) == 2, (
+        "a cloud leg bypassed the shared factory (re-introduced a copy)")

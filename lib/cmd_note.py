@@ -22,28 +22,67 @@ from commands_shared import (
 )
 
 
-def _push_note_to_cloud(note: dict) -> None:
-    """Push a session note to cloud API. Best-effort: silently ignores all errors."""
+def _note_api_client():
+    """Return ``(client, error)`` for this project's notes API.
+
+    ms-178 (maintainability review, PR#766): the credential load + token-provider
+    closure + ApiClient construction was written out three times in this module
+    (push / fetch / clear). commands_shared._get_api_client() already owns that
+    idiom but `sys.exit(1)`s on failure, which a best-effort caller cannot use —
+    hence one local factory that REPORTS the failure instead of exiting, shared by
+    all three call sites so an auth/transport change lands in one place.
+
+    ``error`` is "" on success; a client is returned only when error is "".
+    """
     try:
-        # ms-178 e-6655: share one project_id resolver with the read path so the
-        # two directions can never disagree about whether this is cloud mode.
         project_id = _cloud_project_id()
         if not project_id:
-            return
-        api_url = _resolve_active_api_url()
+            return None, "local mode (cloud.json 無し)"
         from auth import load_credentials
-        creds = load_credentials()
-        if creds is None:
-            return
+        if load_credentials() is None:
+            return None, "未認証 (beacon cloud login が必要)"
         from api_client import ApiClient
-        def _token():
+
+        def _token() -> str:
             from auth import load_credentials as _lc
             c = _lc()
             return _extract_token(c) if c else ""
-        client = ApiClient(api_url, _token)
-        client.add_note(project_id, note)
-    except Exception:
-        pass
+
+        return ApiClient(_resolve_active_api_url(), _token), ""
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _push_note_to_cloud_or_error(note: dict) -> str:
+    """Push one note to the cloud. Returns "" on success, else a reason.
+
+    ms-178 (AX + maintainability review consensus, PR#766): the fire-and-forget
+    sibling below is fine for `note add` — the note is on local disk either way,
+    so silence loses nothing. It is NOT fine for `note restore`, which re-posts
+    the ONLY surviving copy of notes `note clear` already deleted from the shared
+    cloud store. There, swallowing the failure turns "a silent write failure" into
+    "an invented success", and the operator closes the incident while the shared
+    notes are still gone — with no further backup behind it. So restore uses this
+    reporting variant.
+    """
+    client, error = _note_api_client()
+    if error:
+        return error
+    try:
+        client.add_note(_cloud_project_id(), note)
+        return ""
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _push_note_to_cloud(note: dict) -> None:
+    """Push a session note to cloud API. Best-effort: silently ignores all errors.
+
+    Deliberately silent: `note add` has already written the note to the local
+    file, so a failed push costs visibility, not data. Recovery paths must use
+    _push_note_to_cloud_or_error instead (see its docstring).
+    """
+    _push_note_to_cloud_or_error(note)
 
 
 def cmd_note_add():
@@ -141,22 +180,13 @@ def _fetch_cloud_notes(project_id: str):
     "empty". The WRITE path may stay best-effort silent (the note is still on
     disk), but a silent read failure invents absence.
     """
+    client, error = _note_api_client()
+    if error:
+        return [], error
     try:
-        api_url = _resolve_active_api_url()
-        from auth import load_credentials
-        creds = load_credentials()
-        if creds is None:
-            return [], "未認証 (beacon cloud login が必要)"
-        from api_client import ApiClient
-
-        def _token():
-            from auth import load_credentials as _lc
-            c = _lc()
-            return _extract_token(c) if c else ""
-
-        notes = ApiClient(api_url, _token).list_notes(project_id)
+        notes = client.list_notes(project_id)
         return (notes if isinstance(notes, list) else []), ""
-    except Exception as exc:  # network / auth / server error
+    except Exception as exc:  # network / server error
         return [], f"{type(exc).__name__}: {exc}"
 
 
@@ -260,11 +290,24 @@ def cmd_note_clear():
               file=sys.stderr)
         print(f"  local: {path} (moved to {path}.bak, recoverable)",
               file=sys.stderr)
-        if _cloud_project_id():
-            print("  cloud: this project's notes are SHARED by every session — "
-                  "clearing removes other sessions' handoff notes too "
-                  f"(snapshotted to {_cloud_backup_path()} first; "
-                  "restore with 'beacon note restore').", file=sys.stderr)
+        pid = _cloud_project_id()
+        if pid:
+            # AX review (PR#766): sizing only the local leg let the operator see
+            # an exact number for "my" notes and a vague "some others exist" for
+            # the SHARED store it is about to destroy — it could not tell 0 from
+            # 200. A confirmation gate that hides the stake is not a gate.
+            cloud_notes, cloud_error = _fetch_cloud_notes(pid)
+            if cloud_error:
+                others = "件数不明 — cloud を確認できません"
+            else:
+                local_keys = {_note_key(n) for n in _read_local_notes(path)}
+                n_other = sum(1 for n in cloud_notes
+                              if _note_key(n) not in local_keys)
+                others = f"他セッション分 {n_other} 件を含む計 {len(cloud_notes)} 件"
+            print(f"  cloud: this project's notes are SHARED by every session "
+                  f"({others}) — clearing removes other sessions' handoff notes "
+                  f"too. Snapshotted to {_cloud_backup_path()} first; restore "
+                  f"with 'beacon note restore'.", file=sys.stderr)
         print("Re-run as 'beacon note clear --yes' to proceed.", file=sys.stderr)
         sys.exit(1)
     # ms-178 e-6656: take the CLOUD snapshot before deleting anything. The local
@@ -303,18 +346,10 @@ def cmd_note_clear():
     cloud_cleared = True
     if project_id:
         try:
-            from auth import load_credentials
-            creds = load_credentials()
-            if creds is None:
-                raise RuntimeError("未認証")
-            from api_client import ApiClient
-
-            def _token():
-                from auth import load_credentials as _lc
-                c = _lc()
-                return _extract_token(c) if c else ""
-
-            ApiClient(_resolve_active_api_url(), _token).clear_notes(project_id)
+            client, error = _note_api_client()
+            if error:
+                raise RuntimeError(error)
+            client.clear_notes(project_id)
         except Exception as exc:
             # Previously swallowed: a failed cloud delete still printed
             # "Session notes cleared.", so the two stores silently diverged.
@@ -375,15 +410,30 @@ def cmd_note_restore():
                   f"再実行してください。", file=sys.stderr)
         else:
             have = {_note_key(n) for n in live}
+            failed = []
             for n in _read_local_notes(cloud_bak):
                 if _note_key(n) in have:
                     continue
                 # Strip the provenance tag the merge adds on read; it is a view
                 # concern, not part of the stored note.
                 payload = {k: v for k, v in n.items() if k != "origin"}
-                _push_note_to_cloud(payload)
+                # Count only CONFIRMED re-posts (AX + maintainability review
+                # consensus, PR#766): counting the attempt reported a restore
+                # that never happened, on the one path with no backup behind it.
+                push_error = _push_note_to_cloud_or_error(payload)
+                if push_error:
+                    failed.append((n, push_error))
+                    continue
                 have.add(_note_key(n))
                 restored_cloud += 1
+            if failed:
+                print(f"Warning: cloud への再投稿に {len(failed)} 件失敗しました。"
+                      f"退避 {cloud_bak} は残してあるので、原因を解消してから "
+                      f"'beacon note restore' を再実行してください "
+                      f"(復元済みの分は重複しません)。", file=sys.stderr)
+                for n, why in failed[:5]:
+                    print(f"  - {n.get('ts', '?')[:16]} "
+                          f"{(n.get('text') or '')[:40]}: {why}", file=sys.stderr)
 
     print(f"復元しました: local {restored_local} 件 / cloud {restored_cloud} 件")
     if restored_local == 0 and restored_cloud == 0:

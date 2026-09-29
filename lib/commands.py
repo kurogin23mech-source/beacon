@@ -6522,7 +6522,7 @@ def _help_registry():
         # notes. Registered here so help renders from the single source instead.
         {"command": "beacon note <text>", "flags": ["--context <label>"], "description": "Add an ephemeral session note (survives compaction; cleared at session end)"},
         {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
-        {"command": "beacon note clear", "flags": ["-y|--yes"], "description": "Delete all session notes. Requires --yes. Both stores are backed up first (local .bak + cloud .cloud.bak); the cloud copy is shared by every session on the project"},
+        {"command": "beacon note clear --yes", "flags": [], "description": "Delete all session notes (-y is accepted as shorthand; --confirm is an accepted alias). Both stores are backed up first (local .bak + cloud .cloud.bak) and, in cloud mode, NOTHING is deleted if that cloud snapshot cannot be taken — so this command needs cloud reachability. The cloud copy is shared by every session on the project. Recover with: beacon note restore"},
         {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
