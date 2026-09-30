@@ -3401,6 +3401,12 @@ Exit codes (ms-93 / e-2274):
   receive:  0 = got events, 2 = timed out without events, 1 = error.
   listen:   blocks until SIGINT (or --once); exit 0 on clean shutdown.
   ack/status/directory: 0 on success, non-zero on validation / network errors.
+  consent-check: 0 whenever the question was answered — **the exit code does NOT
+            carry the answer**. `-check` looks like `test`/`grep -q`, so branching
+            on `$?` is the natural mistake, and it silently lands on "no
+            confirmation needed" every time. Read
+            `recipient_confirmation_required` from --json instead.
+            1 = usage error (missing --to), 2 = unknown flag.
 EOF
                 ;;
         esac

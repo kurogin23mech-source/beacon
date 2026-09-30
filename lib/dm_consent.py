@@ -103,9 +103,11 @@ CONSENT_REQUIRED_CROSS_USER = "cross_user_new_send"
 #
 # So the explanation lives HERE, next to the rule it explains, and the Skill is
 # told to ask (`beacon bus consent-check`) rather than restate. Every reason
-# constant must appear in this map — tests/test_dm_consent_reason_coverage_e6349
-# fails if a new CONSENT_* lands without an explanation, which is what keeps the
-# explanation from drifting away from the rule the way the prose did.
+# constant must appear in this map —
+# tests/test_dm_consent_skill_alignment_e6349.py::
+# test_every_reason_constant_has_a_one_line_explanation fails if a new CONSENT_*
+# lands without an explanation, which is what keeps the explanation from drifting
+# away from the rule the way the prose did.
 CONSENT_REASON_EXPLANATIONS = {
     CONSENT_SKIP_SAME_USER:
         "宛先は自分自身の別セッションなので、人間の宛先確認は要りません。",
@@ -127,6 +129,27 @@ CONSENT_REASON_EXPLANATIONS = {
         "確認した証跡が要ります。無いとサーバが 403 で拒否します。"
         "プロジェクトが同じかどうかは判定に関係ありません。",
 }
+
+
+def channel_is_recognized(channel: str) -> bool:
+    """ms-160 e-6349 (独立 AX レビュー A-1): この channel 名に見覚えがあるか。
+
+    規則は channel を **完全一致** で見る (``!= "dm"`` は dm 以外すべて)。送信経路では
+    それで正しい — 打った文字列がそのまま channel になるので、綴り違いは「その名前の
+    channel へ送る」という一貫した結果になる。
+
+    だが *問い合わせ* 面では話が違う。`--channel DM` や `--channel dm-typo` は
+    ``non_dm_channel`` に落ちて「確認は要りません」と**自信のある誤答**を返し、
+    呼び手は本来 ``--recipient-confirmed`` が要る別ユーザー宛送信を無警戒で実行する。
+    エラーが出ないので気づく手段が無い。
+
+    そこで問い合わせ側だけが使う「見覚えがあるか」を別に出し、見覚えの無い名前には
+    答えに但し書きを付ける (規則そのものは変えない — 変えると送信経路の意味が動く)。
+    """
+    c = str(channel or "")
+    if not c:
+        return True  # 未指定は呼び出し側が "dm" を補う (= 既知)
+    return c == "dm" or _is_trek_scoped_channel(c)
 
 
 def explain_consent_reason(reason: str) -> str:
@@ -547,6 +570,7 @@ __all__ = [
     "SEND_DENY_RECIPIENT_MISMATCH",
     "CONSENT_REASON_EXPLANATIONS",
     "classify_send_consent",
+    "channel_is_recognized",
     "explain_consent_reason",
     "mint_confirmation_id",
     "build_recipient_confirmed_claim",

@@ -319,8 +319,16 @@ beacon bus consent-check --to <recipient_sid> [--channel <ch>] [--in-reply-to <e
 | `reason` | 判定理由の識別子 (`cross_user_new_send` / `same_user` / `reply_derived_recipient` 等) |
 | `explanation` | **なぜそうなるかの 1 行**。Step 5c の draft にそのまま載せる (AI が言い換えない — 言い換えると機構が見ている根拠と表示がずれる) |
 | `sender_identity` / `recipient_identity` | 判定に使った身元。空なら身元未解決 (下記) |
+| `identity_uncertain` | `true` なら身元が解決できておらず、サーバ側の判定と食い違いうる |
+| `channel_recognized` | `false` なら channel 名に見覚えがない (綴り違いの疑い、下記) |
+| `carve_outs_not_checked` | 判定に使わなかった軸。`required=true` でも Trek / Operation 経由なら実際には不要 |
+| `caveats` | 上記の但し書きを人が読める 1 行にしたもの。**draft にはこれを転記する** |
 
-この verb は読み取り専用で、常に exit 0 (= 質問であってゲートではない)。最終的な権限判定はサーバが持つ。
+この verb は読み取り専用で、**答えが何であれ常に exit 0**。`-check` という名前は `test` / `grep -q` のように「終了コードが真偽を表す」慣習を連想させるが、**終了コードに答えは載っていない**。`if beacon bus consent-check ...; then` のように分岐すると常に「不要」側へ倒れる。答えは必ず `--json` の `recipient_confirmation_required` から読む (終了コードは 1 = 引数不足 / 2 = 未知のフラグ のみ)。最終的な権限判定はサーバが持つ。
+
+#### channel の綴りに注意
+
+規則は channel を **完全一致** で見る。`--channel DM` や `--channel dm-typo` は「dm 以外」に落ちて `required=false` が返るので、**綴り違いは「確認不要」という誤答になる**。`channel_recognized: false` が返ったら綴りを疑う (この場合 `caveats` にもその旨が入る)。
 
 #### 判定が `required=true` のとき
 
