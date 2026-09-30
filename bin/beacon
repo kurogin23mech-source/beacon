@@ -3243,6 +3243,17 @@ print(m.group(1) if m else "")' || true)
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_status
                 ;;
+            consent-check)
+                # ms-160 e-6349: その送信に人間の宛先確認が要るかを判定に問い合わせる
+                # (読み取り専用)。判定軸は「宛先が別ユーザーか」で、プロジェクトが
+                # 同じかどうかは関係しない。/beacon-dm-send がこれを叩くことで、
+                # 手順書が散文で規則を再実装して食い違う経路を断つ。
+                BEACON_BUS_RECIPIENT="${_bus_to:-$_bus_recipient}" \
+                    BEACON_BUS_CHANNEL="$_bus_channel" \
+                    BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
+                    BEACON_JSON="$_bus_json" \
+                    python3 "$COMMANDS_PY" bus_consent_check
+                ;;
             directory|dir)
                 # ms-94 / e-2291: --all-projects は phantom flag だった名残なので
                 # 気付きの stderr を出す (subcommand=directory 経路のみ)。 default
@@ -3319,6 +3330,7 @@ Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek 
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] (--last-seen-at <iso8601> | --event <event_id>) [--project <id>]
        beacon bus status       <event_id> [--project <id>] [--json]
+       beacon bus consent-check --to <session_id> [--channel <ch>] [--in-reply-to <event_id>] [--json]
        beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <minutes>] [--project <id>] [--cwd-only] [--json]
        beacon bus budget       grant --turns <N>=1>  |  show  |  clear
        beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list

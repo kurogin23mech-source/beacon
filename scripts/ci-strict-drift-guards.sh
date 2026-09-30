@@ -37,6 +37,14 @@ echo "[ci-strict-drift-guards] Skill → CLI 境界 (ms-160 e-5981)…"
 # 2 動詞が到達不能になっていたので、再発を CI で止める。
 python3 "$ROOT/scripts/check-skill-cli-boundary.py"
 
+echo "[ci-strict-drift-guards] 宛先確認の規則 ↔ 手順書 (ms-160 e-6349)…"
+# サーバ側の規則 (dm_consent.classify_send_consent) と /beacon-dm-send の記述が
+# 食い違わないこと。以前 Skill は「same-project なら宛先確認は不要」と書いていたが
+# 規則は project を見ず「宛先が別の人間か」で判定するため、同一プロジェクトの
+# 協働者宛に手順どおり送ると 403 で弾かれた。手順書に従うほど失敗する型なので、
+# 判定理由の説明漏れと project 軸の文言の復活を CI で止める。
+python3 -m pytest "$ROOT/tests/test_dm_consent_skill_alignment_e6349.py" -q
+
 echo "[ci-strict-drift-guards] capability scope invariant (ms-134 e-4721)…"
 # Every CLI verb must classify L0..L4, and no profession-shared (L1/L2)
 # capability may reach a profession concrete (core.save_entry /

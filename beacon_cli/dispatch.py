@@ -1982,6 +1982,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_status.add_argument("--project", dest="bus_project_id", default="")
     p_bus_status.add_argument("--json", action="store_true")
 
+    # ms-160 e-6349: 送信前に「人間の宛先確認が要るか」を判定に問い合わせる。
+    # 判定軸は「宛先が別ユーザーか」で、プロジェクトが同じかは関係しない。
+    p_bus_cc = bus_sub.add_parser("consent-check", add_help=False)
+    p_bus_cc.add_argument("--to", dest="cc_to", default="")
+    p_bus_cc.add_argument("--channel", dest="cc_channel", default="")
+    p_bus_cc.add_argument("--in-reply-to", dest="cc_in_reply_to", default="")
+    p_bus_cc.add_argument("--json", action="store_true")
+
     p_bus_dir = bus_sub.add_parser("directory", aliases=["dir"], add_help=False)
     p_bus_dir.add_argument("--user", default="")
     p_bus_dir.add_argument("--machine", default="")
@@ -6000,6 +6008,18 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         if project_id:
             env["BEACON_BUS_PROJECT_ID"] = project_id
         return _run_commands_py(root, "bus_status", env)
+
+    if cmd == "consent-check":
+        if not args.cc_to:
+            print("Usage: beacon bus consent-check --to <session_id> "
+                  "[--channel <ch>] [--in-reply-to <event_id>] [--json]")
+            return 1
+        return _run_commands_py(root, "bus_consent_check", {
+            "BEACON_BUS_RECIPIENT": args.cc_to,
+            "BEACON_BUS_CHANNEL": args.cc_channel or "",
+            "BEACON_BUS_IN_REPLY_TO": args.cc_in_reply_to or "",
+            "BEACON_JSON": "1" if args.json else "",
+        })
 
     if cmd in ("directory", "dir"):
         env = {

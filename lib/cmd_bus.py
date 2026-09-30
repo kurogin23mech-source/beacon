@@ -1478,6 +1478,82 @@ def cmd_bus_ack():
         print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
 
 
+def cmd_bus_consent_check():
+    """Answer "does this send need a human recipient-confirmation?" (ms-160 e-6349).
+
+    Read-only. Exists so `/beacon-dm-send` can **ask** instead of restating the
+    rule in prose. The Skill's own table used to key on the PROJECT ("same
+    project → no confirmation"), but the server rule (dm_consent.
+    classify_send_consent) never looks at the project — it keys on whether the
+    recipient is a DIFFERENT HUMAN. A same-project DM to a colleague therefore
+    followed the手順書 and was rejected 403; following the Skill was what made
+    you fail (2026-09-09, reported by a collaborator).
+
+    Env: BEACON_BUS_RECIPIENT (--to), BEACON_BUS_CHANNEL (default dm),
+    BEACON_BUS_IN_REPLY_TO (present ⇒ reply lane), BEACON_JSON.
+
+    Exit code is always 0: this is a question, not a gate. The authority stays
+    the server; this only lets the caller see the answer *before* the round-trip.
+    """
+    import dm_consent  # inline import matches this module's lazy-import pattern
+
+    recipient = os.environ.get("BEACON_BUS_RECIPIENT", "").strip()
+    channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip() or "dm"
+    in_reply_to = os.environ.get("BEACON_BUS_IN_REPLY_TO", "").strip()
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not recipient:
+        print("Error: --to <session_id> required", file=sys.stderr)
+        sys.exit(1)
+
+    sender_email = ""
+    try:
+        _, sender_email, _ = _resolve_creator_identity()
+    except Exception:
+        sender_email = ""
+    # Reuse the send path's resolver so the identity this answer is based on is
+    # the same one the actual send will use (no second, divergent lookup).
+    recipient_email = ""
+    try:
+        _, _, recipient_email = _resolve_recipient_live(
+            recipient, channel, advise=lambda _m: None)
+    except Exception:
+        recipient_email = ""
+
+    required, reason = dm_consent.classify_send_consent(
+        sender_user_id=sender_email or "",
+        recipient_user_id=recipient_email or "",
+        channel=channel,
+        is_reply=bool(in_reply_to),
+        # Conservative on what cannot be proven cheaply here, matching
+        # cross_user_send_advisory: at worst we say "confirmation needed" when a
+        # carve-out would have skipped it (one extra confirmation, never a
+        # missed one).
+        operation_envelope=False,
+        shared_trek=False,
+    )
+    explanation = dm_consent.explain_consent_reason(reason)
+
+    if as_json:
+        print(json.dumps({
+            "recipient_confirmation_required": required,
+            "reason": reason,
+            "explanation": explanation,
+            "channel": channel,
+            "is_reply": bool(in_reply_to),
+            "sender_identity": sender_email,
+            "recipient_identity": recipient_email,
+        }, ensure_ascii=False))
+        return
+    print(("必要: --recipient-confirmed を付ける" if required
+           else "不要: --recipient-confirmed は付けない")
+          + f"  [{reason}]")
+    print(f"  {explanation}")
+    if not (sender_email and recipient_email):
+        print("  ※ 身元が解決できていないため、サーバ側の判定と食い違う可能性が"
+              "あります (送信時にサーバが最終判定します)。")
+
+
 def cmd_bus_status():
     """Render the 3-stage receipt view for a single bus event (ms-54 / e-1348).
 

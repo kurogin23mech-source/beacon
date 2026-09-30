@@ -91,6 +91,55 @@ CONSENT_SKIP_SHARED_TREK = "shared_trek_member"
 CONSENT_REQUIRED_CROSS_USER = "cross_user_new_send"
 
 
+# ms-160 e-6349 — why this send does (or does not) need a human confirmation,
+# in one line the reader can act on.
+#
+# The bug this closes: `/beacon-dm-send` restated the rule as prose keyed on
+# **project** ("same project → no confirmation needed"), but the rule above never
+# looks at the project — it keys on whether the RECIPIENT IS A DIFFERENT HUMAN.
+# A same-project send to a colleague therefore followed the手順書 and was
+# rejected 403 by the server. Following the Skill made you fail, and neither the
+# AI nor the human could see why.
+#
+# So the explanation lives HERE, next to the rule it explains, and the Skill is
+# told to ask (`beacon bus consent-check`) rather than restate. Every reason
+# constant must appear in this map — tests/test_dm_consent_reason_coverage_e6349
+# fails if a new CONSENT_* lands without an explanation, which is what keeps the
+# explanation from drifting away from the rule the way the prose did.
+CONSENT_REASON_EXPLANATIONS = {
+    CONSENT_SKIP_SAME_USER:
+        "宛先は自分自身の別セッションなので、人間の宛先確認は要りません。",
+    CONSENT_SKIP_UNRESOLVED:
+        "送信元か宛先の身元が解決できず、別人と断定できないので確認は求めません "
+        "(別プロジェクトの自分宛を塞いでしまわないため)。",
+    CONSENT_SKIP_TREK_SCOPE:
+        "Trek (= 事前承認済みの作業空間) の channel なので、確認は要りません。",
+    CONSENT_SKIP_NON_DM:
+        "dm 以外の channel は特定の相手に向けた送信ではないので、確認は要りません。",
+    CONSENT_SKIP_OPERATION:
+        "Operation の事前承認 (envelope) で送るので、確認は要りません。",
+    CONSENT_SKIP_REPLY:
+        "返信は宛先を親メッセージから導くので別人に飛ばず、確認は要りません。",
+    CONSENT_SKIP_SHARED_TREK:
+        "相手と同じ Trek に参加しており、双方が AI 間のやり取りに同意済みです。",
+    CONSENT_REQUIRED_CROSS_USER:
+        "宛先が自分とは別のユーザー (別の人間) への新規 DM なので、人間が宛先を "
+        "確認した証跡が要ります。無いとサーバが 403 で拒否します。"
+        "プロジェクトが同じかどうかは判定に関係ありません。",
+}
+
+
+def explain_consent_reason(reason: str) -> str:
+    """Return the one-line explanation for a ``CONSENT_*`` reason.
+
+    Unknown reasons return a self-describing fallback rather than raising: this
+    is called on a display path, and a送信 must never fail because a new reason
+    has no prose yet (the coverage test is what catches that, at build time).
+    """
+    return CONSENT_REASON_EXPLANATIONS.get(
+        reason, f"判定理由 '{reason}' の説明が未登録です (lib/dm_consent.py)。")
+
+
 # ---------------------------------------------------------------------------
 # Discrimination: does this send need a human recipient-confirmation?
 # ---------------------------------------------------------------------------
@@ -496,7 +545,9 @@ __all__ = [
     "SEND_ALLOW_CONFIRMED",
     "SEND_DENY_MISSING_CONFIRMATION",
     "SEND_DENY_RECIPIENT_MISMATCH",
+    "CONSENT_REASON_EXPLANATIONS",
     "classify_send_consent",
+    "explain_consent_reason",
     "mint_confirmation_id",
     "build_recipient_confirmed_claim",
     "parse_recipient_confirmed_claim",

@@ -102,6 +102,8 @@ VERB_LEDGER = {
     "bus_listen": {"cls": "C", "secondary": [], "note": ""},
     "bus_receive": {"cls": "C", "secondary": [], "note": ""},
     "bus_send": {"cls": "C", "secondary": [], "note": ""},
+    "bus_consent_check": {"cls": "Q", "secondary": [], "note": "ms-160 e-6349: 宛先確認の要否を判定に問い合わせる。読み取り専用で常に exit 0 "
+     "(質問であってゲートではない)。権限判定の真値源はサーバ側。"},
     "bus_status": {"cls": "Q", "secondary": [], "note": ""},
 
     # --- channel ---
