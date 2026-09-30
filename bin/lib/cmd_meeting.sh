@@ -41,23 +41,31 @@ cmd_meeting_schedule() {
 
 cmd_meeting_reschedule() {
     ensure_project
-    local mtg_id="" at="" end="" event_id="" set_transition=""
+    local mtg_id="" at="" end="" event_id="" cal_ns="" cal_acct="" set_transition=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --at)             at="${2:-}"; shift 2 ;;
             --end)            end="${2:-}"; shift 2 ;;
             --event-id)       event_id="${2:-}"; shift 2 ;;
+            # ms-160 e-5981: python 側 cmd_meeting_reschedule は BEACON_MTG_CAL_NS /
+            # BEACON_MTG_CAL_ACCT を読むのに bash 側に旗が無く、CLI 経由では
+            # カレンダーの割り当てを表現できなかった。schedule 側と非対称だった
+            # ので、Skill は CLI を飛ばして commands.py を直叩きしていた。
+            --calendar-ns)     cal_ns="${2:-}"; shift 2 ;;
+            --calendar-account) cal_acct="${2:-}"; shift 2 ;;
             --set-transition) set_transition="1"; shift ;;
-            -?*) _guard_positional "$1" "Usage: beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]" ;;
+            -?*) _guard_positional "$1" "Usage: beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]" ;;
             *)   mtg_id="$1"; shift ;;
         esac
     done
     if [ -z "$mtg_id" ] || [ -z "$at" ]; then
-        echo "Usage: beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]"
+        echo "Usage: beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]"
         exit 1
     fi
     BEACON_MTG_ID="$mtg_id" BEACON_MTG_AT="$at" BEACON_MTG_END="$end" \
-        BEACON_MTG_EVENT_ID="$event_id" BEACON_MTG_SET_TRANSITION="$set_transition" \
+        BEACON_MTG_EVENT_ID="$event_id" \
+        BEACON_MTG_CAL_NS="$cal_ns" BEACON_MTG_CAL_ACCT="$cal_acct" \
+        BEACON_MTG_SET_TRANSITION="$set_transition" \
         python3 "$COMMANDS_PY" meeting_reschedule
 }
 

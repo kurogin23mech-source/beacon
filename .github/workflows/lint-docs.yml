@@ -11,6 +11,10 @@ name: Lint docs (ms-10 e-722)
 #   3. scripts/check-install-md.py      — INSTALL.md bash blocks must not
 #                                          contain deprecated flags (e.g.
 #                                          gcloud `--build-arg`).
+#   4. scripts/check-skill-cli-boundary.py — Skills must reach a capability
+#                                          through `beacon <noun> <verb>`, not
+#                                          by invoking lib/commands.py directly
+#                                          (ms-160 e-5981).
 #
 # Drift here means: a feature commit landed but the matching doc / Skill
 # surface wasn't updated. Strict mode (exit 1) blocks the PR.
@@ -27,6 +31,8 @@ on:
       - 'README.md'
       - 'INSTALL.md'
       - 'skills/**'
+      - 'shared/skills/**'
+      - 'plugins/beacon/skills/**'
       - 'scripts/check-*.py'
       - 'scripts/ci-strict-drift-guards.sh'
       - '.github/workflows/lint-docs.yml'

@@ -28,7 +28,7 @@ ROOT=$(beacon-find-root) && \
   && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
-`NOT_SALES` なら終了。内部コマンドは `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
+`NOT_SALES` なら終了。Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。
 
 ## Step 1: その日のやり取りを集める
 
@@ -67,14 +67,12 @@ beacon account list --json
 Communication の記録（対象は商談 opp- / 顧客 acc- / 活動 act- / ナーチャリング nrt-）:
 
 ```bash
-BEACON_COMM_TARGET="<満たした活動の act-/nrt-id を優先、無ければ opp-/acc-id>" \
-  BEACON_COMM_SUMMARY="<やり取りの1行要約>" \
-  BEACON_COMM_DIRECTION="<inbound: 相手発 / outbound: 自分発>" \
-  BEACON_COMM_CHANNEL="<email / slack>" \
-  BEACON_COMM_BODY="<本文の骨子を数行で (任意, 用件が厚いときだけ)>" \
-  BEACON_COMM_SOURCE_REF="<message-id / thread-id>" BEACON_COMM_SOURCE_URL="<permalink>" \
-  BEACON_COMM_OCCURRED="<やり取りの時刻>" \
-  python3 "$(beacon _lib-path)/commands.py" communication_add
+beacon communication add "<満たした活動の act-/nrt-id を優先、無ければ opp-/acc-id>" "<やり取りの1行要約>" \
+  --direction "<inbound: 相手発 / outbound: 自分発>" \
+  --channel "<email / slack>" \
+  --body "<本文の骨子を数行で (任意, 用件が厚いときだけ)>" \
+  --source-ref "<message-id / thread-id>" --source-url "<permalink>" \
+  --occurred "<やり取りの時刻>"
 ```
 
 証跡は **満たした活動 (act-/nrt-) に紐づけて記録する**のが既定 (ms-176 e-6604)。商談 (opp-) /

@@ -28,14 +28,14 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && beacon account list --json >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
-以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`opportunity_*`) は
-ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
+以降、`$ROOT` は `beacon-find-root` の出力。
+Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。
 
 > 補足: 手元ファイルを Google ドライブに保管する流れは `creatron-invoice` Skill
 > でも使っている (請求書 PDF を Drive に上げてリンクを返す)。同じ保管パターンを
@@ -101,8 +101,7 @@ mcp__google-drive__shareFile 等で共有リンク / webViewLink を取得する
 これを飛ばすと後で資料の在り処を辿れなくなるため必須:
 
 ```bash
-BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[資料] <ファイル名> → <Driveリンク>" \
-  python3 "$(beacon _lib-path)/commands.py" opportunity_activity
+beacon opportunity activity "$OPP" "[資料] <ファイル名> → <Driveリンク>"
 ```
 
 ファイルが複数なら、それぞれ (または 1 行にまとめて) 記録する。

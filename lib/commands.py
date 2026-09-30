@@ -6486,12 +6486,35 @@ def _help_registry():
         {"command": "beacon communication list <target-id>", "flags": ["--json"], "description": "List communications (証跡) oldest→newest + derived ball; act-/nrt- lists only that work item's"},
         {"command": "beacon communication cancel <comm-id>", "flags": ["--reason <text>"], "description": "Cancel (取消) a mis-recorded communication — soft (status=cancelled + reason, kept struck-through); excluded from ball/watch derivation but shown in the log"},
         {"command": "beacon communication retarget <comm-id> <new-target>", "flags": [], "description": "Re-file a communication onto the correct target/work item (opp-/acc-/act-/nrt-); moves it — the evidence itself (summary/source/direction) is unchanged"},
+        # ms-160 e-5981: 送信 identity は commands.py にしか無く、営業 Skill が
+        # 直叩きしていた。CLI に載せた以上ここにも載せる。動詞は `sales identity`
+        # に集約 (当初の `send-account` は、既存の `beacon account` が顧客なので
+        # 「account」が相手と自分の両方を指してしまっていた — 独立 AX レビュー A-3)。
+        {"command": "beacon sales identity add <label>", "flags": ["--email <address>"], "description": "送信元メールアカウントを台帳に登録・更新する (label は冪等キー)"},
+        {"command": "beacon sales identity list", "flags": ["--json"], "description": "送信元アカウント台帳の一覧 (既定の送信元に ★ が付く)"},
+        {"command": "beacon sales identity remove <label>", "flags": [], "description": "送信元アカウントを台帳から削除する"},
+        {"command": "beacon sales identity route <label>", "flags": ["--service <gmail|calendar|drive>", "--namespace <ns>", "--alias <account>"], "description": "そのアカウントで各サービスに使う MCP ツール群 (namespace) と account 引数を決める"},
+        {"command": "beacon sales identity resolve [<label>]", "flags": ["--service <gmail|calendar|drive>"], "description": "実際に使う MCP ルートを JSON で返す (未登録なら exit 1 で送信を止める)。label 省略時は既定の送信元"},
+        {"command": "beacon sales identity signature <label>", "flags": ["--signature <text>", "--clear"], "description": "メール署名を設定・削除する。消すには --clear が必須 (空文字では消えない)"},
+        {"command": "beacon sales identity show", "flags": ["--json"], "description": "既定の送信元を表示する"},
+        {"command": "beacon sales identity set <label|email>", "flags": [], "description": "このプロジェクトの既定の送信元を決める"},
+        {"command": "beacon sales identity check", "flags": ["--from <address>", "--label <label>"], "description": "送信しようとしている from が台帳と一致するか照合する (一致 exit 0 / 不一致 exit 1 で送信を止める)"},
+        {"command": "beacon sales gmail-permalink", "flags": ["--from <address>", "--msgid <rfc822 Message-ID>"], "description": "送信済みメールの Gmail 恒久リンクを組み立てる (thread-id ではなく rfc822 Message-ID を渡す)"},
+        {"command": "beacon sales reply-watch ensure", "flags": [], "description": "返信ウォッチャーを毎時回す Operation を用意する (冪等)"},
+        # 顧客 (Account) の設定なので送信元台帳ではなく account 配下に置く。
+        {"command": "beacon account transcript-source get <acc-id>", "flags": [], "description": "顧客ごとの議事録取得元の宣言を読む (未設定なら null)"},
+        {"command": "beacon account transcript-source set <acc-id>", "flags": ["--type <meet_calendar|drive_folder|external|manual>", "--folder-id <id>", "--naming <pattern>", "--tool <name>", "--clear"], "description": "顧客ごとの議事録取得元を宣言する。消すには --clear が必須"},
         {"command": "beacon meeting schedule <opp-id>", "flags": ["--at <datetime>", "--end <datetime>", "--location <text>", "--event-id <id>", "--calendar-ns <ns>", "--calendar-account <acct>", "--set-transition"], "description": "Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 to the meeting date"},
-        {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日"},
+        {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--calendar-ns <ns>", "--calendar-account <acct>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日. カレンダー旗は schedule と同義 (ms-160 e-5981 で非対称を解消)"},
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
         {"command": "beacon meeting list [<opp-id>]", "flags": ["--json"], "description": "List meetings; <opp-id> optional — omit to list across all opportunities (e-3909)"},
         {"command": "beacon meeting list-ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補; e-3909 canonical read verb, alias: meeting ended)"},
+        # ms-160 e-5981: watch_* は commands.py にしか無く Skill が直叩きしていた。
+        # CLI に載せた以上ここにも載せる (= help が唯一の真値源; ms-120 e-3897)。
+        {"command": "beacon watch set <work-item-id>", "flags": ["--channel <ch>", "--thread <ref>", "--cadence <minutes>"], "description": "Arm a reply watch on a work item (返信待ちスレッドの張り込み; 既定 cadence 60 分)"},
+        {"command": "beacon watch list", "flags": ["--awaiting", "--json"], "description": "List armed reply watches; --awaiting narrows to threads where the ball is with the counterpart"},
+        {"command": "beacon watch clear <work-item-id>", "flags": [], "description": "Disarm the reply watch on a work item"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity / prospect vocabulary)"},
         {"command": "beacon phase add <account|opportunity|prospect> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
         {"command": "beacon phase rename <account|opportunity|prospect> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
@@ -10553,9 +10576,12 @@ def cmd_meeting_ended():
               f"event={r['calendar_event_id'] or '—'}")
 
 
-# ms-107 e-3437 — watch (返信待ち見張り) は内部コマンド。送信 Skill が arm し、
-# 返信ウォッチャー (E) が list/clear する。user 向け CLI 動詞ではない
-# (sales_identity_* と同じ内部専用、bin/beacon/README/dispatch には出さない)。
+# ms-107 e-3437 / ms-160 e-5981 — watch (返信待ち見張り) は送信 Skill が arm し、
+# 返信ウォッチャー (E) が list/clear する。e-5981 で `beacon watch set|list|clear`
+# として CLI 動詞になった (bin/lib/cmd_watch.sh + beacon_cli/dispatch.py + help
+# レジストリ + README)。以前ここには「user 向け CLI 動詞ではない」と書かれていたが、
+# それが Skill 側の commands.py 直叩きを正当化し、help から発見できない・Windows から
+# 到達できない状態を生んでいた。
 
 def cmd_watch_set():
     import sales_entities

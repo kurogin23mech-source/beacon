@@ -34,14 +34,14 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && beacon account list --json >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
-以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`opportunity_activity`) は
-ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
+以降、`$ROOT` は `beacon-find-root` の出力。
+Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。
 
 ## Step 1: 対象商談の特定
 
@@ -67,17 +67,16 @@ beacon account list
 台帳を通さず namespace を手書きしない (= 取り違え防止)。まず台帳を確認:
 
 ```bash
-BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
+beacon sales identity list --json
 ```
 
 - **台帳が空 / calendar route 未設定** の場合、ユーザーに「どの Google アカウントの
   カレンダーで調整しますか？」と確認して登録する (label が既にあれば route だけ足す):
 
 ```bash
-BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$(beacon _lib-path)/commands.py" sales_account_add
-BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="calendar" \
-  BEACON_SEND_NAMESPACE="mcp__google-calendar" BEACON_SEND_ALIAS="work" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_route
+beacon sales identity add "会社" --email "<アドレス>"
+beacon sales identity route "会社" --service calendar \
+  --namespace "mcp__google-calendar" --alias "work"
 ```
 
 - 既定 (default label) でよければ `$LABEL` は空のまま。この 1 件だけ別アカウントの
@@ -86,8 +85,7 @@ BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="calendar" \
 calendar の route を台帳から解決する。**これが使うカレンダーの唯一の決定経路**:
 
 ```bash
-BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
+beacon sales identity resolve "$LABEL" --service calendar
 echo "RESOLVE_EXIT=$?"
 ```
 
@@ -171,7 +169,7 @@ e-3694)。登録するのは **自分のカレンダー** への予定 (相手�
    Meeting を引く:
 
    ```bash
-   BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list
+   beacon meeting list "$OPP" --json
    ```
 
    出力の meetings に `status == "unscheduled"` の `mtg-N` があるか確認する。
@@ -180,20 +178,16 @@ e-3694)。登録するのは **自分のカレンダー** への予定 (相手�
      しない = 重複が構造的に不可能):
 
      ```bash
-     BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
-       BEACON_MTG_EVENT_ID="$EVENT_ID" BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
-       BEACON_MTG_SET_TRANSITION=1 \
-       python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
+     beacon meeting reschedule "$MTG_ID" --at "$WHEN_START" --end "$WHEN_END" \
+       --event-id "$EVENT_ID" --calendar-ns "$CALNS" --calendar-account "$CALACCT" --set-transition
      ```
 
    - **予定未定 mtg- が無い (seed されていない商談) → 従来どおり新規に予約**:
 
      ```bash
-     BEACON_MTG_OPP="$OPP" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
-       BEACON_MTG_LOCATION="$LOC" BEACON_MTG_EVENT_ID="$EVENT_ID" \
-       BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
-       BEACON_MTG_SET_TRANSITION=1 \
-       python3 "$(beacon _lib-path)/commands.py" meeting_schedule
+     beacon meeting schedule "$OPP" --at "$WHEN_START" --end "$WHEN_END" \
+       --location "$LOC" --event-id "$EVENT_ID" \
+       --calendar-ns "$CALNS" --calendar-account "$CALACCT" --set-transition
      ```
 
    確定した `mtg-N` が Beacon 識別 ID。埋め込む **識別 ID タグ** は
@@ -217,13 +211,11 @@ e-3694)。登録するのは **自分のカレンダー** への予定 (相手�
 Beacon 側は:
 
 ```bash
-BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHEN_END" \
-  BEACON_MTG_SET_TRANSITION=1 \
-  python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
+beacon meeting reschedule "$MTG_ID" --at "$NEW_WHEN_START" --end "$NEW_WHEN_END" --set-transition
 ```
 
 これで遷移日もカレンダーも新しい日時に揃う (AC: 予定変更時も両者が追従)。対象の
-`mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list`
+`mtg-N` は `beacon meeting list "$OPP" --json`
 で引ける。
 
 ## Step 7: 別途の「アポ確定」活動は作らない (e-3548 / e-3536)

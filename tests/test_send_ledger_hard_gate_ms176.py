@@ -48,7 +48,12 @@ def test_empty_ledger_blocks_even_when_the_legacy_pin_matches():
     ok, msg = se.check_send_from(data, FROM)
     assert ok is False
     assert "台帳が空" in msg
-    assert "sales_account_add" in msg          # 直し方を必ず示す
+    # 直し方を必ず示す。ms-160 e-5981 で登録は CLI 動詞になったので、内部 verb 名
+    # (sales_account_add) ではなく **読み手がそのまま叩ける形** を出すことを固定する
+    # — 内部 verb 名を案内すると、行き詰まった瞬間の AI に CLI 境界の飛び越しを
+    # 教えることになる (独立 AX レビュー A-1)。
+    assert "beacon sales identity add" in msg
+    assert "commands.py" not in msg
 
 
 def test_registering_the_account_lets_the_send_through():
@@ -96,7 +101,10 @@ def test_gap_warning_only_for_outward_sends(direction, channel, expected):
     band = se.send_ledger_gap_warning(data, direction=direction, channel=channel)
     assert bool(band) is expected
     if expected:
-        assert "台帳が空" in band and "sales_account_add" in band
+        # 上と同じ契約: 直し方は叩ける CLI の形で出し、内部実装の直叩きは案内しない。
+        assert "台帳が空" in band
+        assert "beacon sales identity add" in band
+        assert "commands.py" not in band
 
 
 def test_gap_warning_is_silent_once_the_ledger_exists():

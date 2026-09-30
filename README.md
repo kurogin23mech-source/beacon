@@ -273,6 +273,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon account rename <acc-id> <new-name>` | Rename an account / 取引先名を変更 |
 | `beacon account assign <acc-id> <user>` | Set the assignee (担当ユーザー) on an account / 取引先の担当ユーザーを設定 |
 | `beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Add a nurturing task on an account (継続関係の業務) / 取引先にナーチャリング業務を追加 |
+| `beacon account transcript-source get <acc-id>` | Read the per-customer 議事録取得元 declaration / 顧客ごとの議事録取得元を読む |
+| `beacon account transcript-source set <acc-id> (--type <meet_calendar\|drive_folder\|external\|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] \| --clear)` | Declare where a customer's meeting notes come from / 顧客ごとの議事録取得元を宣言（消すには `--clear` 必須） |
 | `beacon disclose <resource-id> --to-project <id>` | Disclose any Target (account/opportunity/…) to another project so its members can reference it (cross-project 開示; generic) / 任意のターゲット（取引先・商談等）を別プロジェクトに開示 |
 | `beacon undisclose <resource-id> --from-project <id>` | Revoke a Target's disclosure to a project (剥奪即時) / ターゲットの開示を取り消し（即時） |
 | `beacon account delete <acc-id> [--force]` | Delete an account (--force orphans referencing opportunities) / 取引先を削除（--force で参照中の商談を孤立化） |
@@ -309,12 +311,26 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon communication list <opp-\|acc-\|act-\|nrt-id> [--json]` | List communications (証跡) + derived ball; act-/nrt- lists only that work item's / やり取りの証跡一覧とボール導出 |
 | `beacon communication cancel <comm-id> [--reason <text>]` | Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch / 誤記録の証跡を取消（物理削除でなく status=cancelled、履歴に残す） |
 | `beacon communication retarget <comm-id> <new opp-\|acc-\|act-\|nrt->` | Re-file a communication filed under the wrong work item (moves it; the evidence is unchanged) / 誤った活動に付けた証跡を正しい活動へ付け替える |
+| `beacon sales identity add <label> --email <address>` | Register/update a send-from mail account in the ledger / 送信元メールアカウントを台帳に登録・更新（label が冪等キー） |
+| `beacon sales identity list [--json]` | List the send-account ledger (★ marks the default identity) / 送信元台帳の一覧（★ が既定） |
+| `beacon sales identity remove <label>` | Remove a send account / 送信元アカウントを削除 |
+| `beacon sales identity route <label> --service <gmail\|calendar\|drive> --namespace <ns> [--alias <account>]` | Pin which MCP toolset + account this send account uses per service / サービスごとに使う MCP ツール群と account を決める |
+| `beacon sales identity resolve [<label>] --service <gmail\|calendar\|drive>` | Resolve the concrete MCP route as JSON; exit 1 blocks the send when unregistered / 実際に使う MCP ルートを返す（未登録なら送信を止める） |
+| `beacon sales identity signature <label> (--signature <text> \| --clear)` | Set/clear the mail signature; `--clear` is required to delete / メール署名の設定・削除（消すには `--clear` 必須） |
+| `beacon sales identity show [--json]` | Show the default send identity / 既定の送信 identity を表示 |
+| `beacon sales identity set <label\|email>` | Pin the project's default send identity / 既定の送信 identity を決める |
+| `beacon sales identity check --from <address> [--label <label>]` | Verify a proposed `from` against the ledger (exit 1 blocks the send) / 送信元の照合（不一致なら送信を止める） |
+| `beacon sales gmail-permalink --from <address> --msgid <rfc822 Message-ID>` | Build the canonical Gmail permalink for a sent mail / 送信済みメールの Gmail 恒久リンクを組み立てる |
+| `beacon sales reply-watch ensure` | Ensure the hourly reply-watcher Operation exists (idempotent) / 返信ウォッチャーを毎時回す Operation を用意（冪等） |
 | `beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Book a meeting (面談) with a Beacon 識別 ID; `--set-transition` moves the 遷移日 to the meeting date / 面談を予約し識別IDを付与、遷移日も同時更新 |
-| `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従 |
+| `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従（カレンダー旗は schedule と同義） |
 | `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
 | `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
 | `beacon meeting list [<opp-id>] [--json]` | List meetings; opp-id optional — omit for all opportunities / 面談一覧 (opp-id 省略で全商談横断, e-3909) |
 | `beacon meeting list-ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 (e-3909 正式名, alias: meeting ended) |
+| `beacon watch set <work-item-id> --channel <ch> [--thread <ref>] [--cadence <min>]` | Arm a reply watch on a work item (default cadence 60m) / 返信待ちスレッドの張り込みを開始（既定 60 分間隔） |
+| `beacon watch list [--awaiting] [--json]` | List armed reply watches; `--awaiting` = ball is with the counterpart / 張り込み中の一覧（`--awaiting` は相手ボールのみ） |
+| `beacon watch clear <work-item-id>` | Disarm the reply watch on a work item / 張り込みを解除 |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 | `beacon phase add <account\|opportunity\|prospect> <name> [--index N]` | Add or insert a funnel stage / フェーズ段を追加・挿入 |
 | `beacon phase rename <account\|opportunity\|prospect> <old> <new>` | Rename a funnel stage (references follow) / フェーズ段を改名（参照も追随） |

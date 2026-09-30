@@ -39,15 +39,15 @@ ROOT=$(beacon-find-root) && \
   && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
-`NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。内部コマンドは
-`python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ (watch は user 向け CLI 動詞ではない)。
+`NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。
+Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。 張り込みは `beacon watch set|list|clear`。
 
 ## Step 1: 確認対象スレッドの取得
 
 「watch あり かつ ball=相手 (= まだ返信待ち)」のスレッドだけを取る:
 
 ```bash
-BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" watch_list
+beacon watch list --awaiting --json
 ```
 
 `watches[]` が空なら「返信待ちのスレッドはありません」と記録して終了。各要素は
@@ -62,7 +62,7 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
 ```bash
 # 施策一覧 → 各施策のリスト doc-id → 返信待ち行
 beacon acquisition attack-lists <acq-id> --json
-BEACON_DOC_ID=<doc-id> BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" acquisition_attack_list_awaiting_reply
+beacon acquisition attack-list-awaiting-reply <doc-id> --json
 ```
 
 `awaiting[]` の各要素は `acc_id` / `email` / `message_id` (打診時に送ったメールの id) を
@@ -94,13 +94,10 @@ BEACON_DOC_ID=<doc-id> BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" a
 自然に集約される。
 
 ```bash
-BEACON_COMM_TARGET="<work_item_id>" \
-  BEACON_COMM_SUMMARY="<相手の返信の1行要約>" \
-  BEACON_COMM_DIRECTION="inbound" \
-  BEACON_COMM_CHANNEL="<channel>" \
-  BEACON_COMM_SOURCE_REF="<message-id>" BEACON_COMM_SOURCE_URL="<permalink>" \
-  BEACON_COMM_OCCURRED="<返信の時刻>" \
-  python3 "$(beacon _lib-path)/commands.py" communication_add
+beacon communication add "<work_item_id>" "<相手の返信の1行要約>" \
+  --direction inbound --channel "<channel>" \
+  --source-ref "<message-id>" --source-url "<permalink>" \
+  --occurred "<返信の時刻>"
 ```
 
 ball が自分に戻ると、そのスレッドは次回 Step 1 の「返信待ち」から外れる (= 二重に拾わ
@@ -122,7 +119,7 @@ beacon acquisition attack-list-reply-record <doc-id> <acc-id> \
 終える:
 
 ```bash
-BEACON_WATCH_TARGET="<work_item_id>" python3 "$(beacon _lib-path)/commands.py" watch_clear
+beacon watch clear "<work_item_id>"
 ```
 
 完結かどうか機械で決めきれない時は watch を残し、報告で人に委ねる。

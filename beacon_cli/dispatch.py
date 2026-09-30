@@ -408,6 +408,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_account_contact.add_argument("--role", default="")
     p_account_contact.add_argument("--email", default="")
 
+    # ms-160 e-5981: 顧客ごとの議事録取得元。中身は data["accounts"] = 顧客の設定
+    # なので、送信元台帳 (beacon sales identity) ではなくここに置く。
+    p_acc_ts = account_sub.add_parser("transcript-source", add_help=False)
+    ts_sub = p_acc_ts.add_subparsers(dest="ts_cmd", metavar="<get|set>")
+    p_ts_get = ts_sub.add_parser("get", add_help=False)
+    p_ts_get.add_argument("ts_acc_id", nargs="?", default="")
+    p_ts_set = ts_sub.add_parser("set", add_help=False)
+    p_ts_set.add_argument("ts_acc_id", nargs="?", default="")
+    p_ts_set.add_argument("--type", dest="ts_type", default="")
+    p_ts_set.add_argument("--folder-id", dest="folder_id", default="")
+    p_ts_set.add_argument("--naming", default="")
+    p_ts_set.add_argument("--tool", default="")
+    p_ts_set.add_argument("--clear", action="store_true")
+
     p_account_phase = account_sub.add_parser("phase", add_help=False)
     p_account_phase.add_argument("acc_id", nargs="?", default="")
     p_account_phase.add_argument("phase", nargs="?", default="")
@@ -479,6 +493,62 @@ def build_parser() -> argparse.ArgumentParser:
     p_sales_target.add_argument("member", nargs="?", default="")
     p_sales_target.add_argument("amount", nargs="?", default="")
     p_sales_target.add_argument("--json", action="store_true")
+
+    # ms-160 e-5981: 送信元アカウント / 送信 identity の Windows/pipx 経路。
+    # bash 側 bin/lib/cmd_sales.sh と対。これが無いと Windows は
+    # `argparse invalid choice` で弾かれ、送信元台帳に到達する手段が無い。
+    # 余分な位置引数を argparse に弾かせるため、サブ動詞ごとに専用パーサを持つ
+    # (repo の支配的パターン)。1 つのフラットなパーサに位置引数を共有させると、
+    # 綴り間違いや引用符の閉じ忘れで生まれた余分なトークンが黙って捨てられ、
+    # 誤った値で成功したことになる (独立 AX レビュー A-2 high)。
+    #
+    # 動詞は `sales identity` に集約 (A-3, user 判断の rename)。当初の
+    # `send-account` は、既存の `beacon account` が顧客なので「account」が
+    # 相手と自分の両方を指してしまっていた。既に出荷済の `identity check` と
+    # 同じ概念なのでそこへ寄せる。
+    p_sid = sales_sub.add_parser("identity", add_help=False)
+    p_sid.add_argument("--help", "-h", action="store_true", dest="sid_help")
+    sid_sub = p_sid.add_subparsers(dest="id_cmd", metavar="<subcmd>")
+
+    p_sid_add = sid_sub.add_parser("add", add_help=False)
+    p_sid_add.add_argument("label", nargs="?", default="")
+    p_sid_add.add_argument("--email", default="")
+
+    p_sid_list = sid_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_sid_list.add_argument("--json", action="store_true")
+
+    p_sid_rm = sid_sub.add_parser("remove", aliases=["rm"], add_help=False)
+    p_sid_rm.add_argument("label", nargs="?", default="")
+
+    p_sid_route = sid_sub.add_parser("route", add_help=False)
+    p_sid_route.add_argument("label", nargs="?", default="")
+    p_sid_route.add_argument("--service", default="")
+    p_sid_route.add_argument("--namespace", default="")
+    p_sid_route.add_argument("--alias", dest="alias_val", default="")
+
+    p_sid_resolve = sid_sub.add_parser("resolve", add_help=False)
+    p_sid_resolve.add_argument("label", nargs="?", default="")
+    p_sid_resolve.add_argument("--service", default="")
+
+    p_sid_sig = sid_sub.add_parser("signature", add_help=False)
+    p_sid_sig.add_argument("label", nargs="?", default="")
+    p_sid_sig.add_argument("--signature", default="")
+    p_sid_sig.add_argument("--clear", action="store_true")
+
+    p_sid_show = sid_sub.add_parser("show", add_help=False)
+    p_sid_show.add_argument("--json", action="store_true")
+    p_sid_set = sid_sub.add_parser("set", add_help=False)
+    p_sid_set.add_argument("identity", nargs="?", default="")
+    p_sid_check = sid_sub.add_parser("check", add_help=False)
+    p_sid_check.add_argument("--from", dest="from_addr", default="")
+    p_sid_check.add_argument("--label", default="")
+
+    p_sgp = sales_sub.add_parser("gmail-permalink", add_help=False)
+    p_sgp.add_argument("--from", dest="from_addr", default="")
+    p_sgp.add_argument("--msgid", "--rfc822-msgid", dest="msgid", default="")
+
+    p_srw = sales_sub.add_parser("reply-watch", add_help=False)
+    p_srw.add_argument("rw_cmd", nargs="?", default="")
 
     # ---- acquisition (ms-115: 顧客獲得ターゲット, profession=sales) ----
     p_acq = sub.add_parser(
@@ -740,6 +810,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_mtg_resched.add_argument("--at", default="")
     p_mtg_resched.add_argument("--end", default="")
     p_mtg_resched.add_argument("--event-id", dest="event_id", default="")
+    # ms-160 e-5981: bash と同じく schedule だけが持っていたカレンダー旗を
+    # reschedule にも揃える (python 側 verb は元から両方を読んでいた)。
+    p_mtg_resched.add_argument("--calendar-ns", dest="calendar_ns", default="")
+    p_mtg_resched.add_argument("--calendar-account", dest="calendar_account", default="")
     p_mtg_resched.add_argument("--set-transition", dest="set_transition", action="store_true")
 
     p_mtg_end = mtg_sub.add_parser("end", add_help=False)
@@ -793,6 +867,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_phase_remove.add_argument("funnel", nargs="?", default="")
     p_phase_remove.add_argument("name", nargs="?", default="")
+
+    # ---- watch (ms-160 e-5981: 返信待ちスレッドの張り込み) ----
+    # bash 側 bin/lib/cmd_watch.sh と対の Windows/pipx 経路。これが無いと
+    # Windows は `argparse invalid choice: 'watch'` で弾かれ、watch_* に
+    # 到達する手段が一切なくなる (ms-44 e-1171 と同型のドリフト)。
+    p_watch = sub.add_parser(
+        "watch", help="Arm/inspect reply watches on work items", add_help=False,
+    )
+    p_watch.add_argument("--help", "-h", action="store_true", dest="show_help")
+    watch_sub = p_watch.add_subparsers(dest="watch_cmd", metavar="<subcmd>")
+
+    p_watch_set = watch_sub.add_parser("set", add_help=False)
+    p_watch_set.add_argument("wi_id", nargs="?", default="")
+    p_watch_set.add_argument("--channel", default="")
+    p_watch_set.add_argument("--thread", default="")
+    p_watch_set.add_argument("--cadence", default="")
+    p_watch_list = watch_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_watch_list.add_argument("--json", action="store_true")
+    p_watch_list.add_argument("--awaiting", action="store_true")
+    p_watch_clear = watch_sub.add_parser("clear", add_help=False)
+    p_watch_clear.add_argument("wi_id", nargs="?", default="")
 
     # ---- sync ----
     p_sync = sub.add_parser("sync", help="Auto-sync recent git commits", add_help=False)
@@ -2414,6 +2509,30 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
             "BEACON_PHASE_NOTE": args.note or "",
         }
         return _run_commands_py(root, "account_phase", env)
+    if cmd == "transcript-source":
+        ts = args.ts_cmd
+        if ts == "get":
+            if not args.ts_acc_id:
+                print("Usage: beacon account transcript-source get <acc-id>")
+                return 1
+            return _run_commands_py(root, "sales_account_transcript_source_get",
+                                    {"BEACON_ACCOUNT_ID": args.ts_acc_id})
+        if ts == "set":
+            if not args.ts_acc_id:
+                print("Usage: beacon account transcript-source set <acc-id> "
+                      "(--type <meet_calendar|drive_folder|external|manual> "
+                      "[--folder-id <id>] [--naming <pattern>] [--tool <name>] | --clear)")
+                return 1
+            # clear と値の共存拒否は python 側 verb が唯一の判定点。透過させる。
+            return _run_commands_py(root, "sales_account_transcript_source_set", {
+                "BEACON_ACCOUNT_ID": args.ts_acc_id,
+                "BEACON_TS_TYPE": args.ts_type,
+                "BEACON_TS_FOLDER_ID": args.folder_id,
+                "BEACON_TS_NAMING": args.naming,
+                "BEACON_TS_TOOL": args.tool,
+                "BEACON_TS_CLEAR": "1" if args.clear else ""})
+        print("Usage: beacon account transcript-source get|set <acc-id> ...")
+        return 1
     if cmd == "delete":
         if not args.acc_id:
             print("Usage: beacon account delete <acc-id> [--force]")
@@ -3040,9 +3159,26 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
     return 2
 
 
+_SALES_USAGE = (
+    "Usage: beacon sales target <user> <amount> | list\n"
+    "       beacon sales identity add|list|remove|route|resolve|signature|"
+    "show|set|check ...\n"
+    "       beacon sales gmail-permalink --from <address> --msgid <rfc822 Message-ID>\n"
+    "       beacon sales reply-watch ensure")
+
+_SALES_IDENTITY_USAGE = (
+    "Usage: beacon sales identity "
+    "[add <label> --email <address> | list [--json] | remove <label> | "
+    "route <label> --service <svc> --namespace <ns> [--alias <account>] | "
+    "resolve [<label>] --service <svc> | "
+    "signature <label> (--signature <text> | --clear) | "
+    "show [--json] | set <label|email> | check --from <address> [--label <label>]]"
+    "\n  注: 顧客ごとの議事録取得元は beacon account transcript-source (= 顧客の設定)。")
+
+
 def _handle_sales(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.sales_cmd is None:
-        print("Usage: beacon sales target <user> <amount> | list")
+        print(_SALES_USAGE)
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -3060,7 +3196,87 @@ def _handle_sales(root: Path, args: argparse.Namespace) -> int:
             "BEACON_TARGET_AMOUNT": args.amount or "",
         }
         return _run_commands_py(root, "sales_target", env)
-    print("Usage: beacon sales target <user> <amount> | list")
+    # ms-160 e-5981 — bash cmd_sales_send_account / cmd_sales_identity と同じ
+    # env 契約。clear と値の共存拒否は python 側 verb が唯一の判定点なので、
+    # ここでも先回りして弾かず透過させる (bash 側と同じ方針)。
+    if args.sales_cmd == "identity":
+        idc = args.id_cmd
+        if getattr(args, "sid_help", False) or idc is None:
+            print(_SALES_IDENTITY_USAGE)
+            return 0 if getattr(args, "sid_help", False) else 2
+        if idc == "add":
+            if not args.label or not args.email:
+                print("Usage: beacon sales identity add <label> --email <address>")
+                return 1
+            return _run_commands_py(root, "sales_account_add", {
+                "BEACON_SEND_LABEL": args.label, "BEACON_SEND_EMAIL": args.email})
+        if idc in ("list", "ls"):
+            return _run_commands_py(root, "sales_account_list", {
+                "BEACON_JSON": "1" if args.json else ""})
+        if idc in ("remove", "rm"):
+            if not args.label:
+                print("Usage: beacon sales identity remove <label>")
+                return 1
+            return _run_commands_py(root, "sales_account_remove", {
+                "BEACON_SEND_LABEL": args.label})
+        if idc == "route":
+            if not args.label or not args.service or not args.namespace:
+                print("Usage: beacon sales identity route <label> --service "
+                      "<gmail|calendar|drive> --namespace <ns> [--alias <account>]")
+                return 1
+            return _run_commands_py(root, "sales_account_route", {
+                "BEACON_SEND_LABEL": args.label,
+                "BEACON_SEND_SERVICE": args.service,
+                "BEACON_SEND_NAMESPACE": args.namespace,
+                "BEACON_SEND_ALIAS": args.alias_val})
+        if idc == "resolve":
+            if not args.service:
+                print("Usage: beacon sales identity resolve [<label>] --service "
+                      "<gmail|calendar|drive>   (<label> 省略時は既定の送信 identity)")
+                return 1
+            return _run_commands_py(root, "sales_account_resolve", {
+                "BEACON_SEND_LABEL": args.label, "BEACON_SEND_SERVICE": args.service})
+        if idc == "signature":
+            if not args.label:
+                print("Usage: beacon sales identity signature <label> "
+                      "(--signature <text> | --clear)")
+                return 1
+            # clear と値の共存拒否は python 側 verb が唯一の判定点。透過させる。
+            return _run_commands_py(root, "sales_account_signature", {
+                "BEACON_SEND_LABEL": args.label,
+                "BEACON_SEND_SIGNATURE": args.signature,
+                "BEACON_SEND_SIGNATURE_CLEAR": "1" if args.clear else ""})
+        if idc == "show":
+            return _run_commands_py(root, "sales_identity_show", {
+                "BEACON_JSON": "1" if args.json else ""})
+        if idc == "set":
+            if not args.identity:
+                print("Usage: beacon sales identity set <label|email>")
+                return 1
+            return _run_commands_py(root, "sales_identity_set", {
+                "BEACON_SEND_IDENTITY": args.identity})
+        if idc == "check":
+            if not args.from_addr:
+                print("Usage: beacon sales identity check --from <address> [--label <label>]")
+                return 1
+            return _run_commands_py(root, "sales_identity_check", {
+                "BEACON_SEND_FROM": args.from_addr, "BEACON_SEND_LABEL": args.label})
+        print(_SALES_IDENTITY_USAGE)
+        return 2
+    if args.sales_cmd == "gmail-permalink":
+        if not args.from_addr:
+            print("Usage: beacon sales gmail-permalink --from <address> "
+                  "--msgid <rfc822 Message-ID>")
+            return 1
+        return _run_commands_py(root, "sales_gmail_permalink", {
+            "BEACON_SEND_FROM": args.from_addr, "BEACON_RFC822_MSGID": args.msgid})
+    if args.sales_cmd == "reply-watch":
+        if args.rw_cmd != "ensure":
+            print("Usage: beacon sales reply-watch ensure   "
+                  "(返信ウォッチャーを回す Operation を用意する; 冪等)")
+            return 2
+        return _run_commands_py(root, "sales_reply_watch_op_ensure", {})
+    print(_SALES_USAGE)
     return 2
 
 
@@ -3092,13 +3308,16 @@ def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
     if cmd == "reschedule":
         if not args.mtg_id or not args.at:
             print("Usage: beacon meeting reschedule <mtg-id> --at <datetime> "
-                  "[--end <datetime>] [--event-id <id>] [--set-transition]")
+                  "[--end <datetime>] [--event-id <id>] [--calendar-ns <ns>] "
+                  "[--calendar-account <acct>] [--set-transition]")
             return 1
         env = {
             "BEACON_MTG_ID": args.mtg_id or "",
             "BEACON_MTG_AT": args.at or "",
             "BEACON_MTG_END": args.end or "",
             "BEACON_MTG_EVENT_ID": args.event_id or "",
+            "BEACON_MTG_CAL_NS": args.calendar_ns or "",
+            "BEACON_MTG_CAL_ACCT": args.calendar_account or "",
             "BEACON_MTG_SET_TRANSITION": "1" if args.set_transition else "",
         }
         return _run_commands_py(root, "meeting_reschedule", env)
@@ -3184,6 +3403,44 @@ def _handle_phase(root: Path, args: argparse.Namespace) -> int:
                "BEACON_PHASE_NAME": args.name or ""}
         return _run_commands_py(root, "phase_remove", env)
     print(_PHASE_USAGE)
+    return 2
+
+
+_WATCH_USAGE = (
+    "Usage: beacon watch "
+    "[set <work-item-id> --channel <ch> [--thread <ref>] [--cadence <min>] | "
+    "list [--awaiting] [--json] | clear <work-item-id>]")
+
+
+def _handle_watch(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.watch_cmd is None:
+        print(_WATCH_USAGE)
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.watch_cmd
+    if cmd == "set":
+        if not args.wi_id or not args.channel:
+            print("Usage: beacon watch set <work-item-id> --channel <ch> "
+                  "[--thread <ref>] [--cadence <minutes; default 60>]")
+            return 1
+        env = {"BEACON_WATCH_TARGET": args.wi_id or "",
+               "BEACON_WATCH_CHANNEL": args.channel or "",
+               "BEACON_WATCH_THREAD": args.thread or "",
+               "BEACON_WATCH_CADENCE": args.cadence or ""}
+        return _run_commands_py(root, "watch_set", env)
+    if cmd in ("list", "ls"):
+        env = {"BEACON_JSON": "1" if args.json else "",
+               "BEACON_WATCH_AWAITING": "1" if args.awaiting else ""}
+        return _run_commands_py(root, "watch_list", env)
+    if cmd == "clear":
+        if not args.wi_id:
+            print("Usage: beacon watch clear <work-item-id>")
+            return 1
+        return _run_commands_py(root, "watch_clear",
+                                {"BEACON_WATCH_TARGET": args.wi_id or ""})
+    print(_WATCH_USAGE)
     return 2
 
 
@@ -5916,6 +6173,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "sales": _handle_sales,
     "org": _handle_org,  # ms-118: 組織 tenancy (bin/beacon parity)
     "phase": _handle_phase,
+    "watch": _handle_watch,
     "sync": _handle_sync,
     "task": _handle_task,
     "milestone": _handle_milestone,

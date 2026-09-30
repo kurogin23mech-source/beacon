@@ -27,7 +27,7 @@ ROOT=$(beacon-find-root) && \
   && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
-`NOT_SALES` なら終了。内部コマンドは `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
+`NOT_SALES` なら終了。Beacon への記録・参照はすべて `beacon <名詞> <動詞>` の CLI を通す (CORE doc `architecture-tool-skill-separation` §2 の Skill → CLI → local/API)。`python3 "$(beacon _lib-path)/commands.py" <cmd>` の直叩きは使わない — 引数名が手順書と実装の 2 箇所に複製され、実装側の改名で手順書が黙って壊れる (ms-160 e-5981)。
 
 ## Step 1: 対象の終了面談を特定
 
@@ -94,13 +94,11 @@ Zoom / tl;dv / Otter 等の外部ツールは置き場も名前もまちまち�
 証跡は 1 活動配下に集約する (fold・履歴が読めなくなるのを防ぐ)。
 
 ```bash
-BEACON_COMM_TARGET="<満たした活動の act-id を優先、無ければ $OPP>" \
-  BEACON_COMM_SUMMARY="<議事録の1行要約: 何が決まり何が宿題か>" \
-  BEACON_COMM_DIRECTION="inbound" BEACON_COMM_CHANNEL="meeting" \
-  BEACON_COMM_SOURCE_URL="<議事録 doc の Drive リンク>" \
-  BEACON_COMM_BODY="<議事録の骨子を数行で: 論点・合意事項・宿題>" \
-  BEACON_COMM_OCCURRED="<面談の日時>" \
-  python3 "$(beacon _lib-path)/commands.py" communication_add
+beacon communication add "<満たした活動の act-id を優先、無ければ $OPP>" "<議事録の1行要約: 何が決まり何が宿題か>" \
+  --direction inbound --channel meeting \
+  --source-url "<議事録 doc の Drive リンク>" \
+  --body "<議事録の骨子を数行で: 論点・合意事項・宿題>" \
+  --occurred "<面談の日時>"
 ```
 
 証跡は **満たした活動 (act-/nrt-) に紐づけて記録する**のが既定 (ms-176 e-6604)。商談 (opp-) /
@@ -188,12 +186,12 @@ dossier の見出し (顧客の課題[経営/部署/現場] / 勝ち筋 / キー
 `/beacon-sales-drive` と同じ。
 
 [^wrap-source-get]: 実装上は顧客 (Account) に宣言された取得元を読む:
-`BEACON_ACCOUNT_ID="$ACC" python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_get`。
+`beacon account transcript-source get "$ACC"`。
 返る JSON (`null` なら未宣言) の `type` (`meet_calendar` / `drive_folder` / `external` / `manual`) で
 上表の分岐に対応する。
 
 [^wrap-source-set]: 実装上は在処を顧客に書き込む (種類と、必要なら folder_id / naming / tool を
 まとめて渡す。宣言は 1 単位で書き替わる。`drive_folder` は folder_id 必須):
-`BEACON_ACCOUNT_ID="$ACC" BEACON_TS_TYPE="drive_folder" BEACON_TS_FOLDER_ID="<Drive フォルダ ID>" BEACON_TS_NAMING="<命名の手掛かり (任意)>" python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_set`。
+`beacon account transcript-source set "$ACC" --type drive_folder --folder-id "<Drive フォルダ ID>" --naming "<命名の手掛かり (任意)>"`。
 宣言を消すのは明示 clear (`BEACON_TS_CLEAR=1`) のときだけ (#498 review: 空 `BEACON_TS_TYPE` は
 エラーになるだけで既存宣言は消えない — 渡し忘れ/typo で宣言が飛ぶ事故を防ぐ)。
