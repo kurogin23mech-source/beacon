@@ -43,12 +43,12 @@ echo "[ci-strict-drift-guards] 宛先確認の規則 ↔ 手順書 (ms-160 e-634
 # 規則は project を見ず「宛先が別の人間か」で判定するため、同一プロジェクトの
 # 協働者宛に手順どおり送ると 403 で弾かれた。手順書に従うほど失敗する型なので、
 # 判定理由の説明漏れと project 軸の文言の復活を CI で止める。
-python3 -m pytest "$ROOT/tests/test_dm_consent_skill_alignment_e6349.py" -q
-# 加えて verb 本体の出力契約 (独立レビュー A-2/M-2): 規則の試験が緑でも、規則と
-# 読み手のあいだの薄いグルー層は誰も実行していなかった。最初の版は但し書きを
-# 人間可読モードにしか出しておらず、--json で叩けと書いた手順書どおり動く呼び手には
-# 永久に届かなかった = この PR が閉じようとした食い違いを verb 自身が作っていた。
-python3 -m pytest "$ROOT/tests/test_bus_consent_check_contract_e6349.py" -q
+#
+# 依存は標準ライブラリだけ: この script は pytest の入っていない lint-docs ジョブ
+# からも呼ばれる (最初の版は `python3 -m pytest` を直に書いて CI を落とした)。
+# 挙動レベルの契約は tests/test_bus_consent_check_contract_e6349.py が担い、
+# それらは test ジョブが走らせる。
+python3 "$ROOT/scripts/check-dm-consent-alignment.py"
 
 echo "[ci-strict-drift-guards] capability scope invariant (ms-134 e-4721)…"
 # Every CLI verb must classify L0..L4, and no profession-shared (L1/L2)

@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -35,6 +36,46 @@ SKILL_COPIES = (
     ROOT / "shared" / "skills" / "beacon-dm-send" / "SKILL.md",
     ROOT / "plugins" / "beacon" / "skills" / "beacon-dm-send" / "SKILL.md",
 )
+
+
+def _load_guard():
+    """`scripts/check-dm-consent-alignment.py` を読み込む。
+
+    CI の lint-docs ジョブには pytest が無いので、実際に走るのはあの素のスクリプト。
+    ここで同じものを読んで検証し、**CI が走らせる実体と試験対象を一致させる**
+    (最初の版は ci-strict-drift-guards.sh に `python3 -m pytest` を直に書いて
+    CI を落とした)。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_dm_consent_alignment_e6349",
+        ROOT / "scripts" / "check-dm-consent-alignment.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def test_the_standalone_guard_is_green_on_this_tree():
+    """CI が実際に走らせるスクリプトが、今の木で通ること。"""
+    assert _load_guard().find_problems() == []
+
+
+def test_the_standalone_guard_needs_no_pytest():
+    """あのスクリプトが pytest を import しないこと (lint-docs ジョブに無いため)。"""
+    src = (ROOT / "scripts" / "check-dm-consent-alignment.py").read_text()
+    assert "import pytest" not in src
+    assert "pytest" not in src.split('"""', 2)[2] or "python3 -m pytest" not in src
+
+
+def test_ci_guards_script_does_not_invoke_pytest():
+    """ci-strict-drift-guards.sh が pytest を起動しないこと。
+
+    あの script は pytest の入っていない lint-docs ジョブからも呼ばれる。ここで
+    起動行を足すと、手元では緑のまま CI だけが落ちる (実際に一度落とした)。
+    """
+    lines = (ROOT / "scripts" / "ci-strict-drift-guards.sh").read_text().splitlines()
+    offenders = [l for l in lines
+                 if "pytest" in l and not l.lstrip().startswith("#")]
+    assert not offenders, f"pytest を起動している行: {offenders}"
 
 
 def _consent(**kw):
