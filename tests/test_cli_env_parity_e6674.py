@@ -50,8 +50,12 @@ def test_the_backlog_is_recorded_not_hidden():
     検査を無意味にしていないことを確認する。"""
     mod = _checker()
     assert len(mod.KNOWN_GAPS) > 0
-    for row in mod.KNOWN_GAPS:
+    for row, why in mod.KNOWN_GAPS.items():
         assert len(row) == 3 and row[2] in ("bash", "python"), row
+        # Every row states its verdict in place. A bare coordinate would leave
+        # whoever burns the list down unable to tell a real bug from a
+        # deliberate non-gap without re-investigating all 68 (PR #781 M-2).
+        assert isinstance(why, str) and len(why) > 10, (row, why)
 
 
 def _shadow(tmp_path):
@@ -133,7 +137,127 @@ def test_ambient_env_is_not_reported(tmp_path):
 def test_stale_known_gap_is_reported(monkeypatch):
     """直った負債の行を残すと報告されること。残った行は同じ場所の次の退行を
     黙って免除するので、stale 検出は負債リストと対になっている
-    (姉妹ガード check-cli-help-drift / check-print-before-save と同じ規律)。"""
+    (姉妹ガード check-cli-help-drift.py の stale_allowlist と同じ規律)。"""
     mod = _checker()
-    mod.KNOWN_GAPS.add(("verb_that_does_not_exist", "BEACON_NOPE", "bash"))
+    mod.KNOWN_GAPS[("verb_that_does_not_exist", "BEACON_NOPE", "bash")] = "deliberately stale"
     assert mod.main() == 1
+
+# --- 独立レビュー (PR #781) の指摘に対する回帰 ------------------------------
+#
+# AX レビューが実測の囮で 3 つの false negative を示した。いずれも
+# 「名前がその辺にあれば配線済みと数える」= 緩い一致で、過去にも同じ型を
+# 踏んでいる (ms-173 #747)。検出できないガードは、緑のときに嘘をつく。
+
+def test_a_todo_string_is_not_wiring(tmp_path):
+    """python 側: 関数内に env 名の文字列があるだけ (TODO / help 文 / ログ) で
+    『渡している』と数えてはならない。意図を先にコメントで書いてから実装する
+    という普通の順序で、ガードが黙る穴だった (AX-1)。"""
+    mod = _checker()
+    repo = _shadow(tmp_path)
+    (repo / "lib" / "cmd_probe_a.py").write_text(
+        "import os\n"
+        "def cmd_probe_a_demo():\n"
+        "    return os.environ.get('BEACON_PROBE_A', '')\n", encoding="utf-8")
+    d = repo / "beacon_cli" / "dispatch.py"
+    d.write_text(d.read_text(encoding="utf-8")
+                 + '\ndef _handle_probe_a(root, args):\n'
+                   '    _todo = ["BEACON_PROBE_A"]   # named, not wired\n'
+                   '    env = {}\n'
+                   '    return _run_commands_py(root, "probe_a_demo", env)\n',
+                 encoding="utf-8")
+    names = {(v, e) for v, e, f in mod.collect(repo) if f == "python"}
+    assert ("probe_a_demo", "BEACON_PROBE_A") in names, mod.collect(repo)
+
+
+def test_an_env_built_in_a_local_dict_is_recognised(tmp_path):
+    """逆向き: 実際の配線の書き方 (注釈付き代入 + dict() のコピー + 添字書き) を
+    見落とさないこと。見落とすと本物の配線を『穴』と誤報告する。"""
+    mod = _checker()
+    repo = _shadow(tmp_path)
+    (repo / "lib" / "cmd_probe_a.py").write_text(
+        "import os\n"
+        "def cmd_probe_a_demo():\n"
+        "    return (os.environ.get('BEACON_BASE',''), os.environ.get('BEACON_LATE',''))\n",
+        encoding="utf-8")
+    d = repo / "beacon_cli" / "dispatch.py"
+    d.write_text(d.read_text(encoding="utf-8")
+                 + '\ndef _handle_probe_a(root, args):\n'
+                   '    base: dict = {"BEACON_BASE": args.a}\n'
+                   '    env = dict(base)\n'
+                   '    env["BEACON_LATE"] = args.b\n'
+                   '    return _run_commands_py(root, "probe_a_demo", env)\n',
+                 encoding="utf-8")
+    names = {(v, e) for v, e, f in mod.collect(repo) if f == "python"}
+    assert ("probe_a_demo", "BEACON_BASE") not in names, mod.collect(repo)
+    assert ("probe_a_demo", "BEACON_LATE") not in names, mod.collect(repo)
+
+
+@pytest.mark.parametrize("decoy,label", [
+    ('# example: BEACON_PROBE_B=1 is how you would set it', "コメント内の代入"),
+    ('echo "usage: BEACON_PROBE_B=1 ..."', "echo される usage 文字列"),
+])
+def test_bash_text_that_is_not_an_assignment(tmp_path, decoy, label):
+    """bash 側: コメントや引用符の中の `VAR=` は配線ではない。コメントは
+    コードより遅れて腐るので、囮を仕込まなくても普通の劣化で再現する (AX-2)。"""
+    mod = _checker()
+    repo = _shadow(tmp_path)
+    (repo / "lib" / "cmd_probe_b.py").write_text(
+        "import os\n"
+        "def cmd_probe_b_demo():\n"
+        "    return os.environ.get('BEACON_PROBE_B', '')\n", encoding="utf-8")
+    b = repo / "bin" / "beacon"
+    b.write_text(b.read_text(encoding="utf-8")
+                 + "\n%s\npython3 \"$COMMANDS_PY\" probe_b_demo\n" % decoy,
+                 encoding="utf-8")
+    names = {(v, e) for v, e, f in mod.collect(repo) if f == "bash"}
+    assert ("probe_b_demo", "BEACON_PROBE_B") in names, label
+
+
+def test_the_bash_side_still_sees_the_real_surface():
+    """コメント除去を入れたとき、`"$COMMANDS_PY"` ごと消して **bash 側の動詞が
+    0 件** になった。測っていなければ『何も見ないガード』が緑のまま出荷されて
+    いた。実表面を見ていることを数で固定する。"""
+    mod = _checker()
+    sets, verbs = mod._bash_sets(mod.ROOT / "bin" / "beacon", mod.ROOT / "bin" / "lib")
+    assert len(verbs) > 100, len(verbs)
+    assert "BEACON_NOTE_TEXT" in sets.get("note_add", set()), sorted(sets.get("note_add", ()))
+
+
+def test_lookback_does_not_cross_file_boundaries(tmp_path):
+    """短い bin/lib/*.sh の先頭付近の dispatch 行が、直前の別ファイル末尾の
+    代入を自分の覆域として数えないこと。該当する短いファイルが実在する (AX-2)。"""
+    mod = _checker()
+    repo = _shadow(tmp_path)
+    (repo / "lib" / "cmd_probe_c.py").write_text(
+        "import os\n"
+        "def cmd_probe_c_demo():\n"
+        "    return os.environ.get('BEACON_PROBE_C', '')\n", encoding="utf-8")
+    libsh = repo / "bin" / "lib"
+    (libsh / "cmd_zz_donor.sh").write_text(
+        "#!/bin/bash\n" + "\n".join('BEACON_PROBE_C="x"' for _ in range(3)) + "\n",
+        encoding="utf-8")
+    (libsh / "cmd_zz_user.sh").write_text(
+        '#!/bin/bash\npython3 "$COMMANDS_PY" probe_c_demo\n', encoding="utf-8")
+    names = {(v, e) for v, e, f in mod.collect(repo) if f == "bash"}
+    assert ("probe_c_demo", "BEACON_PROBE_C") in names, (
+        "別ファイルの代入を自分の覆域に数えています")
+
+
+def test_an_exemption_is_scoped_to_its_verb(tmp_path):
+    """AMBIENT_ENV は (動詞, env) で効くこと。1 つの動詞を黙らせるつもりの
+    除外が、同じ名前を読む無関係な動詞まで黙らせてはならない (AX-4)。"""
+    mod = _checker()
+    assert mod._is_ambient("doctor", "BEACON_DOCTOR_SKIP_MS81")
+    assert not mod._is_ambient("task_add", "BEACON_DOCTOR_SKIP_MS81")
+    # "*" は全域を意図したときだけの明示的な選択
+    assert mod._is_ambient("anything", "BEACON_DEBUG")
+
+
+def test_the_green_message_states_its_method_not_a_guarantee(capsys):
+    """緑の文が手法と限界を述べること。『every env ... is passed』は、この
+    検査が与えない保証を主張していた (AX-5)。読み手はラベルを信じて再導出を
+    やめるので、言い過ぎたラベルは検出漏れより性質が悪い。"""
+    mod = _checker()
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert "no NEW" in out and "not 'every mapping is proven'" in out, out

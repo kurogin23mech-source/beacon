@@ -33,7 +33,9 @@ So this checker compares the MAPPING, for every verb, not a curated list:
 A name a verb reads but a frontend reaching it never sets is reported.
 
 KNOWN_GAPS carries the backlog that existed when the checker was written, so it
-goes green today and every NEW drift fails. The backlog is data, not a verdict:
+goes green today and every NEW drift fails. Each row carries its verdict, in
+the shape ``scripts/check-pid-liveness.py``'s ALLOWLIST uses (the reason lives
+with the entry, not in a ticket) — see that file for the established form. The backlog is data, not a verdict:
 each line is classified in the companion audit (see the task's notes), and
 burning it down is follow-up work, not a precondition for stopping the bleeding.
 
@@ -59,17 +61,34 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Env names that are never a frontend's job to pass: operator / test knobs read
 # straight from the environment by design, and values a frontend resolves for
 # itself. Matching is exact on the name.
+# Values a frontend is not supposed to pass. Scoped to ``(verb, env)``; the
+# verb ``"*"`` means genuinely process-wide. Scoping matters because env names
+# are ad-hoc strings: a global exemption added to clear ONE verb also silences
+# every other verb that happens to read the same name, now and in future, with
+# nothing in the output naming the collateral (AX review, PR #781 A-4). The
+# "*" rows are the ones where that breadth is the intent, stated as a choice.
 AMBIENT_ENV = {
-    # operator + test knobs (documented as env-only; no flag is intended)
-    "BEACON_DEBUG", "BEACON_QUALGATE_OFF", "BEACON_SUPPRESS_DEPRECATION",
-    "BEACON_DOCTOR_MIN_VERSION", "BEACON_DOCTOR_SKIP_CLOUD_STATE",
-    "BEACON_DOCTOR_SKIP_MS81", "BEACON_DOCTOR_SKIP_PRINCIPLE_MARKER",
-    "BEACON_DOCTOR_SKIP_SKILL_DRIFT",
-    # resolved by the session layer, not supplied on the command line
-    "BEACON_SESSION_ID", "BEACON_SESSION_KIND",
+    # genuinely process-wide: set by the operator's environment or by a layer
+    # above argv, never by a flag on any verb.
+    ("*", "BEACON_DEBUG"),
+    ("*", "BEACON_SESSION_ID"),          # resolved by the session layer
+    ("*", "BEACON_SESSION_KIND"),
     # set by the autonomous-execution envelope, not by a human's argv
-    "BEACON_OPERATION_AUTO_EXECUTE", "BEACON_OPERATION_ENVELOPE_ID",
+    ("*", "BEACON_OPERATION_AUTO_EXECUTE"),
+    ("*", "BEACON_OPERATION_ENVELOPE_ID"),
+    # per-verb operator / test knobs, documented as env-only (no flag intended)
+    ("doctor", "BEACON_DOCTOR_MIN_VERSION"),
+    ("doctor", "BEACON_DOCTOR_SKIP_CLOUD_STATE"),
+    ("doctor", "BEACON_DOCTOR_SKIP_MS81"),
+    ("doctor", "BEACON_DOCTOR_SKIP_PRINCIPLE_MARKER"),
+    ("doctor", "BEACON_DOCTOR_SKIP_SKILL_DRIFT"),
+    ("bus_send", "BEACON_QUALGATE_OFF"),
+    ("summary", "BEACON_SUPPRESS_DEPRECATION"),
 }
+
+
+def _is_ambient(verb: str, env: str) -> bool:
+    return ("*", env) in AMBIENT_ENV or (verb, env) in AMBIENT_ENV
 
 
 def _verb_reads(lib_dir: pathlib.Path) -> dict:
@@ -101,13 +120,45 @@ def _verb_reads(lib_dir: pathlib.Path) -> dict:
     return reads
 
 
-def _python_sets(dispatch_path: pathlib.Path):
-    """verb -> BEACON_* names the _handle_* dispatching it mentions.
+def _env_keys_of(node) -> set:
+    """BEACON_* names this expression contributes as dict KEYS."""
+    out = set()
+    if isinstance(node, ast.Dict):
+        for k in node.keys:
+            if (isinstance(k, ast.Constant) and isinstance(k.value, str)
+                    and k.value.startswith("BEACON_")):
+                out.add(k.value)
+    return out
 
-    Per enclosing function rather than per call site: handlers build the env in
-    a local (``env = {...}; _run_commands_py(root, verb, env)``), and chasing
-    the variable would add precision the report does not need — this direction
-    of error under-reports, never over-reports.
+
+def _copy_source(node):
+    """If this expression copies another local dict (``dict(x)`` / ``{**x}``),
+    the name it copies from."""
+    if (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "dict"
+            and len(node.args) == 1 and isinstance(node.args[0], ast.Name)):
+        return node.args[0].id
+    if isinstance(node, ast.Dict):
+        for k, v in zip(node.keys, node.values):
+            if k is None and isinstance(v, ast.Name):   # {**x}
+                return v.id
+    return None
+
+
+def _python_sets(dispatch_path: pathlib.Path):
+    """verb -> BEACON_* names the handler actually PUTS IN the env it passes.
+
+    Structural, not "the name appears somewhere in this function". The first
+    version matched any string constant in the enclosing function, so a TODO
+    note (``_todo = ["BEACON_X"]``), a help string or a log message naming the
+    variable counted as having wired it — a false negative that an agent
+    documenting intent before implementing would walk straight into
+    (AX review, PR #781 A-1, reproduced with a decoy).
+
+    Tracked here: dict literals passed as the env argument, dict literals
+    assigned to a local that is then passed, ``d["BEACON_X"] = ...`` subscript
+    writes to such a local, and ``d.update({...})``. Anything subtler is not
+    counted — which keeps the error on the reporting side, never the silencing
+    side.
     """
     tree = ast.parse(dispatch_path.read_text(encoding="utf-8"))
     sets = collections.defaultdict(set)
@@ -115,20 +166,80 @@ def _python_sets(dispatch_path: pathlib.Path):
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        keys, local = set(), set()
+        # local name -> BEACON_* keys written into it. Two passes, because a
+        # copy (``env = dict(base_env)``) can precede or follow the literal it
+        # copies depending on how the handler is written.
+        locals_: dict = collections.defaultdict(set)
+        copies: list = []          # (dest, source) for dict(x) / {**x}
+
+        def _record(tgt, value):
+            keys = _env_keys_of(value)
+            if isinstance(tgt, ast.Name):
+                if keys:
+                    locals_[tgt.id] |= keys
+                src = _copy_source(value)
+                if src:
+                    copies.append((tgt.id, src))
+            # env["BEACON_X"] = ...
+            if (isinstance(tgt, ast.Subscript)
+                    and isinstance(tgt.value, ast.Name)
+                    and isinstance(tgt.slice, ast.Constant)
+                    and isinstance(tgt.slice.value, str)
+                    and tgt.slice.value.startswith("BEACON_")):
+                locals_[tgt.value.id].add(tgt.slice.value)
+
         for node in ast.walk(fn):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and node.value.startswith("BEACON_")):
-                keys.add(node.value)
+            # plain and ANNOTATED assignment (``base_env: Dict[str, str] = {...}``
+            # is an AnnAssign, and missing it made every key of the biggest env
+            # dict in the file invisible)
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    _record(tgt, node.value)
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                _record(node.target, node.value)
+            # env.update({...})
             if (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", None) == "update"
+                    and isinstance(getattr(node.func, "value", None), ast.Name)
+                    and node.args):
+                locals_[node.func.value.id] |= _env_keys_of(node.args[0])
+
+        # propagate copies to a fixed point (dict(dict(x)) chains are rare but
+        # cost nothing to follow)
+        for _ in range(len(copies) + 1):
+            changed = False
+            for dest, src in copies:
+                if locals_.get(src) and not locals_[src] <= locals_[dest]:
+                    locals_[dest] |= locals_[src]
+                    changed = True
+            if not changed:
+                break
+
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call)
                     and getattr(node.func, "id", None) == "_run_commands_py"
                     and len(node.args) >= 2):
-                v = node.args[1]
-                if isinstance(v, ast.Constant) and isinstance(v.value, str):
-                    local.add(v.value)
-        for v in local:
-            verbs.add(v)
-            sets[v] |= keys
+                continue
+            v = node.args[1]
+            if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                continue
+            verb = v.value
+            verbs.add(verb)
+            passed = set()
+            env_arg = node.args[2] if len(node.args) >= 3 else None
+            for kw in node.keywords:
+                if kw.arg == "env":
+                    env_arg = kw.value
+            if isinstance(env_arg, ast.Dict):
+                passed |= _env_keys_of(env_arg)
+            elif isinstance(env_arg, ast.Name):
+                passed |= locals_.get(env_arg.id, set())
+            elif env_arg is not None:
+                # an expression we do not model (a call, a merge, …): fall back
+                # to every key this function builds, so an unmodelled shape
+                # reports LESS rather than inventing a gap.
+                passed |= set().union(*locals_.values()) if locals_ else set()
+            sets[verb] |= passed
     return sets, verbs
 
 
@@ -140,38 +251,103 @@ _ASSIGN_RE = re.compile(r'\b(BEACON_[A-Z0-9_]+)=')
 _BASH_LOOKBACK = 60
 
 
+def _quote_spans(line: str):
+    """[(start, end)] of quoted regions, and the offset where a comment starts."""
+    spans, quote, start, i = [], None, 0, 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == quote:
+                spans.append((start, i))
+                quote = None
+        elif ch in "'\"":
+            quote, start = ch, i
+        elif ch == "#":
+            return spans, i
+        i += 1
+    if quote:
+        spans.append((start, len(line)))
+    return spans, len(line)
+
+
+def _bash_assignments(line: str) -> set:
+    """BEACON_* names ASSIGNED on this line.
+
+    A name inside a comment or inside a quoted string is not wiring: an
+    `# example: BEACON_X=1` that outlived the code it described, or an echoed
+    usage line, must not read as coverage (AX review, PR #781 A-2).
+
+    Positions are filtered rather than the text blanked. Blanking also erased
+    `"$COMMANDS_PY"` — the marker that identifies the dispatch line — which
+    silently reduced the bash side to ZERO verbs. Caught by measuring; it
+    would have shipped a guard that saw nothing at all on that frontend.
+    """
+    spans, comment_at = _quote_spans(line)
+    out = set()
+    for m in _ASSIGN_RE.finditer(line):
+        pos = m.start(1)
+        if pos >= comment_at:
+            continue
+        if any(a < pos < b for a, b in spans):
+            continue
+        out.add(m.group(1))
+    return out
+
+
 def _bash_sets(bin_path: pathlib.Path, lib_dir: pathlib.Path):
-    text = bin_path.read_text(encoding="utf-8")
-    for sh in sorted(lib_dir.glob("*.sh")):
-        text += "\n" + sh.read_text(encoding="utf-8")
-    lines = text.splitlines()
+    """verb -> BEACON_* names assigned on the path that dispatches it.
+
+    Each file is scanned INDEPENDENTLY. Concatenating bin/beacon with every
+    bin/lib/*.sh let a dispatch line near the top of a short file reach its
+    lookback window back into the tail of an unrelated preceding file and
+    count that file's assignments as coverage — and six of the per-command
+    files are shorter than the window (AX review, PR #781 A-2).
+    """
     sets = collections.defaultdict(set)
     verbs = set()
-    for i, line in enumerate(lines):
-        m = _DISPATCH_RE.search(line)
-        if not m:
+    for src in [bin_path] + sorted(lib_dir.glob("*.sh")):
+        try:
+            lines = src.read_text(encoding="utf-8").splitlines()
+        except OSError:
             continue
-        verb = m.group(1)
-        verbs.add(verb)
-        window = "\n".join(lines[max(0, i - _BASH_LOOKBACK):i + 1])
-        sets[verb] |= set(_ASSIGN_RE.findall(window))
+        assigns = [_bash_assignments(l) for l in lines]
+        for i, line in enumerate(lines):
+            _, comment_at = _quote_spans(line)
+            m = _DISPATCH_RE.search(line[:comment_at])   # not a commented-out call
+            if not m:
+                continue
+            verb = m.group(1)
+            verbs.add(verb)
+            lo = max(0, i - _BASH_LOOKBACK)              # never crosses into
+            for j in range(lo, i + 1):                   # another file
+                sets[verb] |= assigns[j]
     return sets, verbs
 
 
-def collect(root: pathlib.Path = ROOT) -> list:
-    """[(verb, env, frontend)] for every env a reaching frontend never sets."""
+def collect(root: pathlib.Path = ROOT, exclude=None) -> list:
+    """[(verb, env, frontend)] for every env a reaching frontend never sets.
+
+    ``exclude`` defaults to the recorded backlog; pass ``set()`` for the raw
+    set. Taking it as an ARGUMENT rather than reading the module global lets
+    the stale check ask for the unfiltered answer without briefly emptying a
+    constant other code may be reading (maintainability review, PR #781 M-4 —
+    and the hazard was not theoretical: the clear/restore broke the moment the
+    backlog became a dict).
+    """
+    if exclude is None:
+        exclude = KNOWN_GAPS
     reads = _verb_reads(root / "lib")
     py_sets, py_verbs = _python_sets(root / "beacon_cli" / "dispatch.py")
     sh_sets, sh_verbs = _bash_sets(root / "bin" / "beacon", root / "bin" / "lib")
 
     out = []
     for verb in sorted(reads):
-        for env in sorted(reads[verb] - AMBIENT_ENV):
+        for env in sorted(e for e in reads[verb] if not _is_ambient(verb, e)):
             if verb in sh_verbs and env not in sh_sets.get(verb, set()):
                 out.append((verb, env, "bash"))
             if verb in py_verbs and env not in py_sets.get(verb, set()):
                 out.append((verb, env, "python"))
-    return [row for row in out if row not in KNOWN_GAPS]
+    return [row for row in out if row not in exclude]
 
 
 def main() -> int:
@@ -181,8 +357,11 @@ def main() -> int:
     raw = set(_collect_raw())
     stale = sorted(g for g in KNOWN_GAPS if g not in raw)
     if not rows and not stale:
-        print("[cli-env-parity] OK: every env a verb reads is passed by the "
-              "frontends that reach it ({0} known gaps still allowlisted)."
+        print("[cli-env-parity] OK: no NEW (verb, env, frontend) gap outside "
+              "the recorded backlog ({0} rows). Method: per-handler def-use on "
+              "the Python side, per-file comment/quote-aware scan on the bash "
+              "side — both err toward reporting less, so this is 'nothing new "
+              "was detected', not 'every mapping is proven'."
               .format(len(KNOWN_GAPS)))
         return 0
     if rows:
@@ -208,87 +387,156 @@ def main() -> int:
 
 
 def _collect_raw() -> list:
-    """collect() without the KNOWN_GAPS subtraction (for stale detection)."""
-    saved = set(KNOWN_GAPS)
-    KNOWN_GAPS.clear()
-    try:
-        return collect()
-    finally:
-        KNOWN_GAPS.update(saved)
+    """collect() without the backlog subtraction (for stale detection)."""
+    return collect(exclude=set())
 
 
 # The backlog as it stood when this checker was written (ms-160 e-6674). Data,
 # not a verdict: each row is classified in the task's audit. Burning it down is
 # follow-up work; the checker exists so the list can only shrink.
-KNOWN_GAPS: set = {
-    ("account_add", "BEACON_ACCOUNT_ASSIGNEE", "python"),
-    ("account_contact", "BEACON_CONTACT_PHONE", "python"),
-    ("account_delete", "BEACON_CANCEL_REASON", "python"),
-    ("account_list", "BEACON_AS_PROJECT", "python"),
-    ("account_list", "BEACON_LINKED", "python"),
-    ("acquisition_delete", "BEACON_ACKNOWLEDGE", "bash"),
-    ("bus_directory", "BEACON_DIR_CWD_ONLY", "python"),
-    ("bus_send", "BEACON_BUS_ALLOW_DUPLICATE", "python"),
-    ("bus_send", "BEACON_BUS_CLIENT_EVENT_ID", "python"),
-    ("bus_send", "BEACON_BUS_CONTEXT", "python"),
-    ("bus_send", "BEACON_BUS_DEDUP_WINDOW_SEC", "bash"),
-    ("bus_send", "BEACON_BUS_DEDUP_WINDOW_SEC", "python"),
-    ("bus_send", "BEACON_BUS_IS_RETRY", "python"),
-    ("bus_send", "BEACON_BUS_RATIONALE", "python"),
-    ("bus_send", "BEACON_BUS_RECIPIENT_CONFIRMED", "python"),
-    ("bus_send", "BEACON_BUS_RECIPIENT_USER", "python"),
-    ("cloud_check_project", "BEACON_CLOUD_PROJECT_ID", "bash"),
-    ("cloud_check_project", "BEACON_CLOUD_PROJECT_ID", "python"),
-    ("cloud_list", "BEACON_JSON", "python"),
-    ("deploy_list", "BEACON_BACKEND", "python"),
-    ("deploy_record", "BEACON_BACKEND", "python"),
-    ("deploy_record", "BEACON_JSON", "bash"),
-    ("deploy_record", "BEACON_VERSION", "python"),
-    ("deploy_rollback", "BEACON_REGION", "bash"),
-    ("doc_add", "BEACON_ACCOUNT", "python"),
-    ("doc_add", "BEACON_FORCE", "python"),
-    ("doc_add", "BEACON_OPPORTUNITY", "python"),
-    ("doc_delete", "BEACON_REASON", "python"),
-    ("doc_list", "BEACON_ACCOUNT", "python"),
-    ("doc_list", "BEACON_INCLUDE_TRASHED", "python"),
-    ("doc_list", "BEACON_OPPORTUNITY", "python"),
-    ("doc_update", "BEACON_ACCOUNT", "python"),
-    ("doc_update", "BEACON_MS_SET", "python"),
-    ("doc_update", "BEACON_OPPORTUNITY", "python"),
-    ("doc_update", "BEACON_OP_SET", "python"),
-    ("log", "BEACON_RESOLVES_SET", "python"),
-    ("log_finalize", "BEACON_RESOLVES_SET", "python"),
-    ("meeting_cancel", "BEACON_MTG_CANCEL_REASON", "python"),
-    ("opportunity_add", "BEACON_OPP_ASSIGNEE", "python"),
-    ("opportunity_delete", "BEACON_CANCEL_REASON", "python"),
-    ("pr_create", "BEACON_GH_ARGS", "bash"),
-    ("pr_create", "BEACON_GH_ARGS", "python"),
-    ("push_record", "BEACON_VERSION", "python"),
-    ("rollback", "BEACON_ROLLBACK_CWD", "bash"),
-    ("rollback", "BEACON_ROLLBACK_CWD", "python"),
-    ("rollback", "BEACON_ROLLBACK_NO_RECORD", "bash"),
-    ("run_record", "BEACON_JSON", "bash"),
-    ("sales_gmail_permalink", "BEACON_MSGID", "bash"),
-    ("sales_gmail_permalink", "BEACON_MSGID", "python"),
-    ("search", "BEACON_ACTOR", "python"),
-    ("search", "BEACON_CLAIMANT", "python"),
-    ("search", "BEACON_INCLUDE_BUS_DM", "python"),
-    ("search", "BEACON_INCLUDE_SESSION_LOGS", "python"),
-    ("search", "BEACON_INCLUDE_TREK", "python"),
-    ("search", "BEACON_SOURCE", "python"),
-    ("skill_install", "BEACON_SETTINGS_PATH", "bash"),
-    ("sync", "BEACON_MS_ID", "bash"),
-    ("sync", "BEACON_MS_ID", "python"),
-    ("task_cancel", "BEACON_JSON", "bash"),
-    ("trek_pulse_ack", "BEACON_TREK_BLOCKERS", "python"),
-    ("trek_pulse_ack", "BEACON_TREK_NEEDS_LEADER", "python"),
-    ("trek_pulse_ack", "BEACON_TREK_STATE_SUMMARY", "python"),
-    ("trek_pulse_ack", "BEACON_TREK_TIME_ON_TASK", "python"),
-    ("trek_task_state", "BEACON_TREK_ATTAINMENT_VERDICT", "python"),
-    ("trek_task_state", "BEACON_TREK_VERDICT", "python"),
-    ("trigger_fire", "BEACON_TRIGGER_TREK_ID", "python"),
-    ("view", "BEACON_VIEW_SKIP_HANDSHAKE", "bash"),
-    ("view", "BEACON_VIEW_SKIP_HANDSHAKE", "python"),
+KNOWN_GAPS: dict = {
+    ("account_add", "BEACON_ACCOUNT_ASSIGNEE", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("account_contact", "BEACON_CONTACT_PHONE", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("account_delete", "BEACON_CANCEL_REASON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("account_list", "BEACON_AS_PROJECT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("account_list", "BEACON_LINKED", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("acquisition_delete", "BEACON_ACKNOWLEDGE", "bash"):
+        "bash 未配線 / python は渡す — bash 側の取りこぼし",
+    ("bus_directory", "BEACON_DIR_CWD_ONLY", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("bus_send", "BEACON_BUS_ALLOW_DUPLICATE", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("bus_send", "BEACON_BUS_CLIENT_EVENT_ID", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("bus_send", "BEACON_BUS_CONTEXT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("bus_send", "BEACON_BUS_DEDUP_WINDOW_SEC", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("bus_send", "BEACON_BUS_DEDUP_WINDOW_SEC", "python"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("bus_send", "BEACON_BUS_IS_RETRY", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("bus_send", "BEACON_BUS_RATIONALE", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("bus_send", "BEACON_BUS_RECIPIENT_CONFIRMED", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("bus_send", "BEACON_BUS_RECIPIENT_USER", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("cloud_check_project", "BEACON_CLOUD_PROJECT_ID", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("cloud_check_project", "BEACON_CLOUD_PROJECT_ID", "python"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("cloud_list", "BEACON_JSON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("deploy_list", "BEACON_BACKEND", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("deploy_record", "BEACON_BACKEND", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("deploy_record", "BEACON_JSON", "bash"):
+        "bash 未配線 / python は渡す — bash 側の取りこぼし",
+    ("deploy_record", "BEACON_VERSION", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("deploy_rollback", "BEACON_REGION", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("doc_add", "BEACON_ACCOUNT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_add", "BEACON_FORCE", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_add", "BEACON_OPPORTUNITY", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_delete", "BEACON_REASON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_list", "BEACON_ACCOUNT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_list", "BEACON_INCLUDE_TRASHED", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_list", "BEACON_OPPORTUNITY", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_update", "BEACON_ACCOUNT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_update", "BEACON_MS_SET", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_update", "BEACON_OPPORTUNITY", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_update", "BEACON_OP_SET", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("issue_sync", "BEACON_JSON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("log", "BEACON_RESOLVES_SET", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("log_finalize", "BEACON_RESOLVES_SET", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("meeting_cancel", "BEACON_MTG_CANCEL_REASON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("member_role", "BEACON_JSON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("opportunity_add", "BEACON_OPP_ASSIGNEE", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("opportunity_delete", "BEACON_CANCEL_REASON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("opportunity_list", "BEACON_ALL", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("pr_create", "BEACON_GH_ARGS", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("pr_create", "BEACON_GH_ARGS", "python"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("push_record", "BEACON_VERSION", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("rollback", "BEACON_ROLLBACK_CWD", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("rollback", "BEACON_ROLLBACK_CWD", "python"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("rollback", "BEACON_ROLLBACK_NO_RECORD", "bash"):
+        "bash 未配線 / python は渡す — bash 側の取りこぼし",
+    ("run_record", "BEACON_JSON", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("sales_gmail_permalink", "BEACON_MSGID", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("sales_gmail_permalink", "BEACON_MSGID", "python"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("search", "BEACON_ACTOR", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("search", "BEACON_CLAIMANT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("search", "BEACON_INCLUDE_BUS_DM", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("search", "BEACON_INCLUDE_SESSION_LOGS", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("search", "BEACON_INCLUDE_TREK", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("search", "BEACON_SOURCE", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("skill_install", "BEACON_SETTINGS_PATH", "bash"):
+        "bash 未配線 / python は渡す — bash 側の取りこぼし",
+    ("sync", "BEACON_MS_ID", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("sync", "BEACON_MS_ID", "python"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("task_cancel", "BEACON_JSON", "bash"):
+        "bash 未配線 / python は渡す — bash 側の取りこぼし",
+    ("trek_pulse_ack", "BEACON_TREK_BLOCKERS", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("trek_pulse_ack", "BEACON_TREK_NEEDS_LEADER", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("trek_pulse_ack", "BEACON_TREK_STATE_SUMMARY", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("trek_pulse_ack", "BEACON_TREK_TIME_ON_TASK", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("trek_task_state", "BEACON_TREK_ATTAINMENT_VERDICT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("trek_task_state", "BEACON_TREK_VERDICT", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("trigger_fire", "BEACON_TRIGGER_TREK_ID", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("view", "BEACON_VIEW_SKIP_HANDSHAKE", "bash"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
+    ("view", "BEACON_VIEW_SKIP_HANDSHAKE", "python"):
+        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
 }
 
 if __name__ == "__main__":
