@@ -1863,6 +1863,33 @@ _DRAINING_SCAN_LIMIT = int(
 _WS_ZOMBIE_POLL_AGE_S = int(
     os.environ.get("BEACON_WS_ZOMBIE_POLL_AGE_S", "1800") or "1800")
 
+# ms-173 (e-6729): poll 履歴を *持たない* 行に使う、より長い猶予。e-6563 のガードは
+# `last_poll_at` を書いたことがある行だけを対象にしており、書かない古い bridge や報告を
+# 出さない購読者はガードを素通りして永久に live を主張できた (= e-6583 で実測された穴)。
+# 履歴が無い行は「古い bridge が正当に待機しているだけ」かを server 側から確かめる手段が
+# 無い (ping はゾンビも送る) ので、確信度が低い側に 6 倍 (3 時間) の猶予を与えて誤爆を
+# 減らす。実測されたゾンビは 25 日 / 500 時間なので、時間単位の猶予でも検知力は落ちない。
+_WS_ZOMBIE_NO_HISTORY_AGE_S = int(
+    os.environ.get("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", "10800") or "10800")
+
+
+def _iso_age_seconds(stamp, now_dt):
+    """ISO8601 文字列の古さ (秒)。空 / 壊れている場合は ``None`` (= 源が無い)。
+
+    e-6729 の裏付け判定で使う。``None`` を「古い」ではなく「読めない」として扱うのが要で、
+    読めない源を古い扱いにすると、源を 1 つ持たない正当な行を誤って not-live にしてしまう。
+    """
+    import datetime   # app.py は datetime を module 直下で import していない (既存作法)
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return (now_dt - parsed).total_seconds()
+
 
 def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
                                         now_dt) -> str:
@@ -1929,14 +1956,36 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # live=true の幽霊行として名簿に残った。WS 単独では live を維持させない。
     # (poll を持たない旧版 bridge = last_poll_at 無しは対象外。数分の poll 欠落は
     # ws_live が救う従来挙動のまま — 閾値は cadence 5s の 360 倍で誤爆しない。)
-    if live and not poll_healthy and ws_live is True and session["bridge"]:
-        age = session["poll_health"].get("age_seconds")
-        if age is not None and age > _WS_ZOMBIE_POLL_AGE_S:
+    # ms-173 (e-6729): 判定は lib/bus_liveness.ws_only_liveness_suppression が所管。
+    # ここに if を書き足していくと、消費側ごとに規則が増えて真値源が割れる (state を
+    # derive_state 1 箇所で決めているのと同じ作法に揃える)。e-6563 の「poll 履歴がある行
+    # だけ」という線引きをやめ、**生存の裏付けが何か一つでも新しいか** で引き直した
+    # (履歴の有無は猶予の長さと理由文字列の選択にだけ使う)。
+    #
+    # 裏付けは互いに独立した 3 源を渡す。poll 報告が無い古い bridge でも、人/AI が実際に
+    # 動かしていれば PostToolUse hook 由来の last_heartbeat_at が新しいので救われる
+    # (= 「古い bridge かどうか」ではなく「生きている痕跡があるか」で救う)。
+    if live:
+        _suppressed = bus_liveness.ws_only_liveness_suppression(
+            ws_live,
+            poll_healthy,
+            session["bridge"],
+            (
+                session["poll_health"].get("age_seconds"),
+                _iso_age_seconds(session.get("last_heartbeat_at"), now_dt),
+                _iso_age_seconds(session.get("last_active"), now_dt),
+            ),
+            _WS_ZOMBIE_POLL_AGE_S,
+            max_age_seconds_no_history=_WS_ZOMBIE_NO_HISTORY_AGE_S,
+            session_age_seconds=_iso_age_seconds(
+                session.get("created_at"), now_dt),
+        )
+        if _suppressed:
             live = False
             # PR#758 AX finding: 抑止を silent にしない。live=false だけだと
             # 「普通に止まった session」と見分けが付かず、診断側が誤った回復
             # (再起動不要の session を再起動 等) に向かう。理由を行に刻む。
-            session["live_suppressed_reason"] = "ws-zombie-poll-stale"
+            session["live_suppressed_reason"] = _suppressed
     session["live"] = live
     # ms-165 (e-5965): informational signal. `live` (above) is the deliverability
     # gate — it proves the bridge polls and, post-e-5964, will deliver even to an
