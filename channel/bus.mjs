@@ -43,6 +43,10 @@ import {
 import {
   classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
 } from './bus-qualgate.mjs'
+import {
+  livenessAssertionStale as _livenessAssertionStale,
+  isOrphanedBridge as _isOrphanedBridge,
+} from './bus-liveness-assert.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
@@ -399,6 +403,82 @@ const WS_ENABLED = process.env.BEACON_BUS_WS !== '0'
 // 防止の安全網に徹する。WS 不通時は下の POLL_INTERVAL (5s) に自動 fallback。
 // 従来の 30s に戻すには BEACON_BUS_WS_BACKSTOP_MS=30000。
 const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '120000', 10)
+
+// ms-173 / e-6583 — 生存主張 (= WS ping) を「仕事ができていること」に結び直す。
+//
+// 実害 (実測 2026-10-01): 親 bclaude が死んで孤児 (PPID=1) になった bus.mjs が 3 本、
+// 25 日間 prod へ WS をつないだまま 30 秒ごとに ping を送り続けていた。server は ping
+// を生存の真値として Redis の生存キー (score=now+60 / key TTL 70s) を延命するので、
+// 死んだセッションが ws_live=true のまま 20 日以上居座った (last_poll_at は 500 時間前)。
+//
+// 構造的な誤りは「ソケットが開いて ping が鳴っている」を生存の証拠にしていたこと。
+// ping は *タイマー* が鳴らすので、仕事をしている poll loop の死とも、セッション本体の
+// 死とも無関係に鳴り続ける。しかも poll loop は pollOnce / writePollHeartbeat の例外を
+// 捕まえて回り続けるので「ループが回っている」ことも証拠にならない (REST が死んでいても
+// 回る)。唯一まともな不変条件はこれ:
+//
+//     REST で生存報告 (writePollHeartbeat) が通っていないなら、WS で生存を主張しない。
+//
+// 報告が通った時刻だけを真値とし、それが古くなったら ping を止める (= 生存キーが 70 秒で
+// 自然失効し、directory から正しく消える)。回復可能にしてあるのが肝で、心拍が再び通れば
+// 主張を再開する — 一時的なクラウド障害で受信能力を自ら手放さないため (prosess を
+// exit させるのは孤児のときだけ、下の maybeExitIfOrphaned を参照)。
+const LIVENESS_ASSERT_MAX_STALL_MS = parseInt(
+  process.env.BEACON_BUS_LIVENESS_STALL_MS || '600000', 10)  // 10 分
+// 最後に writePollHeartbeat が成功した時刻。起動直後は「まだ猶予あり」から始める
+// (= 初回心拍が通る前に自分の主張を止めてしまわない)。
+let lastHeartbeatOkAt = Date.now()
+// 生存主張を続けてよいか。false の間は ping も再接続もしない (= 嘘をつかない)。
+// 判断は channel/bus-liveness-assert.mjs が所管 (= 純粋・テスト可能)。ここは状態だけ。
+function livenessAssertionStale() {
+  return _livenessAssertionStale(
+    lastHeartbeatOkAt, Date.now(), LIVENESS_ASSERT_MAX_STALL_MS)
+}
+
+// ms-173 / e-6583 — 孤児になった bridge は自分で終わる。
+//
+// 親 (= この bus.mjs を起こした bclaude / MCP host) が死ぬと、このプロセスは PPID=1 へ
+// 里親付けされる。そのとき奉仕する相手は居らず、残っていても「死んだセッションの名前で
+// 生きていると言い続ける」だけなので、構造として自分で退場する (GitHub issue #427 と同じ穴)。
+//
+// POSIX 限定にしてあるのは意図的: 判定を process.ppid === 1 だけに閉じ、pid 生存確認
+// (kill(pid, 0)) を一切使わない。Windows では対象プロセスを終了させてしまう既知の罠が
+// あり、さらに Windows の孤児は ppid が 1 にならない。検知できない側 (= 何もしない) に
+// 倒してあるので、取り違えて生きている bridge を殺すことはない。
+// 起動時の親 pid。孤児判定は「起動時は親が居た → いま 1 になった」という *里親付けの
+// 証跡* に限る。単に ppid === 1 を見ると、launchd / init / コンテナの PID 1 配下で
+// 正当に起動された bridge を即座に殺してしまう (= 直後に自滅して受信が死ぬ)。
+const INITIAL_PPID = process.ppid
+
+function isOrphanedBridge() {
+  return _isOrphanedBridge(process.platform, INITIAL_PPID, process.ppid)
+}
+
+// 孤児なら退場する。戻り値は「退場した (= 呼び出し側は以降の処理をやめろ)」。
+// process.exit より前に graceful な後片付けはしない: 生存キーは 70 秒で失効し、
+// server 側の finally が WS 切断で登録解除するので、黙って消えるのが最も正しい。
+// ここで heartbeat を打ち直すと「死んだセッションの最後の生存報告」を増やすだけ。
+function maybeExitIfOrphaned(where) {
+  if (!isOrphanedBridge()) return false
+  log(`orphaned bridge (initial ppid=${INITIAL_PPID} → now 1, parent gone) detected at ${where} — exiting (e-6583)`)
+  process.exit(0)
+  // process.exit は戻らないが、test が exit を差し替えたときに呼び出し側が確実に
+  // 処理を打ち切れるよう true を返す (= 差し替え時に素通りして先へ進ませない)。
+  return true
+}
+
+// 生存主張を止めている間の再接続の間隔。止めている理由 (心拍が通らない) は秒単位で
+// 変わらないので、backoff の最小値より長めに取って無駄な試行を減らす。
+const WS_STALE_RETRY_MS = parseInt(
+  process.env.BEACON_BUS_WS_STALE_RETRY_MS || '30000', 10)
+
+// e-6583 — 終了時に WS を閉じる経路。SIGTERM が効かなかった実測 (孤児 3 本は SIGKILL
+// でしか落ちなかった) の 2 つめの原因がこれ: 開いている WS はイベントループを保持する
+// ので、poll loop が抜けてもプロセスは終われない。ping タイマーの unref だけでは足りず、
+// ソケット本体を閉じる必要がある。connectBusWs が実体を差し込む。
+let closeBusWs = null
+// 停止中は再接続しない (= Ctrl-C 後に繋ぎ直して生存台帳へ登録し直すのを防ぐ)。
+let wsStopping = false
 // ms-101 / e-3013 — heartbeat (last_active / last_poll_at の更新) を event-poll の
 // 周期から切り離す専用タイマー間隔。event-poll を backstop まで延ばすと、poll ループ
 // に相乗りしていた heartbeat も遅くなり last_active が古くなって directory の
@@ -510,8 +590,21 @@ async function connectBusWs() {
   // openOnce, so the chains multiplied and a single session opened >14k sockets,
   // OOM-ing the server. This flag serialises reconnects to one at a time.
   let reconnectPending = false
+  // e-6583: いま生きているソケット (終了時に閉じる対象)。
+  let currentWs = null
 
   const openOnce = () => {
+    // e-6583: 生存主張が止められている間は接続し直さない。つなぎ直すたびに server の
+    // 生存台帳へ登録され直してしまい、ping を止めた意味が消える (= 接続/切断を繰り返す
+    // だけで ws_live が真のまま踊る)。心拍が回復するまで黙って待ち、回復後に再開する。
+    if (wsStopping) return
+    if (maybeExitIfOrphaned('ws-reconnect')) return
+    if (livenessAssertionStale()) {
+      if (reconnectPending) return   // 既に 1 本が待っている (chain を増やさない)
+      reconnectPending = true
+      setTimeout(() => { reconnectPending = false; openOnce() }, WS_STALE_RETRY_MS)
+      return
+    }
     let ws
     let pingTimer = null
     let stableTimer = null
@@ -550,6 +643,7 @@ async function connectBusWs() {
       scheduleReconnect()
       return
     }
+    currentWs = ws
     ws.addEventListener('open', () => {
       wsHealthy = true
       wsOpens += 1   // e-5378: successful handshakes — 0 forever = never opened
@@ -560,9 +654,32 @@ async function connectBusWs() {
       // floor, so reconnects hammered the server instead of backing off.
       stableTimer = setTimeout(() => { backoff = 1000 }, STABLE_MS)
       // keepalive: server echoes "pong" to "ping" (app.py ws_project).
+      //
+      // e-6583: ping は server が生存の真値とする唯一の信号なので、無条件に鳴らしては
+      // ならない。鳴らす前に 2 つ確かめる (どちらも「嘘をつかない」ための門):
+      //   1. 孤児でないか — 親が死んでいれば奉仕先が無いので、ここで退場する。
+      //      ping タイマーの中に置くのが要で、poll loop が死んでいても必ず通る
+      //      (実測された 25 日ゾンビは poll loop が止まっていた)。
+      //   2. REST で生存報告が通っているか — 通っていなければ生存を主張しない。
+      //      ping を止めれば server の idle timeout (90s) が接続を回収し、生存キーは
+      //      70 秒で失効する。心拍が再び通れば次の接続から主張を再開する。
       pingTimer = setInterval(() => {
+        if (maybeExitIfOrphaned('ws-ping')) return
+        if (livenessAssertionStale()) {
+          // 嘘をやめる。cleanup() で ping を止め、ソケットも閉じる。再接続は
+          // openOnce 側の門が心拍回復まで抑える。
+          log(`liveness assertion suppressed: no successful heartbeat for ${
+            Math.round((Date.now() - lastHeartbeatOkAt) / 1000)}s — stopping WS ping (e-6583)`)
+          scheduleReconnect()
+          return
+        }
         try { ws.send('ping') } catch { /* close handler will reconnect */ }
       }, 30000)
+      // e-6583: unref しておく。これが無いと、poll loop が死んだ bridge では
+      // ping タイマーだけがイベントループを生かし続け、SIGTERM ハンドラが
+      // stopping=true を立てても誰も見に行かないためプロセスが終了できない
+      // (実測: 孤児 3 本は SIGTERM を無視し SIGKILL でしか落ちなかった)。
+      if (pingTimer.unref) pingTimer.unref()
       // Fetch once right away in case events landed during the connect gap.
       wakePoll()
     })
@@ -601,6 +718,12 @@ async function connectBusWs() {
     })
   }
 
+  // e-6583: 終了ハンドラから掴めるように実体を公開する。閉じる前に wsStopping を
+  // 立てるのが要で、close イベントが走る scheduleReconnect を無効化する。
+  closeBusWs = () => {
+    wsStopping = true
+    try { if (currentWs) currentWs.close() } catch { /* already closing */ }
+  }
   openOnce()
 }
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
@@ -1185,8 +1308,16 @@ if (!PROJECT_ID || !SESSION_ID) {
   log(`[FATAL] Aborting poll loop. Other beacon commands still work; only the bus channel is disabled.`)
 } else {
   let stopping = false
-  process.on('SIGINT', () => { stopping = true; log('SIGINT received') })
-  process.on('SIGTERM', () => { stopping = true; log('SIGTERM received') })
+  // e-6583: stopping を立てるだけでは足りない。poll loop が既に死んでいる bridge では
+  // 誰も stopping を見に行かないので、開いている WS とタイマーがイベントループを保持し
+  // プロセスが終了できない (実測: 孤児 3 本は SIGTERM を無視した)。ソケットも明示的に閉じる。
+  const _onSignal = (sig) => {
+    stopping = true
+    log(`${sig} received`)
+    try { if (closeBusWs) closeBusWs() } catch (e) { log(`WS close on ${sig} failed: ${e.message}`) }
+  }
+  process.on('SIGINT', () => _onSignal('SIGINT'))
+  process.on('SIGTERM', () => _onSignal('SIGTERM'))
 
   // ms-60 + ms-140: per-bridge delivery watermark, OWNED BY THE BRIDGE and
   // fully decoupled from the server cursor.
@@ -1354,6 +1485,10 @@ if (!PROJECT_ID || !SESSION_ID) {
         `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,
         body,
       )
+      // e-6583: 生存報告が *通った* 時刻だけを WS ping の根拠にする。ここを
+      // try の中の apiPut 成功直後に置くのが要で、catch 側 (下) では更新しない —
+      // 「送ろうとした」ではなく「server が受け取った」を真値にする。
+      lastHeartbeatOkAt = Date.now()
     } catch (e) {
       // Heartbeat write failures must NEVER kill the poll loop — the
       // bridge has to keep trying to deliver events even if the cloud
@@ -1805,6 +1940,10 @@ if (!PROJECT_ID || !SESSION_ID) {
     await ensureBridgeWatermark()
     await stampColdStartMetadata()
     while (!stopping) {
+      // e-6583: WS が無効 / 未接続のときは ping タイマーの門を通らないので、孤児判定は
+      // ループ側にも置く。「守る状態に書き込みうる経路を全部数える」— 1 経路だけ塞いで
+      // 構造が閉じたと言わないための配置。
+      if (maybeExitIfOrphaned('poll-loop')) return
       // e-1667: each step is wrapped in withWatchdog so a hung await never
       // wedges the iteration. HTTP_TIMEOUT_MS on apiFetch catches network
       // stalls first; the watchdog is structural defense-in-depth for any
