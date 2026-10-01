@@ -79,21 +79,87 @@ def _isolate_bus_sent_log(tmp_path, monkeypatch):
 # so seeing one is not evidence that a test wrote it. The developer's own bridge
 # is live in this working copy: its poll loop stamps session state, the trigger
 # engine drops files as it fires, and SQLite creates its sidecars on open. Each
-# name is listed with why it is not the test's doing, following the doctrine in
-# scripts/check-print-before-save.py: a false positive costs one line here, a
-# false negative goes unnoticed. Extend it when a real false positive appears —
+# name is listed with why it is not the test's doing, following the doctrine the
+# sibling guard scripts/check-pid-liveness.py states on its own ALLOWLIST: a false
+# positive costs one line here, a false negative goes unnoticed. (An earlier draft
+# cited scripts/check-print-before-save.py, which lives in an unmerged PR —
+# citing a file the reader cannot open is worse than citing none.)
+# Extend it when a real false positive appears —
 # do NOT widen it to a prefix match, which would quietly re-admit the leak class
 # this guard exists to catch (ms-166 e-6621).
+# Deliberately NOT excluded, though an earlier draft listed them:
+# session.json / session-state.json / session_notes.jsonl. The reasoning for
+# excusing them was "the developer's live bridge writes these" — true here, but
+# FALSE in CI, where no bridge runs. And it was never needed: this guard reports
+# files a test CREATES, so a bridge updating a file that already exists is
+# invisible to it either way. Excluding them bought nothing locally and voided the
+# guard exactly where it matters: a full run in a clean checkout left a
+# test-created session.json sitting there unreported, which in turn made the
+# directory exist and let a later test materialise the store.
 _NOT_THE_TESTS_FAULT = frozenset({
-    "session.json",          # bridge poll loop writes its proof-of-life here
-    "session-state.json",    # the Claude Code state hook stamps this per event
-    "session_notes.jsonl",   # `beacon note` from the session running the suite
-    "project.db-shm",        # SQLite shared-memory sidecar, created on open
-    "project.db-wal",        # SQLite write-ahead log, created on open
+    # SQLite's sidecars accompany project.db, which is NOT excluded: a test that
+    # materialises the store is a real leak and gets reported by name. Listing the
+    # two sidecars keeps that report to one line instead of three. (They are not
+    # present in this repo today — a read only materialises the store when the
+    # project is discovered from the cwd, not when BEACON_PROJECT_FILE points at
+    # it, which is itself the two-conventions split tracked as e-6820.)
+    "project.db-shm",
+    "project.db-wal",
+    ".DS_Store",             # Finder writes this whenever it looks at the folder
     "triggers",              # the trigger engine fires into this directory
     "bridges",              # per-bridge registration directory
     "fork-notes-backup",     # fork cleanup's snapshot dir (ms-178 e-6702)
+    # Transient half of the cloud cache's atomic write (lib/store_api.py writes
+    # "<cache>.tmp" then renames). A test that calls load_project() without its
+    # own project file fetches from the cloud and refreshes this cache, which is
+    # a legitimate read path, not state the test invented. Serially the rename
+    # completes inside the same test and the name is gone again by teardown; it
+    # only becomes visible under -n auto, where one worker's mid-write lands in
+    # another's before/after window — 29 innocent tests blamed in one run,
+    # measured 2026-10-01 (see e-6816).
+    "project.json.tmp",
 })
+
+# NOTE on what this guard does NOT see: it reports files a test CREATES, so a
+# test that rewrites an existing file's CONTENT is invisible to it. That is a
+# deliberate limit, not an oversight — the repo's .beacon/ holds live state the
+# developer's own bridge rewrites constantly, so content comparison would be all
+# noise. Catching "a test rewrote real project state" needs a different
+# instrument than this one.
+
+
+def _snapshot_beacon_dir(beacon_dir: str) -> "set[str]":
+    """Relative paths of files under ``beacon_dir``, excluded entries dropped.
+
+    Two properties this must have, both from the independent review of the first
+    version of this guard (PR #780):
+
+    * **An absent directory is an empty snapshot, not "skip the check."** The
+      first version returned None when ``.beacon/`` did not exist and then
+      skipped silently — which disabled the guard in exactly the environment the
+      leak hid in. CI checks out a tree with no ``.beacon/`` at all (it is
+      gitignored), so a test that CREATED the directory and wrote into it passed
+      with no complaint. Reproduced in a bare worktree before fixing.
+    * **It recurses.** ``os.listdir`` saw only the top level, and the repo's
+      ``.beacon/`` already holds bridges/ codex/ documents/ fork-notes-backup/
+      retro/ session_logs/ triggers/ — those names sit in both snapshots, so a
+      new file INSIDE any of them was invisible. The guard claimed to catch "the
+      NEXT one" while being blind to seven existing subtrees.
+
+    Directories named in ``_NOT_THE_TESTS_FAULT`` are pruned rather than walked:
+    their contents are excluded anyway and they are the ones that grow. A full
+    walk measured 0.55 ms over 431 files — about 1% of the suite at two snapshots
+    per test, which is worth paying; pruning keeps it from tracking the trigger
+    and bridge directories as they fill up.
+    """
+    out: "set[str]" = set()
+    for root, dirs, files in os.walk(beacon_dir):
+        dirs[:] = [d for d in dirs if d not in _NOT_THE_TESTS_FAULT]
+        for name in files:
+            if name in _NOT_THE_TESTS_FAULT:
+                continue
+            out.add(os.path.relpath(os.path.join(root, name), beacon_dir))
+    return out
 
 
 @pytest.fixture(autouse=True)
@@ -133,27 +199,52 @@ def _fail_on_repo_beacon_write(request):
     if request.node.get_closest_marker("allow_repo_beacon_write"):
         yield
         return
-    try:
-        before = set(os.listdir(beacon_dir))
-    except OSError:
-        before = None
+    before = _snapshot_beacon_dir(beacon_dir)
     yield
-    if before is None:
-        return
-    try:
-        after = set(os.listdir(beacon_dir))
-    except OSError:
-        return
-    created = sorted((after - before) - _NOT_THE_TESTS_FAULT)
+    created = sorted(_snapshot_beacon_dir(beacon_dir) - before)
     if created:
         raise AssertionError(
             "this test created {0} in the repository's own .beacon/ — it must "
             "write under tmp_path instead. A file left there changes how the "
             "NEXT run of the suite behaves, and the failure then looks like "
-            "someone else's regression (ms-166 e-6621). Point the resolver at a "
-            "tmp path (see _isolate_bus_budget / _isolate_bus_sent_log), or mark "
-            "the test @pytest.mark.allow_repo_beacon_write if the real "
-            "directory genuinely is the subject.".format(", ".join(created)))
+            "someone else's regression (ms-166 e-6621).\n"
+            "Fix it in the module that writes, one of two ways:\n"
+            "  * point BEACON_PROJECT_FILE at tmp in an autouse fixture — one "
+            "redirect moves every side-file the bus family resolves (worked "
+            "example: tests/test_trek_cli_cloud.py::_isolate_project_root);\n"
+            "  * or set the specific override, e.g. BEACON_BUS_BUDGET_PATH or "
+            "BEACON_BUS_SENT_LOG_PATH.\n"
+            "If the real directory genuinely is this test's subject, mark it "
+            "@pytest.mark.allow_repo_beacon_write.".format(", ".join(created)))
+
+
+@pytest.fixture
+def isolated_project(tmp_path, monkeypatch):
+    """A tmp project that BOTH resolution conventions will find. Returns its dir.
+
+    Isolating a test from the developer's repo takes two moves, not one, because
+    this codebase answers "where is .beacon/" in two ways (ms-166 e-6820):
+
+      * ``get_project_file()`` reads ``BEACON_PROJECT_FILE`` — the store, the bus
+        budget, the send log, documents;
+      * ``lib/session.py`` builds paths from ``Path.cwd()`` and never looks at that
+        env var — session.json, cloud.json, the bridge claim, bridges/.
+
+    Setting only the env var leaves the second family writing the real repo. That
+    is how ``test_pr_create_infer`` came to leave a session.json behind in a clean
+    checkout, which then made ``.beacon/`` exist and let a later test materialise
+    the SQLite store (found by the guard below on 2026-10-01).
+
+    Use this rather than re-deriving the recipe per module: when e-6820 collapses
+    the two conventions into one, this fixture is the single place that changes.
+    """
+    beacon_dir = tmp_path / ".beacon"
+    beacon_dir.mkdir(parents=True, exist_ok=True)
+    (beacon_dir / "project.json").write_text(
+        json.dumps({"name": "isolated", "milestones": []}), encoding="utf-8")
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
+    monkeypatch.chdir(tmp_path)
+    return beacon_dir
 
 
 @pytest.fixture

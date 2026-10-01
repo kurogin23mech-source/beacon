@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -214,3 +215,127 @@ def test_the_exclusion_set_is_exact_names_not_prefixes():
         assert not "bus-budget.json".startswith(name), name
         assert not name.endswith("*"), (
             "the exclusion set must hold exact entry names, not patterns: " + name)
+
+
+# --- independent review of PR #780 (AX-1 / AX-2 / AX-3 / M-1) ----------------
+# The first version of the guard had two blind spots that made it pass in the one
+# environment it mattered most in, plus an error message pointing at a symbol
+# that had been deleted. Each is pinned here so it cannot come back.
+
+
+def test_the_guard_works_when_the_directory_does_not_exist_yet(tmp_path):
+    """AX-1: an absent ``.beacon/`` must be an empty snapshot, not a skipped check.
+
+    The first version returned None from ``os.listdir`` on OSError and then
+    returned early — so in a bare checkout, where ``.beacon/`` does not exist at
+    all (it is gitignored), a test could create the directory and write into it
+    and the guard said nothing. That is CI's exact starting condition, and the
+    commit that added the guard cited "CI starts from a clean checkout" as the
+    reason the original leak stayed hidden.
+    """
+    watch = tmp_path / "not-created-yet"          # deliberately NOT mkdir'd
+    body = (
+        "import os\n"
+        f"WATCH = {str(watch)!r}\n"
+        "def test_creates_the_dir_then_leaks():\n"
+        "    os.makedirs(WATCH, exist_ok=True)\n"
+        "    open(os.path.join(WATCH, 'from-scratch.json'), 'w').write('{}')\n"
+    )
+    r = _run_one(body, "test_e6621_probe_absent_dir.py", watch)
+    assert r.returncode != 0, (
+        "the guard skipped the check because the directory did not exist yet — "
+        "that is CI's condition:\n" + r.stdout + r.stderr)
+    assert "from-scratch.json" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+def test_the_guard_sees_writes_into_existing_subdirectories(tmp_path):
+    """M-1: the snapshot must recurse.
+
+    ``os.listdir`` saw only the top level. The repo's ``.beacon/`` already holds
+    seven subdirectories, whose NAMES appear in both snapshots, so a new file
+    inside one of them produced no difference — while the docstring claimed the
+    guard caught "the NEXT one".
+    """
+    watch = tmp_path / "watched"
+    (watch / "documents").mkdir(parents=True)
+    (watch / "documents" / "pre-existing.json").write_text("{}", encoding="utf-8")
+    body = (
+        "import os\n"
+        f"WATCH = {str(watch)!r}\n"
+        "def test_leaks_into_a_subdir():\n"
+        "    open(os.path.join(WATCH, 'documents', 'nested-leak.json'), 'w').write('{}')\n"
+    )
+    r = _run_one(body, "test_e6621_probe_nested.py", watch)
+    assert r.returncode != 0, (
+        "a write into an existing subdirectory went unreported:\n"
+        + r.stdout + r.stderr)
+    assert "nested-leak.json" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+def test_pruned_directories_are_not_walked_but_still_excluded(tmp_path):
+    """Pruning must not turn into a hole: excluded dirs stay excluded, and the
+    guard must not pay to walk them.
+
+    ``triggers/`` is bridge-owned, so a file appearing there is not the test's
+    doing — but the reason it is skipped must be the exclusion list, not an
+    accident of how the walk is written.
+    """
+    import conftest
+    watch = tmp_path / "watched"
+    (watch / "triggers").mkdir(parents=True)
+    before = conftest._snapshot_beacon_dir(str(watch))
+    (watch / "triggers" / "fired.json").write_text("{}", encoding="utf-8")
+    assert conftest._snapshot_beacon_dir(str(watch)) == before, (
+        "a file under an excluded directory changed the snapshot")
+
+
+def test_the_refusal_names_only_things_that_exist():
+    """AX-2: the error must not send the reader after a deleted symbol.
+
+    The first version said "see _isolate_bus_budget / _isolate_bus_sent_log".
+    ``_isolate_bus_budget`` had been removed during the redesign, so the one
+    person following the instructions searched for something that did not exist.
+    Every identifier the message offers has to be findable.
+    """
+    src = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    fn = src.split("def _fail_on_repo_beacon_write", 1)[1].split("\n@pytest.fixture", 1)[0]
+    # Only what the MESSAGE offers — the fixture body legitimately names the
+    # test-only directory override, which the reader is never told to go find.
+    message = fn.split("raise AssertionError(", 1)[1]
+    offered = set(re.findall(r"\b(BEACON_[A-Z_]+|_isolate_[a-z_]+)\b", message))
+    assert offered, "the refusal offers no concrete handle at all"
+    # Search where a reader would: the whole tests/ and lib/ trees, not just this
+    # file. The message legitimately points at a fixture in another test module.
+    haystack = []
+    for sub in ("tests", "lib"):
+        for path in sorted((ROOT / sub).rglob("*.py")):
+            if path.name == "conftest.py" or path.name == Path(__file__).name:
+                continue        # the message's own home, and this test
+            haystack.append(path.read_text(encoding="utf-8", errors="ignore"))
+    repo_text = "\n".join(haystack)
+    missing = sorted(n for n in offered if n not in repo_text)
+    assert not missing, (
+        "the refusal points at {0}, which a reader cannot find anywhere in "
+        "tests/ or lib/ — following the instructions leads nowhere. (This is what "
+        "happened with _isolate_bus_budget, a fixture deleted during the "
+        "redesign.)".format(", ".join(missing)))
+
+
+def test_a_misspelled_opt_out_marker_cannot_be_silent():
+    """AX-3: --strict-markers turns a typo into a collection error.
+
+    Registering the marker makes the right spelling discoverable; it does not stop
+    the wrong one. Without strict mode ``allow_repo_beacon_writes`` only warns,
+    and warnings print far from the assertion the reader is looking at.
+    """
+    body = (
+        "import pytest\n"
+        "@pytest.mark.allow_repo_beacon_writes\n"   # deliberate typo
+        "def test_typo():\n"
+        "    pass\n"
+    )
+    r = _run_one(body, "test_e6621_probe_typo.py", ROOT / ".beacon")
+    assert r.returncode != 0, (
+        "a misspelled marker was accepted — the typo would read as an opt-out "
+        "while doing nothing:\n" + r.stdout + r.stderr)
+    assert "allow_repo_beacon_writes" in (r.stdout + r.stderr), r.stdout + r.stderr
