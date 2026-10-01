@@ -5238,10 +5238,27 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
         # cleanup verb was added to close. Refuse rather than ignore: silently
         # swallowing a flag the caller believed in is how the ms-160 wiring bugs
         # stayed invisible.
-        if getattr(args, "force", False) and positional != "cleanup":
-            _eprint("Error: --force is only valid for 'beacon session fork cleanup "
-                    "<worktree-path>'.")
-            return 2
+        if positional != "cleanup":
+            # Independent AX review of PR #770 (AX-1, high): `fork_path` and
+            # `--force` both live on the SHARED `fork` subparser because argparse
+            # cannot scope an argument to one positional value. Before they
+            # existed, `beacon session fork ms-9 typo-arg` failed with
+            # "unrecognized arguments"; afterwards argparse binds the stray token
+            # to `fork_path`, nobody reads it for this verb, and the call exits 0.
+            # That is the same silent-swallow this verb was added to close,
+            # recreated one line away from it. Refuse both here so the two
+            # frontends agree (bin/beacon's `list` arm already refuses them).
+            if getattr(args, "force", False):
+                _eprint("Error: --force is only valid for 'beacon session fork "
+                        "cleanup <worktree-path>'.")
+                return 2
+            if (getattr(args, "fork_path", "") or "").strip():
+                _eprint("Error: 'beacon session fork {0}' takes no second "
+                        "argument (got '{1}'). A worktree path is only used by "
+                        "'beacon session fork cleanup <worktree-path>'.".format(
+                            positional or "<ms-id>",
+                            (getattr(args, "fork_path", "") or "").strip()))
+                return 2
         if positional == "cleanup":
             # ms-178 e-6702/e-6703: delegate to the guarded verb; never call
             # `git worktree remove` from here.

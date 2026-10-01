@@ -557,3 +557,112 @@ def test_force_is_rejected_outside_cleanup_on_both_frontends(repo):
                             cwd=str(root), capture_output=True, text=True)
         assert sh.returncode != 0, (
             f"bash frontend must refuse {argv}: {sh.stdout}{sh.stderr}")
+
+
+# --- independent review of PR #770 (AX-1 / AX-2 / maintainability-2) ---------
+# Three defects two context-free judges found that neither the fork's tests nor
+# the parent's first pass caught. AX-1 and AX-2 are both "the thing this verb
+# exists to prevent, recreated one line away from it".
+
+
+def test_uncommitted_work_is_a_gate_and_names_the_files(repo):
+    """AX-2: the merge check only sees committed history.
+
+    Gate 1 asks `git merge-base --is-ancestor`, which cannot see work that was
+    never committed. Removal used to discover it the worst possible way: plain
+    `git worktree remove` fails with exit 128 ("contains modified or untracked
+    files, use --force to delete it") and the code retried with --force on ANY
+    failure — so an operator who passed --force for the *unmerged branch* reason
+    silently also lost their uncommitted work, with git's own error text
+    recommending exactly that. Discover it as a gate, and name the files.
+    """
+    root, wt = repo
+    _git("checkout", "-q", "main", cwd=root)
+    _git("branch", "-f", "--no-track", "origin/main", "ms-9-fork-abc", cwd=root)
+    _set_activity(wt, 99999)  # idle, merged ⇒ only the dirty gate should block
+    (wt / "wip.txt").write_text("work in progress\n", encoding="utf-8")
+    r = _cleanup(root, wt)
+    out = json.loads(r.stdout)
+    assert out["removed"] is False, r.stdout
+    assert wt.exists(), "a worktree with uncommitted work must survive"
+    assert (wt / "wip.txt").exists()
+    joined = " ".join(out["blockers"])
+    assert "未コミット" in joined, joined
+    assert "wip.txt" in joined, "the refusal must name what would be destroyed: " + joined
+
+
+def test_force_may_discard_uncommitted_work_only_after_disclosure(repo):
+    """AX-2 (other half): --force stays able to override, informedly.
+
+    Losing one's own WIP is a risk a human can knowingly accept — unlike the
+    notes snapshot, which is a hard_blocker. What was wrong was that the loss
+    happened without ever being named. With the gate in place the refusal lists
+    the files first, so passing --force is a choice rather than a surprise.
+    """
+    root, wt = repo
+    _git("checkout", "-q", "main", cwd=root)
+    _git("branch", "-f", "--no-track", "origin/main", "ms-9-fork-abc", cwd=root)
+    _set_activity(wt, 99999)
+    (wt / "wip.txt").write_text("work in progress\n", encoding="utf-8")
+    r = _cleanup(root, wt, env={"BEACON_FORK_CLEANUP_FORCE": "1"})
+    out = json.loads(r.stdout)
+    assert out["removed"] is True, r.stdout
+    assert not Path(wt).exists()
+
+
+def test_stray_second_positional_is_refused_outside_cleanup(repo):
+    """AX-1: `fork_path` lives on the shared subparser, so it leaked.
+
+    Before the cleanup verb existed, `beacon session fork ms-9 typo-arg` failed
+    with "unrecognized arguments". Adding `fork_path` to the shared `fork`
+    subparser made argparse bind the stray token and exit 0 with nobody reading
+    it — the same silent swallow the cleanup verb was added to close.
+    """
+    root, _wt = repo
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT), str(ROOT / "lib")])
+    for argv in (["session", "fork", "ms-9", "typo-arg"],
+                 ["session", "fork", "list", "typo-arg"]):
+        code = (
+            "import sys, pathlib\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from beacon_cli.dispatch import dispatch\n"
+            f"sys.exit(dispatch(pathlib.Path({str(ROOT)!r}), {argv!r}))\n"
+        )
+        r = subprocess.run([sys.executable, "-c", code], cwd=str(root),
+                           capture_output=True, text=True, env=env)
+        assert r.returncode != 0, (
+            f"a stray second argument must be refused for {argv}: "
+            f"{r.stdout}{r.stderr}")
+        assert "typo-arg" in (r.stdout + r.stderr), (
+            "the refusal must quote the token it rejected: " + r.stdout + r.stderr)
+
+
+def test_own_session_id_does_not_claim_a_fallback_that_cannot_fire():
+    """maintainability-2: `session-state.json` never carries a session id.
+
+    The reader used to try it as a second source, but that file's schema is
+    {declared_state, declared_at, state_since, source_event, state_detail?} —
+    written by session_state_hook.build_state_marker, which puts no id in it. A
+    docstring promising a fallback the code cannot take sends the next reader
+    debugging the wrong layer. Pinned from the producer side so that if someone
+    later DOES add an id to the marker, this test says the reader may change too.
+    """
+    import session_state_hook
+    marker = session_state_hook.build_state_marker(
+        "PreToolUse", "2026-10-01T00:00:00Z")
+    assert "session_id" not in marker and "sid" not in marker, (
+        "the state marker now carries an id — _fork_own_session_id may read it: "
+        + repr(marker))
+    # Look at what the function EXECUTES, not what it talks about: the comment
+    # explaining why the fallback was removed names the file on purpose, and a
+    # raw substring check would call that a violation (the guard has to fail on
+    # the real defect, not on its own explanation).
+    src = (ROOT / "lib" / "session.py").read_text(encoding="utf-8")
+    fn = src.split("def _fork_own_session_id", 1)[1].split("\ndef ", 1)[0]
+    code_lines = [ln for ln in fn.splitlines()
+                  if ln.strip() and not ln.strip().startswith("#")]
+    body = "\n".join(code_lines)
+    assert "session-state.json" not in body, (
+        "_fork_own_session_id must not read a file that cannot carry the id:\n"
+        + body)

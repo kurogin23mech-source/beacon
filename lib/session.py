@@ -1391,15 +1391,19 @@ def _fork_own_session_id(worktree: Path) -> str:
     as free to delete. Best-effort: an unreadable / absent marker yields "" and
     the caller must then treat liveness as UNKNOWN, never as "safe".
     """
-    for name in ("session.json", "session-state.json"):
-        try:
-            rec = json.loads((worktree / ".beacon" / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        sid = rec.get("session_id") or rec.get("sid") or ""
-        if sid:
-            return str(sid)
-    return ""
+    # Independent maintainability review of PR #770: this used to also try
+    # `.beacon/session-state.json` as a fallback, but that file's schema is
+    # {declared_state, declared_at, state_since, source_event, state_detail?} —
+    # written by lib/session_state_hook.build_state_marker, which never puts a
+    # session id in it. The fallback could not ever succeed, so the docstring
+    # promised a second source the code did not have. Read the one file that
+    # actually carries the id; do not claim a fallback that cannot fire.
+    try:
+        rec = json.loads(
+            (worktree / ".beacon" / "session.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(rec.get("session_id") or rec.get("sid") or "")
 
 
 def list_forks(repo_root: Path | str, runner=None) -> list[dict]:

@@ -982,6 +982,38 @@ def cmd_session_fork_cleanup():
                     f"({(merged.stderr or '').strip() or f'git exit {merged.returncode}'})。"
                     f"確認できないため削除しません")
 
+    # --- gate 1b: uncommitted work inside the worktree -----------------------
+    # Independent AX review of PR #770 (AX-2, high): gate 1 asks git whether the
+    # BRANCH is merged, and `git merge-base --is-ancestor` only sees committed
+    # history. Work that was never committed is invisible to it. The removal step
+    # then discovered the problem the worst possible way: plain
+    # `git worktree remove` fails with exit 128 ("contains modified or untracked
+    # files, use --force to delete it") and the code retried with --force on ANY
+    # failure, so an operator who passed --force for the *unmerged branch* reason
+    # silently also got their uncommitted work deleted. git's own error text
+    # recommends exactly that destructive retry, which is how the caller is led
+    # into it. Reproduced on a real repo 2026-10-01.
+    #
+    # So discover it HERE, as a gate, and name the files. --force may still
+    # override it (losing one's own WIP is a risk a human can knowingly accept —
+    # unlike the notes snapshot, which stays a hard_blocker), but it has to be an
+    # INFORMED choice: the refusal lists what would be destroyed first.
+    dirty = subprocess.run(["git", "status", "--porcelain"],
+                           cwd=record["worktree_path"], capture_output=True,
+                           text=True)
+    if dirty.returncode != 0:
+        blockers.append(
+            f"このフォークに未コミットの変更が残っているかを確認できませんでした "
+            f"({(dirty.stderr or '').strip() or f'git exit {dirty.returncode}'})。"
+            f"確認できないため削除しません")
+    elif dirty.stdout.strip():
+        names = [ln[3:].strip() for ln in dirty.stdout.splitlines() if ln[3:].strip()]
+        shown = "、".join(names[:5]) + ("ほか" if len(names) > 5 else "")
+        blockers.append(
+            f"このフォークに未コミットの変更が {len(names)} 件あります ({shown})。"
+            f"削除すると失われます (git の履歴に入っていないので取り込み確認では"
+            f"検出できません)")
+
     # --- gate 2: is someone still working in there? --------------------------
     idle = record.get("idle_seconds")
     if idle is None:
