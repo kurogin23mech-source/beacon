@@ -155,48 +155,162 @@ def test_checker_is_satisfied_once_the_print_moves_below_the_save(tmp_path):
     assert mod.collect(lib) == []
 
 
-# --- 4. precision: the shapes that must NOT be reported ---------------------
+# --- 4. the full catch/quiet matrix -----------------------------------------
+#
+# Both independent reviews of PR #777 reproduced the same blind spot: the first
+# version treated "a save exists somewhere inside this compound statement" as
+# "the write happened", so a save in one arm of an `if`, inside a `try` whose
+# handler swallows the abort, or inside a loop that may not iterate, all made
+# the checker wave through an unconditional success print. The try/except shape
+# is structurally the e-6688 bug itself. Every shape below is pinned so neither
+# half of the guard's accuracy — what it catches, and what it leaves alone —
+# can regress silently.
 
-@pytest.mark.parametrize("name,src", [
-    ("validation error returns before the save", '''
-        def cmd_x():
-            if not entry_id:
-                print("Error: entry id required")
-                sys.exit(1)
-            save_project(data)
-    '''),
-    ("no-op notice returns before the save", '''
-        def cmd_x():
-            if already_adopted:
-                print("already adopted")
-                return
-            save_project(data)
-    '''),
-    ("write, report, then a follow-on write", '''
-        def cmd_x():
-            save_project(data)
-            print(f"Renamed {a} to {b}")
-            if changed:
-                save_project(data)
-    '''),
-    ("stderr warning is not a success claim", '''
-        def cmd_x():
-            print("Warning: odd state", file=sys.stderr)
-            save_project(data)
-    '''),
-    ("print nested in a conditional is a maybe, not a claim", '''
-        def cmd_x():
-            if verbose:
-                print("extra detail")
-            save_project(data)
-    '''),
-])
-def test_checker_does_not_cry_wolf(tmp_path, name, src):
-    mod = _checker()
+MUST_REPORT = {
+    "the historical bug: print then save":
+        "def cmd_x():\n"
+        "    print(f'Done: [{eid}]')\n"
+        "    save_project(data)\n",
+    "save in only one arm, print unconditional":
+        "def cmd_x():\n"
+        "    if needs_write:\n"
+        "        save_project(data)\n"
+        "    else:\n"
+        "        pass\n"
+        "    print(f'Done: [{eid}]')\n",
+    "save in an if with no else":
+        "def cmd_x():\n"
+        "    if needs_write:\n"
+        "        save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n",
+    "try/except swallows the abort":
+        "def cmd_x():\n"
+        "    try:\n"
+        "        save_project(data)\n"
+        "    except ConflictError:\n"
+        "        pass\n"
+        "    print(f'Done: [{eid}]')\n",
+    "save inside a loop (zero iterations is a real path)":
+        "def cmd_x():\n"
+        "    for item in items:\n"
+        "        save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n",
+    "the success line moved into a helper":
+        "def _report_done(entry):\n"
+        "    print(f'Done: {entry}')\n"
+        "def cmd_x():\n"
+        "    _report_done(entry)\n"
+        "    save_project(data)\n",
+    "defining a helper is not performing the write":
+        "def cmd_x():\n"
+        "    def _write():\n"
+        "        save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n"
+        "    _write()\n",
+    "file=sys.stdout is stdout, not stderr":
+        "def cmd_x():\n"
+        "    print(f'Done: [{eid}]', file=sys.stdout)\n"
+        "    save_project(data)\n",
+    "file= an expression we cannot resolve stays in scope":
+        "def cmd_x():\n"
+        "    print(f'Done: [{eid}]', file=pick_stream())\n"
+        "    save_project(data)\n",
+}
+
+MUST_STAY_QUIET = {
+    "validation error returns before the save":
+        "def cmd_x():\n"
+        "    if not entry_id:\n"
+        "        print('Error: entry id required')\n"
+        "        sys.exit(1)\n"
+        "    save_project(data)\n",
+    "no-op notice returns before the save":
+        "def cmd_x():\n"
+        "    if already:\n"
+        "        print('already adopted')\n"
+        "        return\n"
+        "    save_project(data)\n",
+    "write, report, then a follow-on write":
+        "def cmd_x():\n"
+        "    save_project(data)\n"
+        "    print(f'Renamed {a} to {b}')\n"
+        "    if changed:\n"
+        "        save_project(data)\n",
+    "stderr warning is not a success claim":
+        "def cmd_x():\n"
+        "    print('Warning: odd state', file=sys.stderr)\n"
+        "    save_project(data)\n",
+    "print nested in a conditional is a maybe":
+        "def cmd_x():\n"
+        "    if verbose:\n"
+        "        print('extra detail')\n"
+        "    save_project(data)\n",
+    "try saves and every handler saves too":
+        "def cmd_x():\n"
+        "    try:\n"
+        "        save_project(data)\n"
+        "    except ConflictError:\n"
+        "        save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n",
+    "finally always runs":
+        "def cmd_x():\n"
+        "    try:\n"
+        "        work()\n"
+        "    finally:\n"
+        "        save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n",
+    "both arms of the if save":
+        "def cmd_x():\n"
+        "    if cond:\n"
+        "        save_project(data)\n"
+        "    else:\n"
+        "        save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n",
+    "a with-block body always runs":
+        "def cmd_x():\n"
+        "    with lock():\n"
+        "        save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n",
+    "a verb that never writes makes no write claim":
+        "def cmd_x():\n"
+        "    print('listing')\n"
+        "    print('more')\n",
+    "print after a plain save":
+        "def cmd_x():\n"
+        "    save_project(data)\n"
+        "    print(f'Done: [{eid}]')\n",
+}
+
+
+def _collect_src(tmp_path, src):
     lib = tmp_path / "lib"
     lib.mkdir()
-    (lib / "cmd_x.py").write_text(textwrap.dedent(src), encoding="utf-8")
-    assert mod.collect(lib) == [], name
+    (lib / "cmd_x.py").write_text(src, encoding="utf-8")
+    return _checker().collect(lib)
+
+
+@pytest.mark.parametrize("name", sorted(MUST_REPORT))
+def test_checker_reports_every_unbacked_success_line(tmp_path, name):
+    hits = _collect_src(tmp_path, MUST_REPORT[name])
+    assert hits, "MISSED: " + name + " — the guard would wave this through"
+
+
+@pytest.mark.parametrize("name", sorted(MUST_STAY_QUIET))
+def test_checker_does_not_cry_wolf(tmp_path, name):
+    hits = _collect_src(tmp_path, MUST_STAY_QUIET[name])
+    assert hits == [], "FALSE POSITIVE: " + name + " -> " + repr(hits)
+
+
+def test_scope_is_stated_in_the_success_message():
+    """The guard checks lib/ and the save_project primitive only. An unscoped
+    'OK' would read as a repo-wide guarantee it does not provide — the gap both
+    reviews of PR #777 raised."""
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check-print-before-save.py")],
+        capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "lib/*.py" in r.stdout and "save_project()" in r.stdout, r.stdout
+    assert "NOT checked" in r.stdout, r.stdout
 
 
 def test_unparseable_file_is_reported_not_treated_as_clean(tmp_path):

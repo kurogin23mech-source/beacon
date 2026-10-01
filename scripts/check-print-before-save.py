@@ -55,11 +55,61 @@ ALLOW = {
         "reports GitHub's state (already closed); true regardless of the save.",
     ("cmd_pr.py", "cmd_pr_add", "PR body (prefill):"):
         "echoes the body being used as input; not a claim that anything was written.",
+    # --- conditional-write verbs whose report is accurate either way ---------
+    # These reach the checker through the second shape it looks for (the write
+    # is conditional, the print is not). The print is still true when no write
+    # happened, so they are exempt — but they are listed rather than excluded
+    # by a rule, because distinguishing "accurate either way" from "success
+    # claim" is a judgement a parser cannot make. Following the doctrine stated
+    # in scripts/check-pid-liveness.py: a false positive costs one allowlist
+    # line, a false negative goes unnoticed until something breaks.
+    ("commands.py", "cmd_channel_opt_out", ""):
+        "a trailing footer ('Lift later with: …'); it describes how to undo, "
+        "not that anything was written.",
+    ("commands.py", "cmd_channel_opt_out", "Lift later with:"):
+        "same footer; the preceding branches each print their own accurate "
+        "already-set / written line.",
+    ("commands.py", "cmd_sales_reply_watch_op_ensure", "reply-watch operation:"):
+        "reports the operation's resulting state and says 'created' vs 'exists' "
+        "explicitly; when nothing changed there was nothing to write and the "
+        "line is still true.",
+    ("commands.py", "cmd_sales_reply_watch_op_ensure", "  → 自動発火を有効にするには"):
+        "a next-step hint about approval, not a claim about the write.",
 }
 
 
+# The write primitive this checker understands. Named so the scope is greppable
+# and so widening it later is one edit — NOT a claim that every save-like
+# primitive in the tree is covered. Known out of scope today:
+# ``trek_store.save_trek`` (20+ sites in lib/cmd_trek.py) and the server-side
+# stores. Widening means auditing those call sites; see the follow-up task.
+SAVE_PRIMITIVES = ("save_project",)
+
+# How many levels of module-local indirection to follow. A success line
+# extracted into a helper (``_report_done(entry)``) is a refactor someone will
+# make, and at depth 0 the guard would silently stop covering that function.
+# Depth 1 catches the realistic shape; deeper chains remain a stated blind spot.
+_RESOLVE_DEPTH = 1
+
+
+def _own_body(node):
+    """Statements belonging to this function, excluding nested def bodies.
+
+    ``ast.walk`` descends into a nested ``def``, which made merely DEFINING a
+    helper that calls save_project look like performing the write.
+    """
+    out = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                              ast.ClassDef)):
+            continue
+        out.append(child)
+        out.extend(_own_body(child))
+    return out
+
+
 def _terminates(stmt) -> bool:
-    """Does this statement leave the function unconditionally?"""
+    """Does this statement unconditionally leave the function?"""
     if isinstance(stmt, (ast.Return, ast.Raise)):
         return True
     if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
@@ -67,7 +117,7 @@ def _terminates(stmt) -> bool:
         if getattr(f, "attr", None) == "exit" or getattr(f, "id", None) == "exit":
             return True
     if isinstance(stmt, ast.If):
-        return bool(_block_terminates(stmt.body) and stmt.orelse
+        return bool(stmt.orelse and _block_terminates(stmt.body)
                     and _block_terminates(stmt.orelse))
     return False
 
@@ -76,25 +126,147 @@ def _block_terminates(stmts) -> bool:
     return any(_terminates(s) for s in stmts)
 
 
-def _calls_save(stmts) -> bool:
+def _is_save_call(node, helpers) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+    if name in SAVE_PRIMITIVES:
+        return True
+    return bool(name and helpers.get(name, (False, False))[0])
+
+
+def _direct_save(stmt, helpers) -> bool:
+    """Does this ONE statement perform the write unconditionally (no branching)?
+
+    Defining a function is not calling it: ``def _w(): save_project(d)`` must
+    not count, or the write looks done at the point the helper is declared.
+    (``ast.walk`` cannot express this — skipping a FunctionDef *node* still
+    walks its body — so the traversal is over ``_own_body``, which stops at
+    nested definitions.)
+    """
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return False
+    nodes = [stmt] + _own_body(stmt)
+    if any(isinstance(n, (ast.If, ast.Try, ast.For, ast.While, ast.AsyncFor))
+           for n in nodes):
+        return False          # branching: use _definitely_saves instead
+    return any(_is_save_call(n, helpers) for n in nodes)
+
+
+def _definitely_saves(stmts, helpers) -> bool:
+    """Does EVERY path through this block that falls out of it pass a write?
+
+    The predicate the first version got wrong: it asked "is there a save
+    anywhere inside", which is true for a save in one arm of an ``if``, or in a
+    ``try`` whose handler swallows the abort, or in a loop that may run zero
+    times. Each of those leaves a path on which the write did not happen while
+    the checker went on believing it had — so the success print after it was
+    waved through. Both independent reviews of PR #777 reproduced exactly that.
+    """
     for s in stmts:
-        for n in ast.walk(s):
-            if isinstance(n, ast.Call):
-                name = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
-                if name == "save_project":
-                    return True
+        if _terminates(s):
+            return True
+        if _direct_save(s, helpers):
+            return True
+        if isinstance(s, ast.If):
+            if not s.orelse:
+                continue          # the false path writes nothing
+            if (_definitely_saves(s.body, helpers)
+                    and _definitely_saves(s.orelse, helpers)):
+                return True
+        elif isinstance(s, ast.Try):
+            # finally always runs; otherwise the try body only counts when every
+            # handler also saves or leaves (an exception must not route past it).
+            if s.finalbody and _definitely_saves(s.finalbody, helpers):
+                return True
+            if (_definitely_saves(s.body, helpers)
+                    and s.handlers
+                    and all(_definitely_saves(h.body, helpers) for h in s.handlers)
+                    and (not s.orelse or _definitely_saves(s.orelse, helpers))):
+                return True
+        elif isinstance(s, (ast.For, ast.While, ast.AsyncFor)):
+            # zero iterations is a real path; only the else clause is certain.
+            if s.orelse and _definitely_saves(s.orelse, helpers):
+                return True
+        elif isinstance(s, (ast.With, ast.AsyncWith)):
+            if _definitely_saves(s.body, helpers):
+                return True
     return False
 
 
-def _stdout_prints(stmts):
-    out = []
-    for s in stmts:
-        for n in ast.walk(s):
-            if (isinstance(n, ast.Call)
-                    and getattr(n.func, "id", None) == "print"
-                    and not any(k.arg == "file" for k in n.keywords)):
-                out.append(n)
-    return out
+def _stdout_print_call(node) -> bool:
+    """A print() that goes to stdout.
+
+    ``file=`` is only an exemption when it actually names stderr — the rule is
+    about the stream, not about the keyword being present. ``file=sys.stdout``
+    is stdout, and an expression we cannot resolve is treated as in scope
+    (unknown must not read as safe).
+    """
+    if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "print"):
+        return False
+    for kw in node.keywords:
+        if kw.arg != "file":
+            continue
+        v = kw.value
+        if isinstance(v, ast.Attribute) and v.attr == "stderr":
+            return False
+        return True       # sys.stdout, or anything we cannot resolve
+    return True
+
+
+def _direct_stdout_prints(stmt, helpers):
+    """stdout prints this ONE statement performs unconditionally.
+
+    A bare ``print(...)``, or a call to a module-local helper that itself
+    prints to stdout (depth 1). A print nested in a conditional inside ``stmt``
+    is a *maybe*, and flagging a maybe is how a checker earns a reputation for
+    crying wolf.
+    """
+    if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+        return []
+    call = stmt.value
+    if _stdout_print_call(call):
+        return [call]
+    name = getattr(call.func, "id", None)
+    if name and helpers.get(name, (False, False))[1]:
+        return [call]
+    return []
+
+
+def _helper_table(tree, depth=_RESOLVE_DEPTH):
+    """module-local function name -> (calls a write, prints to stdout).
+
+    Resolved to ``depth`` levels so a success line moved into a helper does not
+    silently fall out of the guard's reach.
+    """
+    bodies = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bodies[node.name] = node
+    table = {name: (False, False) for name in bodies}
+    for _ in range(depth + 1):
+        changed = False
+        for name, fn in bodies.items():
+            saves, prints = table[name]
+            for n in _own_body(fn):
+                for sub in ast.walk(n):
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        continue
+                    if _is_save_call(sub, table):
+                        saves = True
+                    if _stdout_print_call(sub):
+                        prints = True
+                    callee = getattr(getattr(sub, "func", None), "id", None)
+                    if callee and callee in table:
+                        s2, p2 = table[callee]
+                        saves = saves or s2
+                        prints = prints or p2
+            if (saves, prints) != table[name]:
+                table[name] = (saves, prints)
+                changed = True
+        if not changed:
+            break
+    return table
 
 
 def _literal_prefix(node) -> str:
@@ -118,75 +290,101 @@ def _allowed(filename, fnname, text) -> bool:
     return False
 
 
-def _direct_stdout_prints(stmt):
-    """stdout prints that this ONE statement performs unconditionally.
+def _scan(stmts, inherited, filename, fnname, hits, helpers, committed=False):
+    """Walk one block, reporting stdout prints the write does not stand behind.
 
-    Only a bare ``print(...)`` expression statement counts. A print nested in a
-    conditional / loop / handler inside ``stmt`` is a *maybe*, and flagging a
-    maybe is how a checker earns its reputation for crying wolf.
-    """
-    if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
-        return []
-    call = stmt.value
-    if getattr(call.func, "id", None) != "print":
-        return []
-    if any(k.arg == "file" for k in call.keywords):
-        return []          # stderr: a warning is not a success claim
-    return [call]
+    A print is reported when, on the path reaching it, the function's write is
+    not GUARANTEED to have run. Two shapes fall under that:
 
+      * the print comes before the write (the historical e-6688 bug);
+      * the write is conditional — one arm of an ``if``, a ``try`` whose handler
+        swallows the abort, a loop that may not iterate — and the print is
+        unconditional. The success line then outlives a write that did not
+        happen, which is the same harm by a different route. Both independent
+        reviews of PR #777 reproduced this and the first version missed it.
 
-def _scan(stmts, inherited, filename, fnname, hits, committed=False):
-    """Walk one block, carrying the prints certain to have run on the way in.
-
-    ``inherited`` is cleared at every ``save_project()``: anything printed after
-    a successful write is reporting a write that happened (``account rename``
-    writes, reports, then syncs an outbox — correct, and must not be flagged).
-    A statement that leaves the function ends the walk: validation errors and
-    no-op notices print and return, and never reach a save.
-
-    ``committed`` means a write has already landed on this path. After that the
-    verb's result IS true, so nothing later is a false success claim and
-    collection stops — ``account rename`` writes, reports, then saves an outbox
-    marker, and the report belongs to the first write.
-
-    Known limit (stated rather than papered over): a verb that writes twice and
-    reports the SECOND write before it happens is not caught. No verb does that
-    today; the common and observed shape is report-then-first-write.
+    ``committed`` means every path reaching here has passed the write; from
+    that point the verb's result is true and nothing later is a false claim.
     """
     pending = [] if committed else list(inherited)
     for s in stmts:
-        if _calls_save([s]):
-            # Flag first (the save may be nested inside this statement), then
-            # recurse so a save deeper in still sees the same prefix.
-            for p in pending:
-                text = _literal_prefix(p)
-                if not _allowed(filename, fnname, text):
-                    hits.append((filename, fnname, p.lineno, text))
-            if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)):
-                for attr in ("body", "orelse", "finalbody"):
-                    sub = getattr(s, attr, None) or []
-                    if sub:
-                        _scan(sub, pending, filename, fnname, hits, committed)
-                for h in getattr(s, "handlers", None) or []:
-                    _scan(h.body, pending, filename, fnname, hits, committed)
+        if _direct_save(s, helpers):
+            _report(pending, filename, fnname, hits)
             pending = []
             committed = True
             continue
-        if isinstance(s, (ast.If, ast.Try, ast.For, ast.While, ast.With)):
+        if isinstance(s, (ast.If, ast.Try, ast.For, ast.While, ast.With,
+                          ast.AsyncFor, ast.AsyncWith)):
             for attr in ("body", "orelse", "finalbody"):
                 sub = getattr(s, attr, None) or []
                 if sub:
-                    _scan(sub, pending, filename, fnname, hits, committed)
+                    _scan(sub, pending, filename, fnname, hits, helpers, committed)
             for h in getattr(s, "handlers", None) or []:
-                _scan(h.body, pending, filename, fnname, hits, committed)
-            if _calls_save([s]):
-                committed = True
+                _scan(h.body, pending, filename, fnname, hits, helpers, committed)
+            if _definitely_saves([s], helpers):
+                _report(pending, filename, fnname, hits)
                 pending = []
+                committed = True
             continue
         if _terminates(s):
             return
         if not committed:
-            pending.extend(_direct_stdout_prints(s))
+            pending.extend(_direct_stdout_prints(s, helpers))
+
+
+def _report(prints, filename, fnname, hits):
+    for p in prints:
+        text = _literal_prefix(p)
+        if not _allowed(filename, fnname, text):
+            hits.append((filename, fnname, p.lineno, text))
+
+
+def _scan_function(fn, filename, hits, helpers):
+    """Scan one function, then report anything still pending at its end.
+
+    Reporting the leftovers is what catches the conditional-write shapes: a
+    print that was never backed by a guaranteed write reaches the end of the
+    function still pending.
+    """
+    if not _contains_save(fn, helpers):
+        return            # a verb that never writes makes no write claims
+    leftovers = []
+    _scan(fn.body, [], filename, fn.name, hits, helpers)
+    _scan_tail(fn.body, [], filename, fn.name, leftovers, helpers)
+    for h in leftovers:
+        if h not in hits:
+            hits.append(h)
+
+
+def _contains_save(fn, helpers) -> bool:
+    for n in _own_body(fn):
+        for sub in ast.walk(n):
+            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if _is_save_call(sub, helpers):
+                return True
+    return False
+
+
+def _scan_tail(stmts, inherited, filename, fnname, hits, helpers, committed=False):
+    """Like _scan, but also reports what is still pending when the block ends."""
+    pending = [] if committed else list(inherited)
+    for s in stmts:
+        if _direct_save(s, helpers):
+            pending = []
+            committed = True
+            continue
+        if isinstance(s, (ast.If, ast.Try, ast.For, ast.While, ast.With,
+                          ast.AsyncFor, ast.AsyncWith)):
+            if _definitely_saves([s], helpers):
+                pending = []
+                committed = True
+            continue
+        if _terminates(s):
+            return
+        if not committed:
+            pending.extend(_direct_stdout_prints(s, helpers))
+    _report(pending, filename, fnname, hits)
 
 
 def collect(lib_dir: pathlib.Path = LIB) -> list:
@@ -198,9 +396,10 @@ def collect(lib_dir: pathlib.Path = LIB) -> list:
             # Unparseable must not read as clean (ms-160 e-6349): report it.
             hits.append((path.name, "(whole file)", 0, "could not be parsed"))
             continue
+        helpers = _helper_table(tree)
         for fn in ast.walk(tree):
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                _scan(fn.body, [], path.name, fn.name, hits)
+                _scan_function(fn, path.name, hits, helpers)
     seen, uniq = set(), []
     for h in hits:
         if h not in seen:
@@ -211,9 +410,12 @@ def collect(lib_dir: pathlib.Path = LIB) -> list:
 
 def main() -> int:
     hits = collect()
+    _scanned = len(list(LIB.glob("*.py")))
     if not hits:
-        print("[print-before-save] OK: no success line is printed before the "
-              "write that would make it true.")
+        print("[print-before-save] OK: in lib/*.py, no success line is printed "
+              "before its save_project() write ({0} files scanned). Scope is "
+              "lib/ + the save_project primitive only — trek_store.save_trek "
+              "and the server stores are NOT checked.".format(_scanned))
         return 0
     print("[print-before-save] a success line is printed BEFORE its write:", file=sys.stderr)
     for filename, fnname, lineno, text in hits:
