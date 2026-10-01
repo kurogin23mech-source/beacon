@@ -50,6 +50,21 @@ os.environ.setdefault("BEACON_SESSION_KIND", "human")
 os.environ.setdefault("BEACON_TEST_MODE", "1")
 
 
+def pytest_configure(config):
+    """Register the suite's own markers so they are not silently mistyped.
+
+    An unregistered marker only warns, and a misspelled one
+    (``allow_repo_beacon_writes``) then does nothing while reading as if it
+    opted out — the kind of silent no-op this suite's guards exist to catch
+    (ms-166 e-6621). With ``--strict-markers`` a typo becomes an error; without
+    it, registering at least makes the intended spelling discoverable via
+    ``pytest --markers``."""
+    config.addinivalue_line(
+        "markers",
+        "allow_repo_beacon_write: this test's subject is the repository's own "
+        ".beacon/ directory, so the leak guard is waived for it")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_bus_sent_log(tmp_path, monkeypatch):
     """ms-141 / e-4965: point the bus recent-send guard's log at a per-test tmp
@@ -58,6 +73,87 @@ def _isolate_bus_sent_log(tmp_path, monkeypatch):
     log. Tests that specifically exercise the guard set their own contents."""
     monkeypatch.setenv(
         "BEACON_BUS_SENT_LOG_PATH", str(tmp_path / "bus-sent-log.json"))
+
+
+# Entries in the repo's .beacon/ that appear on their own while the suite runs,
+# so seeing one is not evidence that a test wrote it. The developer's own bridge
+# is live in this working copy: its poll loop stamps session state, the trigger
+# engine drops files as it fires, and SQLite creates its sidecars on open. Each
+# name is listed with why it is not the test's doing, following the doctrine in
+# scripts/check-print-before-save.py: a false positive costs one line here, a
+# false negative goes unnoticed. Extend it when a real false positive appears —
+# do NOT widen it to a prefix match, which would quietly re-admit the leak class
+# this guard exists to catch (ms-166 e-6621).
+_NOT_THE_TESTS_FAULT = frozenset({
+    "session.json",          # bridge poll loop writes its proof-of-life here
+    "session-state.json",    # the Claude Code state hook stamps this per event
+    "session_notes.jsonl",   # `beacon note` from the session running the suite
+    "project.db-shm",        # SQLite shared-memory sidecar, created on open
+    "project.db-wal",        # SQLite write-ahead log, created on open
+    "triggers",              # the trigger engine fires into this directory
+    "bridges",              # per-bridge registration directory
+    "fork-notes-backup",     # fork cleanup's snapshot dir (ms-178 e-6702)
+})
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_repo_beacon_write(request):
+    """Fail the test that leaves a new file in the real repo ``.beacon/``.
+
+    ms-166 / e-6621 AC 4 — the guard has to be observable, not just believed.
+    The two fixtures above redirect the files we know about; this one catches the
+    NEXT one. Without it a new side-file would leak exactly as the budget did,
+    and the cost would again land on whoever runs the suite next rather than on
+    the test that caused it.
+
+    Attribution is the whole value: the failure names the test and the file, so
+    the person reading it does not have to bisect. Pre-existing files are
+    ignored (only files the test CREATES are reported) — the repo legitimately
+    holds project.json / cloud.json / session.json, and a developer's own state
+    is not the test's fault.
+
+    Under ``-n auto`` attribution is approximate: workers run concurrently, so a
+    file one test creates falls inside another's before/after window and both are
+    reported. That is the right way to be wrong here — the message names the file,
+    which is what locates the真 source, and over-reporting a real leak costs a
+    minute while missing one costs the next person's debugging session. Do not
+    "fix" it by disabling the guard under xdist.
+
+    Opt out with ``@pytest.mark.allow_repo_beacon_write`` when a test's subject
+    genuinely is the real project directory."""
+    # ``BEACON_TEST_REPO_BEACON_DIR`` points the guard at a different directory.
+    # Only the guard's own probe uses it (tests/test_bus_budget_isolation_e6621.py):
+    # verifying that the guard fires used to mean writing the real .beacon/, and
+    # under ``-n auto`` that file then appeared inside OTHER workers' before/after
+    # windows and got attributed to whichever test happened to straddle it — 4
+    # innocent tests blamed per run, measured 2026-10-01. The probe now exercises
+    # the guard against a tmp directory, so verifying it costs nothing real.
+    beacon_dir = os.environ.get("BEACON_TEST_REPO_BEACON_DIR", "").strip() or \
+        os.path.join(os.path.dirname(_TESTS_DIR), ".beacon")
+    if request.node.get_closest_marker("allow_repo_beacon_write"):
+        yield
+        return
+    try:
+        before = set(os.listdir(beacon_dir))
+    except OSError:
+        before = None
+    yield
+    if before is None:
+        return
+    try:
+        after = set(os.listdir(beacon_dir))
+    except OSError:
+        return
+    created = sorted((after - before) - _NOT_THE_TESTS_FAULT)
+    if created:
+        raise AssertionError(
+            "this test created {0} in the repository's own .beacon/ — it must "
+            "write under tmp_path instead. A file left there changes how the "
+            "NEXT run of the suite behaves, and the failure then looks like "
+            "someone else's regression (ms-166 e-6621). Point the resolver at a "
+            "tmp path (see _isolate_bus_budget / _isolate_bus_sent_log), or mark "
+            "the test @pytest.mark.allow_repo_beacon_write if the real "
+            "directory genuinely is the subject.".format(", ".join(created)))
 
 
 @pytest.fixture

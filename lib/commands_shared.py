@@ -1299,7 +1299,25 @@ def _gate_target_class(data: dict, kind: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _get_bus_budget_path() -> str:
-    """Resolve .beacon/bus-budget.json under the current project root."""
+    """Resolve .beacon/bus-budget.json under the current project root.
+
+    ``BEACON_BUS_BUDGET_PATH`` overrides the location, exactly as
+    ``BEACON_BUS_SENT_LOG_PATH`` does for the sibling send-guard file below
+    (ms-141 e-4965). ms-166 e-6621: without an override the only way to keep a
+    test off the real repo ``.beacon/`` was for that test to set
+    ``BEACON_PROJECT_FILE`` itself, so every code path that grants budget had to
+    be isolated by hand at every call site. ``cmd_trek_join`` reaches
+    ``_arm_for_trek``, which writes an unconditional 20-turn grant, and
+    tests/test_trek_cli_cloud.py drove it with no isolation — leaving a
+    ``trek_id: tk-fake01`` budget in the developer's working copy that made the
+    NEXT run treat sends as autonomous and refuse them (bus tests failing by the
+    dozen, locally only; CI starts from a clean checkout and stayed green).
+
+    An override plus one autouse fixture closes the whole class, including code
+    paths added later, instead of asking each new test to remember."""
+    override = os.environ.get("BEACON_BUS_BUDGET_PATH", "").strip()
+    if override:
+        return override
     beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
     return os.path.join(beacon_dir, "bus-budget.json")
 

@@ -25,6 +25,30 @@ from io import StringIO
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolate_project_root(tmp_path, monkeypatch):
+    """Keep this module's writes out of the developer's working copy (e-6621).
+
+    ``cmd_trek_join`` reaches ``_arm_for_trek``, which writes an unconditional
+    20-turn budget grant. This module drove that with no project isolation, so
+    the grant landed in the repo's own ``.beacon/`` and the NEXT run of the suite
+    read it and treated sends as autonomous — bus tests then failed by the dozen
+    on the developer's machine while CI, starting from a clean checkout, stayed
+    green. Hit 6 times on 2026-10-01 across four sessions.
+
+    Pointing the project root at tmp is enough: every side-file the bus family
+    resolves (budget, send log, allowlist mirror) hangs off ``get_project_file()``,
+    so one redirect moves them all. The suite-wide backstop that catches the NEXT
+    module to forget this lives in tests/conftest.py
+    (``_fail_on_repo_beacon_write``).
+    """
+    beacon_dir = tmp_path / ".beacon"
+    beacon_dir.mkdir(parents=True, exist_ok=True)
+    (beacon_dir / "project.json").write_text(
+        json.dumps({"name": "t", "milestones": []}), encoding="utf-8")
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402

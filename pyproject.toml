@@ -75,6 +75,19 @@ codex = [
 dev = [
     "build>=1.0",
     "pytest>=7.0",
+    # ms-166 e-6811: the suite reached ~9600 tests and a single serial pytest run
+    # sat right on the CI job's 15-minute ceiling (measured 623s / 856s / 921s on
+    # consecutive runs — the 921s one was CANCELLED mid-run). A cancelled job
+    # reads almost exactly like a failed one, so "did a test break or did we run
+    # out of time" became a question you had to open the log to answer. Splitting
+    # across workers took the same subset from 96-102s to 30s locally.
+    #
+    # NOT yet used in CI. e-6621 closed one shared-state leak (a test writing the
+    # repo's own .beacon/), but the full suite under `-n auto` still produces 5
+    # failures + 18 errors that do not reproduce when the same files run alone —
+    # more cross-file state remains, tracked as e-6816. Shipped in the dev extra
+    # so that investigation, and local runs of a subset, can use it today.
+    "pytest-xdist>=3.5",
     "ruff>=0.4",
 ]
 
