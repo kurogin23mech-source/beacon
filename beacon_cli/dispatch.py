@@ -3958,6 +3958,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
             "       beacon note list [--json]\n"
             "       beacon note clear --yes   (-y / --confirm も可)\n"
             "       beacon note restore\n"
+            "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 0
@@ -3979,12 +3980,22 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         # ms-178 e-6656: recover from the backups clear left. Additive and
         # idempotent, so it needs no confirmation flag.
         return _run_commands_py(root, "note_restore", {})
+    if sub == "purge-probes":
+        # ms-160 e-6715: remove the notes an unguarded AX surface audit wrote.
+        # Without this branch the token falls through to the free-text arm
+        # below and is SAVED AS A NOTE named "purge-probes" — the very defect
+        # e-6715 exists to close, reproduced on this frontend.
+        return _run_commands_py(
+            root, "note_purge_probes",
+            {"BEACON_NOTE_PURGE_CONFIRM": "1" if args.assume_yes else ""},
+        )
     if not sub:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
             "       beacon note clear --yes   (-y / --confirm も可)\n"
             "       beacon note restore\n"
+            "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 1

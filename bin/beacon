@@ -2320,6 +2320,23 @@ EOF
                 done
                 python3 "$COMMANDS_PY" note_restore
                 ;;
+            purge-probes)
+                # ms-160 e-6715: remove the notes an unguarded AX surface audit
+                # already wrote (text == the probe sentinel). Dry-run unless
+                # --confirm: the cloud leg is clear + re-post (the notes API has
+                # no delete-one), so it is not a free operation.
+                shift 2
+                note_purge_confirm=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --confirm|-y|--yes) note_purge_confirm="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)   _guard_no_positional "note purge-probes" "$1" ;;
+                    esac
+                done
+                BEACON_NOTE_PURGE_CONFIRM="$note_purge_confirm" \
+                    python3 "$COMMANDS_PY" note_purge_probes
+                ;;
             clear)
                 # ms-178 e-6654: clear wipes the LOCAL file (recoverable via
                 # .bak) *and* the project's shared cloud notes (not recoverable
@@ -2342,6 +2359,7 @@ EOF
                 echo "       beacon note list [--json]"
                 echo "       beacon note clear -y|--yes"
                 echo "       beacon note restore"
+                echo "       beacon note purge-probes [--confirm]   (-y / --yes も可)"
                 ;;
             *)
                 shift
