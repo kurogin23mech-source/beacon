@@ -176,6 +176,7 @@ from cmd_task import (  # noqa: F401
 # fails loudly (AttributeError) instead of silently.
 from cmd_note import (  # noqa: F401
     cmd_note_add, cmd_note_list, cmd_note_clear, cmd_note_restore,
+    cmd_note_purge_probes,
 )
 from cmd_decision import (cmd_decision_record, cmd_decision_list,  # noqa: F401  (ms-154 e-5594/e-5595)
                           cmd_decision_derive)  # noqa: F401  (ms-166 e-5972)
@@ -6573,6 +6574,7 @@ def _help_registry():
         {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
         {"command": "beacon note clear --yes", "flags": [], "description": "Delete all session notes (-y is accepted as shorthand; --confirm is an accepted alias). Both stores are backed up first (local .bak + cloud .cloud.bak) and, in cloud mode, NOTHING is deleted if that cloud snapshot cannot be taken — so this command needs cloud reachability. The cloud copy is shared by every session on the project. Recover with: beacon note restore"},
         {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
+        {"command": "beacon note purge-probes", "flags": ["--confirm"], "description": "Remove the junk notes an AX surface audit wrote before the read-only gate existed (text == the probe sentinel; notes merely MENTIONING it are kept). Dry-run by default — prints what would go and changes nothing; --confirm performs it. The notes API has no delete-one, so the cloud leg is clear + re-post the survivors: a note another session writes during that window is lost. Both stores are snapshotted to .purge.bak first (a separate path from note clear's backups, so one cannot destroy the other's recovery route) and nothing is deleted if that snapshot cannot be taken"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
         {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
@@ -11080,6 +11082,7 @@ if __name__ == "__main__":
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
         "note_restore": cmd_note_restore,
+        "note_purge_probes": cmd_note_purge_probes,
         "decision_record": cmd_decision_record,
         "decision_list": cmd_decision_list,
         "decision_derive": cmd_decision_derive,
