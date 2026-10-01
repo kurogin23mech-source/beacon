@@ -118,6 +118,27 @@ def test_blocked_probe_is_not_reported_as_a_silent_no_op(project):
     assert "refused" in probe["stderr"], probe
 
 
+def test_an_unrunnable_probe_states_both_verdicts(project, monkeypatch):
+    """A probe that could not be RUN must still say "not blocked, not a silent
+    no-op" rather than omit the fields.
+
+    Omitting them made every consumer KeyError on that path, and left a reader
+    inferring meaning from an absent key. Found as an intermittent failure of
+    the test below when the spawn timed out under parallel load — the flake was
+    pointing at a real gap, not at itself.
+    """
+    import subprocess as sp
+
+    def _boom(*a, **k):
+        raise sp.TimeoutExpired(cmd="beacon", timeout=60)
+
+    monkeypatch.setattr(commands.subprocess, "run", _boom)
+    probe = commands._collect_surface_snapshot(commands_list=["note"])[0]
+    assert "error" in probe and "TimeoutExpired" in probe["error"], probe
+    assert probe["silent_no_op"] is False, probe
+    assert probe["blocked_by_readonly_gate"] is False, probe
+
+
 def test_read_only_group_probe_still_shows_its_real_surface(project):
     """Fail-closed must not mean fail-always: a group whose bogus subcommand is
     rejected by its own parser must still be sampled, not gate-blocked."""

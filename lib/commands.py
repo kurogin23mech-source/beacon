@@ -1507,7 +1507,7 @@ def _collect_surface_snapshot(commands_list=None) -> list:
         entry = {"cmd": c, "probe_argv": f"{c} {bogus}"}
         try:
             p = subprocess.run([beacon_bin, c, bogus], capture_output=True,
-                               text=True, timeout=20, env=probe_env)
+                               text=True, timeout=60, env=probe_env)
             entry["exit_code"] = p.returncode
             entry["stdout"] = (p.stdout or "")[:2000]
             entry["stderr"] = (p.stderr or "")[:2000]
@@ -1526,6 +1526,14 @@ def _collect_surface_snapshot(commands_list=None) -> list:
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             entry["error"] = f"{type(e).__name__}: {e}"
+            # State both verdicts even here. A probe we could not RUN is not
+            # evidence of anything — least of all of a silent no-op — and a
+            # reader that has to infer meaning from a MISSING key will infer
+            # something. Leaving them out also made every consumer of the
+            # snapshot raise KeyError on this path (observed as an intermittent
+            # test failure when the spawn timed out under parallel load).
+            entry["silent_no_op"] = False
+            entry["blocked_by_readonly_gate"] = False
         probes.append(entry)
     return probes
 
