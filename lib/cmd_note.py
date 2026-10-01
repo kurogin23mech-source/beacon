@@ -438,3 +438,147 @@ def cmd_note_restore():
     print(f"復元しました: local {restored_local} 件 / cloud {restored_cloud} 件")
     if restored_local == 0 and restored_cloud == 0:
         print("  (どちらの退避も既に反映済みでした — 重複は作りません)")
+
+
+def _purge_backup_path() -> str:
+    """Where `note purge-probes` snapshots BOTH stores before touching them.
+
+    Deliberately NOT the paths `note clear` uses (.bak / .cloud.bak): a purge
+    must not overwrite a clear's backup, or running one would destroy the other
+    one's only recovery route (`beacon note restore` reads those two).
+    """
+    return _get_notes_path().replace(".jsonl", "") + ".purge.bak"
+
+
+def _is_probe_note(note: dict) -> bool:
+    """True for a note whose text is the AX surface probe's bogus token.
+
+    Matched against the one definition in cli_surface, never a local copy — a
+    second spelling would make this skip the garbage it exists to remove.
+    Exact match (after stripping), not a substring: a human note *mentioning*
+    the sentinel (this task's own handoff notes do) must survive.
+    """
+    import cli_surface
+    return (note.get("text") or "").strip() == cli_surface.SURFACE_PROBE_SENTINEL
+
+
+def cmd_note_purge_probes():
+    """Remove the probe notes an unguarded AX surface audit already wrote
+    (ms-160 e-6715).
+
+    The gate in readonly_gate stops NEW ones; this clears the backlog. 17 of
+    the 48 notes in the live project store were this string.
+
+    Dry-run by default — it prints what would go and exits without touching
+    anything. ``--confirm`` performs it.
+
+    Why it is shaped like clear+restore rather than a per-note delete: the
+    notes API exposes list / add / clear and no delete-one, and adding a server
+    endpoint needs a production deploy this project does not currently do. So
+    the cloud leg is "snapshot → clear → re-post the survivors", which carries
+    a real window: a note another session writes between the clear and the
+    re-post is lost. That window is disclosed to the operator rather than
+    designed around, and the snapshot is kept either way.
+    """
+    path = _get_notes_path()
+    confirm = os.environ.get("BEACON_NOTE_PURGE_CONFIRM") == "1"
+    project_id = _cloud_project_id()
+
+    local = _read_local_notes(path)
+    local_probes = [n for n in local if _is_probe_note(n)]
+    local_keep = [n for n in local if not _is_probe_note(n)]
+
+    cloud = []
+    cloud_probes = []
+    cloud_keep = []
+    if project_id:
+        cloud, cloud_error = _fetch_cloud_notes(project_id)
+        if cloud_error:
+            # Same rule as `note clear` (ms-178 e-6656): a store we cannot read
+            # is a store we cannot back up, so we do not delete from either.
+            print(f"Aborted: cloud のメモを取得できず退避が取れません ({cloud_error})。",
+                  file=sys.stderr)
+            print("  何も削除していません (退避の取れない削除は行いません)。",
+                  file=sys.stderr)
+            sys.exit(1)
+        cloud_probes = [n for n in cloud if _is_probe_note(n)]
+        cloud_keep = [n for n in cloud if not _is_probe_note(n)]
+
+    total_probes = len(local_probes) + len(cloud_probes)
+    if total_probes == 0:
+        import cli_surface
+        print("点検メモ ({0}) は見つかりませんでした。"
+              "削除するものはありません。".format(cli_surface.SURFACE_PROBE_SENTINEL))
+        return
+
+    print(f"点検メモ: local {len(local_probes)} 件 / cloud {len(cloud_probes)} 件")
+    print(f"残すメモ: local {len(local_keep)} 件 / cloud {len(cloud_keep)} 件")
+    if not confirm:
+        print()
+        print("これは下見です (まだ何も変更していません)。")
+        if project_id:
+            print("  実行すると cloud のメモを一度すべて消してから、残すメモを"
+                  "投稿し直します。")
+            print("  この間に別セッションが書いたメモは失われます "
+                  "(退避は取るので 'beacon note restore' 相当の手当ては可能)。")
+        print("  実行する: beacon note purge-probes --confirm")
+        return
+
+    # --- snapshot BOTH stores first; no backup ⇒ no delete -----------------
+    backup = _purge_backup_path()
+    try:
+        os.makedirs(os.path.dirname(backup) or ".", exist_ok=True)
+        with open(backup, "w", encoding="utf-8") as f:
+            for n in local:
+                f.write(json.dumps(dict(n, origin="local"), ensure_ascii=False) + "\n")
+            for n in cloud:
+                f.write(json.dumps(dict(n, origin="cloud"), ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"Aborted: 退避を書けません ({backup}: {exc})。何も削除していません。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # --- local leg: rewrite with the survivors ------------------------------
+    if local_probes:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for n in local_keep:
+                f.write(json.dumps(n, ensure_ascii=False) + "\n")
+
+    # --- cloud leg: clear, then re-post the survivors ----------------------
+    reposted = 0
+    failed = []
+    if project_id and cloud_probes:
+        try:
+            client, error = _note_api_client()
+            if error:
+                raise RuntimeError(error)
+            client.clear_notes(project_id)
+        except Exception as exc:
+            print(f"Warning: cloud のメモを削除できませんでした ({exc})。"
+                  f"local のみ整理され、cloud 側は点検メモが残っています。",
+                  file=sys.stderr)
+            print(f"  退避: {backup}", file=sys.stderr)
+            cloud_keep = []  # nothing was cleared, so nothing to re-post
+        for n in cloud_keep:
+            payload = {k: v for k, v in n.items() if k != "origin"}
+            push_error = _push_note_to_cloud_or_error(payload)
+            if push_error:
+                failed.append((n, push_error))
+                continue
+            reposted += 1
+
+    print(f"点検メモを削除しました: 計 {total_probes} 件")
+    print(f"  退避: {backup} (local {len(local)} 件 + cloud {len(cloud)} 件、"
+          f"削除前の全文)")
+    if project_id:
+        print(f"  cloud に戻したメモ: {reposted} / {len(cloud_keep)} 件")
+    if failed:
+        # Counting attempts as successes is exactly what ms-178 e-6656 had to
+        # undo on `note restore`; report the shortfall instead of inventing it.
+        print(f"Warning: cloud への再投稿に {len(failed)} 件失敗しました。"
+              f"退避 {backup} に全文が残っています。", file=sys.stderr)
+        for n, why in failed[:5]:
+            print(f"  - {n.get('ts', '?')[:16]} "
+                  f"{(n.get('text') or '')[:40]}: {why}", file=sys.stderr)
+        sys.exit(1)
