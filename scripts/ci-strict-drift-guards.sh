@@ -70,4 +70,12 @@ echo "[ci-strict-drift-guards] Windows-unsafe pid liveness probes (ms-133 e-6591
 # (both did, before the 2026-09-29 independent AX review caught the hole).
 python3 "$ROOT/scripts/check-pid-liveness.py" --strict
 
+echo "[ci-strict-drift-guards] 旗 → env の写像が両フロントで揃っているか (ms-160 e-6674)…"
+# 旗の名前を比べる check-cli-help-drift.py はこの級を原理的に見られない。片方の
+# フロントに無い旗は「不一致」ではなく「不在」で、両方に無ければ揃っていると
+# 数えられる。落ちていたのは argv を環境変数へ写す対応表の方で、それは 2 言語で
+# 手書きされている。beacon doc add --force / search --source / cloud list --json
+# ほか約 45 件が bash で通り python で落ちる状態だった。
+python3 "$ROOT/scripts/check-cli-env-parity.py"
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."
