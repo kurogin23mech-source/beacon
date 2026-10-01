@@ -752,3 +752,49 @@ def _mysql_coalesced_expr(paths) -> str:
     inner = ", ".join(
         f"NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '{p}')), 'null')" for p in paths)
     return f"COALESCE({inner}, '')"
+
+def mysql_window_eval(rows, sql: str, params) -> list:
+    """生成 SQL を **仕様表に基づいて** 評価し、MySQL が返すはずの行を再現する。
+
+    テスト専用の評価器 (ms-166 e-5986)。SQL 文字列を手で parse するのではなく、
+    :func:`mysql_window_sql` が仕様表から組んだ式そのものを ``sql`` の中から探して
+    「どの項目が絞られているか」を復元し、パラメータを同じ順に消費する。手書きの
+    parser を置くと SQL 生成側と評価側が別々に drift するが、この形なら **仕様表が
+    変われば両方が同時に変わる**。
+
+    これで検証できるのは「生成 SQL が仕様表どおりに評価されたら結果はどうなるか」
+    まで。**本物の MySQL が仕様表どおりに評価するかは検証できない** — JSON 欠損の
+    COALESCE / JSON null の NULLIF / ORDER BY DESC の挙動は、デプロイ後に実機で
+    突合する前提 (規模テストの偽カーソルは WHERE を一切解釈しないので、そこでは
+    この次元が測れない)。
+    """
+    out = list(rows or [])
+    idx = 0
+    for name, paths, op in _WINDOW_FILTERS:
+        expr = _mysql_coalesced_expr(paths)
+        if op == "not_in":
+            marker = f"{expr} NOT IN ("
+            if marker not in sql:
+                continue
+            holes = sql.split(marker, 1)[1].split(")", 1)[0].count("%s")
+            excluded = {str(v) for v in params[idx:idx + holes]}
+            idx += holes
+            out = [r for r in out if _row_value(r, paths) not in excluded]
+            continue
+        symbol = "=" if op == "eq" else ">"
+        if f"{expr} {symbol} %s" not in sql:
+            continue
+        value = str(params[idx])
+        idx += 1
+        if op == "eq":
+            out = [r for r in out if _row_value(r, paths) == value]
+        else:
+            out = [r for r in out if _row_value(r, paths) > value]
+    # ORDER BY ... DESC, sk DESC + LIMIT n (= 最新側から n 件)
+    order_expr = _mysql_coalesced_expr(_WINDOW_ORDER)
+    if f"ORDER BY {order_expr} DESC" in sql:
+        out.sort(key=lambda r: (_row_value(r, _WINDOW_ORDER),
+                                str(r.get("decision_id") or "")), reverse=True)
+    if "LIMIT %s" in sql:
+        out = out[:int(params[-1])]
+    return out
