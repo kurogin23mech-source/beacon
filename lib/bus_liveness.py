@@ -144,6 +144,43 @@ def classify_send_delivery(live, draining) -> str:
     return SEND_NORMAL
 
 
+def parse_iso8601(stamp) -> Optional[datetime.datetime]:
+    """ISO8601 文字列を tz-aware な datetime にする。読めなければ ``None``。
+
+    ms-173 / e-6729 独立レビュー (保守性 M-3): 「``Z`` を ``+00:00`` に置換 →
+    ``fromisoformat`` → naive なら UTC を補う」という同じ手順が複数箇所に手書きで
+    散っていた。パース規則 (Z 補完 / naive の扱い / 不正値の吸収) を直したいときに
+    全箇所を見つけて揃えないと、読めない値の扱いが関数ごとに drift する。ここを
+    唯一の定義にして、判定側 (:func:`_declaration_is_stale`) と経過秒側
+    (:func:`iso_age_seconds`) はこれを呼ぶ薄い層にする。
+
+    ``None`` は「読めなかった」であって「古い」ではない。古いと解釈するかは
+    呼び出し側の文脈で決める (判定側は stale 扱い、経過秒側は「源が無い」扱い)。
+    """
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def iso_age_seconds(stamp, now) -> Optional[float]:
+    """ISO8601 文字列の古さ (秒)。読めなければ ``None`` (= その源が無い)。
+
+    ``None`` を「古い」ではなく「無い」として扱うのが要で、読めない源を古い扱いに
+    すると、その源を 1 つ持たない正当な行を誤って not-live にしてしまう
+    (:func:`ws_only_liveness_suppression` の裏付け判定で使う)。
+    """
+    parsed = parse_iso8601(stamp)
+    if parsed is None:
+        return None
+    return (now - parsed).total_seconds()
+
+
 def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
     """Return whether a state declaration is too old to trust.
 
@@ -161,16 +198,94 @@ def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
     ``interrupted``. Read ``derive_state`` for the mapping; keep this one about
     the stamp.
     """
-    if not declared_at:
-        return True
-    try:
-        stamped = datetime.datetime.fromisoformat(
-            str(declared_at).replace("Z", "+00:00"))
-        if stamped.tzinfo is None:
-            stamped = stamped.replace(tzinfo=datetime.timezone.utc)
-    except (ValueError, AttributeError, TypeError):
+    stamped = parse_iso8601(declared_at)
+    if stamped is None:   # 欠落 / 読めない = 日付を付けられない宣言は信じない
         return True
     return (now - stamped).total_seconds() > stale_after_seconds
+
+
+# ms-173 / e-6729 — WS 単独で立っている生存主張を、裏付けが無いときに取り下げる。
+#
+# 背景 (e-6583 の実測 2026-10-01): 親が死んで孤児になった bridge が 25 日間 WS を
+# つないだまま ping を送り続け、死んだセッションが ws_live=true のまま居座った。真因は
+# bridge 側で直したが (= ping を「生存報告が通っていること」に結び直した)、直したコードが
+# 入っていない古い bridge には届かない。e-6583 の記述自身が「poll 履歴を持たない行には
+# ガードが効かない設計なので、そこでリークすると永久ゾンビが再発しうる」と指摘していた穴。
+#
+# e-6563 の先行ガードは `last_poll_at` を一度でも書いた行だけを対象にしていた (= 古い
+# bridge を誤って not-live にしないための意図的な除外)。その除外が穴そのものなので、
+# 「poll 履歴があるか」で線を引くのをやめ、**生存の裏付けが何か一つでも新しいか** で引く。
+#
+# ここは e-6582 (汚染された『確認待ち』の降格) と違い、曖昧さが無い。「WS で生存を主張して
+# いるのに、生存の痕跡がどれも 30 分以上古い (または一つも無い)」は、本物を隠す恐れのある
+# 推定ではなく、嘘をついている証拠そのもの。だから倒す向きを人に問う必要がない。
+#
+# 誤爆しない側の安全弁が「裏付けを複数源から取る」こと: poll 報告が無い古い bridge でも、
+# 人/AI が実際に動かしていれば PostToolUse hook 由来の heartbeat (last_heartbeat_at) が
+# 新しい。だから「古い bridge かどうか」ではなく「生きている痕跡があるか」で救う。
+WS_SUPPRESS_POLL_STALE = "ws-zombie-poll-stale"          # e-6563 と同一の理由文字列 (互換)
+WS_SUPPRESS_NO_EVIDENCE = "ws-zombie-no-liveness-evidence"
+
+
+def ws_only_liveness_suppression(*, ws_live, poll_healthy, has_poll_history,
+                                 evidence_ages_seconds, max_age_seconds,
+                                 max_age_seconds_no_history=None,
+                                 session_age_seconds=None):
+    """WS 単独の生存主張を取り下げるべきか。取り下げる理由、または ``None``。
+
+    Args:
+        ws_live: 接続台帳の raw signal (True / False / None)。
+        poll_healthy: poll 報告が健全か。
+        has_poll_history: ``last_poll_at`` を一度でも書いたか (理由文字列の選択だけに使う。
+            **抑止するか否かの判定には使わない** — そこが e-6563 の穴だった)。
+        evidence_ages_seconds: 生存の裏付けの古さ (秒) を並べたもの。``None`` は
+            「その源は無い / 読めない」。poll 報告・hook heartbeat・最終活動のように、
+            互いに独立した源を渡す (1 源だけだとその源を持たない正当な行を誤爆する)。
+        max_age_seconds: poll 履歴がある行で、この秒数以内の裏付けが 1 つでもあれば救う。
+        max_age_seconds_no_history: poll 履歴が **無い** 行に使う、より長い猶予。
+            省略時は ``max_age_seconds`` と同じ。履歴が無い行は「古い bridge が正当に
+            待機しているだけ」の可能性を server 側から確かめる手段が無い (ping は
+            ゾンビも送る) ため、確信度が低い側に長い猶予を与えて誤爆を減らす。
+            ゾンビは日単位で居座るので、時間単位の猶予でも検知力は落ちない
+            (実測されたゾンビは 25 日 / 500 時間)。
+        session_age_seconds: セッション自身の年齢 (秒)。猶予より若ければ **判定しない**。
+            繋いだ直後の bridge は、まだ一度も生存報告を出していないのが正常なので、
+            「裏付けが無い」を嘘の証拠として扱ってはならない (これを入れないと、
+            起動直後の数秒だけ not-live に見える窓ができる)。年齢は生存の証拠ではなく
+            「まだ証拠を期待できない」ことの根拠なので、裏付けとは別の引数で受ける。
+
+    Returns:
+        ``WS_SUPPRESS_POLL_STALE`` / ``WS_SUPPRESS_NO_EVIDENCE`` / ``None``。
+
+    引数が **すべて keyword-only** なのは意図的 (ms-173 / e-6729 独立レビュー AX-1)。
+    先頭 3 つは ws_live (True/False/None) / poll_healthy (bool) / has_poll_history
+    (bool) と型が同系で、位置で渡すと並びを入れ替えても TypeError にならず **判定が
+    黙って逆になる**。ここは「WS ping を生存の証拠にしない」という契約を守る唯一の
+    判定点なので、取り違えが静かに通ると 25 日ゾンビと同型のバグが再発する。
+    keyword-only にすれば取り違えはその場で TypeError として顕在化する。
+
+    契約:
+      * ``ws_live`` が True でない、または poll が健全なら **何もしない** (``None``)。
+        この関数は「WS 単独で立っている主張」だけを扱う。
+      * 裏付けが 1 つでも新しければ救う。誤って not-live にすると DM が届かなくなり、
+        嘘を残すより重い害になるので、判定は救う側に倒す。
+      * 裏付けが全て古い / 一つも無い場合に取り下げる。
+      * セッションが猶予より若ければ何もしない (まだ証拠を期待できない)。
+      * 閾値が不正 (None / 0 以下) なら何もしない (= 設定ミスで健全な行を黙らせない)。
+    """
+    if ws_live is not True or poll_healthy:
+        return None
+    limit = max_age_seconds if has_poll_history else (
+        max_age_seconds_no_history if max_age_seconds_no_history is not None
+        else max_age_seconds)
+    if limit is None or limit <= 0:
+        return None
+    if session_age_seconds is not None and session_age_seconds <= limit:
+        return None          # 若すぎて判定できない (証拠の不在を嘘の証拠にしない)
+    ages = [a for a in (evidence_ages_seconds or ()) if a is not None]
+    if any(a <= limit for a in ages):
+        return None
+    return WS_SUPPRESS_POLL_STALE if has_poll_history else WS_SUPPRESS_NO_EVIDENCE
 
 
 def derive_state(declared_state, declared_at, live, now,

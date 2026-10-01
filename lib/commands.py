@@ -109,6 +109,7 @@ from cmd_session import (  # noqa: F401  (re-exported for dispatch + import-path
     cmd_session_working,
     cmd_session_fork,
     cmd_session_fork_list,
+    cmd_session_fork_cleanup,
     _release_all_occupations_for_session,
 )
 
@@ -6534,7 +6535,7 @@ def _help_registry():
         {"command": "beacon doc table set-cell <doc-id> <row-id> <col> <val>", "flags": ["--value <v>", "--json"], "description": "Update a cell; old value kept in append-only history"},
         {"command": "beacon doc table rm-row <doc-id> <row-id>", "flags": ["--json"], "description": "Soft-delete a row (tombstone; audit trail survives)"},
         {"command": "beacon doc table show <doc-id>", "flags": ["--json"], "description": "Render a table-doc as a markdown table"},
-        {"command": "beacon pr add", "flags": ["-m <ms-id>", "--url <url>", "--intent <text>"], "description": "Record a PR entry"},
+        {"command": "beacon pr add <github-url>", "flags": ["-m <ms-id>", "--intent <text>", "--author <user>", "--json"], "description": "Record a PR entry"},
         {"command": "beacon pr approve <entry-id>", "flags": ["--rationale <text>", "--no-auto-done", "--json"], "description": "Approve a PR (auto-dones bound tasks at HIGH confidence; --no-auto-done to opt out)"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
@@ -6548,6 +6549,11 @@ def _help_registry():
         {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
         {"command": "beacon note clear --yes", "flags": [], "description": "Delete all session notes (-y is accepted as shorthand; --confirm is an accepted alias). Both stores are backed up first (local .bak + cloud .cloud.bak) and, in cloud mode, NOTHING is deleted if that cloud snapshot cannot be taken — so this command needs cloud reachability. The cloud copy is shared by every session on the project. Recover with: beacon note restore"},
         {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
+        # ms-178 e-6702/e-6703: the fork family was absent from this registry, so
+        # `--help` on it fell through to the parsers (the e-6654 footgun class).
+        {"command": "beacon session fork <ms-id>", "flags": ["--json"], "description": "Create a sibling worktree + workspace to work a milestone in parallel"},
+        {"command": "beacon session fork list", "flags": ["--json"], "description": "List active fork worktrees, with each one's unpromoted handoff-note count and how long ago it was last worked in"},
+        {"command": "beacon session fork cleanup <worktree-path>", "flags": ["--force", "--json"], "description": "Remove a merged fork worktree. Refuses if the branch is unmerged, if the worktree holds uncommitted work (the merge check only sees committed history, so this is its own gate and the files are named in the refusal), if a session is still working in it (inactivity threshold 300s, override with BEACON_FORK_IDLE_THRESHOLD_S), or if liveness cannot be determined. Handoff notes are snapshotted to .beacon/fork-notes-backup/ before anything is deleted; --force overrides the first three refusals but NEVER a failed snapshot, and is rejected on any other fork sub-verb. A refused run still leaves the snapshot and names it. In --json, `removed` reports the worktree alone and `branch_removed` the branch, so 'worktree gone, branch left' is distinguishable"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
         {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
@@ -6598,10 +6604,10 @@ def _help_registry():
         # SPEC `bnzTXhu6KYIMfVE2Ivy2` for the design; landed in
         # e-1646 (stop) / e-1647 (rollback) / e-1648 (claim) /
         # e-1649 (stuck) / e-1650 (morning).
-        {"command": "beacon stop scoped <target>", "flags": ["--kind ms|task|session", "--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast a STOP signal at a single MS / task / session (Andon cord — anyone can halt)"},
+        {"command": "beacon stop scoped", "flags": ["--target <ms|task|session>:<id>", "--reason-kind <k>", "--reason <text>", "--machine-reason <json>", "--json"], "description": "Broadcast a STOP signal at a single MS / task / session (Andon cord — anyone can halt)"},
         {"command": "beacon stop global", "flags": ["--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast STOP across every active autonomous session (everything-stops fallback)"},
         {"command": "beacon stop status", "flags": ["--json"], "description": "Show the latest stop / resume state from the stop-signal channel"},
-        {"command": "beacon resume scoped <target>", "flags": ["--kind ms|task|session", "--reason <text>", "--json"], "description": "Clear a scoped STOP, allowing the targeted session(s) to resume work"},
+        {"command": "beacon resume scoped", "flags": ["--target <ms|task|session>:<id>", "--reason <text>", "--json"], "description": "Clear a scoped STOP, allowing the targeted session(s) to resume work"},
         {"command": "beacon resume global", "flags": ["--reason <text>", "--json"], "description": "Clear a global STOP across every autonomous session"},
         {"command": "beacon rollback", "flags": ["--commits N", "--reason <text>", "--dry-run", "--no-record", "--json"], "description": "Undo working tree (git stash) + N local commits (--soft reset); push past upstream → report-only with compensation proposals"},
         {"command": "beacon claim request <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Announce intent to take a target (ms/task/operation/trek/free); other sessions can respond"},
@@ -11131,6 +11137,7 @@ if __name__ == "__main__":
         "session_working": cmd_session_working,
         "session_fork": cmd_session_fork,
         "session_fork_list": cmd_session_fork_list,
+        "session_fork_cleanup": cmd_session_fork_cleanup,
         "channel_install": cmd_channel_install,
         "channel_uninstall": cmd_channel_uninstall,
         "channel_opt_out": cmd_channel_opt_out,

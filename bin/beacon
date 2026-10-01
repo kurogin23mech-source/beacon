@@ -2126,7 +2126,34 @@ except ValueError as e:
                 # ms-67 / e-1553: `fork list` sub-sub-command to enumerate
                 # active forks (used by /beacon-session-merge-back picker).
                 shift 2
-                if [[ "${1:-}" == "list" ]]; then
+                if [[ "${1:-}" == "cleanup" ]]; then
+                    # ms-178 e-6702/e-6703: the deletion lives in the tool layer
+                    # so its "snapshot notes ⇒ then delete" ordering cannot be
+                    # skipped by a caller.
+                    shift
+                    _sfc_path="" _sfc_force="" _sfc_json=""
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --force) _sfc_force="1"; shift ;;
+                            --json)  _sfc_json="1"; shift ;;
+                            -?*)     _guard_flag "$1" ;;
+                            *)
+                                # AX review PR#770: a second positional used to
+                                # be dropped in silence here while dispatch.py's
+                                # argparse rejected it — the two frontends
+                                # disagreed, and a typo'd arg vanished without a
+                                # trace. Same guard as `note list` (e-6654).
+                                if [[ -n "$_sfc_path" ]]; then
+                                    _guard_no_positional "session fork cleanup" "$1"
+                                fi
+                                _sfc_path="$1"; shift ;;
+                        esac
+                    done
+                    BEACON_FORK_PATH="$_sfc_path" \
+                        BEACON_FORK_CLEANUP_FORCE="$_sfc_force" \
+                        BEACON_JSON="$_sfc_json" \
+                        python3 "$COMMANDS_PY" session_fork_cleanup
+                elif [[ "${1:-}" == "list" ]]; then
                     shift
                     _sfl_json=""
                     while [[ $# -gt 0 ]]; do
@@ -2169,6 +2196,7 @@ except ValueError as e:
                 echo "       beacon session working --target <kind:id> [--title <t>] | --clear | --show [--json]"
                 echo "       beacon session fork <ms-id> [--json]"
                 echo "       beacon session fork list [--json]"
+                echo "       beacon session fork cleanup <worktree-path> [--force] [--json]"
                 echo "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
                 ;;
             *)
@@ -2396,6 +2424,7 @@ EOF
                 _dec_evidence=""
                 _dec_related_task=""
                 _dec_json=""
+                _dec_related_target=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --what)         _dec_what="${2:-}"; shift 2 ;;
@@ -2404,6 +2433,7 @@ EOF
                         --decided-by)   _dec_decided_by="${2:-}"; shift 2 ;;
                         --evidence)     _dec_evidence="${_dec_evidence:+$_dec_evidence$'\n'}${2:-}"; shift 2 ;;
                         --related-task) _dec_related_task="${2:-}"; shift 2 ;;
+                        --related-target) _dec_related_target="${2:-}"; shift 2 ;;
                         --json)         _dec_json="1"; shift ;;
                         -?*)            _guard_flag "$1" ;;
                         *)              [[ -z "$_dec_what" ]] && _dec_what="$1"; shift ;;
@@ -2414,6 +2444,7 @@ EOF
                     BEACON_DECISION_DECIDED_BY="$_dec_decided_by" \
                     BEACON_DECISION_EVIDENCE="$_dec_evidence" \
                     BEACON_DECISION_RELATED_TASK="$_dec_related_task" \
+                    BEACON_DECISION_RELATED_TARGET="$_dec_related_target" \
                     BEACON_JSON="$_dec_json" \
                     python3 "$COMMANDS_PY" decision_record
                 ;;
@@ -2456,7 +2487,7 @@ EOF
                 ;;
             *)
                 echo "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]"
-                echo "                              [--kind log-backstop] [--decided-by autonomous-AI] [--related-task e-XXX] [--json]"
+                echo "                              [--kind log-backstop] [--decided-by autonomous-AI] [--related-task e-XXX] [--related-target ms-XX] [--json]"
                 echo "       beacon decision list [--kind <kind>] [--session <sid>] [--target <id>] [--limit N] [--json]  (--session/--target は『このセッション/この作業対象で下した判断』に絞る; ms-164 e-6030)"
                 echo "       beacon decision derive [--apply] [--json]  (既存 PR の intent から decision を導出; 現状 PR intent のみ対応; dry-run 既定、--apply で書込; ms-166 e-5972)"
                 echo ""

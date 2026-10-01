@@ -866,7 +866,293 @@ def cmd_session_fork_list():
         print(f"  parent_sid:    {fk['parent_session_id'] or '(unknown)'}")
         print(f"  parent_branch: {fk['parent_branch'] or '(unknown)'}")
         print(f"  created:       {fk['created_at']}")
+        # ms-178 e-6702/e-6703: surface the two facts a human needs BEFORE
+        # choosing something to delete. Printing them only in --json left the
+        # human picker blind to "someone is in there" and "32 notes at stake".
+        idle = fk.get("idle_seconds")
+        if idle is None:
+            activity = "⚠ 作業中かどうか判定できません (空いているとは限りません)"
+        elif idle < _session.fork_idle_threshold_seconds():
+            activity = f"⚠ 作業中 ({idle/60:.0f} 分前まで活動)"
+        else:
+            activity = f"最終活動: {idle/3600:.1f} 時間前"
+        print(f"  activity:      {activity}")
+        n = int(fk.get("unpromoted_notes") or 0)
+        if n:
+            print(f"  ⚠ 未昇格の引き継ぎメモ: {n} 件 "
+                  f"(消す前に /beacon-session-end で昇格を検討)")
         print("")
+
+
+def cmd_session_fork_cleanup():
+    """Remove a fork worktree, but never at the cost of its handoff notes.
+
+    ms-178 e-6702 / e-6703. Before this, cleanup lived entirely in
+    /beacon-session-merge-back as markdown: the Skill was asked to check that the
+    branch was merged, then ran ``git worktree remove`` itself. Two consequences:
+
+      1. ``git worktree remove`` deletes ``.beacon/`` too, so a fork's
+         ``session_notes.jsonl`` died with it — no backup, no warning, no count.
+         ms-178 hardened ``note clear`` on both CLI frontends, but cleanup is a
+         THIRD writer to the same state and bypassed both guards. Observed
+         2026-09-29: a fork was cleaned up mid-session and three handoff notes
+         holding review adjudications were lost from both stores.
+      2. The picker listed every fork in the repo without regard for whether
+         another session was still working in one (the Skill documented this as
+         deliberate future work), so a parallel session could pull the ground
+         out from under a live one — which is how (1) fired.
+
+    The fix is to move the deletion itself into the tool layer and make the safe
+    ordering the only reachable path: snapshot ⇒ then delete, never the reverse.
+    A guard living in a Skill prompt is a request; a guard living here is a
+    constraint (CORE doc architecture-tool-skill-separation).
+    """
+    import datetime
+    import subprocess
+    import session as _session
+
+    json_out = os.environ.get("BEACON_JSON", "") == "1"
+    raw_path = (os.environ.get("BEACON_FORK_PATH") or "").strip()
+    force = os.environ.get("BEACON_FORK_CLEANUP_FORCE") == "1"
+    idle_threshold = _session.fork_idle_threshold_seconds()
+
+    if not raw_path:
+        print("Error: worktree path required. Usage: beacon session fork cleanup "
+              "<worktree-path> [--force]", file=sys.stderr)
+        sys.exit(1)
+
+    repo_root = os.getcwd()  # bin/beacon already cd'd to the project root
+    target = os.path.realpath(os.path.expanduser(raw_path))
+    forks = _session.list_forks(repo_root)
+    record = next((f for f in forks
+                   if os.path.realpath(f["worktree_path"]) == target), None)
+    if record is None:
+        print(f"Error: {raw_path} is not an active fork worktree of this repo.",
+              file=sys.stderr)
+        print("  'beacon session fork list' shows the forks that can be cleaned up.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    branch = record.get("child_branch") or ""
+    # Two kinds of refusal, kept in SEPARATE lists on purpose (AX review PR#770):
+    #   blockers      — risks a human may knowingly accept, so --force overrides.
+    #   hard_blockers — "we physically cannot preserve the data", which --force
+    #                   must NOT override. Previously everything shared one list,
+    #                   so --force sailed past the backup-failure gate while the
+    #                   code comment, the help entry and the Skill all promised it
+    #                   could not. Documentation asserting a guarantee the code
+    #                   does not provide is worse than no guarantee: the operator
+    #                   reaches for --force precisely when recovery matters.
+    blockers = []
+    hard_blockers = []
+
+    # --- gate 1: the branch's work must already be in main -------------------
+    # Removing an unmerged fork discards commits.
+    if not branch:
+        # AX review PR#770: this used to be `if branch:` — a fork.json with no
+        # child_branch skipped the merge check entirely, so the very risk this
+        # verb exists to prevent slipped through on missing metadata. Unknown is
+        # refused here for the same reason it is in gate 2.
+        blockers.append(
+            "この fork に紐づく branch 情報が読めません (fork.json の "
+            "child_branch が空)。安全に取り込み確認ができないため削除しません")
+    else:
+        # `--is-ancestor` exits 1 for "not an ancestor" and 128 for "cannot
+        # compare" (no origin remote, origin/main missing, never fetched).
+        # Reporting both as "not merged yet" sends the operator into a wait-for-
+        # merge loop that can never succeed (AX review PR#770).
+        ref = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                              "origin/main"],
+                             cwd=repo_root, capture_output=True, text=True)
+        if ref.returncode != 0:
+            blockers.append(
+                "origin/main が見つかりません (git fetch 済みか、origin remote が "
+                "あるかを確認してください)。取り込み確認ができないため削除しません")
+        else:
+            merged = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", branch, "origin/main"],
+                cwd=repo_root, capture_output=True, text=True)
+            if merged.returncode == 1:
+                blockers.append(
+                    f"branch '{branch}' はまだ origin/main に取り込まれていません "
+                    f"(取り込み前に消すとコミットが失われます)")
+            elif merged.returncode != 0:
+                blockers.append(
+                    f"branch '{branch}' の取り込み確認に失敗しました "
+                    f"({(merged.stderr or '').strip() or f'git exit {merged.returncode}'})。"
+                    f"確認できないため削除しません")
+
+    # --- gate 1b: uncommitted work inside the worktree -----------------------
+    # Independent AX review of PR #770 (AX-2, high): gate 1 asks git whether the
+    # BRANCH is merged, and `git merge-base --is-ancestor` only sees committed
+    # history. Work that was never committed is invisible to it. The removal step
+    # then discovered the problem the worst possible way: plain
+    # `git worktree remove` fails with exit 128 ("contains modified or untracked
+    # files, use --force to delete it") and the code retried with --force on ANY
+    # failure, so an operator who passed --force for the *unmerged branch* reason
+    # silently also got their uncommitted work deleted. git's own error text
+    # recommends exactly that destructive retry, which is how the caller is led
+    # into it. Reproduced on a real repo 2026-10-01.
+    #
+    # So discover it HERE, as a gate, and name the files. --force may still
+    # override it (losing one's own WIP is a risk a human can knowingly accept —
+    # unlike the notes snapshot, which stays a hard_blocker), but it has to be an
+    # INFORMED choice: the refusal lists what would be destroyed first.
+    dirty = subprocess.run(["git", "status", "--porcelain"],
+                           cwd=record["worktree_path"], capture_output=True,
+                           text=True)
+    if dirty.returncode != 0:
+        blockers.append(
+            f"このフォークに未コミットの変更が残っているかを確認できませんでした "
+            f"({(dirty.stderr or '').strip() or f'git exit {dirty.returncode}'})。"
+            f"確認できないため削除しません")
+    elif dirty.stdout.strip():
+        names = [ln[3:].strip() for ln in dirty.stdout.splitlines() if ln[3:].strip()]
+        shown = "、".join(names[:5]) + ("ほか" if len(names) > 5 else "")
+        blockers.append(
+            f"このフォークに未コミットの変更が {len(names)} 件あります ({shown})。"
+            f"削除すると失われます (git の履歴に入っていないので取り込み確認では"
+            f"検出できません)")
+
+    # --- gate 2: is someone still working in there? --------------------------
+    idle = record.get("idle_seconds")
+    if idle is None:
+        blockers.append(
+            "このフォークで作業中のセッションが居るかを判定できません "
+            "(.beacon/session.json の活動記録が読めません)。"
+            "『判定できない』は『空いている』ではありません")
+    elif idle < idle_threshold:
+        blockers.append(
+            f"{idle/60:.0f} 分前まで作業されています "
+            f"(セッション {record.get('own_session_id') or '(不明)'}、"
+            f"作業中とみなす閾値 {idle_threshold/60:.0f} 分)。"
+            f"作業中のフォークを消すと、そのセッションの足元が外れます")
+
+    # --- gate 3: unpromoted notes must be preserved BEFORE any deletion ------
+    # Same ordering guarantee as `note clear` (ms-178 e-6656): no backup ⇒ no
+    # delete. The snapshot lands in the PARENT repo, outside the worktree that is
+    # about to disappear — a backup inside the deleted directory is not a backup.
+    # These go in hard_blockers: preserving the data is not the operator's risk
+    # to accept, so --force does not reach them.
+    n_notes = record.get("unpromoted_notes")
+    backup_path = ""
+    if n_notes is None:
+        # Maintainability review PR#770: the count used to collapse "file absent"
+        # and "file unreadable" into 0, so a transient I/O error made the backup
+        # step be skipped entirely and the notes deleted. Unreadable is not empty.
+        hard_blockers.append(
+            f"引き継ぎメモの件数を読めませんでした ({record.get('notes_path')})。"
+            f"0 件と確定できないため削除しません")
+        n_notes = 0
+    elif n_notes:
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_branch = (branch or "fork").replace("/", "-")
+        backup_dir = os.path.join(repo_root, ".beacon", "fork-notes-backup")
+        backup_path = os.path.join(backup_dir, f"{safe_branch}-{stamp}.jsonl")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            import shutil
+            shutil.copyfile(record["notes_path"], backup_path)
+        except OSError as exc:
+            hard_blockers.append(
+                f"引き継ぎメモ {n_notes} 件の退避に失敗しました ({exc})。"
+                f"退避が取れないので削除しません (--force でも上書きできません)")
+            backup_path = ""
+
+    refusals = hard_blockers + ([] if force else blockers)
+    if refusals:
+        if json_out:
+            print(json.dumps({"removed": False, "blockers": refusals,
+                              "hard_blockers": hard_blockers,
+                              "backup_failed": bool(hard_blockers),
+                              "unpromoted_notes": n_notes,
+                              "notes_backup": backup_path,
+                              "forced": force,
+                              "worktree_path": record["worktree_path"]},
+                             ensure_ascii=False))
+        else:
+            print(f"削除しませんでした: {record['worktree_path']}", file=sys.stderr)
+            for b in refusals:
+                print(f"  - {b}", file=sys.stderr)
+            # e-6780: the snapshot is taken BEFORE the refusal check, so a
+            # refused call still leaves a backup. Saying so matters most right
+            # here: the operator just learned the fork cannot be removed, and
+            # the notes they were worried about are already safe on disk. It was
+            # only visible in --json, which is how the ms-160 fork's notes came
+            # to survive by accident rather than by design (2026-10-01).
+            if backup_path:
+                print(f"  ℹ 削除はしていませんが、引き継ぎメモ {n_notes} 件の控えは "
+                      f"取ってあります: {backup_path}", file=sys.stderr)
+            if n_notes:
+                print(f"  ℹ 引き継ぎメモが {n_notes} 件あります。このフォークで "
+                      f"/beacon-session-end を走らせると、残す価値のあるものを "
+                      f"ドキュメントへ昇格できます。", file=sys.stderr)
+            if hard_blockers:
+                print("  これはデータ保全の可否なので --force では通せません。"
+                      "原因を解消してから再実行してください。", file=sys.stderr)
+            elif not force:
+                print("  承知の上で消すなら --force を付けてください。",
+                      file=sys.stderr)
+        sys.exit(1)
+
+    # --- remove: worktree first, then the branch ----------------------------
+    # e-6781: `removed` reports the WORKTREE, not "everything went perfectly".
+    # It used to be `not errors`, so a successful worktree removal whose
+    # `git branch -d` failed reported removed=false while the directory was
+    # already gone. A caller reading that retries, and the retry cannot even
+    # find the fork any more (it is no longer in list_forks), so the real
+    # leftover — the branch — becomes unreachable. The --force path hits this
+    # every time: forcing past the unmerged-branch blocker leaves a branch that
+    # `git branch -d` is guaranteed to refuse.
+    errors = []
+    worktree_removed = False
+    branch_removed = False
+    rm = subprocess.run(["git", "worktree", "remove", record["worktree_path"]],
+                        cwd=repo_root, capture_output=True, text=True)
+    if rm.returncode != 0 and force:
+        rm = subprocess.run(
+            ["git", "worktree", "remove", "--force", record["worktree_path"]],
+            cwd=repo_root, capture_output=True, text=True)
+    if rm.returncode != 0:
+        errors.append(f"git worktree remove failed: {rm.stderr.strip()}")
+    else:
+        worktree_removed = True
+        if branch:
+            br = subprocess.run(["git", "branch", "-d", branch],
+                                cwd=repo_root, capture_output=True, text=True)
+            if br.returncode != 0:
+                errors.append(f"git branch -d failed: {br.stderr.strip()}")
+            else:
+                branch_removed = True
+
+    result = {
+        "removed": worktree_removed,
+        "branch_removed": branch_removed,
+        "worktree_path": record["worktree_path"],
+        "branch": branch,
+        "unpromoted_notes": n_notes,
+        "notes_backup": backup_path,
+        "forced": force,
+        "errors": errors,
+    }
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        if worktree_removed:
+            print(f"片付けました: {record['worktree_path']}")
+            if branch_removed:
+                print(f"  branch {branch} も削除しました")
+            elif branch:
+                # e-6781: say what is still there, by name. "消しました" with a
+                # surviving branch sends the operator looking in the wrong place.
+                print(f"  ⚠ branch {branch} は残っています "
+                      f"(git branch -d が拒否しました)", file=sys.stderr)
+        for e in errors:
+            print(f"Error: {e}", file=sys.stderr)
+        if backup_path:
+            print(f"  引き継ぎメモ {n_notes} 件を退避: {backup_path}")
+    if errors:
+        sys.exit(1)
 
 
 # --- occupation release on session end (ms-81 e-1918) ---

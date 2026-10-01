@@ -323,8 +323,20 @@ def test_ws_alone_does_not_keep_long_poll_silent_bridge_live():
     assert row["live_suppressed_reason"] == "ws-zombie-poll-stale"
 
 
-def test_ws_zombie_guard_does_not_touch_bridgeless_sessions():
-    """poll を持たない旧版 bridge (last_poll_at 無し) は WS だけで live のまま。"""
+def test_ws_zombie_guard_suppresses_bridgeless_session_with_no_fresh_evidence():
+    """poll を持たない行も、生存の痕跡が全部古ければ live を維持させない (e-6729)。
+
+    契約の変更点 (ms-173 / e-6729 — e-6563 の意図的な除外を上書きする):
+    このテストは以前「poll を持たない旧版 bridge は WS だけで live のまま」を固定して
+    いた。古い bridge を誤って not-live にしない配慮だったが、その除外そのものが穴で、
+    e-6583 で実測された: 孤児になった bridge が 25 日間 WS ping を送り続け、死んだ
+    セッションが live を主張し続けた。ping はゾンビも送るので、「poll 履歴が無い」ことを
+    免除の根拠にはできない。
+
+    古い bridge を守る意図は捨てていない — 下の
+    ``test_bridgeless_session_with_fresh_heartbeat_stays_live`` が受け持つ。
+    免除の線を「履歴の有無」から「痕跡が新しいか」へ引き直した、というのがこの変更。
+    """
     now = _now()
     _seed_project("p1")
     _sessions_store.setdefault("p1", []).append({
@@ -336,4 +348,42 @@ def test_ws_zombie_guard_does_not_touch_bridgeless_sessions():
     })
     _ws_live_map["s-nopoll"] = True
     row = _row("s-nopoll")
-    assert row["live"] is True  # ガードは poll 履歴を持つ行にだけ効く
+    assert row["live"] is False
+    assert row["live_suppressed_reason"] == "ws-zombie-no-liveness-evidence"
+
+
+def test_bridgeless_session_with_fresh_heartbeat_stays_live():
+    """poll を持たない行でも、独立した痕跡が新しければ live のまま (e-6729 の安全弁)。
+
+    古い bridge は poll 報告を出さないが、人/AI が実際に動かしていれば PostToolUse hook
+    由来の ``last_heartbeat_at`` が新しい。ここが False になると、生きている古い bridge に
+    DM が届かなくなる — 嘘を残すより重い害なので、この 1 本が上の抑止の歯止めになる。
+    """
+    now = _now()
+    _seed_project("p1")
+    _sessions_store.setdefault("p1", []).append({
+        "session_id": "s-nopoll-active",
+        "actor": {"email": "", "machine": "", "agent": ""},
+        "last_active": _iso(now - datetime.timedelta(hours=48)),
+        "last_heartbeat_at": _iso(now - datetime.timedelta(seconds=20)),
+        "shutdown": False,
+    })
+    _ws_live_map["s-nopoll-active"] = True
+    row = _row("s-nopoll-active")
+    assert row["live"] is True
+    assert row.get("live_suppressed_reason") is None
+
+
+def test_bridgeless_session_young_enough_is_not_judged():
+    """繋いだ直後はまだ報告が無いのが正常。証拠の不在を嘘の証拠にしない (e-6729)。"""
+    now = _now()
+    _seed_project("p1")
+    _sessions_store.setdefault("p1", []).append({
+        "session_id": "s-nopoll-young",
+        "actor": {"email": "", "machine": "", "agent": ""},
+        "created_at": _iso(now - datetime.timedelta(seconds=5)),
+        "shutdown": False,
+    })
+    _ws_live_map["s-nopoll-young"] = True
+    row = _row("s-nopoll-young")
+    assert row["live"] is True

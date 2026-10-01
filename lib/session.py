@@ -188,29 +188,56 @@ def _should_cloud_sync(last_sync_iso: str) -> bool:
     """True iff cloud sync is due (never synced, or debounce elapsed)."""
     if not last_sync_iso:
         return True
-    try:
-        last = datetime.fromisoformat(last_sync_iso.replace("Z", "+00:00"))
-    except ValueError:
+    # Shares the one ISO parser (PR#770). This caller keeps its own failure
+    # decision (unparseable ⇒ treat sync as due), only the parsing is shared.
+    last = _parse_iso_utc(last_sync_iso)
+    if last is None:
         return True
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
     elapsed = (datetime.now(timezone.utc) - last).total_seconds()
     return elapsed >= _cloud_debounce_seconds()
+
+
+def fork_idle_threshold_seconds() -> float:
+    """Seconds of inactivity after which a fork counts as "not being worked in".
+
+    ms-178 (maintainability review PR#770): the display path hardcoded 300 while
+    the gate read BEACON_FORK_IDLE_THRESHOLD_S, so overriding the gate left the
+    listing contradicting it ("last active 6 min ago" shown, yet cleanup refuses).
+    One definition, read by both.
+    """
+    try:
+        return float(os.environ.get("BEACON_FORK_IDLE_THRESHOLD_S") or 300)
+    except ValueError:
+        return 300.0
+
+
+def _parse_iso_utc(raw: str):
+    """Parse an ISO8601 stamp to an aware UTC datetime, or None.
+
+    ms-178 (maintainability review PR#770): `_is_fresh` and `_fork_idle_seconds`
+    each had their own copy of "replace Z, parse, assume UTC when naive", which
+    meant a fix to timestamp handling could land in one and miss the other. One
+    parser, one set of edge-case decisions.
+    """
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
 
 
 def _is_fresh(last_active_iso: str, now_iso: str, threshold_seconds: int) -> bool:
     """Return True iff ``last_active`` is within ``threshold_seconds`` of ``now``."""
     if not last_active_iso:
         return False
-    try:
-        last = datetime.fromisoformat(last_active_iso.replace("Z", "+00:00"))
-        now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
-    except ValueError:
+    last = _parse_iso_utc(last_active_iso)
+    now = _parse_iso_utc(now_iso)
+    if last is None or now is None:
         return False
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
     delta = (now - last).total_seconds()
     return 0 <= delta <= threshold_seconds
 
@@ -1330,6 +1357,55 @@ def fork_workspace(
     }
 
 
+def _fork_idle_seconds(worktree: Path, now=None):
+    """Seconds since the fork's bridge last proved life, or None if unknown.
+
+    ms-178 e-6703: liveness must be decidable WITHOUT the cloud, because cleanup
+    happens on the local machine and a network blip must not read as "nobody is
+    working here". ``.beacon/session.json``'s ``last_active`` is the bridge poll
+    loop's proof-of-life stamp (the truth source per ms-54 e-1319), so its age is
+    a purely local liveness signal.
+
+    Returns None when the stamp is missing or unparseable. None means UNKNOWN and
+    callers must NOT read it as idle — "no evidence of life" is not "evidence of
+    no life".
+    """
+    try:
+        rec = json.loads((worktree / ".beacon" / "session.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    stamp = _parse_iso_utc(rec.get("last_active") or "")
+    if stamp is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return max(0.0, (current - stamp).total_seconds())
+
+
+def _fork_own_session_id(worktree: Path) -> str:
+    """The session id that has been working inside ``worktree``, or "".
+
+    ms-178 e-6703: cleanup could remove a fork another session was still working
+    in (skills/beacon-session-merge-back.md documented this as deliberate future
+    work). Reading the worktree's own session marker lets a caller distinguish
+    "finished" from "someone is in here", instead of treating every listed fork
+    as free to delete. Best-effort: an unreadable / absent marker yields "" and
+    the caller must then treat liveness as UNKNOWN, never as "safe".
+    """
+    # Independent maintainability review of PR #770: this used to also try
+    # `.beacon/session-state.json` as a fallback, but that file's schema is
+    # {declared_state, declared_at, state_since, source_event, state_detail?} —
+    # written by lib/session_state_hook.build_state_marker, which never puts a
+    # session id in it. The fallback could not ever succeed, so the docstring
+    # promised a second source the code did not have. Read the one file that
+    # actually carries the id; do not claim a fallback that cannot fire.
+    try:
+        rec = json.loads(
+            (worktree / ".beacon" / "session.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(rec.get("session_id") or rec.get("sid") or "")
+
+
 def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
     """List active fork worktrees under ``repo_root``.
 
@@ -1377,6 +1453,27 @@ def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
             record = json.loads(fj.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        # ms-178 e-6702 / e-6703: the picker must carry the facts a caller needs
+        # to REFUSE, not just the ones needed to display. Cleanup deletes the
+        # whole worktree (and with it .beacon/session_notes.jsonl), so without
+        # these two numbers the deletion cannot be gated on anything:
+        #   unpromoted_notes — handoff notes this fork wrote that have not been
+        #     promoted to a doc yet. Losing them loses the fork's decision trail,
+        #     which is precisely what session-end exists to preserve.
+        #   own_session_id   — the session that is (or was) working in this fork,
+        #     so a caller can tell "still being worked in" from "finished".
+        notes_path = wt / ".beacon" / "session_notes.jsonl"
+        # Maintainability review PR#770: absent and unreadable must NOT both be
+        # 0. A caller gates "skip the backup" on this number, so collapsing a
+        # permission/IO error into "no notes" deletes them. None = UNKNOWN.
+        if not notes_path.exists():
+            unpromoted = 0
+        else:
+            try:
+                with open(notes_path, "r", encoding="utf-8") as nf:
+                    unpromoted = sum(1 for line in nf if line.strip())
+            except OSError:
+                unpromoted = None
         forks.append({
             "worktree_path": str(wt),
             "target_ms_id": record.get("target_ms_id", ""),
@@ -1385,5 +1482,9 @@ def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
             "parent_session_id": record.get("parent_session_id", ""),
             "parent_branch": record.get("parent_branch", ""),
             "created_at": record.get("created_at", ""),
+            "unpromoted_notes": unpromoted,
+            "notes_path": str(notes_path),
+            "own_session_id": _fork_own_session_id(wt),
+            "idle_seconds": _fork_idle_seconds(wt),
         })
     return forks
