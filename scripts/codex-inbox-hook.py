@@ -37,14 +37,21 @@ def _resolve_lib_dir(install_root: Path) -> Path:
     ms-93 e-3209: mirrors codex-receive-loop.py. When this hook runs from the
     bundled ``_bundled_scripts/`` dir, its self-resolved install_root is the
     ``beacon_cli`` package and lib lives at the ``_bundled_lib`` sibling.
+    The layout rule itself lives in ``scripts/_install_paths.py`` (one definition
+    for every script under ``scripts/``); this wrapper stays as the name the call
+    sites in this file already use. Keeping a private copy here is what
+    ``_install_paths`` exists to prevent: whoever changes the layout rule edits
+    one place and ships, and the copies keep running the old rule in silence
+    (ms-133 e-6686; the same drift the module's own docstring warns about).
+
+    Importing the shared resolver is safe in every layout this hook actually runs
+    in: ``$CODEX_HOME/hooks.json`` invokes it by ABSOLUTE path, so Python puts the
+    hook's own directory first on ``sys.path`` — and ``_install_paths.py`` is
+    always a sibling there (``scripts/`` in a source tree, ``_bundled_scripts/``
+    in a wheel, which packages ``*.py``).
     """
-    lib_dir = install_root / "lib"
-    if lib_dir.is_dir():
-        return lib_dir
-    bundled = install_root / "_bundled_lib"
-    if bundled.is_dir():
-        return bundled
-    return lib_dir
+    from _install_paths import resolve_lib_dir
+    return resolve_lib_dir(install_root)
 
 
 def _import_modules(install_root: Path):
