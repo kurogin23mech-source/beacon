@@ -43,10 +43,7 @@ import {
 import {
   classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
 } from './bus-qualgate.mjs'
-import {
-  livenessAssertionStale as _livenessAssertionStale,
-  isOrphanedBridge as _isOrphanedBridge,
-} from './bus-liveness-assert.mjs'
+import { livenessAssertionStale, isOrphanedBridge } from './bus-liveness-assert.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
@@ -423,15 +420,34 @@ const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '120000
 // 自然失効し、directory から正しく消える)。回復可能にしてあるのが肝で、心拍が再び通れば
 // 主張を再開する — 一時的なクラウド障害で受信能力を自ら手放さないため (prosess を
 // exit させるのは孤児のときだけ、下の maybeExitIfOrphaned を参照)。
+// 対になる server 側の閾値 (独立レビュー AX-2): server/app.py の
+// BEACON_WS_ZOMBIE_POLL_AGE_S (既定 30 分) / BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S (既定 3 時間)。
+// **この値 (bridge 側) < server 側** の順序で初めて意図通りに働く: 先に bridge が自分で
+// 黙り、それが届かない古い bridge だけを server が捕まえる。逆転させると bridge が黙る前に
+// server が not-live にしてしまい、健全なセッションを誤って落とす。片方だけ変えないこと
+// (語彙が LIVENESS/STALL と ZOMBIE/AGE で分かれており、名前からは関連に気づけない)。
+// 単位も違う (こちらは ms、server は秒)。
 const LIVENESS_ASSERT_MAX_STALL_MS = parseInt(
   process.env.BEACON_BUS_LIVENESS_STALL_MS || '600000', 10)  // 10 分
+// AX-3: 閾値が不正 (NaN / 0 以下) なら門は何もしない = fail-open。健全な bridge を設定ミスで
+// 黙らせないための向きだが、黙って無効化されると「設定したのに何も起きない」になる。
+// 起動時に 1 度だけ警告して、無効化されていることを可視化する。
+if (!Number.isFinite(LIVENESS_ASSERT_MAX_STALL_MS) || LIVENESS_ASSERT_MAX_STALL_MS <= 0) {
+  log(`WARNING: BEACON_BUS_LIVENESS_STALL_MS=${process.env.BEACON_BUS_LIVENESS_STALL_MS} `
+    + 'is not a positive number of ms — the WS liveness gate is DISABLED. '
+    + 'This bridge will keep asserting liveness even if heartbeats stop failing through.')
+}
 // 最後に writePollHeartbeat が成功した時刻。起動直後は「まだ猶予あり」から始める
 // (= 初回心拍が通る前に自分の主張を止めてしまわない)。
 let lastHeartbeatOkAt = Date.now()
 // 生存主張を続けてよいか。false の間は ping も再接続もしない (= 嘘をつかない)。
 // 判断は channel/bus-liveness-assert.mjs が所管 (= 純粋・テスト可能)。ここは状態だけ。
-function livenessAssertionStale() {
-  return _livenessAssertionStale(
+// 名前を純関数と変えてあるのは意図 (独立レビュー 保守性 M-1): 同名にすると grep で
+// 定義が 2 つ出て、しかもシグネチャが違う (純関数は引数あり / ここは状態を閉じ込めた
+// 0 引数) ため、どちらを直せばよいか名前から判断できなくなる。`...Now` は「いまの状態で
+// 評価する」側であることを名前で予告する。
+function isLivenessStaleNow() {
+  return livenessAssertionStale(
     lastHeartbeatOkAt, Date.now(), LIVENESS_ASSERT_MAX_STALL_MS)
 }
 
@@ -450,8 +466,8 @@ function livenessAssertionStale() {
 // 正当に起動された bridge を即座に殺してしまう (= 直後に自滅して受信が死ぬ)。
 const INITIAL_PPID = process.ppid
 
-function isOrphanedBridge() {
-  return _isOrphanedBridge(process.platform, INITIAL_PPID, process.ppid)
+function isThisBridgeOrphaned() {
+  return isOrphanedBridge(process.platform, INITIAL_PPID, process.ppid)
 }
 
 // 孤児なら退場する。戻り値は「退場した (= 呼び出し側は以降の処理をやめろ)」。
@@ -459,7 +475,7 @@ function isOrphanedBridge() {
 // server 側の finally が WS 切断で登録解除するので、黙って消えるのが最も正しい。
 // ここで heartbeat を打ち直すと「死んだセッションの最後の生存報告」を増やすだけ。
 function maybeExitIfOrphaned(where) {
-  if (!isOrphanedBridge()) return false
+  if (!isThisBridgeOrphaned()) return false
   log(`orphaned bridge (initial ppid=${INITIAL_PPID} → now 1, parent gone) detected at ${where} — exiting (e-6583)`)
   process.exit(0)
   // process.exit は戻らないが、test が exit を差し替えたときに呼び出し側が確実に
@@ -599,7 +615,7 @@ async function connectBusWs() {
     // だけで ws_live が真のまま踊る)。心拍が回復するまで黙って待ち、回復後に再開する。
     if (wsStopping) return
     if (maybeExitIfOrphaned('ws-reconnect')) return
-    if (livenessAssertionStale()) {
+    if (isLivenessStaleNow()) {
       if (reconnectPending) return   // 既に 1 本が待っている (chain を増やさない)
       reconnectPending = true
       setTimeout(() => { reconnectPending = false; openOnce() }, WS_STALE_RETRY_MS)
@@ -665,7 +681,7 @@ async function connectBusWs() {
       //      70 秒で失効する。心拍が再び通れば次の接続から主張を再開する。
       pingTimer = setInterval(() => {
         if (maybeExitIfOrphaned('ws-ping')) return
-        if (livenessAssertionStale()) {
+        if (isLivenessStaleNow()) {
           // 嘘をやめる。cleanup() で ping を止め、ソケットも閉じる。再接続は
           // openOnce 側の門が心拍回復まで抑える。
           log(`liveness assertion suppressed: no successful heartbeat for ${

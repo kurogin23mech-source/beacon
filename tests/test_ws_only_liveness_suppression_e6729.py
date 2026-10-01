@@ -41,8 +41,13 @@ NO_HISTORY_LIMIT = 10800   # 3 時間 (新 _WS_ZOMBIE_NO_HISTORY_AGE_S)
 
 def _suppress(ws_live=True, poll_healthy=False, has_history=False,
               ages=(None,), session_age=None):
+    # 全て keyword で渡す (独立レビュー AX-1 で keyword-only 化した)。
     return bus_liveness.ws_only_liveness_suppression(
-        ws_live, poll_healthy, has_history, ages, POLL_LIMIT,
+        ws_live=ws_live,
+        poll_healthy=poll_healthy,
+        has_poll_history=has_history,
+        evidence_ages_seconds=ages,
+        max_age_seconds=POLL_LIMIT,
         max_age_seconds_no_history=NO_HISTORY_LIMIT,
         session_age_seconds=session_age,
     )
@@ -135,7 +140,8 @@ class TestFailsTowardSavingTheRow:
     def test_misconfigured_threshold_does_nothing(self, limit):
         """設定ミスで健全な行を黙らせない。"""
         assert bus_liveness.ws_only_liveness_suppression(
-            True, False, True, (10**6,), limit,
+            ws_live=True, poll_healthy=False, has_poll_history=True,
+            evidence_ages_seconds=(10**6,), max_age_seconds=limit,
             max_age_seconds_no_history=limit, session_age_seconds=10**6) is None
 
     def test_empty_evidence_tuple_and_none_are_handled(self):
@@ -143,6 +149,57 @@ class TestFailsTowardSavingTheRow:
             == bus_liveness.WS_SUPPRESS_POLL_STALE
         assert _suppress(has_history=True, ages=None, session_age=10**6) \
             == bus_liveness.WS_SUPPRESS_POLL_STALE
+
+
+# --- AX-1: 位置引数を構造的に拒む ---------------------------------------------
+
+class TestKeywordOnly:
+    """先頭 3 つは型が同系 (True/False/None と bool 2 つ) なので、位置で渡せると
+    並びを入れ替えても TypeError にならず判定が黙って逆になる。keyword-only に
+    したことを契約として固定する (独立レビュー AX-1)。"""
+
+    def test_positional_call_is_refused(self):
+        with pytest.raises(TypeError):
+            bus_liveness.ws_only_liveness_suppression(
+                True, False, True, (10**6,), POLL_LIMIT)
+
+    def test_keyword_call_works(self):
+        assert bus_liveness.ws_only_liveness_suppression(
+            ws_live=True, poll_healthy=False, has_poll_history=True,
+            evidence_ages_seconds=(10**6,), max_age_seconds=POLL_LIMIT,
+        ) == bus_liveness.WS_SUPPRESS_POLL_STALE
+
+
+# --- M-3: ISO パースが 1 箇所に集約されているか -------------------------------
+
+class TestIsoParseIsSingleSourced:
+    """同じ「Z 補完 → fromisoformat → naive なら UTC」の手順が複数箇所に手書きで
+    散ると、読めない値の扱いが関数ごとに drift する (独立レビュー 保守性 M-3)。"""
+
+    def test_parse_and_age_are_exported(self):
+        assert callable(bus_liveness.parse_iso8601)
+        assert callable(bus_liveness.iso_age_seconds)
+
+    def test_unreadable_is_none_not_stale(self):
+        """``None`` は「読めない」であって「古い」ではない。経過秒側は源が無い扱い。"""
+        import datetime
+        now = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+        for junk in ("", None, "not-a-date", 0):
+            assert bus_liveness.iso_age_seconds(junk, now) is None
+
+    def test_z_suffix_and_naive_are_both_utc(self):
+        import datetime
+        now = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+        assert bus_liveness.iso_age_seconds("2026-09-30T23:00:00.000Z", now) == 3600
+        assert bus_liveness.iso_age_seconds("2026-09-30T23:00:00", now) == 3600
+
+    def test_server_does_not_reimplement_the_parse(self):
+        """server/app.py が自前の ISO パーサを持ち直していないこと。"""
+        app_src = (REPO_ROOT / "server" / "app.py").read_text(encoding="utf-8")
+        assert "bus_liveness.iso_age_seconds(" in app_src, (
+            "server が集約関数を使っていない")
+        assert "def _iso_age_seconds" not in app_src, (
+            "server に自前の ISO パーサが復活している (真値源が割れる)")
 
 
 # --- 配線: server がこの規則を使っているか ------------------------------------

@@ -144,6 +144,43 @@ def classify_send_delivery(live, draining) -> str:
     return SEND_NORMAL
 
 
+def parse_iso8601(stamp) -> Optional[datetime.datetime]:
+    """ISO8601 文字列を tz-aware な datetime にする。読めなければ ``None``。
+
+    ms-173 / e-6729 独立レビュー (保守性 M-3): 「``Z`` を ``+00:00`` に置換 →
+    ``fromisoformat`` → naive なら UTC を補う」という同じ手順が複数箇所に手書きで
+    散っていた。パース規則 (Z 補完 / naive の扱い / 不正値の吸収) を直したいときに
+    全箇所を見つけて揃えないと、読めない値の扱いが関数ごとに drift する。ここを
+    唯一の定義にして、判定側 (:func:`_declaration_is_stale`) と経過秒側
+    (:func:`iso_age_seconds`) はこれを呼ぶ薄い層にする。
+
+    ``None`` は「読めなかった」であって「古い」ではない。古いと解釈するかは
+    呼び出し側の文脈で決める (判定側は stale 扱い、経過秒側は「源が無い」扱い)。
+    """
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def iso_age_seconds(stamp, now) -> Optional[float]:
+    """ISO8601 文字列の古さ (秒)。読めなければ ``None`` (= その源が無い)。
+
+    ``None`` を「古い」ではなく「無い」として扱うのが要で、読めない源を古い扱いに
+    すると、その源を 1 つ持たない正当な行を誤って not-live にしてしまう
+    (:func:`ws_only_liveness_suppression` の裏付け判定で使う)。
+    """
+    parsed = parse_iso8601(stamp)
+    if parsed is None:
+        return None
+    return (now - parsed).total_seconds()
+
+
 def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
     """Return whether a state declaration is too old to trust.
 
@@ -161,14 +198,8 @@ def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
     ``interrupted``. Read ``derive_state`` for the mapping; keep this one about
     the stamp.
     """
-    if not declared_at:
-        return True
-    try:
-        stamped = datetime.datetime.fromisoformat(
-            str(declared_at).replace("Z", "+00:00"))
-        if stamped.tzinfo is None:
-            stamped = stamped.replace(tzinfo=datetime.timezone.utc)
-    except (ValueError, AttributeError, TypeError):
+    stamped = parse_iso8601(declared_at)
+    if stamped is None:   # 欠落 / 読めない = 日付を付けられない宣言は信じない
         return True
     return (now - stamped).total_seconds() > stale_after_seconds
 
@@ -196,7 +227,7 @@ WS_SUPPRESS_POLL_STALE = "ws-zombie-poll-stale"          # e-6563 と同一の�
 WS_SUPPRESS_NO_EVIDENCE = "ws-zombie-no-liveness-evidence"
 
 
-def ws_only_liveness_suppression(ws_live, poll_healthy, has_poll_history,
+def ws_only_liveness_suppression(*, ws_live, poll_healthy, has_poll_history,
                                  evidence_ages_seconds, max_age_seconds,
                                  max_age_seconds_no_history=None,
                                  session_age_seconds=None):
@@ -225,6 +256,13 @@ def ws_only_liveness_suppression(ws_live, poll_healthy, has_poll_history,
 
     Returns:
         ``WS_SUPPRESS_POLL_STALE`` / ``WS_SUPPRESS_NO_EVIDENCE`` / ``None``。
+
+    引数が **すべて keyword-only** なのは意図的 (ms-173 / e-6729 独立レビュー AX-1)。
+    先頭 3 つは ws_live (True/False/None) / poll_healthy (bool) / has_poll_history
+    (bool) と型が同系で、位置で渡すと並びを入れ替えても TypeError にならず **判定が
+    黙って逆になる**。ここは「WS ping を生存の証拠にしない」という契約を守る唯一の
+    判定点なので、取り違えが静かに通ると 25 日ゾンビと同型のバグが再発する。
+    keyword-only にすれば取り違えはその場で TypeError として顕在化する。
 
     契約:
       * ``ws_live`` が True でない、または poll が健全なら **何もしない** (``None``)。

@@ -1872,23 +1872,28 @@ _WS_ZOMBIE_POLL_AGE_S = int(
 _WS_ZOMBIE_NO_HISTORY_AGE_S = int(
     os.environ.get("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", "10800") or "10800")
 
+# ms-173 独立レビュー AX-2: 対になる bridge 側の閾値との関係をここに書き留める。
+# bridge (channel/bus.mjs の BEACON_BUS_LIVENESS_STALL_MS、既定 10 分) は「生存報告が
+# 通らなくなったら ping を止める」側、ここ (既定 30 分 / 履歴なし 3 時間) は「それでも
+# 主張し続ける行を server が信じない」側。**bridge 側 < server 側** の順序で初めて
+# 意図通りに働く: 先に bridge が自分で黙り、それが届かない古い bridge だけを server が
+# 捕まえる。逆転させると、bridge が黙る前に server が not-live にしてしまい、健全な
+# セッションを誤って落とす。片方だけ変えないこと (語彙が LIVENESS/STALL と ZOMBIE/AGE で
+# 分かれており、名前からは関連に気づけないため明記する)。
+#
+# AX-3: 閾値が不正 (0 以下) ならガードは何もしない = fail-open。健全な行を設定ミスで
+# 黙らせないための向きだが、黙って無効化されると「設定したのに何も起きない」になる。
+# 起動時に 1 度だけ警告して、無効化されていることを可視化する。
+for _name, _val in (("BEACON_WS_ZOMBIE_POLL_AGE_S", _WS_ZOMBIE_POLL_AGE_S),
+                    ("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", _WS_ZOMBIE_NO_HISTORY_AGE_S)):
+    if _val <= 0:
+        print(
+            f"WARNING: {_name}={_val} (<= 0) — zombie-WS liveness guard is DISABLED. "
+            "A dead session that keeps pinging will stay live=true. "
+            "Set a positive number of seconds to re-enable.",
+            file=sys.stderr,
+        )
 
-def _iso_age_seconds(stamp, now_dt):
-    """ISO8601 文字列の古さ (秒)。空 / 壊れている場合は ``None`` (= 源が無い)。
-
-    e-6729 の裏付け判定で使う。``None`` を「古い」ではなく「読めない」として扱うのが要で、
-    読めない源を古い扱いにすると、源を 1 つ持たない正当な行を誤って not-live にしてしまう。
-    """
-    import datetime   # app.py は datetime を module 直下で import していない (既存作法)
-    if not stamp:
-        return None
-    try:
-        parsed = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except (ValueError, AttributeError, TypeError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return (now_dt - parsed).total_seconds()
 
 
 def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
@@ -1967,17 +1972,19 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # (= 「古い bridge かどうか」ではなく「生きている痕跡があるか」で救う)。
     if live:
         _suppressed = bus_liveness.ws_only_liveness_suppression(
-            ws_live,
-            poll_healthy,
-            session["bridge"],
-            (
+            # 全て keyword で渡す (独立レビュー AX-1)。先頭 3 つは型が同系なので
+            # 位置で渡すと取り違えが TypeError にならず判定が黙って逆になる。
+            ws_live=ws_live,
+            poll_healthy=poll_healthy,
+            has_poll_history=session["bridge"],
+            evidence_ages_seconds=(
                 session["poll_health"].get("age_seconds"),
-                _iso_age_seconds(session.get("last_heartbeat_at"), now_dt),
-                _iso_age_seconds(session.get("last_active"), now_dt),
+                bus_liveness.iso_age_seconds(session.get("last_heartbeat_at"), now_dt),
+                bus_liveness.iso_age_seconds(session.get("last_active"), now_dt),
             ),
-            _WS_ZOMBIE_POLL_AGE_S,
+            max_age_seconds=_WS_ZOMBIE_POLL_AGE_S,
             max_age_seconds_no_history=_WS_ZOMBIE_NO_HISTORY_AGE_S,
-            session_age_seconds=_iso_age_seconds(
+            session_age_seconds=bus_liveness.iso_age_seconds(
                 session.get("created_at"), now_dt),
         )
         if _suppressed:

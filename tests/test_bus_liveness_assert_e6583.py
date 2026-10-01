@@ -108,6 +108,17 @@ class TestIsOrphanedBridge:
         out = _probe("out.r = isOrphanedBridge('linux', 1, 1)")
         assert out["r"] is False
 
+    def test_comment_does_not_misattribute_the_windows_kill_trap(self):
+        """Windows の kill(pid,0) 罠は **CPython の os.kill 固有**。Node の
+        process.kill(pid,0) は libuv が signum 0 を特別扱いするので安全で、同じ
+        ディレクトリの channel/bridge_detect.mjs がそう明記している。言語を限定せずに
+        「kill(pid,0) は Windows で危険」と書くと、同一ディレクトリ内で矛盾した主張が
+        並び、次の読み手が誤って学習する (独立レビュー 保守性 M-2)。"""
+        src = MODULE.read_text(encoding="utf-8")
+        assert "bridge_detect.mjs" in src, (
+            "Node 側が安全である根拠 (bridge_detect.mjs) への参照が無い")
+        assert "os.kill" in src, "危険なのが CPython 側であることを特定していない"
+
     def test_windows_never_detected(self):
         """Windows の孤児は ppid が 1 にならず、pid 生存確認は対象を終了させる罠が
         ある。検知できない側 (= 何もしない) に倒す。"""
@@ -180,18 +191,40 @@ class TestBusMjsWiring:
     def test_ping_is_gated_by_heartbeat_freshness(self, bus_code):
         """門は ping タイマーの *中* に立っていなければならない。
 
-        注意 (このテスト自身の落とし穴): 単に `livenessAssertionStale()` の出現数を
-        数えると、関数 *定義* 行 `function livenessAssertionStale() {` も部分一致して
-        数に入る。実際この書き方では、ping の門を丸ごと削っても定義＋残り 1 箇所で
-        閾値を満たして緑のままだった (注入実験で検出)。だから領域を切り出して見る。
+        注意 (このテスト自身の落とし穴): 単に述語名の出現数を数えると、関数 *定義* 行
+        も部分一致して数に入る。実際その書き方では ping の門を丸ごと削っても定義＋
+        残り 1 箇所で閾値を満たして緑のままだった (注入実験で検出)。だから領域を
+        切り出して見る。
         """
         ping_block = _region(
             bus_code, "pingTimer = setInterval(", "}, 30000)")
-        assert "livenessAssertionStale()" in ping_block, (
+        assert "isLivenessStaleNow()" in ping_block, (
             "ping タイマーの中に生存主張の門が無い — 心拍が止まっても ping が鳴り続ける")
         reconnect_block = _region(bus_code, "const openOnce = () => {", "let ws\n")
-        assert "livenessAssertionStale()" in reconnect_block, (
+        assert "isLivenessStaleNow()" in reconnect_block, (
             "再接続経路に門が無い — 繋ぎ直して生存台帳に再登録され続ける")
+
+    def test_pure_predicates_are_never_called_bare(self, bus_code):
+        """純関数を引数なしで呼んでいないこと。
+
+        実際に踏んだ事故 (独立レビュー 保守性 M-1 の rename 作業中、2026-10-01):
+        wrapper を別名にしたとき `maybeExitIfOrphaned` の中が
+        `if (!isOrphanedBridge()) return false` のまま残った。これは今や 3 引数の純関数
+        なので引数なし呼び出しは全 undefined になり、ガード節が常に false を返して
+        **孤児の退場が一切発火しなくなる**。TypeError も出ないので静かに死ぬ。
+        既存の配線テストは `maybeExitIfOrphaned('...')` の存在だけを見ていたので
+        これを検出できなかった。述語の呼び出し形そのものを固定する。
+        """
+        for pure in ("livenessAssertionStale", "isOrphanedBridge"):
+            assert f"{pure}()" not in bus_code, (
+                f"{pure} を引数なしで呼んでいる — 純関数は引数が要る。"
+                f"状態込みの判定は wrapper (isLivenessStaleNow / isThisBridgeOrphaned) を使う")
+
+    def test_orphan_exit_uses_the_stateful_wrapper(self, bus_code):
+        """maybeExitIfOrphaned が wrapper 経由で判定していること (上の事故の直接ガード)。"""
+        block = _region(bus_code, "function maybeExitIfOrphaned(where) {", "\n}")
+        assert "isThisBridgeOrphaned()" in block, (
+            "孤児判定が wrapper を経由していない — 退場が発火しなくなる")
 
     def test_heartbeat_success_is_stamped_only_on_success(self, bus_code):
         """「送ろうとした」ではなく「server が受け取った」を真値にする。

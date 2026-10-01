@@ -39,9 +39,15 @@ export function livenessAssertionStale(lastHeartbeatOkAt, now, limitMs) {
  *
  * 1. 単に ppid === 1 を見ると、launchd / init / コンテナの PID 1 配下で正当に起動された
  *    bridge を即座に殺してしまう (= 起動直後に自滅して受信が死ぬ)。
- * 2. pid 生存確認 (kill(pid, 0)) を一切使わない。Windows では対象プロセスを *終了させて
- *    しまう* 既知の罠があるため。さらに Windows の孤児は ppid が 1 にならないので、
- *    win32 は検知対象から外す = 検知できない側 (何もしない) に倒す。
+ * 2. pid 生存確認を使わない。**Node の process.kill(pid, 0) 自体は Windows でも安全**
+ *    (libuv が signum 0 を特別扱いしてプロセス存在確認に落とす。channel/bridge_detect.mjs
+ *    の isPidAlive を参照)。危険なのは CPython 側の os.kill で、signal 0 も
+ *    TerminateProcess を通る (ms-133 / e-6591)。ここで kill を使わないのは Windows が
+ *    危険だからではなく、**見たいのが親の生死ではなく「里親付けが起きた証跡」** だから。
+ *    親 pid が生きていても、それが自分の親でなくなっていれば孤児なので、ppid の変化を
+ *    見るほうが問い合わせとして正しい。
+ * 3. win32 は検知対象から外す。Windows の孤児は ppid が 1 にならないので、この判定軸
+ *    そのものが成立しない = 検知できない側 (何もしない) に倒す。
  *
  * どちらも「生きている bridge を誤って殺さない」側に倒してある。
  */
