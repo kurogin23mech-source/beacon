@@ -193,3 +193,22 @@ def test_all_reason_env_vars_is_derived_not_hand_listed():
     anyone remembering to update a second list."""
     assert readonly_gate.ALL_REASON_ENV_VARS == frozenset(readonly_gate.REASON_ENV.values())
     assert len(readonly_gate.ALL_REASON_ENV_VARS) == len(readonly_gate.REASON_ENV)
+
+
+# --- the gate's placement, re-verified after M-1 showed frontends diverge ---
+
+def test_readonly_gate_holds_through_the_python_frontend_too(project):
+    """M-1 proved the two frontends can disagree, so do not assume the gate
+    reaches both. It does — because it sits at the python dispatch chokepoint
+    that bin/beacon and beacon_cli/dispatch.py both funnel into — but that is
+    the claim this pins rather than leaves implied."""
+    cwd, notes = project
+    before = notes.read_text(encoding="utf-8")
+    os.environ["BEACON_SURFACE_PROBE"] = "1"
+    try:
+        from beacon_cli import dispatch
+        rc = dispatch.dispatch(ROOT, ["note", "__ax_surface_probe__"])
+    finally:
+        os.environ.pop("BEACON_SURFACE_PROBE", None)
+    assert rc == readonly_gate.PROBE_REFUSAL_EXIT, rc
+    assert notes.read_text(encoding="utf-8") == before, "the probe wrote via the python frontend"
