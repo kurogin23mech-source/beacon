@@ -44,10 +44,19 @@ REASON_SURFACE_PROBE = "surface_probe"
 
 # Env var per reason. Set by bin/beacon (help) and by the snapshot collector
 # (probe); exported into the whole process so every front end inherits it.
-_REASON_ENV = {
+REASON_ENV = {
     REASON_HELP: "BEACON_HELP_ONLY",
     REASON_SURFACE_PROBE: "BEACON_SURFACE_PROBE",
 }
+
+# Every env var that can put this process into a read-only reason. A caller that
+# spawns a child under ONE reason must strip the others first, or reason priority
+# in active_reason() silently decides which refusal shape the child gets. Derived
+# from REASON_ENV so a new reason cannot be forgotten here.
+ALL_REASON_ENV_VARS = frozenset(REASON_ENV.values())
+
+# Back-compat alias for the pre-e-6715 private name.
+_REASON_ENV = REASON_ENV
 
 # Exit code a probe refusal uses. The snapshot matches on this rather than on
 # the message text, so re-wording the refusal cannot silently break detection.
@@ -60,7 +69,7 @@ def active_reason(env=None) -> Optional[str]:
     set (it is the one with a user waiting for output)."""
     e = os.environ if env is None else env
     for reason in (REASON_HELP, REASON_SURFACE_PROBE):
-        if e.get(_REASON_ENV[reason]) == "1":
+        if e.get(REASON_ENV[reason]) == "1":
             return reason
     return None
 

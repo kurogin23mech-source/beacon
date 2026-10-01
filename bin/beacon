@@ -2331,7 +2331,7 @@ EOF
                 echo "       beacon note list [--json]"
                 echo "       beacon note clear -y|--yes"
                 echo "       beacon note restore"
-                echo "       beacon note purge-probes [--confirm]"
+                echo "       beacon note purge-probes [--confirm]   (-y / --yes も可)"
                 ;;
             *)
                 shift

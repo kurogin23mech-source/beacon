@@ -1493,8 +1493,15 @@ def _collect_surface_snapshot(commands_list=None) -> list:
     # ms-160 e-6715: run every probe read-only. The gate is in the python
     # dispatch chokepoint, so it holds for whichever front end the bogus token
     # reaches — and for command groups added to the list later.
-    probe_env = dict(os.environ)
-    probe_env["BEACON_SURFACE_PROBE"] = "1"
+    # Strip every OTHER read-only reason before setting ours. active_reason()
+    # resolves help before surface_probe, so an ambient BEACON_HELP_ONLY in the
+    # parent process would make each probe refuse under the HELP reason — exit 0
+    # on stdout — and the collector below would then record silent_no_op=True for
+    # a command it actually refused, fabricating the exact AX defect this audit
+    # exists to find. Guaranteed by code, not by which caller happens to run it.
+    probe_env = {k: v for k, v in os.environ.items()
+                 if k not in readonly_gate.ALL_REASON_ENV_VARS}
+    probe_env[readonly_gate.REASON_ENV[readonly_gate.REASON_SURFACE_PROBE]] = "1"
     for c in cmds:
         entry = {"cmd": c, "probe_argv": f"{c} {bogus}"}
         try:
@@ -6574,7 +6581,7 @@ def _help_registry():
         {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
         {"command": "beacon note clear --yes", "flags": [], "description": "Delete all session notes (-y is accepted as shorthand; --confirm is an accepted alias). Both stores are backed up first (local .bak + cloud .cloud.bak) and, in cloud mode, NOTHING is deleted if that cloud snapshot cannot be taken — so this command needs cloud reachability. The cloud copy is shared by every session on the project. Recover with: beacon note restore"},
         {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
-        {"command": "beacon note purge-probes", "flags": ["--confirm"], "description": "Remove the junk notes an AX surface audit wrote before the read-only gate existed (text == the probe sentinel; notes merely MENTIONING it are kept). Dry-run by default — prints what would go and changes nothing; --confirm performs it. The notes API has no delete-one, so the cloud leg is clear + re-post the survivors: a note another session writes during that window is lost. Both stores are snapshotted to .purge.bak first (a separate path from note clear's backups, so one cannot destroy the other's recovery route) and nothing is deleted if that snapshot cannot be taken"},
+        {"command": "beacon note purge-probes", "flags": ["--confirm", "-y", "--yes"], "description": "Remove the junk notes an AX surface audit wrote before the read-only gate existed (text == the probe sentinel; notes merely MENTIONING it are kept). Dry-run by default — prints what would go and changes nothing; --confirm performs it (-y and --yes are accepted aliases, same set as note clear). The notes API has no delete-one, so the cloud leg is clear + re-post the survivors: a note another session writes during that window is lost. Both stores are snapshotted to .purge.bak first (a separate path from note clear's backups, so one cannot destroy the other's recovery route) and nothing is deleted if that snapshot cannot be taken"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
         {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
