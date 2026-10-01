@@ -259,3 +259,161 @@ def test_backend_imports_the_rule_from_the_single_source(mod_name):
     assert not hasattr(mod, _RULE), (
         f"{mod_name} が {_RULE} を自前で定義しています — 規則は "
         f"decision_event.py の単一真実源から import すること")
+
+
+# ---------------------------------------------------------------------------
+# 5. 冪等 reject の **開示** が全経路で消費される (独立レビュー AX-1 / 保守性 M-1)
+# ---------------------------------------------------------------------------
+#
+# 初版は冪等 reject を保存層で強制したが、「追記されなかった」という信号を消費するのは
+# 汎用 route (POST /decisions) + beacon decision record の 1 経路だけで、実働の完遂経路
+# (B〜F) は client.record_decision の戻り値を変数に受けずに捨てていた。独立レビュー 2 体
+# (ax / maintainability) が同時にこれを指摘した: 「reject されたのに記録されたと思い込む」
+# という、まさに塞ごうとした誤解が塞いだ経路以外で再現する。
+#
+# 構造修正: client 側の完遂 write は収束口 commands_shared.record_completion_decision を
+# 通す (失敗の可視化 + 冪等 reject の開示をそこ 1 箇所が持つ)。以下はその経由を機械で
+# 固定し、新しい完遂経路が収束口を飛ばして生の client.record_decision を呼ぶ退行を捕まえる。
+
+_LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
+
+# (ファイル, 関数) → この関数は収束口を通さなければならない。
+_CLIENT_SIDE_COMPLETION_WRITERS = (
+    ("target_completion.py", "_record_completion_decision"),   # B / C / D / E
+    ("cmd_target.py", "_record_completion_verdict_decision"),  # F
+)
+_CHOKE_POINT = "record_completion_decision"
+
+
+@pytest.mark.parametrize("filename,func", _CLIENT_SIDE_COMPLETION_WRITERS)
+def test_client_side_completion_writers_go_through_the_choke_point(filename, func):
+    tree = ast.parse(open(os.path.join(_LIB, filename), encoding="utf-8").read())
+    called = _called_names(tree, func)
+    assert _CHOKE_POINT in called, (
+        f"{filename}:{func} が収束口 {_CHOKE_POINT} を通っていません "
+        f"(冪等 reject の開示が落ちる)。呼ばれている: {sorted(called)}")
+
+
+@pytest.mark.parametrize("filename,func", _CLIENT_SIDE_COMPLETION_WRITERS)
+def test_client_side_completion_writers_do_not_call_the_raw_api(filename, func):
+    # 収束口を通しつつ生 API も叩く、という中途半端な退行も塞ぐ (= 二重書き込み + 開示漏れ)。
+    tree = ast.parse(open(os.path.join(_LIB, filename), encoding="utf-8").read())
+    called = _called_names(tree, func)
+    assert "record_decision" not in called, (
+        f"{filename}:{func} が client.record_decision を直接呼んでいます — "
+        f"戻り値 (deduplicated) を握り潰すので {_CHOKE_POINT} 経由にしてください")
+
+
+def test_the_choke_point_guard_actually_fails_on_drift():
+    # test-the-test: 収束口を外して生 API に戻した関数を合成し、上の 2 guard が
+    # 本当に赤くなることを確かめる。
+    drifted = textwrap.dedent('''
+        def _record_completion_decision(target, verdict, reason):
+            """record_completion_decision を通すべき、とだけ書いてある。"""
+            client.record_decision(project_id, {"kind": "completion-verdict"})
+    ''')
+    called = _called_names(ast.parse(drifted), "_record_completion_decision")
+    assert _CHOKE_POINT not in called, "guard が緩い: docstring の言及で通ってしまう"
+    assert "record_decision" in called, "生 API 呼び出しを検出できていない"
+
+
+def test_choke_point_discloses_dedup_and_never_breaks_the_flow():
+    import commands_shared as cs
+
+    class _Dedup:
+        def record_decision(self, pid, payload):
+            return {"decision_id": "dec-OLD", "kind": "completion-verdict",
+                    "deduplicated": True}
+
+    class _Fresh:
+        def record_decision(self, pid, payload):
+            return {"decision_id": "dec-NEW", "kind": "completion-verdict",
+                    "deduplicated": False}
+
+    class _Broken:
+        def record_decision(self, pid, payload):
+            raise RuntimeError("endpoint down")
+
+    out = cs.record_completion_decision(_Dedup(), "p", {}, target_id="ms-9",
+                                        verdict="done")
+    assert out["deduplicated"] is True and out["decision_id"] == "dec-OLD"
+    out = cs.record_completion_decision(_Fresh(), "p", {}, target_id="ms-9",
+                                        verdict="done")
+    assert out["deduplicated"] is False
+    # 失敗契約: write が転んでも例外を呼び出し元へ出さず None を返す (完遂フローを壊さない)。
+    assert cs.record_completion_decision(_Broken(), "p", {}, target_id="ms-9",
+                                         verdict="done") is None
+
+
+def test_choke_point_logs_a_warning_when_deduplicated(caplog):
+    import commands_shared as cs
+
+    class _Dedup:
+        def record_decision(self, pid, payload):
+            return {"decision_id": "dec-OLD", "deduplicated": True}
+
+    with caplog.at_level("WARNING"):
+        cs.record_completion_decision(_Dedup(), "p", {}, target_id="ms-9",
+                                      verdict="done")
+    # 開示は WARNING ログで行う (ハンドラ未設定の CLI では stderr に出るので人も AI も
+    # 気付ける)。「畳まれた」事実と既存 id の両方が出ていること。
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "NOT appended" in msgs and "dec-OLD" in msgs
+
+
+# ---------------------------------------------------------------------------
+# 6. beacon decision record から完遂の対象を立てられる (独立レビュー AX-1)
+# ---------------------------------------------------------------------------
+#
+# 初版は CLI 側に「既に記録済み」表示を足したが、`beacon decision record` は
+# --related-task しか持たず related.target_id を立てられなかった。完遂の冪等判定は
+# target を鍵に含むので、この経路からは **構造的に dedup が起こらず表示が到達不能**
+# (= dead code) だった。書き側の口を足して読み側 (`decision list --target`) と対にする。
+
+def test_decision_record_can_set_the_completion_target():
+    import importlib
+    import cmd_decision
+    importlib.reload(cmd_decision)
+    captured = {}
+
+    class _Client:
+        def record_decision(self, pid, payload):
+            captured.update(payload)
+            return {"decision_id": "dec-1", "kind": payload.get("kind"),
+                    "deduplicated": False}
+
+    env = {
+        "BEACON_DECISION_WHAT": "done",
+        "BEACON_DECISION_KIND": "completion-verdict",
+        "BEACON_DECISION_EVIDENCE": "commit:abc1234",
+        "BEACON_DECISION_RELATED_TARGET": "ms-9",
+        "BEACON_DECISION_RELATED_TASK": "e-1",
+    }
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        cmd_decision._is_cloud_mode = lambda: True
+        cmd_decision._get_api_client = lambda: (_Client(), {"project_id": "p"})
+        cmd_decision.cmd_decision_record()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    assert captured["related"]["target_id"] == "ms-9"
+    assert captured["related"]["task_id"] == "e-1"
+    # 立った target が冪等キーの対象になる = 表示が到達可能になったことの構造的確認。
+    assert de.completion_dedup_key(captured) == ("ms-9", "completion-verdict", "done")
+
+
+def test_both_cli_fronts_expose_related_target():
+    # beacon には CLI フロントが 2 つある (bash の bin/beacon と python の
+    # beacon_cli/dispatch.py)。片方だけに旗を足すと、その OS / 経路だけ使えない。
+    root = os.path.join(os.path.dirname(__file__), "..")
+    for rel in ("bin/beacon", "beacon_cli/dispatch.py"):
+        body = open(os.path.join(root, rel), encoding="utf-8").read()
+        assert "--related-target" in body, f"{rel} に --related-target が無い"
+        assert "BEACON_DECISION_RELATED_TARGET" in body, (
+            f"{rel} が BEACON_DECISION_RELATED_TARGET を渡していない")

@@ -61,6 +61,11 @@ def cmd_decision_record():
     decided_by = os.environ.get("BEACON_DECISION_DECIDED_BY", "").strip() or "autonomous-AI"
     evidence = _split_evidence(os.environ.get("BEACON_DECISION_EVIDENCE", ""))
     related_task = os.environ.get("BEACON_DECISION_RELATED_TASK", "").strip()
+    # ms-166 e-6602 (独立レビュー AX-1): target を立てる口が無いと completion-verdict を
+    # この経路から記録できず、下の「既に記録済み」表示が構造的に到達不能になる
+    # (完遂の冪等判定は related.target_id を鍵に含むため)。読み側の
+    # `beacon decision list --target` と対になる書き側の口。
+    related_target = os.environ.get("BEACON_DECISION_RELATED_TARGET", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not what:
@@ -90,8 +95,13 @@ def cmd_decision_record():
     }
     if rationale:
         payload["rationale"] = rationale
+    related = {}
     if related_task:
-        payload["related"] = {"task_id": related_task}
+        related["task_id"] = related_task
+    if related_target:
+        related["target_id"] = related_target
+    if related:
+        payload["related"] = related
 
     try:
         client, config = _get_api_client()
