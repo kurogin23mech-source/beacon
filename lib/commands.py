@@ -284,6 +284,7 @@ from cmd_bus import (  # noqa: F401
     cmd_bus_auto_execute_list, cmd_bus_auto_execute_add, cmd_bus_auto_execute_remove,
     cmd_bus_send, cmd_bus_listen, cmd_bus_receive, cmd_bus_ack,
     cmd_bus_status, cmd_bus_directory, cmd_dm_sent,
+    cmd_bus_consent_check,
 )
 
 # ms-159 e-6246: `beacon attention` — the human-attention projection over the
@@ -11063,6 +11064,9 @@ if __name__ == "__main__":
         "bus_receive": cmd_bus_receive,
         "bus_ack": cmd_bus_ack,
         "bus_status": cmd_bus_status,
+        # ms-160 e-6349: 送信前に「人間の宛先確認が要るか」を判定に問い合わせる
+        # (Skill が散文で規則を再実装して食い違う経路を断つ)。
+        "bus_consent_check": cmd_bus_consent_check,
         "bus_directory": cmd_bus_directory,
         "attention": cmd_attention,  # ms-159 e-6246
         # ms-70 / e-1716: receiver-side decision primitive for pending DM

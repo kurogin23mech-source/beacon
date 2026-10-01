@@ -520,6 +520,7 @@ walkthrough.
 | Command | Description |
 |---------|-------------|
 | `beacon dm send --to <sid> --payload '<json>' [--manual] [--in-reply-to <eid>]` | Send a DM (canonical verb; delegates to `bus send --channel dm`) / DM 送信 (e-3899) |
+| `beacon bus consent-check --to <sid> [--channel <ch>] [--in-reply-to <eid>] [--json]` | Ask whether this send needs a human recipient-confirmation; keyed on **is the recipient a different user**, not on the project (read-only) / 宛先確認の証跡が要るかを判定に問い合わせる。軸は「宛先が別ユーザーか」で、プロジェクトが同じかは関係しない (ms-160 e-6349) |
 | `beacon dm respond <approve\|deny> <event_id>` | Decide a pending cross-user DM action envelope / 受信側の承認判断 |
 | `beacon dm audit [--limit N] [--json]` | Read the DM-approval audit log (alias: `dm log`) / DM 監査ログ |
 | `beacon dm sent [--limit N] [--json]` | List DMs THIS session sent with receipt + ⚠dup marker (sender-side) / 送信した DM の履歴 (e-4966) |

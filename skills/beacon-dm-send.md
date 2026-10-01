@@ -312,18 +312,52 @@ reply mode で「代替候補に送る」を選んだ場合、`recipient_sid` �
 
 cross-project ケースで no を選ばれたら中止。
 
-### Step 3.1: cross-user consent フラグ (ms-110 / e-3443 = サーバ側で別ユーザー宛の誤送信を拒否する仕組み)
+### Step 3.1: 宛先確認の証跡フラグ (ms-110 / e-3443 + ms-160 / e-6349)
 
-cross-project (= 別プロジェクト = 別ユーザーの可能性がある相手) への **新規送信** で上の確認に yes した場合、Step 7 の送信 argv に **`--recipient-confirmed`** を必ず付ける。これは「人間がこの宛先を確認した」という証跡 (= recipient_confirmed claim) を CLI に載せさせるフラグ。サーバはこの証跡が無い cross-user DM を拒否するので、付け忘れると 403 で弾かれる (= 誤送信の構造防止、正規経路では必須)。
+`--recipient-confirmed` は「人間がこの宛先を実際に見て承認した」という証跡 (= recipient_confirmed claim) を載せるフラグ。サーバはこの証跡が無い **別ユーザー宛の新規 DM** を 403 (`cross_user_missing_confirmation`) で拒否する。
 
-| 条件 | `--recipient-confirmed` |
+**判定軸は「宛先が別のユーザー (別の人間) か」であって、プロジェクトが同じかどうかではない。** かつてこの Skill は「same-project なら付けない」と書いていたが、サーバの規則 (`lib/dm_consent.classify_send_consent`) はプロジェクトを一切見ない。そのため **同一プロジェクトに居る協働者宛**に手順どおり送ると 403 で弾かれた (2026-09-09、協働者が実際に踏んで e-6349 として起票)。手順書に従うほど失敗し、AI も人間も原因に辿り着けない型だった。
+
+#### この Skill は規則を書き写さない — CLI に聞く
+
+散文の表を持つと、サーバ側の規則が変わった / 読み違えたときに静かに食い違う。**判定は必ず CLI に問い合わせる**:
+
+```bash
+beacon bus consent-check --to <recipient_sid> [--channel <ch>] [--in-reply-to <event_id>] --json
+```
+
+返る JSON:
+
+| field | 意味 |
 |---|---|
-| cross-project かつ **新規送信** (reply でない) | **付ける** |
-| same-project (同一プロジェクト) | 付けない (= 自分の別セッション等、サーバも素通し) |
-| reply (`--in-reply-to` あり) | 付けない (= 宛先は親 envelope から導出、別人に飛ばない) |
-| Trek scope / Operation 経路 | 付けない (= 事前承認済み) |
+| `recipient_confirmation_required` | `true` なら Step 7 の argv に `--recipient-confirmed` を付ける |
+| `reason` | 判定理由の識別子 (`cross_user_new_send` / `same_user` / `reply_derived_recipient` 等) |
+| `explanation` | **なぜそうなるかの 1 行**。Step 5c の draft にそのまま載せる (AI が言い換えない — 言い換えると機構が見ている根拠と表示がずれる) |
+| `sender_identity` / `recipient_identity` | 判定に使った身元。空なら身元未解決 (下記) |
+| `identity_uncertain` | `true` なら身元が解決できておらず、サーバ側の判定と食い違いうる |
+| `channel_recognized` | `false` なら channel 名に見覚えがない (綴り違いの疑い、下記) |
+| `carve_outs_not_checked` | 判定に使わなかった軸。`required=true` でも Trek / Operation 経由なら実際には不要 |
+| `caveats` | 上記の但し書きを人が読める 1 行にしたもの。**draft にはこれを転記する** |
 
-このフラグは「人間の宛先確認が済んだ」ことを CLI に伝えるだけで、確認そのものは Step 5c/5d の draft + force-confirm で人間が実際に宛先を見て承認する step が担う。フラグと承認 step は一体で扱う (= フラグだけ付けて承認を飛ばさない)。
+この verb は読み取り専用で、**答えが何であれ常に exit 0**。`-check` という名前は `test` / `grep -q` のように「終了コードが真偽を表す」慣習を連想させるが、**終了コードに答えは載っていない**。`if beacon bus consent-check ...; then` のように分岐すると常に「不要」側へ倒れる。答えは必ず `--json` の `recipient_confirmation_required` から読む (終了コードは 1 = 引数不足 / 2 = 未知のフラグ のみ)。最終的な権限判定はサーバが持つ。
+
+#### channel の綴りに注意
+
+規則は channel を **完全一致** で見る。`--channel DM` や `--channel dm-typo` は「dm 以外」に落ちて `required=false` が返るので、**綴り違いは「確認不要」という誤答になる**。`channel_recognized: false` が返ったら綴りを疑う (この場合 `caveats` にもその旨が入る)。
+
+#### 判定が `required=true` のとき
+
+Step 7 の argv に `--recipient-confirmed` を付ける。ただし**フラグと承認 step は一体**で扱う: 実際の承認は Step 5c/5d の draft + force-confirm で人間が宛先を見て行う。フラグだけ付けて承認を飛ばしてはならない (= 証跡が嘘になる)。
+
+Step 5d の force-confirm 条件にも入る (= 別ユーザー宛の新規送信は「risk understood」の明示入力を要する)。
+
+#### 身元が解決できないとき
+
+`sender_identity` / `recipient_identity` が空だと、サーバは「別人と断定できない」ので確認を求めない (`reason=unresolved_identity`)。これは別プロジェクトの自分宛を塞がないための意図的な緩和。ただし **CLI 側で解決できなかった身元がサーバ側では解決する場合があり、判定が食い違いうる**。`consent-check` はその旨を出力に添えるので、draft の警告にそのまま転記する。
+
+#### consent-check が叩けないとき (cloud 不通 等)
+
+判定を省略してよいが、**`required` を false と決めつけない**。draft に「宛先確認の要否を判定できませんでした。別ユーザー宛なら送信がサーバに拒否される可能性があります」と 1 行出し、Step 5d の force-confirm 経路に載せる (= 不明なら安全側に寄せる)。
 
 ### Step 3.2: send mode の armed gate 免除フラグ (ms-120 / e-3901 = 自律応答ゲートをフラグ非依存に)
 
@@ -495,6 +529,9 @@ in-reply-to: <parent_event_id>            ← reply mode のみ
   ⚠ live check: 相手は stale (age 12m)、 配送されない可能性 (= Step 2 で soft-warn の場合)
   ⚠ cross-project: 相手 project=<rid>、 cwd=<cid> (= Step 3 で cross-project の場合)
   ⚠ sensitivity high: 外部 user 初回 / 機密内容 (= 後述 Step 5d で明示入力 強制)
+  宛先確認:    必要 / 不要  [<reason>]                (= Step 3.1 の consent-check の結果)
+    <explanation を 1 行そのまま>                     (= 言い換えない、機構の根拠と揃える)
+    ※ 身元が解決できていないため判定が食い違う可能性があります   (= 出力に注記があれば)
   budget:      armed=true, 3/3 grant 済               (= reply mode、 Step 4 で grant した場合)
   budget:      armed=true, 2/3 remaining              (= reply mode、 既存 budget があった場合)
 
@@ -528,6 +565,8 @@ Step 5c draft 内警告が以下のいずれかを含む場合、 単一 `yes` �
 | 条件 | 検知方法 |
 |---|---|
 | cross-project | `recipient_project_id != cwd_project_id` (= Step 3 で yes 既選択でも本 Step で再確認) |
+| **別ユーザー宛の新規送信** | Step 3.1 の `consent-check` が `required=true` (= `cross_user_new_send`)。プロジェクトが同じでも該当する |
+| 宛先確認の要否が判定できない | `consent-check` が叩けなかった (= 不明なら安全側に寄せる) |
 | 外部 user 初回 | member list に email 不在の recipient への **初回** 送信 (= dm 履歴に該当 sid との往復ゼロ) |
 | sensitivity high | 起動オプション `--sensitivity high` or 起動メッセージで「機密」 「sensitive」 「confidential」 を含む |
 

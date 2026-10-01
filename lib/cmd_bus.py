@@ -1478,6 +1478,105 @@ def cmd_bus_ack():
         print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
 
 
+def cmd_bus_consent_check():
+    """Answer "does this send need a human recipient-confirmation?" (ms-160 e-6349).
+
+    Read-only. Exists so `/beacon-dm-send` can **ask** instead of restating the
+    rule in prose. The Skill's own table used to key on the PROJECT ("same
+    project → no confirmation"), but the server rule (dm_consent.
+    classify_send_consent) never looks at the project — it keys on whether the
+    recipient is a DIFFERENT HUMAN. A same-project DM to a colleague therefore
+    followed the手順書 and was rejected 403; following the Skill was what made
+    you fail (2026-09-09, reported by a collaborator).
+
+    Env: BEACON_BUS_RECIPIENT (--to), BEACON_BUS_CHANNEL (default dm),
+    BEACON_BUS_IN_REPLY_TO (present ⇒ reply lane), BEACON_JSON.
+
+    Exit code is always 0: this is a question, not a gate. The authority stays
+    the server; this only lets the caller see the answer *before* the round-trip.
+    """
+    import dm_consent  # inline import matches this module's lazy-import pattern
+
+    recipient = os.environ.get("BEACON_BUS_RECIPIENT", "").strip()
+    channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip() or "dm"
+    in_reply_to = os.environ.get("BEACON_BUS_IN_REPLY_TO", "").strip()
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not recipient:
+        print("Error: --to <session_id> required", file=sys.stderr)
+        sys.exit(1)
+
+    sender_email = ""
+    try:
+        _, sender_email, _ = _resolve_creator_identity()
+    except Exception:
+        sender_email = ""
+    # Reuse the send path's resolver so the identity this answer is based on is
+    # the same one the actual send will use (no second, divergent lookup).
+    recipient_email = ""
+    try:
+        _, _, recipient_email = _resolve_recipient_live(
+            recipient, channel, advise=lambda _m: None)
+    except Exception:
+        recipient_email = ""
+
+    required, reason = dm_consent.classify_send_consent(
+        sender_user_id=sender_email or "",
+        recipient_user_id=recipient_email or "",
+        channel=channel,
+        is_reply=bool(in_reply_to),
+        # 安価に証明できない 2 軸。安全側 (= 余分に確認を求める) に倒すが、
+        # **倒したこと自体を黙らせない**: 出力に「この 2 軸は未検証」と出す
+        # (独立 AX レビュー A-4 — 出さないと、Trek / Operation 文脈で「必要」と
+        # 出た呼び手が理由を誤診し、無関係な所をデバッグする)。
+        operation_envelope=False,
+        shared_trek=False,
+    )
+    explanation = dm_consent.explain_consent_reason(reason)
+
+    # 答えに添える但し書き。**JSON にも必ず載せる** — 手順書は --json で叩けと
+    # 書いており、人間可読モードにしか出さないと、手順書どおり動く呼び手には
+    # 永久に届かない (独立 AX レビュー A-2。この PR が閉じようとしている
+    # 「手順書と実装の食い違い」を、私自身がこの verb で作っていた)。
+    caveats = []
+    identity_uncertain = not (sender_email and recipient_email)
+    if identity_uncertain:
+        caveats.append("身元が解決できていないため、サーバ側の判定と食い違う可能性が"
+                       "あります (送信時にサーバが最終判定します)。")
+    channel_recognized = dm_consent.channel_is_recognized(channel)
+    if not channel_recognized:
+        caveats.append(f"channel '{channel}' に見覚えがありません (綴り違いでは？)。"
+                       "規則は channel を完全一致で見るので、綴りが違うと 'dm 以外' と"
+                       "判定され、確認が要る送信を要らないと答えます。")
+
+    if as_json:
+        print(json.dumps({
+            "recipient_confirmation_required": required,
+            "reason": reason,
+            "explanation": explanation,
+            "channel": channel,
+            "channel_recognized": channel_recognized,
+            "is_reply": bool(in_reply_to),
+            "sender_identity": sender_email,
+            "recipient_identity": recipient_email,
+            "identity_uncertain": identity_uncertain,
+            # 判定に使わなかった carve-out。答えが「必要」でも、これらが真なら
+            # 実際には不要でありうる。
+            "carve_outs_not_checked": ["operation_envelope", "shared_trek"],
+            "caveats": caveats,
+        }, ensure_ascii=False))
+        return
+    print(("必要: --recipient-confirmed を付ける" if required
+           else "不要: --recipient-confirmed は付けない")
+          + f"  [{reason}]")
+    print(f"  {explanation}")
+    for c in caveats:
+        print(f"  ※ {c}")
+    if required:
+        print("  ※ Trek 参加中 / Operation の事前承認経由なら実際には不要です "
+              "(この 2 軸は判定していません)。")
+
+
 def cmd_bus_status():
     """Render the 3-stage receipt view for a single bus event (ms-54 / e-1348).
 

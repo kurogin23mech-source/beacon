@@ -150,6 +150,12 @@ ALLOW_MISSING_FROM_BIN_HELP: set[str] = {
 # This is the largest list — cmd_help_json predates many subcommands.
 # Shrinking this is the highest-value follow-up.
 ALLOW_MISSING_FROM_HELP_JSON: set[str] = {
+    # ms-160 e-6349: `bus` は help レジストリを持たず bash 側の専用 help を使う設計
+    # (cmd_help_render が exit 3 して bash にフォールバックする、ms-120 e-3897)。
+    # ここに bus の 1 subcommand だけ登録すると `beacon bus --help` がその 1 件しか
+    # 描かなくなり、send / listen / receive / status を隠してしまう = 改善ではなく退行。
+    # README には載せる (user 向けの動詞なので) が、レジストリ側は空のままにする。
+    "bus consent-check",
     "cloud",
     "cloud off",
     "cloud open",
