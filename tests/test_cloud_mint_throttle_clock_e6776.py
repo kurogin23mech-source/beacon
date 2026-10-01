@@ -14,7 +14,7 @@
 
 固定する契約:
 
-  * gate は `last_cloud_heartbeat_at` (= 実際に心拍を送った経路だけが書く stamp) を見る。
+  * gate は `last_cloud_heartbeat_sent_at` (= 実際に心拍を送った経路だけが書く stamp) を見る。
   * `last_active` がいくら新しくても、心拍を送っていなければ cache は当たらない
     (= これが退行したら軸が再び死ぬ)。
   * stamp が無い session.json (古い beacon が書いたもの) は cache miss にして 1 回だけ
@@ -56,7 +56,7 @@ def _seed(cwd, **over):
         "parent_pid": 4242,
         "source": "server_minted",
         "last_active": _iso(now),
-        "last_cloud_heartbeat_at": _iso(now),
+        "last_cloud_heartbeat_sent_at": _iso(now),
     }
     payload.update(over)
     (cwd / ".beacon" / "session.json").write_text(
@@ -80,14 +80,14 @@ class TestThrottleClock:
         now = datetime.now(timezone.utc)
         _seed(cwd,
               last_active=_iso(now),                                  # 受信プロセスが更新
-              last_cloud_heartbeat_at=_iso(now - timedelta(seconds=TTL + 60)))
+              last_cloud_heartbeat_sent_at=_iso(now - timedelta(seconds=TTL + 60)))
         assert _hit(cwd) is None
 
     def test_missing_stamp_misses_the_cache(self, cwd):
         """古い beacon が書いた session.json は stamp を持たない。1 回だけ network に
         出て stamp が付き、以降は定常運転 = 自己治癒する。"""
         p = _seed(cwd)
-        del p["last_cloud_heartbeat_at"]
+        del p["last_cloud_heartbeat_sent_at"]
         (cwd / ".beacon" / "session.json").write_text(
             json.dumps(p), encoding="utf-8")
         assert _hit(cwd) is None
@@ -96,7 +96,7 @@ class TestThrottleClock:
         """last_active だけで通る経路が残っていないこと (退行の直接ガード)。"""
         now = datetime.now(timezone.utc)
         p = _seed(cwd, last_active=_iso(now))
-        del p["last_cloud_heartbeat_at"]
+        del p["last_cloud_heartbeat_sent_at"]
         (cwd / ".beacon" / "session.json").write_text(
             json.dumps(p), encoding="utf-8")
         assert _hit(cwd) is None, (
@@ -118,15 +118,15 @@ class TestThrottleClock:
 
 
 class TestStampIsWrittenOnlyBySender:
-    def test_mint_payload_carries_the_stamp(self):
-        """心拍を実際に送った経路が stamp を書くこと。"""
-        src = (session_mod.__file__)
-        with open(src, encoding="utf-8") as f:
-            body = f.read()
-        mint = body[body.index("heartbeat = client.me_heartbeat("):]
-        mint = mint[:mint.index("write_session(payload)")]
-        assert '"last_cloud_heartbeat_at": now' in mint, (
-            "心拍成功時に stamp を書いていない — gate が永久に miss して毎回 network に出る")
+    """stamp を書くのは心拍を送った経路だけ、という所有関係を固定する。
+
+    独立レビュー (保守性 M-4) の指摘を受けて、ここは **ソースの字面一致をやめ**
+    振る舞いで確かめる形に置き換えた (元は '"last_cloud_heartbeat_sent_at": now' の
+    逐語一致で、無害な整形変更でも赤くなった)。実際に書かれた session.json を見る
+    振る舞いテストは tests/test_session_cloud_mint_cache.py が持つ (fixture がそこに
+    揃っているため)。ここに残すのは「受信プロセス側が書かない」= 字面でしか確かめ
+    られない否定の契約だけ。
+    """
 
     def test_bridge_does_not_write_the_stamp(self):
         """受信プロセスがこの stamp を書かないこと。書いたら時計が再び他人のものになる。"""
@@ -134,5 +134,5 @@ class TestStampIsWrittenOnlyBySender:
         repo = Path(session_mod.__file__).resolve().parents[1]
         for rel in ("channel/bus.mjs", "channel/bus-local-heartbeat.mjs"):
             txt = (repo / rel).read_text(encoding="utf-8")
-            assert "last_cloud_heartbeat_at" not in txt, (
+            assert "last_cloud_heartbeat_sent_at" not in txt, (
                 f"{rel} が throttle の時計を書いている (e-6776 の再発)")

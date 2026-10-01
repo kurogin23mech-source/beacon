@@ -70,6 +70,17 @@ DECLARABLE_STATES = frozenset({
     STATE_TERMINATED,
 })
 
+# The COMPLETE range of ``derive_state`` — every value a consumer (ops room,
+# Go viewer, roster ordering, attention filter) may receive. Consumers that
+# enumerate states MUST check exhaustiveness against THIS set, not against
+# ``DECLARABLE_STATES | {STATE_UNKNOWN}``: the server-raised states are exactly
+# the ones a consumer forgets, and a guard written from the declarable set stays
+# green while a new state silently falls into some `.get(..., default)` bucket
+# (ms-177 — that is how ``interrupted`` would have slipped past the existing
+# ``_ROSTER_STATE_ORDER`` exhaustiveness test).
+ALL_STATES = DECLARABLE_STATES | frozenset({STATE_UNKNOWN, STATE_INTERRUPTED})
+
+
 # ms-173 / e-6775 — 「待機内容 (state_detail) を持つ状態」の正典。
 #
 # 不変条件: **state_detail は state に属する。両者は必ず一緒に動く。** 待ちでない状態
@@ -108,17 +119,6 @@ def state_detail_for_declaration(declared_state, state_detail):
     if not state_carries_wait_detail(declared_state):
         return ""
     return state_detail if isinstance(state_detail, str) else ""
-
-
-# The COMPLETE range of ``derive_state`` — every value a consumer (ops room,
-# Go viewer, roster ordering, attention filter) may receive. Consumers that
-# enumerate states MUST check exhaustiveness against THIS set, not against
-# ``DECLARABLE_STATES | {STATE_UNKNOWN}``: the server-raised states are exactly
-# the ones a consumer forgets, and a guard written from the declarable set stays
-# green while a new state silently falls into some `.get(..., default)` bucket
-# (ms-177 — that is how ``interrupted`` would have slipped past the existing
-# ``_ROSTER_STATE_ORDER`` exhaustiveness test).
-ALL_STATES = DECLARABLE_STATES | frozenset({STATE_UNKNOWN, STATE_INTERRUPTED})
 
 
 def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[bool]:
@@ -372,7 +372,12 @@ def derive_state(declared_state, declared_at, live, now,
       ``terminated`` regardless of liveness or age — it legitimately stops
       emitting, so nothing flips it to ``unknown``.
     - **While LIVE, the latest declaration is authoritative — staleness does NOT
-      apply.** The bridge heartbeats every few seconds; that live heartbeat
+      apply, with ONE exception: a ``running`` declaration (see
+      ``running_stale_after_seconds`` below and the branch comment in the body).**
+      待ち状態の静止は正常なので経年で疑わないが、``running`` は継続的な主張なので
+      静止は矛盾 — そこだけ疑う (ms-173 / e-6774)。この要約表が唯一の正とするため、
+      例外は後付け段落でなくここに書く (独立レビュー 保守性 M-1)。
+      The bridge heartbeats every few seconds; that live heartbeat
       continuously re-affirms the marker (the session would push a NEW marker if
       its state changed), so ``declared_at`` age is not evidence the state is
       wrong. This is the correction that lets a session parked in

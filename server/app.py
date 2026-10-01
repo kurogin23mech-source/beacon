@@ -1739,9 +1739,15 @@ _POLL_HEALTH_DEFAULT_INTERVAL_MS = 2000
 _POLL_HEALTH_INTERVAL_MULTIPLIER = 2
 
 # ms-165 (e-5965): attentiveness window. last_heartbeat_at is written only by
-# POST /api/me/heartbeat (the interactive PostToolUse hook path), so its
-# freshness proves a human/AI is actively DRIVING the session — distinct from
-# `live` (bridge polling). Env-overridable.
+# POST /api/me/heartbeat, so its freshness proves a human/AI is actively DRIVING
+# the session — distinct from `live` (bridge polling). Env-overridable.
+#
+# ms-173 / e-6776 — 書き手の訂正: その POST を出すのは **PostToolUse hook ではない**。
+# CLI の session 解決 (lib/session.get_or_mint_session_via_server) の副産物で、beacon
+# コマンドが走ると出る。書き手の正典はその呼び出し元の docstring
+# (lib/session._cloud_mint_cache_hit) 1 箇所。ここを含め散在していた「hook 由来」の誤記が、
+# この軸が構造的に死んでいること (throttle cache が永久に当たり心拍が二度と出ない) を
+# 長く見逃させた。
 _ATTENTIVE_HEARTBEAT_MAX_AGE_S = int(
     os.environ.get("BEACON_ATTENTIVE_MAX_AGE_S", "300") or "300")
 
@@ -1896,8 +1902,16 @@ _RUNNING_DECL_STALE_AGE_S = int(
 # AX-3: 閾値が不正 (0 以下) ならガードは何もしない = fail-open。健全な行を設定ミスで
 # 黙らせないための向きだが、黙って無効化されると「設定したのに何も起きない」になる。
 # 起動時に 1 度だけ警告して、無効化されていることを可視化する。
-for _name, _val in (("BEACON_WS_ZOMBIE_POLL_AGE_S", _WS_ZOMBIE_POLL_AGE_S),
-                    ("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", _WS_ZOMBIE_NO_HISTORY_AGE_S)):
+# ms-173 独立レビュー 保守性 M-3: 閾値を追加するたびにこのループへ手で足す運用だと
+# 必ず忘れる (実際 _RUNNING_DECL_STALE_AGE_S を足したとき忘れた)。fail-open な閾値は
+# **この 1 リストに登録する** のを唯一の作法にし、網羅をテストで固定する
+# (tests/test_fail_open_threshold_warnings.py)。
+_FAIL_OPEN_THRESHOLDS = (
+    ("BEACON_WS_ZOMBIE_POLL_AGE_S", _WS_ZOMBIE_POLL_AGE_S),
+    ("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", _WS_ZOMBIE_NO_HISTORY_AGE_S),
+    ("BEACON_RUNNING_DECL_STALE_AGE_S", _RUNNING_DECL_STALE_AGE_S),
+)
+for _name, _val in _FAIL_OPEN_THRESHOLDS:
     if _val <= 0:
         print(
             f"WARNING: {_name}={_val} (<= 0) — zombie-WS liveness guard is DISABLED. "
@@ -1980,8 +1994,11 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # (履歴の有無は猶予の長さと理由文字列の選択にだけ使う)。
     #
     # 裏付けは互いに独立した 3 源を渡す。poll 報告が無い古い bridge でも、人/AI が実際に
-    # 動かしていれば PostToolUse hook 由来の last_heartbeat_at が新しいので救われる
-    # (= 「古い bridge かどうか」ではなく「生きている痕跡があるか」で救う)。
+    # 動かしていれば last_heartbeat_at が新しいので救われる (= 「古い bridge かどうか」
+    # ではなく「生きている痕跡があるか」で救う)。書き手は CLI の session 解決
+    # (正典: lib/session._cloud_mint_cache_hit の docstring)。**PostToolUse hook ではない**
+    # — e-6776 で訂正。この誤記を信じてここの安全弁を据えたが、当時 stamp は凍結しており
+    # 安全弁は機能していなかった。
     if live:
         _suppressed = bus_liveness.ws_only_liveness_suppression(
             # 全て keyword で渡す (独立レビュー AX-1)。先頭 3 つは型が同系なので

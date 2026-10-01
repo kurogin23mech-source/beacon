@@ -56,7 +56,7 @@ def _write_session_file(project_dir: Path, **overrides):
         # ms-173 / e-6776: cache の freshness gate が見るのはこちら。last_active は
         # 受信プロセスが別用途で 60 秒ごとに書くので throttle の時計に使えなかった
         # (gate が永久に通り、心拍が二度と出ずサーバの last_heartbeat_at が凍結した)。
-        "last_cloud_heartbeat_at": _iso(-60),  # fresh under default 300s TTL
+        "last_cloud_heartbeat_sent_at": _iso(-60),  # fresh under default 300s TTL
         "harness": "test",
         "source": "server_minted",
         "machine_id": "mc-abc-def",
@@ -154,6 +154,54 @@ def test_cache_miss_when_pid_differs_calls_heartbeat(
     assert result["minted"] is True
 
 
+def test_mint_writes_the_throttle_stamp_into_session_json(
+    isolated_project, monkeypatch,
+):
+    """心拍を実際に送った経路が throttle の時計を書くこと (**振る舞いで確認**)。
+
+    ms-173 / e-6776 + 独立レビュー 保守性 M-4: 元はこれを lib/session.py のソース字面
+    (``'"last_cloud_heartbeat_sent_at": now'``) の一致で見ていたが、無害な整形変更でも
+    赤くなる脆いテストだった。実際に書かれた session.json を読む形に置き換えた。
+
+    これが書かれないと gate は永久に miss し、毎回 network に出る (= throttle が消える)。
+    """
+    # cache を強制的に miss させる (stamp を持たない古い session.json)
+    p = _write_session_file(isolated_project)
+    del p["last_cloud_heartbeat_sent_at"]
+    (isolated_project / ".beacon" / "session.json").write_text(
+        json.dumps(p), encoding="utf-8")
+    _stub_pid(monkeypatch, 42424)
+    _stub_machine_cache(monkeypatch)
+    monkeypatch.setattr(
+        session._agent, "get_actor",
+        lambda: {"machine": "test-mac", "agent": "test-agent"},
+    )
+
+    def _client_factory():
+        class _Client:
+            def me_upsert_machine(self, *a, **k):
+                return {"machine_id": "mc-abc-def"}
+
+            def me_heartbeat(self, *a, **k):
+                return {"session_id": "sv-minted-9999", "minted": True}
+        return _Client(), {}
+
+    monkeypatch.setattr(session, "_commands", None, raising=False)
+    import commands as _commands
+    monkeypatch.setattr(_commands, "_get_api_client", _client_factory)
+
+    result = session.get_or_mint_session_via_server()
+    assert result["session_id"] == "sv-minted-9999"
+
+    written = json.loads(
+        (isolated_project / ".beacon" / "session.json").read_text(encoding="utf-8"))
+    assert written.get("last_cloud_heartbeat_sent_at"), (
+        "心拍を送ったのに throttle の時計を書いていない — gate が永久に miss する")
+    # 受信プロセスが書く last_active とは別フィールドであること (混ざると e-6776 再発)。
+    assert "last_active" in written
+    assert written["last_cloud_heartbeat_sent_at"] != "" 
+
+
 def test_cache_miss_when_stale_heartbeat_stamp_calls_heartbeat(
     isolated_project, monkeypatch,
 ):
@@ -169,7 +217,7 @@ def test_cache_miss_when_stale_heartbeat_stamp_calls_heartbeat(
     tests/test_cloud_mint_throttle_clock_e6776.py が別途固定している。
     """
     _write_session_file(isolated_project,
-                        last_cloud_heartbeat_at=_iso(-999999))
+                        last_cloud_heartbeat_sent_at=_iso(-999999))
     _stub_pid(monkeypatch, 42424)
     _stub_machine_cache(monkeypatch)
     monkeypatch.setattr(

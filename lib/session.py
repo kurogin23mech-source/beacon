@@ -386,7 +386,7 @@ def _cloud_mint_cache_hit(
          ``machine_id`` and same ``parent_pid``. Any drift means the
          server would mint a new sid, so the cache must not short-
          circuit that.
-      4. Cached ``last_cloud_heartbeat_at`` is within the TTL window
+      4. Cached ``last_cloud_heartbeat_sent_at`` is within the TTL window
          (ms-173 / e-6776 — **not** ``last_active``, see below).
       5. Cached ``source`` proves the sid came from an earlier server
          mint (``server_minted``). We refuse to return a locally-minted
@@ -413,6 +413,23 @@ def _cloud_mint_cache_hit(
     if existing.get("source") != "server_minted":
         return None
     now = _now_iso()
+    # --- セッション時刻フィールドの用語集 (ms-173 / e-6776 + 独立レビュー AX-1) -------
+    #
+    # 似た名前の時刻が 4 つあり、**書き手が違う**。取り違えが e-6776 の実害を生んだので、
+    # 書き手で区別できる形に揃え、ここを唯一の用語集とする。新しい時刻フィールドを足す
+    # ときはこの表も更新する (tests/test_session_timestamp_glossary.py が網羅を固定)。
+    #
+    #   last_cloud_heartbeat_sent_at (client: .beacon/session.json)
+    #       = **この経路が /api/me/heartbeat を送った時刻**。スロットルの時計はこれ。
+    #         名前に "sent" を入れてあるのは、下の last_active と混ざらないため。
+    #   last_active                  (client: .beacon/session.json / server: session row)
+    #       = 「何かが活動した」時刻。**受信プロセスが 60 秒ごとに書く** ので、この
+    #         スロットルの時計には使えない (他人の活動で自分の送信間隔を判定できない)。
+    #   last_heartbeat_at            (server: session row)
+    #       = server が /api/me/heartbeat を受け取った時刻。heartbeat_fresh の源。
+    #   last_poll_at                 (server: session row)
+    #       = 受信プロセスの poll ループが 1 周した時刻 (bridge の生存)。
+    #
     # ms-173 / e-6776 — スロットルの時計は「自分が前回いつ送ったか」でなければならない。
     #
     # ここは以前 ``last_active`` を見ていたが、その値を書くのは **受信プロセス**
@@ -428,7 +445,7 @@ def _cloud_mint_cache_hit(
     # 「前回送ってから十分経ったか」を他人の活動で判定していたのが誤り。この stamp は
     # 実際に心拍を送った経路だけが書く (下の payload 参照)。欠けている場合は「送った
     # 記録が無い」= cache miss にして 1 回だけ network に出る (以降は定常運転)。
-    if not _is_fresh(existing.get("last_cloud_heartbeat_at", ""), now, ttl):
+    if not _is_fresh(existing.get("last_cloud_heartbeat_sent_at", ""), now, ttl):
         return None
     # Cache hit — refresh last_active in-memory so downstream readers see
     # a current timestamp, but don't rewrite the file (that would defeat
@@ -447,13 +464,20 @@ def get_or_mint_session_via_server() -> dict:
          miss, call POST /api/me/machine to mint one + write the cache.
       3. **Cache short-circuit (ms-98 / e-2769)** — if
          ``.beacon/session.json`` holds a server-minted sid for the
-         current identity tuple and its ``last_active`` is within the
-         cache TTL (default 300 s, tunable via
+         current identity tuple and its ``last_cloud_heartbeat_sent_at``
+         is within the cache TTL (default 300 s, tunable via
          ``BEACON_SESSION_CLOUD_MINT_TTL_SECONDS``, ``0`` to disable),
          return the cached payload without touching the network. This is
          the primary throttle for the ``/api/me/heartbeat`` hot path —
          before the cache, every ``beacon <cmd>`` under
          ``BEACON_USE_CLOUD_FIRST_SESSION=1`` triggered one heartbeat.
+
+         ms-173 / e-6776 — ここは以前 ``last_active`` と書いていた。それは **この
+         スロットルがかつて実際に見ていた値** であり、受信プロセスが 60 秒ごとに
+         更新するため gate が永久に通って心拍が二度と出なかった (= 直したバグその
+         もの)。古い説明を残すと次の読み手が last_active 参照へ「直して」しまうので、
+         呼び出し先 (:func:`_cloud_mint_cache_hit`) の docstring を唯一の正とし、
+         ここもフィールド名を揃える (独立レビュー 保守性 M-2)。
       4. Call POST /api/me/heartbeat with the identity tuple
          (project_id, machine_id, parent_pid). Server returns the sid
          (= same tuple → same sid for continuity).
@@ -551,7 +575,7 @@ def _get_or_mint_session_via_server_impl() -> dict:
         # ms-173 / e-6776: この経路 (= 実際に /api/me/heartbeat を叩いた所) だけが書く
         # stamp。cache のスロットルはこれを見る。last_active と分けてあるのが要で、
         # last_active は受信プロセスが別用途で更新するため throttle の時計に使えない。
-        "last_cloud_heartbeat_at": now,
+        "last_cloud_heartbeat_sent_at": now,
         "harness": _detect_harness(),
         "source": "server_minted",
         "machine_id": machine_id,
