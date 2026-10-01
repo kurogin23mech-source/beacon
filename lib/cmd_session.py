@@ -866,7 +866,182 @@ def cmd_session_fork_list():
         print(f"  parent_sid:    {fk['parent_session_id'] or '(unknown)'}")
         print(f"  parent_branch: {fk['parent_branch'] or '(unknown)'}")
         print(f"  created:       {fk['created_at']}")
+        # ms-178 e-6702/e-6703: surface the two facts a human needs BEFORE
+        # choosing something to delete. Printing them only in --json left the
+        # human picker blind to "someone is in there" and "32 notes at stake".
+        idle = fk.get("idle_seconds")
+        if idle is None:
+            activity = "⚠ 作業中かどうか判定できません (空いているとは限りません)"
+        elif idle < 300:
+            activity = f"⚠ 作業中 ({idle/60:.0f} 分前まで活動)"
+        else:
+            activity = f"最終活動: {idle/3600:.1f} 時間前"
+        print(f"  activity:      {activity}")
+        n = int(fk.get("unpromoted_notes") or 0)
+        if n:
+            print(f"  ⚠ 未昇格の引き継ぎメモ: {n} 件 "
+                  f"(消す前に /beacon-session-end で昇格を検討)")
         print("")
+
+
+def cmd_session_fork_cleanup():
+    """Remove a fork worktree, but never at the cost of its handoff notes.
+
+    ms-178 e-6702 / e-6703. Before this, cleanup lived entirely in
+    /beacon-session-merge-back as markdown: the Skill was asked to check that the
+    branch was merged, then ran ``git worktree remove`` itself. Two consequences:
+
+      1. ``git worktree remove`` deletes ``.beacon/`` too, so a fork's
+         ``session_notes.jsonl`` died with it — no backup, no warning, no count.
+         ms-178 hardened ``note clear`` on both CLI frontends, but cleanup is a
+         THIRD writer to the same state and bypassed both guards. Observed
+         2026-09-29: a fork was cleaned up mid-session and three handoff notes
+         holding review adjudications were lost from both stores.
+      2. The picker listed every fork in the repo without regard for whether
+         another session was still working in one (the Skill documented this as
+         deliberate future work), so a parallel session could pull the ground
+         out from under a live one — which is how (1) fired.
+
+    The fix is to move the deletion itself into the tool layer and make the safe
+    ordering the only reachable path: snapshot ⇒ then delete, never the reverse.
+    A guard living in a Skill prompt is a request; a guard living here is a
+    constraint (CORE doc architecture-tool-skill-separation).
+    """
+    import datetime
+    import subprocess
+    import session as _session
+
+    json_out = os.environ.get("BEACON_JSON", "") == "1"
+    raw_path = (os.environ.get("BEACON_FORK_PATH") or "").strip()
+    force = os.environ.get("BEACON_FORK_CLEANUP_FORCE") == "1"
+    try:
+        idle_threshold = float(os.environ.get("BEACON_FORK_IDLE_THRESHOLD_S") or 300)
+    except ValueError:
+        idle_threshold = 300.0
+
+    if not raw_path:
+        print("Error: worktree path required. Usage: beacon session fork cleanup "
+              "<worktree-path> [--force]", file=sys.stderr)
+        sys.exit(1)
+
+    repo_root = os.getcwd()  # bin/beacon already cd'd to the project root
+    target = os.path.realpath(os.path.expanduser(raw_path))
+    forks = _session.list_forks(repo_root)
+    record = next((f for f in forks
+                   if os.path.realpath(f["worktree_path"]) == target), None)
+    if record is None:
+        print(f"Error: {raw_path} is not an active fork worktree of this repo.",
+              file=sys.stderr)
+        print("  'beacon session fork list' shows the forks that can be cleaned up.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    branch = record.get("child_branch") or ""
+    blockers = []
+
+    # --- gate 1: the branch's work must already be in main -------------------
+    # Removing an unmerged fork discards commits. This check used to live in the
+    # Skill; keeping it here means it cannot be skipped by a caller that forgets.
+    if branch:
+        merged = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", branch, "origin/main"],
+            cwd=repo_root, capture_output=True, text=True)
+        if merged.returncode != 0:
+            blockers.append(
+                f"branch '{branch}' はまだ origin/main に取り込まれていません "
+                f"(取り込み前に消すとコミットが失われます)")
+
+    # --- gate 2: is someone still working in there? --------------------------
+    idle = record.get("idle_seconds")
+    if idle is None:
+        blockers.append(
+            "このフォークで作業中のセッションが居るかを判定できません "
+            "(.beacon/session.json の活動記録が読めません)。"
+            "『判定できない』は『空いている』ではありません")
+    elif idle < idle_threshold:
+        blockers.append(
+            f"{idle/60:.0f} 分前まで作業されています "
+            f"(セッション {record.get('own_session_id') or '(不明)'})。"
+            f"作業中のフォークを消すと、そのセッションの足元が外れます")
+
+    # --- gate 3: unpromoted notes must be preserved BEFORE any deletion ------
+    # Same ordering guarantee as `note clear` (ms-178 e-6656): no backup ⇒ no
+    # delete. The snapshot lands in the PARENT repo, outside the worktree that is
+    # about to disappear — a backup inside the deleted directory is not a backup.
+    n_notes = int(record.get("unpromoted_notes") or 0)
+    backup_path = ""
+    if n_notes:
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_branch = (branch or "fork").replace("/", "-")
+        backup_dir = os.path.join(repo_root, ".beacon", "fork-notes-backup")
+        backup_path = os.path.join(backup_dir, f"{safe_branch}-{stamp}.jsonl")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            import shutil
+            shutil.copyfile(record["notes_path"], backup_path)
+        except OSError as exc:
+            blockers.append(
+                f"引き継ぎメモ {n_notes} 件の退避に失敗しました ({exc})。"
+                f"退避が取れないので削除しません")
+            backup_path = ""
+
+    if blockers and not force:
+        if json_out:
+            print(json.dumps({"removed": False, "blockers": blockers,
+                              "unpromoted_notes": n_notes,
+                              "notes_backup": backup_path,
+                              "worktree_path": record["worktree_path"]},
+                             ensure_ascii=False))
+        else:
+            print(f"削除しませんでした: {record['worktree_path']}", file=sys.stderr)
+            for b in blockers:
+                print(f"  - {b}", file=sys.stderr)
+            if n_notes:
+                print(f"  ℹ 引き継ぎメモが {n_notes} 件あります。このフォークで "
+                      f"/beacon-session-end を走らせると、残す価値のあるものを "
+                      f"ドキュメントへ昇格できます。", file=sys.stderr)
+            print("  承知の上で消すなら --force を付けてください。", file=sys.stderr)
+        sys.exit(1)
+
+    # --- remove: worktree first, then the branch ----------------------------
+    errors = []
+    rm = subprocess.run(["git", "worktree", "remove", record["worktree_path"]],
+                        cwd=repo_root, capture_output=True, text=True)
+    if rm.returncode != 0 and force:
+        rm = subprocess.run(
+            ["git", "worktree", "remove", "--force", record["worktree_path"]],
+            cwd=repo_root, capture_output=True, text=True)
+    if rm.returncode != 0:
+        errors.append(f"git worktree remove failed: {rm.stderr.strip()}")
+    elif branch:
+        br = subprocess.run(["git", "branch", "-d", branch],
+                            cwd=repo_root, capture_output=True, text=True)
+        if br.returncode != 0:
+            errors.append(f"git branch -d failed: {br.stderr.strip()}")
+
+    result = {
+        "removed": not errors,
+        "worktree_path": record["worktree_path"],
+        "branch": branch,
+        "unpromoted_notes": n_notes,
+        "notes_backup": backup_path,
+        "forced": force,
+        "errors": errors,
+    }
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        if errors:
+            for e in errors:
+                print(f"Error: {e}", file=sys.stderr)
+        else:
+            print(f"片付けました: {record['worktree_path']}")
+            if branch:
+                print(f"  branch {branch} も削除しました")
+        if backup_path:
+            print(f"  引き継ぎメモ {n_notes} 件を退避: {backup_path}")
+    if errors:
+        sys.exit(1)
 
 
 # --- occupation release on session end (ms-81 e-1918) ---

@@ -1330,6 +1330,58 @@ def fork_workspace(
     }
 
 
+def _fork_idle_seconds(worktree: Path, now=None):
+    """Seconds since the fork's bridge last proved life, or None if unknown.
+
+    ms-178 e-6703: liveness must be decidable WITHOUT the cloud, because cleanup
+    happens on the local machine and a network blip must not read as "nobody is
+    working here". ``.beacon/session.json``'s ``last_active`` is the bridge poll
+    loop's proof-of-life stamp (the truth source per ms-54 e-1319), so its age is
+    a purely local liveness signal.
+
+    Returns None when the stamp is missing or unparseable. None means UNKNOWN and
+    callers must NOT read it as idle — "no evidence of life" is not "evidence of
+    no life".
+    """
+    import datetime as _dt
+    try:
+        rec = json.loads((worktree / ".beacon" / "session.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    raw = rec.get("last_active") or ""
+    if not raw:
+        return None
+    try:
+        stamp = _dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+    current = now or _dt.datetime.now(_dt.timezone.utc)
+    return max(0.0, (current - stamp).total_seconds())
+
+
+def _fork_own_session_id(worktree: Path) -> str:
+    """The session id that has been working inside ``worktree``, or "".
+
+    ms-178 e-6703: cleanup could remove a fork another session was still working
+    in (skills/beacon-session-merge-back.md documented this as deliberate future
+    work). Reading the worktree's own session marker lets a caller distinguish
+    "finished" from "someone is in here", instead of treating every listed fork
+    as free to delete. Best-effort: an unreadable / absent marker yields "" and
+    the caller must then treat liveness as UNKNOWN, never as "safe".
+    """
+    for name in ("session.json", "session-state.json"):
+        try:
+            rec = json.loads((worktree / ".beacon" / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        sid = rec.get("session_id") or rec.get("sid") or ""
+        if sid:
+            return str(sid)
+    return ""
+
+
 def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
     """List active fork worktrees under ``repo_root``.
 
@@ -1377,6 +1429,22 @@ def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
             record = json.loads(fj.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        # ms-178 e-6702 / e-6703: the picker must carry the facts a caller needs
+        # to REFUSE, not just the ones needed to display. Cleanup deletes the
+        # whole worktree (and with it .beacon/session_notes.jsonl), so without
+        # these two numbers the deletion cannot be gated on anything:
+        #   unpromoted_notes — handoff notes this fork wrote that have not been
+        #     promoted to a doc yet. Losing them loses the fork's decision trail,
+        #     which is precisely what session-end exists to preserve.
+        #   own_session_id   — the session that is (or was) working in this fork,
+        #     so a caller can tell "still being worked in" from "finished".
+        notes_path = wt / ".beacon" / "session_notes.jsonl"
+        unpromoted = 0
+        try:
+            with open(notes_path, "r", encoding="utf-8") as nf:
+                unpromoted = sum(1 for line in nf if line.strip())
+        except OSError:
+            unpromoted = 0
         forks.append({
             "worktree_path": str(wt),
             "target_ms_id": record.get("target_ms_id", ""),
@@ -1385,5 +1453,9 @@ def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
             "parent_session_id": record.get("parent_session_id", ""),
             "parent_branch": record.get("parent_branch", ""),
             "created_at": record.get("created_at", ""),
+            "unpromoted_notes": unpromoted,
+            "notes_path": str(notes_path),
+            "own_session_id": _fork_own_session_id(wt),
+            "idle_seconds": _fork_idle_seconds(wt),
         })
     return forks

@@ -423,6 +423,7 @@ VERB_LEDGER = {
     "session_working": {"cls": "R", "secondary": [], "note": "[post-memo/ms-159] 作業 target(working_target) の宣言記録(R)。activity は session_focus の intent text を再利用、これは構造化した target を書く"},
     "session_fork": {"cls": "C", "secondary": [], "note": "local"},
     "session_fork_list": {"cls": "Q", "secondary": [], "note": ""},
+    "session_fork_cleanup": {"cls": "C", "secondary": ["B"], "note": "[post-memo/ms-178] fork worktree の物理削除=局所破壊(C)、退避と生存判定のゲートが機構(B)。退避が取れなければ削除しない"},
     "session_id": {"cls": "Q", "secondary": [], "note": ""},
     "session_log_list": {"cls": "Q", "secondary": [], "note": ""},
     "session_log_show": {"cls": "Q", "secondary": [], "note": ""},

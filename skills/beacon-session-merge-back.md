@@ -100,12 +100,32 @@ git branch --merged origin/main | grep -E "^\s*$(echo "$TARGET_FORK_CHILD_BRANCH
 Bash ツールで実行:
 
 ```bash
-git worktree remove "$TARGET_FORK_WORKTREE_PATH"
-git branch -d "$TARGET_FORK_CHILD_BRANCH"
+beacon session fork cleanup "$TARGET_FORK_WORKTREE_PATH"
 ```
 
-- `git worktree remove` が失敗 (= worktree 内に未 commit の変更がある等) → 「worktree に未 commit の変更があります。中身を確認するか `--force` を使うか判断してください」と提示して中止。**自動で `--force` を渡さない** (= ユーザー判断)
-- `git branch -d` が失敗 (= branch が未マージと git が判断) → Step 3 で merged 判定したのとずれているので警告だけ出して続行 (= worktree は既に消えた状態)
+**`git worktree remove` を直接叩かない (ms-178 e-6702)**。削除は CLI 側の verb が所有する。
+理由: `git worktree remove` は `.beacon/` ごと消すため、その fork がまだドキュメントへ
+昇格していない引き継ぎメモを、控えも警告も件数表示もなく失う。2026-09-29 に実際に発生し、
+レビュー採否を含むメモ 3 件が失われた。`beacon session fork cleanup` は削除の前に
+メモを worktree の外 (`.beacon/fork-notes-backup/`) へ退避し、**退避が取れなければ
+削除しない** (`beacon note clear` と同じ順序保証)。branch の削除も同じ verb が行う。
+
+この verb は以下のいずれかに当たると **拒否して終了コード 1 を返す**:
+
+| 拒否理由 | 意味 |
+|---|---|
+| branch が origin/main に未取り込み | 消すとコミットが失われる |
+| その fork でまだ作業されている | 他セッションの足元を外す (e-6703) |
+| 作業中か判定できない | 「判定できない」は「空いている」ではない |
+| メモの退避が取れない | 退避の取れない削除は行わない |
+
+拒否されたら **その内容をそのままユーザーに提示して中止する**。`--force` を自動で
+付けてはならない (= ユーザー判断)。未昇格メモがあると告げられた場合は、
+「その fork で `/beacon-session-end` を走らせてメモを昇格させてから片付ける」経路を
+提案する (= 昇格を飛ばして消させない)。
+
+なお `--force` を付けても **メモの退避は必ず行われる** (force は拒否の上書きであって、
+退避の省略ではない)。
 
 成功したら次へ。
 

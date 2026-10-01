@@ -418,6 +418,9 @@ Sources: `manual` (default, AI self-report), `google_docs`, `notion`, `jupyter`,
 | `beacon log [message] [-m ms-id]` | Record HEAD commit to milestone / コミット記録 |
 | `beacon log --prepare` | Output context as JSON (read-only) / 判断材料出力 |
 | `beacon log --finalize --progress N` | Write evaluation results / 評価結果書き込み (`--summary` was retired in e-1040 — see `project-vision` doc + session log) |
+| `beacon session fork <ms-id>` | Create a sibling worktree to work a milestone in parallel / 並列作業用の worktree を作る |
+| `beacon session fork list` | List active forks with each one's unpromoted handoff-note count and last activity / fork 一覧 (未昇格メモ件数・最終活動付き) |
+| `beacon session fork cleanup <worktree-path>` | Remove a merged fork; refuses on unmerged branch, live session, or if its notes cannot be backed up first / fork を片付ける (退避が取れなければ削除しない) |
 | `beacon summary [--json]` | View project summary (read-only). Writes retired in e-1040 — use `project-vision` doc + `beacon session log` |
 | `beacon sync` | Auto-sync recent commits / 直近コミットを同期 |
 | `beacon search <query> [-m ms-id] [--json]` | Full-text search across milestones, tasks, commits, PRs, and saves / 全文検索 |
