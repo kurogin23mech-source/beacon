@@ -583,6 +583,24 @@ def _row_target_id(row: dict) -> str:
     return str(related.get("target_id") or row.get("target_id") or "")
 
 
+def effective_exclude_kinds(exclude_kinds, kind: str = "") -> frozenset:
+    """実際に適用する除外集合を返す — ``kind`` を明示したらその種別自身は引く。
+
+    なぜ引くか: ``kind=dm-send`` のように「既定除外されている種別を明示して見たい」
+    read を成立させるため (= 消すのではなく既定から外すだけ、という契約)。それ以外の
+    組合せは素直な AND になる。
+
+    **Python 側の窓 (:func:`window_decision_events`) と SQL 生成
+    (:func:`mysql_window_sql`) の両方がこの 1 関数を呼ぶ** (ms-166 e-5986 独立レビュー
+    保守性 M-1)。旧実装は同じ式を 2 箇所に逐語コピーしており、片方だけ直すと
+    「一覧には出るのに SQL では落ちる (逆も)」という、このモジュールが警告している
+    まさにその drift を再生産しうる状態だった。
+    """
+    if not exclude_kinds:
+        return frozenset()
+    return frozenset(exclude_kinds) - ({kind} if kind else frozenset())
+
+
 def window_decision_events(rows, *, kind: str = "", limit: int = 100,
                            since: str = "", session: str = "",
                            target: str = "", exclude_kinds=None) -> list[dict]:
@@ -627,7 +645,7 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
         # 丸ごと無視しており、署名からは「両方渡すと片方が黙って勝つ」ことが読めなかった。
         # ``kind`` 自身を引くので「``kind=dm-send`` を明示したら dm-send が引ける」性質は
         # 保たれ、それ以外の組合せは素直な AND になる。
-        _ex = frozenset(exclude_kinds) - ({kind} if kind else frozenset())
+        _ex = effective_exclude_kinds(exclude_kinds, kind)
         if _ex:
             out = [r for r in out if (r.get("kind") or "") not in _ex]
     if session:
@@ -712,10 +730,9 @@ def mysql_window_sql(*, kind: str = "", limit: int = 100, since: str = "",
     """
     values = {"kind": kind, "session": session, "target": target,
               "since": since, "exclude_kinds": exclude_kinds}
-    # 除外集合は ``kind`` 明示時に ``kind`` 自身を引く (window_decision_events と同じ規則)
+    # 除外集合の算出は窓ヘルパーと同じ 1 関数を通す (保守性 M-1: 式の逐語コピーを廃止)
     if exclude_kinds:
-        values["exclude_kinds"] = sorted(
-            frozenset(exclude_kinds) - ({kind} if kind else frozenset()))
+        values["exclude_kinds"] = sorted(effective_exclude_kinds(exclude_kinds, kind))
     clauses: list = []
     params: list = []
     for name, paths, op in _WINDOW_FILTERS:
@@ -777,7 +794,7 @@ def mysql_window_eval(rows, sql: str, params) -> list:
             if marker not in sql:
                 continue
             holes = sql.split(marker, 1)[1].split(")", 1)[0].count("%s")
-            excluded = {str(v) for v in params[idx:idx + holes]}
+            excluded = {str(v) for v in params[idx:idx + holes]}  # 生成側が既に kind を引いている
             idx += holes
             out = [r for r in out if _row_value(r, paths) not in excluded]
             continue

@@ -44,6 +44,7 @@ _SERVER = os.path.join(os.path.dirname(__file__), "..", "server")
 sys.path.insert(0, _SERVER)
 
 import decision_event as de  # noqa: E402
+import decision_derive as dd  # noqa: E402  (lib/ は conftest が path に載せる)
 from scale_contract import fake_rows, measure_rows_into_python  # noqa: E402
 
 
@@ -190,3 +191,129 @@ def test_欠損とJSON_nullを空文字に落としている():
     # 静かに消える。式の形を固定して、COALESCE / NULLIF の省略を差分で見つける。
     tail, _ = de.mysql_window_sql(target="ms-9", limit=1)
     assert "COALESCE(" in tail and "NULLIF(" in tail and ", 'null')" in tail
+
+
+# ---------------------------------------------------------------------------
+# 6. 独立レビュー採否で足した分 (ax A-1/A-2, 保守性 M-1/M-2)
+# ---------------------------------------------------------------------------
+
+def test_除外集合の算出が単一関数に集約されている():
+    """保守性 M-1: 「kind 自身を引く」規則を Python 側と SQL 側に 2 回書かない。
+
+    片方だけ直すと「一覧には出るのに SQL では落ちる (逆も)」という、このモジュールが
+    警告しているまさにその drift を再生産する。
+    """
+    import ast
+    src = open(os.path.join(_SERVER, "decision_event.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    for fname in ("window_decision_events", "mysql_window_sql"):
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == fname)
+        called = {s.func.id for s in ast.walk(fn)
+                  if isinstance(s, ast.Call) and isinstance(s.func, ast.Name)}
+        assert "effective_exclude_kinds" in called, (
+            f"{fname} が除外集合の算出を共有関数に通していない")
+    # 式の逐語コピーが残っていないこと (差分でも気付けるように形で固定)
+    assert src.count("- ({kind} if kind else frozenset())") == 1, (
+        "除外集合の式が複製されている — 共有関数 1 箇所に畳むこと")
+
+
+# 手書きの golden SQL (保守性 M-2)。
+#
+# テスト用評価器 (mysql_window_eval) は SQL 生成側と同じ式組み立て関数を共有するので、
+# **式そのものにバグが入ると生成 SQL と評価器の両方に同じ形で現れ、緑で通る** (循環)。
+# そこで主要な組合せについて SQL 文字列を **手で書いて** 固定し、式組み立てへの依存を
+# 切る。ここが赤くなったら、生成側の式が変わったということ (意図的な変更なら golden を
+# 更新する。評価器経由のテストだけでは気付けない次元)。
+_GOLDEN_KIND = ("COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '$.kind')), 'null'), '')")
+_GOLDEN_CREATED = ("COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '$.created_at')),"
+                   " 'null'), '')")
+_GOLDEN_SESSION = ("COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '$.who.session_id')),"
+                   " 'null'), '')")
+_GOLDEN_TARGET = ("COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '$.related.target_id')),"
+                  " 'null'), NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '$.target_id')),"
+                  " 'null'), '')")
+
+
+def test_全項目を指定したSQLを手書きで固定する():
+    tail, params = de.mysql_window_sql(
+        kind="log-backstop", session="sv-1", target="ms-9",
+        since="2026-09-01T00:00:00Z", limit=7)
+    assert tail == (
+        f" AND {_GOLDEN_KIND} = %s"
+        f" AND {_GOLDEN_SESSION} = %s"
+        f" AND {_GOLDEN_TARGET} = %s"
+        f" AND {_GOLDEN_CREATED} > %s"
+        f" ORDER BY {_GOLDEN_CREATED} DESC, sk DESC LIMIT %s")
+    assert params == ["log-backstop", "sv-1", "ms-9", "2026-09-01T00:00:00Z", 7]
+
+
+def test_対象のSQLが2つのパスをこの順で見る():
+    # 本文解決側 (_row_value) と同じ順序 (related.target_id → top-level target_id)。
+    tail, _ = de.mysql_window_sql(target="ms-9", limit=1)
+    assert "$.related.target_id" in tail
+    assert tail.index("$.related.target_id") < tail.index("$.target_id"), (
+        "fallback の順序が逆 — Python 側の読み出しと食い違う")
+
+
+def test_明示した対象が台帳の接頭辞で検証される():
+    """ax A-2: 明示指定が本文解決より緩いと、綴り違いが「成功」のまま書き込まれる。
+
+    書かれた対象 id は `decision list --target <正しい id>` では二度と見つからず、
+    この MS が直している「記録はあるのに辿れない」を再生産する。2 経路を同じガードへ。
+    """
+    import work_model as wm
+    for ok in [f"{p}9" for p in wm.known_target_prefixes()]:
+        assert dd.is_known_target_id(ok), ok
+    for bad in ("e-123", "garbage", "ms-", "", "   ", "ms-9 と ms-10"):
+        assert not dd.is_known_target_id(bad), bad
+
+
+def test_明示した対象が不正なら記録せず終了する():
+    import importlib
+    import cmd_decision
+    importlib.reload(cmd_decision)
+    posted = []
+
+    class _Client:
+        def record_decision(self, pid, payload):
+            posted.append(payload)
+            return {"decision_id": "dec-1"}
+
+    env = {"BEACON_DECISION_WHAT": "決めた",
+           "BEACON_DECISION_EVIDENCE": "commit:abc1234",
+           "BEACON_DECISION_RELATED_TARGET": "e-123",  # タスク id = 対象ではない
+           "BEACON_DECISION_RATIONALE": "", "BEACON_DECISION_DECIDED_BY": "",
+           "BEACON_DECISION_RELATED_TASK": "", "BEACON_DECISION_KIND": "",
+           "BEACON_JSON": ""}
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        cmd_decision._is_cloud_mode = lambda: True
+        cmd_decision._get_api_client = lambda: (_Client(), {"project_id": "p"})
+        with pytest.raises(SystemExit) as exc:
+            cmd_decision.cmd_decision_record()
+        assert exc.value.code == 1
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    assert posted == [], "不正な対象のまま記録してしまっている"
+
+
+def test_両CLIフロントのusageが固定の既定値を宣伝しない():
+    """ax A-1: 既定値が環境に依存するようになったのに usage が旧値を見せていた。
+
+    文脈ゼロの AI は usage を読んで「省略すれば autonomous-AI」と信じる。実際は
+    セッション種別で human-delegated に化けうるので、省略した呼び出しが環境ごとに
+    違う監査値を黙って書く。
+    """
+    root = os.path.join(os.path.dirname(__file__), "..")
+    for rel in ("bin/beacon", "beacon_cli/dispatch.py"):
+        body = open(os.path.join(root, rel), encoding="utf-8").read()
+        assert "[--decided-by autonomous-AI]" not in body, (
+            f"{rel} の usage が固定の既定値を宣伝している")
+        assert "セッション種別から導出" in body, (
+            f"{rel} の usage が導出である事実を示していない")

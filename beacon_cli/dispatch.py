@@ -3992,7 +3992,9 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
 
 _DECISION_USAGE = (
     "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]\n"
-    "                              [--kind log-backstop] [--decided-by autonomous-AI]\n"
+    "                              [--kind log-backstop] [--decided-by <enum>]\n"
+    "                              (--decided-by 省略時はセッション種別から導出:\n"
+    "                               人間端末なら human-delegated、それ以外は autonomous-AI)\n"
     "                              [--related-task e-XXX] [--related-target ms-XX] [--json]\n"
     "       beacon decision list [--kind <kind>] [--session <sid>] [--target <id>] [--limit N] [--json]\n"
     "  --evidence は複数回指定可。decided_by を立てる一級決定は evidence 必須。\n"

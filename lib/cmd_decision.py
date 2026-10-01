@@ -81,6 +81,19 @@ def cmd_decision_record():
     if not what:
         print("Error: --what (the decision made) is required", file=sys.stderr)
         sys.exit(1)
+    # ms-166 e-5986 独立レビュー AX-2: 明示指定の対象も本文解決と同じ prefix 表で検証する。
+    # 検証しないと綴り違いや別種の id が「成功」表示のまま書き込まれ、`decision list
+    # --target <正しい id>` で二度と見つからない行が残る (= 記録はあるのに辿れない)。
+    if related_target:
+        import decision_derive as _dd_check
+        if not _dd_check.is_known_target_id(related_target):
+            import work_model as _wm_check
+            print(f"Error: --related-target {related_target!r} は対象 id に見えません "
+                  f"(対象 id は {', '.join(_wm_check.known_target_prefixes())} "
+                  f"のいずれかで始まります。例: ms-166 / opp-3)。"
+                  f"タスクに紐づけたいなら --related-task を使ってください",
+                  file=sys.stderr)
+            sys.exit(1)
     if decided_by not in _DECIDED_BY:
         print(f"Error: --decided-by must be one of {sorted(_DECIDED_BY)}",
               file=sys.stderr)

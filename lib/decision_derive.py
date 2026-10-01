@@ -162,3 +162,18 @@ def resolve_target_from_text(*texts) -> str:
     """
     found = target_ids_in_text(*texts)
     return found[0] if len(found) == 1 else ""
+
+def is_known_target_id(value: str) -> bool:
+    """``value`` が台帳にある対象 prefix で始まる id かを返す (純関数)。
+
+    ms-166 e-5986 独立レビュー AX-2: 対象を書く経路が 2 つあり、本文からの解決は
+    prefix 表に一致しないものを捨てるのに、**明示指定の旗は一切検証せずそのまま書いて
+    いた**。信頼される側 (明示) の方が緩く、しかも解決より優先されるので、綴り違いや
+    別種の id (``e-123`` 等) を渡すと「成功した」と表示されたまま、二度と
+    ``decision list --target <正しい id>`` で見つからない行が残る — この MS が直して
+    いる「記録はあるのに辿れない」をまさに再生産する。2 経路を同じガードに揃える。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return target_ids_in_text(text) == [text]
