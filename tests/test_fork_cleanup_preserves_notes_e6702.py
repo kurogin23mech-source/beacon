@@ -421,16 +421,23 @@ def test_one_iso_parser_is_shared(repo):
         "more than one place parses the ISO stamp; a fix to one will miss the other")
 
 
-def test_bash_frontend_rejects_a_stray_positional():
+def test_bash_frontend_rejects_a_stray_positional(repo):
     """The two frontends must agree on an unexpected extra argument: argparse
-    rejects it, so bash must too (it used to drop it in silence)."""
+    rejects it, so bash must too (it used to drop it in silence).
+
+    Runs inside the fixture's project, not the repo checkout: `.beacon/` is
+    gitignored, so a developer's working tree has one and CI does not. Depending
+    on that made this pass locally and fail in CI on bin/beacon's
+    "no Beacon project found" path, which never reaches the argument loop.
+    """
     import shutil as _sh
     bash = _sh.which("bash")
     if bash is None:
         pytest.skip("bash required")
+    root, _ = repo
     r = subprocess.run([bash, str(ROOT / "bin" / "beacon"), "session", "fork",
                         "cleanup", "/tmp/a", "/tmp/b"],
-                       capture_output=True, text=True, cwd=str(ROOT))
+                       capture_output=True, text=True, cwd=str(root))
     assert r.returncode != 0, r.stdout + r.stderr
     assert "unexpected argument" in r.stderr, r.stderr
 
