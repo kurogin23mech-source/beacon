@@ -1872,6 +1872,18 @@ _WS_ZOMBIE_POLL_AGE_S = int(
 _WS_ZOMBIE_NO_HISTORY_AGE_S = int(
     os.environ.get("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", "10800") or "10800")
 
+# ms-173 (e-6774): live なのに ``running`` の宣言が進まなくなった行を訂正する閾値。
+# 本当に動いていれば PreToolUse / PostToolUse が次々に発火して declared_at が進む。
+# 進まないなら「作業中」はもう本当ではない (実測: 許可待ちで止まった行が 38 分
+# 「作業中」のまま居た)。
+#
+# **1 回の tool 呼び出しの最長を上回る値でなければならない**: PreToolUse と PostToolUse の
+# 間 (= 長いテスト実行や CI 待ち) は declared_at が凍るので、短く取ると正常な長時間作業を
+# unknown にしてしまう。30 分は手元の最長実測 (テスト全走 3.5 分) に対して十分な余裕。
+# 誤爆しても次の hook で running に戻るだけ (回復可能) なのも、この向きを選べる理由。
+_RUNNING_DECL_STALE_AGE_S = int(
+    os.environ.get("BEACON_RUNNING_DECL_STALE_AGE_S", "1800") or "1800")
+
 # ms-173 独立レビュー AX-2: 対になる bridge 側の閾値との関係をここに書き留める。
 # bridge (channel/bus.mjs の BEACON_BUS_LIVENESS_STALL_MS、既定 10 分) は「生存報告が
 # 通らなくなったら ping を止める」側、ここ (既定 30 分 / 履歴なし 3 時間) は「それでも
@@ -2045,7 +2057,9 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     declared_state = session.get("declared_state") or ""
     declared_at = session.get("declared_at") or ""
     state = bus_liveness.derive_state(
-        declared_state, declared_at, session["live"], now_dt, _STATE_DECL_GRACE_S)
+        declared_state, declared_at, session["live"], now_dt, _STATE_DECL_GRACE_S,
+        # e-6774: running だけは live でも経年で疑う (待ち状態は従来どおり疑わない)。
+        running_stale_after_seconds=_RUNNING_DECL_STALE_AGE_S)
     session["state"] = state
     # `state_since` = when the session entered `state`. When the derived state
     # matches what the session declared, the hook-tracked entry time is authoritative

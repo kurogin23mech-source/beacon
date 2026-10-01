@@ -335,7 +335,8 @@ def ws_only_liveness_suppression(*, ws_live, poll_healthy, has_poll_history,
 
 
 def derive_state(declared_state, declared_at, live, now,
-                 stale_after_seconds) -> str:
+                 stale_after_seconds, *,
+                 running_stale_after_seconds=None) -> str:
     """Project a work unit's canonical ``state`` (ms-159 / e-6243).
 
     The one place every value in ``ALL_STATES`` is decided. Pure: the
@@ -385,12 +386,15 @@ def derive_state(declared_state, declared_at, live, now,
           those needs ``last_poll_at`` as a derivation input.
 
     So ``stale_after_seconds`` is a *post-death grace window*, not a general
-    freshness clock — it is consulted only on the not-live path. (The precise
-    live-stuck detector — a session that is live but silently stopped declaring
-    because its hooks broke — is the deferred deadline-sweep / generic server
-    tick, np2 判断6; this slice deliberately trusts a live declaration over
-    catching that rarer case, because mis-hiding awaiting_human is the worse
-    failure.)
+    freshness clock — it is consulted only on the not-live path.
+
+    ms-173 / e-6774 — その上で ``running`` **だけ** は live でも経年で疑う
+    (``running_stale_after_seconds``)。「live-stuck な宣言は後回し」と書いていたのが
+    この箇所で、実測 (2026-10-01) で live なのに running の declared_at が 38 分止まった
+    行が 2 件見つかったため塞いだ。塞げる理由は非対称性にある: 待ち状態の静止は正常
+    (hook が発火しないので当然凍る) だが、``running`` は継続的な主張なので静止は矛盾。
+    だから待ち状態を隠すリスクを負わずに running だけを訂正できる。詳細は該当分岐の
+    コメント参照。
 
     Args:
         declared_state: the session's last self-declared state, or a falsy /
@@ -415,6 +419,34 @@ def derive_state(declared_state, declared_at, live, now,
     # 2. A recognized non-terminal declaration.
     if declared_state in DECLARABLE_STATES:  # non-terminal (terminated handled)
         if live:
+            # ms-173 / e-6774 — ``running`` だけは経年で疑う。
+            #
+            # 下の原則 (live な宣言は経年で疑わない) には **非対称性** がある:
+            #   * ``awaiting_human`` / ``blocked`` / ``idle`` は静止が正常。待っている間は
+            #     hook が発火しないので declared_at は当然凍る。だから経年で疑ってはならず、
+            #     疑うと「長く待っている行」= この MS が surface したい対象を隠してしまう。
+            #   * ``running`` は **継続的な主張**。本当に動いていれば PreToolUse /
+            #     PostToolUse が次々に発火して declared_at を進める。進まないなら、その
+            #     「作業中」はもう本当ではない。
+            #
+            # 実害 (2026-10-01 実測): live なのに running の declared_at が 38 分止まった
+            # 行が 2 件。いずれも待機内容に許可要求の文面が残っており、許可待ちで止まって
+            # いるのに運用室では「作業中」に見えていた。止まった事実を誰も訂正しない。
+            #
+            # 投影先は ``unknown``: 止まったことは分かるが、何をしているかは分からない
+            # (idle とも awaiting_human とも断定できない)。``unknown`` の意味
+            # 「生きているが何をしているか言えない」をそのまま使う — でっち上げない。
+            #
+            # しきい値は「1 回の tool 呼び出しの最長」を上回る必要がある: PreToolUse と
+            # PostToolUse の間 (= 長いテスト実行や CI 待ち) は declared_at が凍るので、
+            # 短く取ると正常な長時間作業を unknown にしてしまう。既定は呼び出し側が渡す
+            # (None = この判定を使わない = 従来どおり) ので、既存の呼び出しは不変。
+            if (declared_state == STATE_RUNNING
+                    and running_stale_after_seconds is not None
+                    and running_stale_after_seconds > 0
+                    and _declaration_is_stale(
+                        declared_at, now, running_stale_after_seconds)):
+                return STATE_UNKNOWN
             # Live heartbeat re-affirms the marker → trust it regardless of age.
             # This keeps a long-waiting awaiting_human at the top of attention.
             return declared_state
