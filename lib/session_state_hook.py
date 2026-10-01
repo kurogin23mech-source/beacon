@@ -82,6 +82,34 @@ def is_idle_notification(message) -> bool:
     return _IDLE_NOTIFICATION_MARKER in str(message or "").lower()
 
 
+def is_genuine_awaiting_human(marker) -> bool:
+    """True iff ``marker`` is a *本物の* ``awaiting_human`` 宣言 — 応答を要する
+    待ちとして no-clobber 保護に値するもの。
+
+    ms-173 / e-6582 — 汚染の自己治癒。この判別が要る理由: 上の producer 修正
+    (62766932) より前の beacon が stamp したマーカーは、アイドル通知を
+    ``awaiting_human`` に写したうえで ``state_detail`` にアイドル文言そのもの
+    ("Claude is waiting for your input") を載せている。``declared_state`` だけを
+    見る no-clobber 規則はそれを「本物の待ち」として **保護** してしまうため、
+    hook が二度と発火しない放置セッションでは運用室が永久に橙のまま残った
+    (2026-09-19 実測 3 行、当時は手で修復)。
+
+    判別軸は ``state_detail`` 自身: 本物の待ちは許可要求文 (「Claude needs your
+    permission to use Bash」) か AskUserQuestion の質問文を載せる。アイドル文言を
+    載せている ``awaiting_human`` は、アイドル通知を取り違えて書かれた汚染なので
+    保護しない (= 次のアイドル通知で idle へ降格し、自然に治る)。
+
+    ``state_detail`` が **無い** ``awaiting_human`` は保護する: message 無しの分類
+    不能な Notification は従来どおり awaiting_human に倒す設計 (fail-safe の向きは
+    過剰発火側に固定) なので、detail の不在を汚染の証拠として扱ってはならない。
+    """
+    if not isinstance(marker, dict):
+        return False
+    if marker.get("declared_state") != bus_liveness.STATE_AWAITING_HUMAN:
+        return False
+    return not is_idle_notification(marker.get("state_detail"))
+
+
 def ask_question_detail(tool_input) -> str:
     """AskUserQuestion の tool_input から待機内容 (先頭の質問文) を引く。
 
@@ -139,15 +167,14 @@ def build_state_marker(event_name, now_iso, prev_marker=None, *, detail="",
             and str(tool_name or "") == ASK_TOOL_NAME):
         state = bus_liveness.STATE_AWAITING_HUMAN
     # Notification のアイドル通知は awaiting_human に写さない (過剰発火の真因):
-    #   - 直前の宣言が awaiting_human (許可要求 / AskUserQuestion 提示) なら
-    #     何も宣言しない = その待ちを clobber しない (60 秒放置で必ず後追い発火
-    #     するのがこの通知なので、上書きすると本物の確認待ちが毎回消える)。
+    #   - 直前の宣言が *本物の* awaiting_human (許可要求 / AskUserQuestion 提示)
+    #     なら何も宣言しない = その待ちを clobber しない (60 秒放置で必ず後追い
+    #     発火するのがこの通知なので、上書きすると本物の確認待ちが毎回消える)。
     #   - それ以外は idle として宣言 (Stop を取り逃した crash 経路でも、放置
     #     セッションが running のまま凍らない保険)。
     if str(event_name) == "Notification" and is_idle_notification(detail):
-        prev_state = (prev_marker or {}).get("declared_state") \
-            if isinstance(prev_marker, dict) else None
-        if prev_state == bus_liveness.STATE_AWAITING_HUMAN:
+        prev = prev_marker if isinstance(prev_marker, dict) else {}
+        if is_genuine_awaiting_human(prev):
             return None
         state = bus_liveness.STATE_IDLE
         detail = ""  # アイドル文言は待機内容ではない (でっち上げ防止)
