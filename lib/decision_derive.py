@@ -24,6 +24,10 @@ cloud POST via ``commands_shared.best_effort_decision_write``.
 """
 from __future__ import annotations
 
+import re
+
+import work_model as _wm  # ms-166 e-6603: 対象 prefix 表の単一真実源
+
 DERIVED_PR_INTENT_KIND = "pr-intent"
 
 # Cap on the existing-decision scan the backfill reads to build its dedup set.
@@ -119,32 +123,28 @@ def covered_pr_numbers(existing_decisions) -> set:
 # 対象 prefix は :func:`work_model.known_target_prefixes` から引く (= ハードコードしない)。
 # 新しい target クラスが台帳に載った瞬間にこの解決も効くようにするため。``e-`` (タスク /
 # エントリ) は target prefix ではないので拾われない。
-_TARGET_REF_RE = None
-
-
-def _target_ref_pattern():
-    """本文中の対象 id を拾う正規表現 (遅延生成 + キャッシュ)。
-
-    ``work_model.known_target_prefixes()`` から組むので、prefix 表に新クラスが増えれば
-    自動で対象になる。``op-`` が ``opp-`` の接頭辞だが、リテラルに ``-`` を含むので
-    ``opp-3`` が ``op-`` として誤match することはない (長い方を先に並べて明示的に優先)。
-    """
-    global _TARGET_REF_RE
-    if _TARGET_REF_RE is None:
-        import re
-        import work_model as _wm
-        prefixes = sorted(_wm.known_target_prefixes(), key=len, reverse=True)
-        alt = "|".join(re.escape(p) for p in prefixes)
-        # 対象 id = prefix + 英数字 1 文字以上。直前が英数字 / ハイフンなら拾わない
-        # (= 別語の一部を切り出さない)。
-        _TARGET_REF_RE = re.compile(r"(?<![0-9A-Za-z-])(" + alt + r")([0-9A-Za-z]+)")
-    return _TARGET_REF_RE
+# 本文中の対象 id を拾う正規表現。``work_model.known_target_prefixes()`` から組むので、
+# prefix 表に新クラスが増えれば自動で対象になる。``op-`` が ``opp-`` の接頭辞だが
+# リテラルに ``-`` を含むので ``opp-3`` が ``op-`` として誤match することはない (長い方を
+# 先に並べて明示的に優先)。対象 id = prefix + 英数字 1 文字以上で、直前が英数字 /
+# ハイフンなら拾わない (= 別語の一部を切り出さない)。
+#
+# **import 時に即時構築** する (独立レビュー 保守性 M-3)。他テーブルから正規表現を組む
+# 家の流儀は ``deliverable_map._WEDGE_TAG_RE`` と同じこの形で、``lib/`` に遅延 global
+# キャッシュの前例は無い。遅延にすると「最初の呼び出し時点の prefix 表で固定される」
+# stale キャッシュの失敗モードを新設してしまう (循環 import の制約も無い —
+# ``work_model`` は ``work_base`` のみ import する)。
+_TARGET_REF_RE = re.compile(
+    r"(?<![0-9A-Za-z-])("
+    + "|".join(re.escape(p) for p in
+               sorted(_wm.known_target_prefixes(), key=len, reverse=True))
+    + r")([0-9A-Za-z]+)")
 
 
 def target_ids_in_text(*texts) -> list:
     """``texts`` に現れる対象 id を重複なし・出現順で返す (純関数)。"""
     found = []
-    pat = _target_ref_pattern()
+    pat = _TARGET_REF_RE
     for text in texts:
         for m in pat.finditer(str(text or "")):
             tid = m.group(1) + m.group(2)

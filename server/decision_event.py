@@ -603,10 +603,12 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
     ``limit`` 件」を返す (ms-164 e-6030: session-end が『このセッション / この target の
     判断』を件数窓こぼれなく取れる = scale-contract-principle 準拠)。
 
-    ``exclude_kinds`` (ms-166 e-6603) は **``kind`` 未指定のときだけ** 効く既定除外
+    ``exclude_kinds`` (ms-166 e-6603) は既定 read から外す kind 集合
     (:data:`NON_DECISION_KINDS` を渡す想定)。``limit`` の前に適用するので、除外した分
-    だけ本物の判断が窓からこぼれることはない。``kind`` を明示した read では無視する
-    (= 「その kind を見たい」という意図が既定より強い)。
+    だけ本物の判断が窓からこぼれることはない。``kind`` と同時に渡した場合は
+    **AND 合成** で、除外集合から ``kind`` 自身を引いて適用する — つまり
+    「``kind=dm-send`` を明示すれば dm-send は引ける」性質を保ったまま、残りの組合せは
+    素直な AND になる (片方が黙って勝つ優先規則は置かない / 独立レビュー AX-4)。
 
     ``rows`` は各 backend が取得した decision dict の list (``decision_id`` / ``kind``
     / ``created_at`` / ``who`` / ``related`` を持つ)。純関数 — 副作用なし、入力 list は
@@ -615,13 +617,19 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
     out = list(rows or [])
     if kind:
         out = [r for r in out if (r.get("kind") or "") == kind]
-    elif exclude_kinds:
+    if exclude_kinds:
         # ms-166 e-6603: 既定 read から「決定でない kind」を外す。**limit の前**に絞るのが
         # 要点 — 後で絞ると「最新 limit 件の中の残り」になって、除外した分だけ本物の判断が
         # 窓からこぼれる (e-5970 で直した filter-after-truncate と同じ穴を再生産する)。
-        # ``kind`` 明示時は適用しない (= その kind を見たいという明示意図が既定より強い)。
-        _ex = frozenset(exclude_kinds)
-        out = [r for r in out if (r.get("kind") or "") not in _ex]
+        #
+        # ``kind`` と同時に渡されたら **AND 合成** する: 除外集合から ``kind`` 自身を引いて
+        # 適用する (独立レビュー AX-4)。旧実装は elif で ``kind`` 指定時に exclude_kinds を
+        # 丸ごと無視しており、署名からは「両方渡すと片方が黙って勝つ」ことが読めなかった。
+        # ``kind`` 自身を引くので「``kind=dm-send`` を明示したら dm-send が引ける」性質は
+        # 保たれ、それ以外の組合せは素直な AND になる。
+        _ex = frozenset(exclude_kinds) - ({kind} if kind else frozenset())
+        if _ex:
+            out = [r for r in out if (r.get("kind") or "") not in _ex]
     if session:
         out = [r for r in out if _row_session_id(r) == session]
     if target:

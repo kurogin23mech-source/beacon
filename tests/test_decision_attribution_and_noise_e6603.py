@@ -246,3 +246,172 @@ def test_dynamo_roundtrip_excludes_dm_send_by_default():
         pid, exclude_kinds=de.NON_DECISION_KINDS)
     assert [r["kind"] for r in default_read] == ["log-backstop"]
     assert len(dyn.list_decision_events(pid, kind="dm-send")) == 2
+
+
+# ---------------------------------------------------------------------------
+# 4. 独立レビュー採否で足した挙動 (ax A-1/A-2/A-3/A-4, 保守性 M-1/M-2/M-3)
+# ---------------------------------------------------------------------------
+
+def test_and_composes_kind_with_exclude_kinds(capsys=None):
+    """ax A-4: 両方渡したら AND 合成し、片方が黙って勝つ優先規則を置かない。
+
+    除外集合から ``kind`` 自身を引くので「kind=dm-send を明示したら dm-send が引ける」
+    性質は保たれる。旧実装は elif で ``kind`` 指定時に exclude_kinds を丸ごと無視しており、
+    署名からは「両方渡すと何が起きるか」が読めなかった。
+    """
+    rows = [_row("dm-send", "2026-09-01T00:00:00Z", "d1"),
+            _row("task-done", "2026-09-02T00:00:00Z", "t1"),
+            _row("log-backstop", "2026-09-03T00:00:00Z", "l1")]
+    # kind 明示 + その kind が除外集合に居る → kind 自身は引かれるので引ける
+    out = de.window_decision_events(rows, kind="dm-send",
+                                    exclude_kinds=de.NON_DECISION_KINDS)
+    assert [r["decision_id"] for r in out] == ["d1"]
+    # kind 明示 + 別 kind の除外 → 素直な AND (dm-send は kind 絞りで既に消えている)
+    out = de.window_decision_events(rows, kind="task-done",
+                                    exclude_kinds=frozenset({"log-backstop"}))
+    assert [r["decision_id"] for r in out] == ["t1"]
+    # kind 明示 + 自分自身を除外 → kind を引くので空にならない (消えない保証)
+    out = de.window_decision_events(rows, kind="task-done",
+                                    exclude_kinds=frozenset({"task-done"}))
+    assert [r["decision_id"] for r in out] == ["t1"]
+
+
+def test_route_computes_the_exclusion_set_once():
+    """保守性 M-1: フィルタ用と開示用で `not kind` を 2 回評価しない。
+
+    2 回書くと片方だけ直したとき「除外していないと表示しつつ実際は除外する」(逆も)
+    食い違いが起き、開示が実態と一致する保証が手作業に落ちる。
+    """
+    import ast
+    path = os.path.join(_SERVER, "routers_projects.py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "list_decisions":
+            fn = node
+    assert fn is not None
+    src = ast.get_source_segment(open(path, encoding="utf-8").read(), fn) or ""
+    # NON_DECISION_KINDS の参照は 1 箇所だけ (= 集合の算出が 1 回)
+    assert src.count("NON_DECISION_KINDS") == 1, (
+        "除外集合が 2 回算出されている — フィルタと開示が drift しうる")
+
+
+def test_record_json_carries_the_derived_attribution_and_target():
+    """ax A-2: --json でも機械が決めた帰属 / 対象を出す。
+
+    --json は自動化経路が「何が記録されたか」を確認する正規手段。人間向け print にだけ
+    開示を実装すると、この修正が足した情報そのものが機械の読み手から消える。
+    """
+    import importlib
+    import json as _json
+    import cmd_decision
+    importlib.reload(cmd_decision)
+
+    class _Client:
+        def record_decision(self, pid, payload):
+            return {"decision_id": "dec-1", "kind": payload.get("kind")}
+
+    env = {
+        "BEACON_DECISION_WHAT": "opp-3 の成約を決めた",
+        "BEACON_DECISION_EVIDENCE": "commit:abc1234",
+        "BEACON_DECISION_RATIONALE": "",
+        "BEACON_DECISION_DECIDED_BY": "",
+        "BEACON_DECISION_RELATED_TASK": "",
+        "BEACON_DECISION_RELATED_TARGET": "",
+        "BEACON_DECISION_KIND": "",
+        "BEACON_JSON": "1",
+    }
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    import io
+    import contextlib
+    buf = io.StringIO()
+    try:
+        cmd_decision._is_cloud_mode = lambda: True
+        cmd_decision._get_api_client = lambda: (_Client(), {"project_id": "p"})
+        with contextlib.redirect_stdout(buf):
+            cmd_decision.cmd_decision_record()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    out = _json.loads(buf.getvalue())
+    assert out["decision_id"] == "dec-1"
+    assert out["decided_by_source"] == "session-kind"
+    assert out["target_id"] == "opp-3"
+    assert out["target_id_source"] == "text"
+
+
+def test_explicit_target_flag_beats_the_text_inference():
+    """ax A-3: 明示指定 > 本文からの導出。曖昧を構造的に解消する経路。"""
+    captured = {}
+    _run_record({"BEACON_DECISION_WHAT": "ms-166 と ms-160 を直した",
+                 "BEACON_DECISION_RELATED_TARGET": "ms-166"}, captured)
+    assert captured["related"]["target_id"] == "ms-166"
+
+
+def test_both_cli_fronts_expose_related_target_for_record():
+    # CLI フロントは 2 つ (bash の bin/beacon と python の beacon_cli/dispatch.py)。
+    # 片方だけに旗を足すと、その経路だけ曖昧を解消できない。
+    root = os.path.join(os.path.dirname(__file__), "..")
+    for rel in ("bin/beacon", "beacon_cli/dispatch.py"):
+        body = open(os.path.join(root, rel), encoding="utf-8").read()
+        assert "--related-target" in body, f"{rel} に --related-target が無い"
+        assert "BEACON_DECISION_RELATED_TARGET" in body, (
+            f"{rel} が BEACON_DECISION_RELATED_TARGET を渡していない")
+
+
+def test_target_regex_is_built_at_import_time():
+    """保守性 M-3: 家の流儀 (deliverable_map._WEDGE_TAG_RE) と同じ即時構築。
+
+    遅延 global キャッシュは「最初の呼び出し時点の prefix 表で固定される」stale
+    キャッシュの失敗モードを新設する (既存コードには無い)。
+    """
+    import re as _re
+    assert isinstance(dd._TARGET_REF_RE, _re.Pattern), (
+        "正規表現が import 時に構築されていない (遅延 None センチネルは lib の前例外)")
+
+
+def test_list_discloses_the_exclusion_even_when_everything_was_excluded():
+    """ax A-1: **0 件のときこそ開示が要る**。
+
+    旧実装は `if not rows: print("(決定なし)"); return` が開示より手前にあり、
+    「全部が除外されて 0 件」と「そもそも判断記録が無い」が同じ文言に潰れていた。
+    前者を後者と読むと「このプロジェクトには判断記録が無い」と誤って結論する。
+    実データでは通信ログが流れの大半を占める時期があるので十分起こりうる。
+    """
+    import contextlib
+    import importlib
+    import io
+    import cmd_decision
+    importlib.reload(cmd_decision)
+
+    class _Client:
+        def list_decisions(self, pid, **kw):
+            # 全件除外されて 0 件、ただし「何を外したか」は返ってくる
+            return {"decisions": [], "count": 0, "excluded_kinds": ["dm-send"]}
+
+    env = {"BEACON_DECISION_KIND": "", "BEACON_DECISION_LIMIT": "",
+           "BEACON_DECISION_SESSION": "", "BEACON_DECISION_TARGET": "",
+           "BEACON_JSON": ""}
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    buf = io.StringIO()
+    try:
+        cmd_decision._is_cloud_mode = lambda: True
+        cmd_decision._get_api_client = lambda: (_Client(), {"project_id": "p"})
+        with contextlib.redirect_stdout(buf):
+            cmd_decision.cmd_decision_list()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    out = buf.getvalue()
+    assert "(決定なし)" in out
+    assert "dm-send" in out and "--kind dm-send" in out, (
+        "0 件のときに除外の開示が落ちている — 『除外で 0 件』と『記録が無い』が"
+        "同じ文言に潰れる")

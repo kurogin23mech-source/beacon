@@ -1734,14 +1734,16 @@ def make_router(
         # 押し出していた。**消さず既定から外すだけ** — ``kind=dm-send`` を明示すれば従来
         # どおり全件引ける。除外は窓の内側 (limit の前) で効くので、除外分だけ判断が
         # こぼれることはない。
-        _excluded = (sorted(decision_event_mod.NON_DECISION_KINDS)
-                     if not kind else [])
+        # 「今回除外する kind 集合」は **1 回だけ** 算出する (独立レビュー 保守性 M-1)。
+        # 旧実装は同じ `not kind` 条件をフィルタ用と開示用に別々のリテラル式で 2 回書いて
+        # いた。片方だけ直すと「除外していないと表示しつつ実際は除外する」(逆も) 食い違いが
+        # 起き、この修正自身が掲げた「開示は実態と一致させる」を手作業の一致に頼ってしまう。
+        _exclude = (decision_event_mod.NON_DECISION_KINDS if not kind else None)
+        _excluded = sorted(_exclude) if _exclude else []
         try:
             rows = db.list_decision_events(
                 project_id, kind=kind, limit=limit, since=since,
-                session=session, target=target,
-                exclude_kinds=(decision_event_mod.NON_DECISION_KINDS
-                               if not kind else None))
+                session=session, target=target, exclude_kinds=_exclude)
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"decision stream read failed: {exc}")
