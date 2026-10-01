@@ -6534,7 +6534,7 @@ def _help_registry():
         {"command": "beacon doc table set-cell <doc-id> <row-id> <col> <val>", "flags": ["--value <v>", "--json"], "description": "Update a cell; old value kept in append-only history"},
         {"command": "beacon doc table rm-row <doc-id> <row-id>", "flags": ["--json"], "description": "Soft-delete a row (tombstone; audit trail survives)"},
         {"command": "beacon doc table show <doc-id>", "flags": ["--json"], "description": "Render a table-doc as a markdown table"},
-        {"command": "beacon pr add", "flags": ["-m <ms-id>", "--url <url>", "--intent <text>"], "description": "Record a PR entry"},
+        {"command": "beacon pr add <github-url>", "flags": ["-m <ms-id>", "--intent <text>", "--author <user>", "--json"], "description": "Record a PR entry"},
         {"command": "beacon pr approve <entry-id>", "flags": ["--rationale <text>", "--no-auto-done", "--json"], "description": "Approve a PR (auto-dones bound tasks at HIGH confidence; --no-auto-done to opt out)"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
@@ -6598,10 +6598,10 @@ def _help_registry():
         # SPEC `bnzTXhu6KYIMfVE2Ivy2` for the design; landed in
         # e-1646 (stop) / e-1647 (rollback) / e-1648 (claim) /
         # e-1649 (stuck) / e-1650 (morning).
-        {"command": "beacon stop scoped <target>", "flags": ["--kind ms|task|session", "--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast a STOP signal at a single MS / task / session (Andon cord — anyone can halt)"},
+        {"command": "beacon stop scoped", "flags": ["--target <ms|task|session>:<id>", "--reason-kind <k>", "--reason <text>", "--machine-reason <json>", "--json"], "description": "Broadcast a STOP signal at a single MS / task / session (Andon cord — anyone can halt)"},
         {"command": "beacon stop global", "flags": ["--reason-kind <k>", "--reason <text>", "--json"], "description": "Broadcast STOP across every active autonomous session (everything-stops fallback)"},
         {"command": "beacon stop status", "flags": ["--json"], "description": "Show the latest stop / resume state from the stop-signal channel"},
-        {"command": "beacon resume scoped <target>", "flags": ["--kind ms|task|session", "--reason <text>", "--json"], "description": "Clear a scoped STOP, allowing the targeted session(s) to resume work"},
+        {"command": "beacon resume scoped", "flags": ["--target <ms|task|session>:<id>", "--reason <text>", "--json"], "description": "Clear a scoped STOP, allowing the targeted session(s) to resume work"},
         {"command": "beacon resume global", "flags": ["--reason <text>", "--json"], "description": "Clear a global STOP across every autonomous session"},
         {"command": "beacon rollback", "flags": ["--commits N", "--reason <text>", "--dry-run", "--no-record", "--json"], "description": "Undo working tree (git stash) + N local commits (--soft reset); push past upstream → report-only with compensation proposals"},
         {"command": "beacon claim request <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Announce intent to take a target (ms/task/operation/trek/free); other sessions can respond"},
