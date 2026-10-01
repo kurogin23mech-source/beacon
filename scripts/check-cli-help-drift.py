@@ -826,13 +826,12 @@ def bash_verb_flags(verb: str, bin_path: Path = BIN_BEACON) -> "set[str] | None"
         return None
     nxt = _BASH_FUNC_RE.search(text, m.end())
     body = text[m.start():nxt.start()] if nxt else text[m.start():]
-    flags: set[str] = set()
-    for group in _BASH_CASE_FLAG_RE.findall(body):
-        for token in group.split("|"):
-            token = token.split("=")[0]  # normalise ``--x=…`` shapes
-            if token.startswith("--") and token != "--":
-                flags.add(token)
-    return flags
+    # Shared with the ghost-flag check via _case_label_flags (ms-133 e-6611):
+    # one scanner, so a fix to flag reading cannot land on only one of two
+    # copies and make the two reports contradict each other. This call stays a
+    # whole-body scan (no comment/string blanking, no arm scoping) to keep the
+    # curated parity contract's behaviour exactly as it was.
+    return _case_label_flags(body)
 
 
 def collect_flag_parity(
@@ -919,18 +918,90 @@ def collect_flag_parity(
 # Registry commands whose advertised flags are knowingly not resolvable here.
 # Every entry needs a reason; an entry that stops being needed must be deleted,
 # not left to rot (a stale allowlist silently re-opens the hole it covered).
-ALLOW_ADVERTISED_FLAG: dict[str, set[str]] = {
+#
+# KEYED BY VERB PATH, not by the registry's display string. A row's display text
+# carries placeholders that get reworded for documentation reasons alone
+# ("beacon pr add" → "beacon pr add <github-url>" in this very change), and a
+# raw-string key would stop matching on such a rename even though nothing about
+# the implementation moved. The guard would then report the same flag as a NEW
+# ghost and the allowlist row as stale, simultaneously — and both messages would
+# point at the wrong repair. The verb path is the part that only changes when the
+# command itself does. (ms-133 e-6611; raised independently by both the AX and
+# the maintainability review of PR #771, which is why it is fixed rather than
+# noted.)
+ALLOW_ADVERTISED_FLAG: dict[tuple[str, ...], set[str]] = {
     # --- Fixed by open PR #680 (fix/help-registry-flag-drift), not yet merged.
     # Listed so this guard can land first without editing the same registry
     # lines that PR rewrites. DELETE these three once #680 is on main — if the
     # entries survive the merge, the guard goes red and names them again.
-    "beacon doc add": {"--title"},
-    "beacon stuck check": {"--idle-min"},
-    "beacon milestone list": {"--json"},
+    ("doc", "add"): {"--title"},
+    ("stuck", "check"): {"--idle-min"},
+    ("milestone", "list"): {"--json"},
 }
 
 
 _HEREDOC_RE = re.compile(r"<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?")
+
+
+def _blank_span(line: str, start: int, end: int) -> str:
+    """Replace ``line[start:end]`` with spaces, preserving length.
+
+    Every stripper here is length-preserving on purpose: arm boundaries are
+    computed as offsets into the stripped text and then used to slice it, so a
+    stripper that shortened lines would silently misalign every slice.
+    """
+    return line[:start] + " " * (end - start) + line[end:]
+
+
+def _strip_comments_and_strings(body: str, keep_strings: bool = False) -> str:
+    """Blank out bash comments and (optionally) quoted string contents.
+
+    Case labels are always bare code — ``--flag)`` never appears inside quotes —
+    so prose can only ever produce FALSE matches. Without this, a mere comment
+    or usage ``echo`` containing the characters ``in --notaflag)`` registers
+    ``--notaflag`` as a flag the CLI implements, and a genuinely nonexistent flag
+    advertised in help then passes the guard silently. That is the one failure
+    direction this whole check must never have: a detector that cannot fail reads
+    as a safety net while guaranteeing nothing (ms-133 e-6611, found by the
+    independent AX review of PR #771 with a working reproduction).
+
+    ``keep_strings=True`` leaves quoted contents intact for the test-compare
+    reader, which legitimately needs them (``[[ "$2" == "--json" ]]`` puts the
+    flag inside quotes). Comments are blanked in both modes.
+    """
+    out: list[str] = []
+    for line in body.splitlines(keepends=True):
+        nl = len(line) - len(line.rstrip("\n"))
+        text, tail = (line[: len(line) - nl], line[len(line) - nl:]) if nl else (line, "")
+        i = 0
+        quote: str | None = None
+        q_start = 0
+        while i < len(text):
+            ch = text[i]
+            if quote is None:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == "#":
+                    # Unquoted '#' starts a comment: blank to end of line.
+                    text = _blank_span(text, i, len(text))
+                    break
+                if ch in "\"'":
+                    quote = ch
+                    q_start = i
+            else:
+                if ch == "\\" and quote == '"':
+                    i += 2
+                    continue
+                if ch == quote:
+                    if not keep_strings:
+                        # Blank the contents, keep the delimiters so the shape
+                        # of the line (and its length) is unchanged.
+                        text = _blank_span(text, q_start + 1, i)
+                    quote = None
+            i += 1
+        out.append(text + tail)
+    return "".join(out)
 # A case label like ``add)`` / ``list|ls)`` — a verb-shaped arm, never a flag
 # arm (those start with ``-`` and are matched by _BASH_CASE_FLAG_RE instead).
 _BASH_CASE_VERB_RE = re.compile(
@@ -1031,15 +1102,49 @@ def _test_compare_flags(body: str) -> set[str]:
     return flags
 
 
-def _case_flags(body: str) -> set[str]:
-    """Long flags ``body`` parses — ``--flag)`` case labels plus test compares."""
+def _case_label_flags(body: str) -> set[str]:
+    """Long flags named by ``--flag)`` case labels in ``body``.
+
+    The single implementation of "read the flags out of a bash arg loop",
+    shared by ``bash_verb_flags`` (curated bash↔Python parity) and
+    ``_case_flags`` (the registry ghost-flag check). Keeping one copy matters
+    because the two callers' reports are printed side by side: if a fix to this
+    scan landed in only one of two duplicated loops, parity could call a flag
+    missing while the ghost check calls the same flag real, and nothing would
+    say which one to believe.
+
+    Comment / string blanking is the CALLER's job, and the two callers differ:
+    ``_case_flags`` blanks both (labels are bare code), while
+    ``bash_verb_flags`` is a plain whole-function scan. See ``_case_flags``.
+    """
     flags: set[str] = set()
     for group in _BASH_CASE_FLAG_RE.findall(body):
         for token in group.split("|"):
-            token = token.split("=")[0]
+            token = token.split("=")[0]  # normalise ``--x=…`` shapes
             if token.startswith("--") and token != "--":
                 flags.add(token)
-    return flags | _test_compare_flags(body)
+    return flags
+
+
+def _case_flags(body: str) -> set[str]:
+    """Long flags ``body`` parses — ``--flag)`` case labels plus test compares.
+
+    The two readers need different views of the same text, which is why the
+    stripping happens here rather than once upstream: a case label is bare code,
+    so quoted prose must be blanked before scanning for it; a test compare keeps
+    its flag INSIDE quotes, so that reader needs them left alone. Comments are
+    noise to both.
+
+    Note the deliberate difference from ``bash_verb_flags``: that one scans a
+    whole ``cmd_<verb>()`` body as one scope and so also sees sibling sub-arms'
+    flags, which is fine for its curated parity contract but would make
+    ``doc update``'s ``--title`` look like ``doc add``'s. Path-scoped callers go
+    through ``bash_flags_for_path``, which separates preamble from arm.
+    """
+    labels = _case_label_flags(_strip_comments_and_strings(body))
+    return labels | _test_compare_flags(
+        _strip_comments_and_strings(body, keep_strings=True)
+    )
 
 
 def _bash_main_switch(bin_path: Path = BIN_BEACON) -> str:
@@ -1282,7 +1387,7 @@ def collect_help_flag_drift(
     """
     ghosts: list[str] = []
     unresolved: list[str] = []
-    matched_allow: dict[str, set[str]] = {}
+    matched_allow: dict[tuple[str, ...], set[str]] = {}
 
     for entry in _registry_entries(commands_py):
         command = entry.get("command", "")
@@ -1311,17 +1416,20 @@ def collect_help_flag_drift(
             unresolved.append(command)
             continue
 
-        allowed = ALLOW_ADVERTISED_FLAG.get(command, set())
+        key = tuple(path)
+        allowed = ALLOW_ADVERTISED_FLAG.get(key, set())
         for flag in sorted(advertised - real):
             if flag in allowed:
-                matched_allow.setdefault(command, set()).add(flag)
+                matched_allow.setdefault(key, set()).add(flag)
             else:
                 ghosts.append(f"{command} {flag}")
 
     stale: list[str] = []
-    for command, flags in ALLOW_ADVERTISED_FLAG.items():
-        for flag in sorted(flags - matched_allow.get(command, set())):
-            stale.append(f"{command} {flag}")
+    for key, flags in ALLOW_ADVERTISED_FLAG.items():
+        for flag in sorted(flags - matched_allow.get(key, set())):
+            # Rendered as a command line so the report reads like the help it
+            # describes, even though the key itself is the verb path.
+            stale.append("beacon " + " ".join(key) + " " + flag)
 
     return {
         "ok": not (ghosts or stale),
