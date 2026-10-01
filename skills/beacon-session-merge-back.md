@@ -51,7 +51,11 @@ stdout に JSON 配列が返る:
     "child_branch": "ms-12-fork-abc123",
     "parent_session_id": "...",
     "parent_branch": "main",
-    "created_at": "..."
+    "created_at": "...",
+    "unpromoted_notes": 3,
+    "notes_path": "/Users/.../.worktrees/ms-12-fork-abc123/.beacon/session_notes.jsonl",
+    "own_session_id": "sv-...",
+    "idle_seconds": 42.0
   },
   ...
 ]
@@ -68,12 +72,25 @@ stdout に JSON 配列が返る:
 active な fork が N 件あります。どれを cleanup しますか？
 
 1. ms-12 "..." (child=ms-12-fork-abc123, created 2026-06-12T03:00)
+     ⚠ 作業中 (1 分前まで活動) / ⚠ 未昇格の引き継ぎメモ 3 件
 2. ms-15 "..." (child=ms-15-fork-def456, created 2026-06-12T05:30)
+     最終活動: 43.3 時間前
 
 番号で選ぶか、cancel で中止してください。
 ```
 
 - 番号で選択 → 対応 fork の `worktree_path` と `child_branch` を控える
+- **`unpromoted_notes` と `idle_seconds` を必ず各行に出す (ms-178 e-6702/e-6703)**。
+  この 2 つが本 Skill の存在理由に直結する: `unpromoted_notes` が 1 件以上の fork を
+  消すと、まだドキュメントへ昇格していない引き継ぎメモ (= その fork の判断の軌跡) を
+  失う。`idle_seconds` が小さい fork は **他セッションがまだ作業中** で、消すとその
+  セッションの足元が外れる。表示形式:
+  - `idle_seconds` が `null` → 「⚠ 作業中か判定できません」(= 空いているとは限らない)
+  - `idle_seconds` が閾値 (既定 300 秒、`BEACON_FORK_IDLE_THRESHOLD_S` で変更可) 未満
+    → 「⚠ 作業中 (N 分前まで活動)」
+  - それ以上 → 「最終活動: N 時間前」
+  - `unpromoted_notes` が `null` → 「⚠ メモ件数を読めません」(= 0 件ではない)
+  - `unpromoted_notes` が 1 以上 → 「⚠ 未昇格の引き継ぎメモ N 件」
 - `cancel` → 中止
 
 ユーザーが選んだ fork を `$TARGET_FORK` として記憶 (`worktree_path` / `child_branch` を保持)。
@@ -124,8 +141,12 @@ beacon session fork cleanup "$TARGET_FORK_WORKTREE_PATH"
 「その fork で `/beacon-session-end` を走らせてメモを昇格させてから片付ける」経路を
 提案する (= 昇格を飛ばして消させない)。
 
-なお `--force` を付けても **メモの退避は必ず行われる** (force は拒否の上書きであって、
-退避の省略ではない)。
+`--force` が上書きできるのは **人間が引き受けられる種類のリスク** だけ (未取り込み /
+作業中 / 判定不能)。**メモの退避が取れない場合は `--force` でも通らない** — データ保全の
+物理的な可否は人間が引き受けられるものではないため、`hard_blocker` として force の管轄外に
+置いてある (`--json` の `backup_failed` で判別できる)。この区別は独立レビュー (PR #770) の
+指摘で入った: それ以前は force が退避失敗ゲートまで素通りし、手順書の記述と実装が
+食い違っていた。
 
 成功したら次へ。
 

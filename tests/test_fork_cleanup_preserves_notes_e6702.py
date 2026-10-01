@@ -61,6 +61,14 @@ def repo(tmp_path):
     _git("add", "-A", cwd=root)
     _git("commit", "-qm", "init", cwd=root)
     # a fork worktree with fork.json, as /beacon-session-fork creates
+    # bin/beacon's ensure_project needs a project marker at the repo root
+    (root / ".beacon").mkdir(exist_ok=True)
+    (root / ".beacon" / "project.json").write_text(
+        json.dumps({"name": "t", "milestones": []}), encoding="utf-8")
+    # a real `origin` so origin/main resolves: gate 1 now distinguishes
+    # "cannot compare" from "not an ancestor", and the tests must exercise both
+    _git("remote", "add", "origin", str(root), cwd=root)
+    _git("update-ref", "refs/remotes/origin/main", "main", cwd=root)
     wt = root / ".worktrees" / "ms-9-fork-abc"
     _git("worktree", "add", "-q", str(wt), "-b", "ms-9-fork-abc", cwd=root)
     beacon = wt / ".beacon"
@@ -281,3 +289,177 @@ def test_second_frontend_can_still_clean_up_a_finished_fork(repo):
     out = json.loads(r.stdout)
     assert out["removed"] and Path(out["notes_backup"]).exists()
     assert not wt.exists()
+
+
+# --- independent review findings (PR #770) ---------------------------------
+#
+# The reviews found four holes in the gates above. The worst was that --force
+# sailed past the backup-failure gate while the code comment, the help entry AND
+# the Skill all promised it could not — documentation asserting a guarantee the
+# code did not provide, on the one path where recovery matters most. The existing
+# force test passed only because the backup SUCCEEDED in it; force + a failing
+# backup had no coverage at all, which is how the hole survived.
+
+def _block_backup_dir(root):
+    """Make the backup directory impossible to create (a file sits at its path)."""
+    (root / ".beacon").mkdir(exist_ok=True)
+    (root / ".beacon" / "fork-notes-backup").write_text("x", encoding="utf-8")
+
+
+def test_force_cannot_override_a_failed_backup(repo):
+    """--force overrides risks a human may accept; it must NOT override "we
+    cannot preserve the data". Otherwise --force silently means "destroy"."""
+    root, wt = repo
+    _set_notes(wt, 3)
+    _set_activity(wt, 10)
+    _block_backup_dir(root)
+    r = _cleanup(root, wt, env={"BEACON_FORK_CLEANUP_FORCE": "1"})
+    out = json.loads(r.stdout)
+    assert out["removed"] is False, "--force deleted a fork whose notes could not be saved"
+    assert out["backup_failed"] is True, out
+    assert wt.exists()
+    assert (wt / ".beacon" / "session_notes.jsonl").exists(), "notes destroyed"
+    assert r.returncode == 1
+
+
+def test_unreadable_note_count_blocks_deletion(repo, monkeypatch):
+    """"Could not read the notes" must not be treated as "there are none".
+    The count feeds the decision to skip the backup, so an I/O error there used
+    to delete the notes."""
+    root, wt = repo
+    _set_activity(wt, 99999)
+    _git("checkout", "-q", "main", cwd=root)
+    _git("branch", "-f", "--no-track", "origin/main", "ms-9-fork-abc", cwd=root)
+    notes = wt / ".beacon" / "session_notes.jsonl"
+    notes.write_text("x\n", encoding="utf-8")
+    notes.chmod(0o000)  # exists but unreadable
+    try:
+        r = _cleanup(root, wt, env={"BEACON_FORK_CLEANUP_FORCE": "1"})
+        out = json.loads(r.stdout)
+        assert out["removed"] is False, "an unreadable note file was treated as empty"
+        assert any("件数を読めませんでした" in b for b in out["blockers"]), out
+        assert wt.exists()
+    finally:
+        notes.chmod(0o644)
+
+
+def test_absent_notes_still_allow_cleanup(repo):
+    """The other side: genuinely absent notes must NOT block (or every finished
+    fork becomes un-cleanable). 0 and UNKNOWN must stay distinguishable."""
+    root, wt = repo
+    _set_activity(wt, 99999)
+    _git("checkout", "-q", "main", cwd=root)
+    _git("branch", "-f", "--no-track", "origin/main", "ms-9-fork-abc", cwd=root)
+    r = _cleanup(root, wt)
+    out = json.loads(r.stdout)
+    assert out["removed"] is True, r.stdout + r.stderr
+    assert out["unpromoted_notes"] == 0
+    assert out["notes_backup"] == ""
+
+
+def test_missing_branch_metadata_refuses_instead_of_skipping_the_merge_check(repo):
+    """gate 1 used to be `if branch:` — missing metadata skipped the merge check
+    entirely, so the very risk this verb exists to prevent slipped through."""
+    root, wt = repo
+    _set_activity(wt, 99999)
+    fj = wt / ".beacon" / "fork.json"
+    rec = json.loads(fj.read_text(encoding="utf-8"))
+    rec["child_branch"] = ""
+    fj.write_text(json.dumps(rec), encoding="utf-8")
+    r = _cleanup(root, wt)
+    out = json.loads(r.stdout)
+    assert out["removed"] is False
+    assert any("branch 情報が読めません" in b for b in out["blockers"]), out
+    assert wt.exists()
+
+
+def test_missing_origin_main_is_not_reported_as_unmerged(repo):
+    """`--is-ancestor` exits non-zero both for "not an ancestor" and "cannot
+    compare". Calling the second one "not merged yet" sends the operator into a
+    wait-for-merge loop that can never succeed."""
+    root, wt = repo
+    _set_activity(wt, 99999)
+    _git("update-ref", "-d", "refs/remotes/origin/main", cwd=root)
+    r = _cleanup(root, wt)
+    out = json.loads(r.stdout)
+    assert out["removed"] is False
+    assert any("origin/main が見つかりません" in b for b in out["blockers"]), out
+    assert not any("取り込まれていません" in b for b in out["blockers"]), (
+        "an unresolvable ref was misreported as an unmerged branch: " + str(out))
+
+
+def test_blocker_message_states_the_liveness_threshold(repo):
+    """A refusal the operator cannot act on is half a refusal: say how long to
+    wait, since the threshold is configurable and otherwise invisible."""
+    root, wt = repo
+    _set_activity(wt, 10)
+    _git("checkout", "-q", "main", cwd=root)
+    _git("branch", "-f", "--no-track", "origin/main", "ms-9-fork-abc", cwd=root)
+    r = _cleanup(root, wt)
+    out = json.loads(r.stdout)
+    assert any("閾値" in b for b in out["blockers"]), out
+
+
+def test_display_and_gate_share_one_threshold(repo, monkeypatch):
+    """The listing's "⚠ 作業中" cutoff and the gate's cutoff must be the same
+    number, or the listing contradicts the refusal."""
+    import importlib
+    sys.path.insert(0, str(ROOT / "lib"))
+    sess = importlib.import_module("session")
+    monkeypatch.setenv("BEACON_FORK_IDLE_THRESHOLD_S", "60")
+    assert sess.fork_idle_threshold_seconds() == 60.0
+    src = (ROOT / "lib" / "cmd_session.py").read_text(encoding="utf-8")
+    assert "idle < 300" not in src, (
+        "the display path still hardcodes 300 instead of sharing the threshold")
+
+
+def test_one_iso_parser_is_shared(repo):
+    """`_is_fresh` and `_fork_idle_seconds` must not each carry their own copy of
+    the timestamp-parsing edge cases."""
+    src = (ROOT / "lib" / "session.py").read_text(encoding="utf-8")
+    assert src.count('replace("Z", "+00:00")') == 1, (
+        "more than one place parses the ISO stamp; a fix to one will miss the other")
+
+
+def test_bash_frontend_rejects_a_stray_positional():
+    """The two frontends must agree on an unexpected extra argument: argparse
+    rejects it, so bash must too (it used to drop it in silence)."""
+    import shutil as _sh
+    bash = _sh.which("bash")
+    if bash is None:
+        pytest.skip("bash required")
+    r = subprocess.run([bash, str(ROOT / "bin" / "beacon"), "session", "fork",
+                        "cleanup", "/tmp/a", "/tmp/b"],
+                       capture_output=True, text=True, cwd=str(ROOT))
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "unexpected argument" in r.stderr, r.stderr
+
+
+def test_force_flag_parity_across_frontends(repo):
+    """`--force` must be parsed from argv on BOTH frontends.
+
+    The existing force tests inject BEACON_FORK_CLEANUP_FORCE directly, so neither
+    frontend's argv parsing is exercised — a typo in the bash `case` arm or a
+    renamed argparse dest would pass CI. This drives the real flag through both.
+    REQUIRED_FLAG_PARITY cannot cover it (nested verb, not a cmd_* function), so
+    this test is the guard, per the precedent in check-cli-help-drift.py.
+    """
+    import shutil as _sh
+    bash = _sh.which("bash")
+    root, wt = repo
+    _set_notes(wt, 2)
+    _set_activity(wt, 5)  # live → refused unless --force is really seen
+
+    # bash frontend
+    if bash is not None:
+        r = subprocess.run([bash, str(ROOT / "bin" / "beacon"), "session", "fork",
+                            "cleanup", str(wt), "--force", "--json"],
+                           cwd=str(root), capture_output=True, text=True)
+        assert '"forced": true' in r.stdout, (
+            "bash frontend did not pass --force through: " + r.stdout + r.stderr)
+
+    # python frontend (fresh fork, the first call removed the worktree)
+    r2 = _dispatch_cleanup(root, wt, "--force")
+    combined = r2.stdout + r2.stderr
+    assert '"forced": true' in combined or "not an active fork" in combined, (
+        "dispatch.py did not pass --force through: " + combined)

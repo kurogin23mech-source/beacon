@@ -188,29 +188,56 @@ def _should_cloud_sync(last_sync_iso: str) -> bool:
     """True iff cloud sync is due (never synced, or debounce elapsed)."""
     if not last_sync_iso:
         return True
-    try:
-        last = datetime.fromisoformat(last_sync_iso.replace("Z", "+00:00"))
-    except ValueError:
+    # Shares the one ISO parser (PR#770). This caller keeps its own failure
+    # decision (unparseable ⇒ treat sync as due), only the parsing is shared.
+    last = _parse_iso_utc(last_sync_iso)
+    if last is None:
         return True
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
     elapsed = (datetime.now(timezone.utc) - last).total_seconds()
     return elapsed >= _cloud_debounce_seconds()
+
+
+def fork_idle_threshold_seconds() -> float:
+    """Seconds of inactivity after which a fork counts as "not being worked in".
+
+    ms-178 (maintainability review PR#770): the display path hardcoded 300 while
+    the gate read BEACON_FORK_IDLE_THRESHOLD_S, so overriding the gate left the
+    listing contradicting it ("last active 6 min ago" shown, yet cleanup refuses).
+    One definition, read by both.
+    """
+    try:
+        return float(os.environ.get("BEACON_FORK_IDLE_THRESHOLD_S") or 300)
+    except ValueError:
+        return 300.0
+
+
+def _parse_iso_utc(raw: str):
+    """Parse an ISO8601 stamp to an aware UTC datetime, or None.
+
+    ms-178 (maintainability review PR#770): `_is_fresh` and `_fork_idle_seconds`
+    each had their own copy of "replace Z, parse, assume UTC when naive", which
+    meant a fix to timestamp handling could land in one and miss the other. One
+    parser, one set of edge-case decisions.
+    """
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
 
 
 def _is_fresh(last_active_iso: str, now_iso: str, threshold_seconds: int) -> bool:
     """Return True iff ``last_active`` is within ``threshold_seconds`` of ``now``."""
     if not last_active_iso:
         return False
-    try:
-        last = datetime.fromisoformat(last_active_iso.replace("Z", "+00:00"))
-        now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
-    except ValueError:
+    last = _parse_iso_utc(last_active_iso)
+    now = _parse_iso_utc(now_iso)
+    if last is None or now is None:
         return False
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
     delta = (now - last).total_seconds()
     return 0 <= delta <= threshold_seconds
 
@@ -1343,21 +1370,14 @@ def _fork_idle_seconds(worktree: Path, now=None):
     callers must NOT read it as idle — "no evidence of life" is not "evidence of
     no life".
     """
-    import datetime as _dt
     try:
         rec = json.loads((worktree / ".beacon" / "session.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    raw = rec.get("last_active") or ""
-    if not raw:
+    stamp = _parse_iso_utc(rec.get("last_active") or "")
+    if stamp is None:
         return None
-    try:
-        stamp = _dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=_dt.timezone.utc)
-    current = now or _dt.datetime.now(_dt.timezone.utc)
+    current = now or datetime.now(timezone.utc)
     return max(0.0, (current - stamp).total_seconds())
 
 
@@ -1439,12 +1459,17 @@ def list_forks(repo_root: Path | str, runner=None) -> list[dict]:
         #   own_session_id   — the session that is (or was) working in this fork,
         #     so a caller can tell "still being worked in" from "finished".
         notes_path = wt / ".beacon" / "session_notes.jsonl"
-        unpromoted = 0
-        try:
-            with open(notes_path, "r", encoding="utf-8") as nf:
-                unpromoted = sum(1 for line in nf if line.strip())
-        except OSError:
+        # Maintainability review PR#770: absent and unreadable must NOT both be
+        # 0. A caller gates "skip the backup" on this number, so collapsing a
+        # permission/IO error into "no notes" deletes them. None = UNKNOWN.
+        if not notes_path.exists():
             unpromoted = 0
+        else:
+            try:
+                with open(notes_path, "r", encoding="utf-8") as nf:
+                    unpromoted = sum(1 for line in nf if line.strip())
+            except OSError:
+                unpromoted = None
         forks.append({
             "worktree_path": str(wt),
             "target_ms_id": record.get("target_ms_id", ""),
