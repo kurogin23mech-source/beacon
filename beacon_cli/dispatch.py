@@ -1953,6 +1953,19 @@ def build_parser() -> argparse.ArgumentParser:
     # escape hatch (without it, an armed Windows session would be gated with no
     # way to send a one-off — fail-closed but stuck).
     p_bus_send.add_argument("--manual", dest="bus_manual", action="store_true")
+    # ms-160 e-6674: the two cross-user DM flags bin/beacon has had and this
+    # shim never grew. Without them a Windows / pipx operator cannot send a
+    # cross-user DM at all:
+    #   --recipient-confirmed (ms-110 e-3443) carries the "a human checked this
+    #     address" claim. The server REFUSES a cross-user DM that lacks it, so
+    #     its absence here is not a missing convenience — it is a closed door.
+    #   --to-user (ms-54 e-2934) is the user-scoped (time-shifted) address:
+    #     delivered when the recipient next starts a session rather than now.
+    # Both are documented in the /beacon-dm-send Skill, which a Windows
+    # operator would follow and then hit an unrecognised-argument error.
+    p_bus_send.add_argument("--recipient-confirmed", dest="bus_recipient_confirmed",
+                             action="store_true")
+    p_bus_send.add_argument("--to-user", dest="bus_to_user", default="")
     p_bus_send.add_argument("--no-envelope", dest="no_envelope",
                              action="store_true")
     p_bus_send.add_argument("--json", action="store_true")
@@ -5904,9 +5917,11 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help or args.bus_cmd is None:
         print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
-              "[--sender <id>] [--to <recipient> ...] [--to-trek <trek-id>] "
-              "[--delivery <mode>] [--in-reply-to <event_id>] "
-              "[--action <name> ...] [--no-envelope] [--project <id>]")
+              "[--sender <id>] [--to <recipient> ...] [--to-user <user-id>] "
+              "[--to-trek <trek-id>] [--delivery <mode>] "
+              "[--in-reply-to <event_id>] [--action <name> ...] "
+              "[--manual] [--recipient-confirmed] [--no-envelope] "
+              "[--project <id>]")
         print("       beacon bus listen    [--recipient <id>] [--channel <ch>] "
               "[--interval <sec>] [--auto-ack] [--once] [--project <id>]")
         print("       beacon bus receive   [--recipient <id>] [--channel <ch>] "
@@ -5957,6 +5972,7 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             bus_to_list = [bus_to_raw] if bus_to_raw else []
         else:
             bus_to_list = [r for r in bus_to_raw if r]
+        bus_to_user = (getattr(args, "bus_to_user", "") or "").strip()
         bus_to_trek = (getattr(args, "bus_to_trek", "") or "").strip()
         if bus_to_trek:
             extras = _expand_trek_recipients(root, bus_to_trek)
@@ -5964,6 +5980,14 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
                 # _expand_trek_recipients already printed an error.
                 return 1
             bus_to_list.extend(extras)
+        # ms-54 e-2934 / ms-160 e-6674: --to and --to-user are mutually
+        # exclusive. Same rule, same exit code and wording as bin/beacon — a
+        # shim that accepts a combination the other frontend rejects is the
+        # drift this task exists to close.
+        if bus_to_user and (bus_to_list or bus_to_trek):
+            print("Error: --to と --to-user は相互排他です "
+                  "(どちらか片方のみ指定してください)。", file=sys.stderr)
+            return 2
         # Deduplicate while preserving order; treat the sender's own
         # session as harmless (= same-user broadcast within their own
         # treks). Self-filtering is up to the caller's policy.
@@ -5990,6 +6014,10 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
             # ms-120 / e-3901: armed-gate manual override (parity with bin/beacon).
             "BEACON_BUS_MANUAL": "1" if getattr(args, "bus_manual", False) else "",
+            # ms-160 e-6674: parity with bin/beacon's cross-user DM flags.
+            "BEACON_BUS_RECIPIENT_CONFIRMED":
+                "1" if getattr(args, "bus_recipient_confirmed", False) else "",
+            "BEACON_BUS_RECIPIENT_USER": bus_to_user,
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
