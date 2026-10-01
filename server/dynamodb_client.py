@@ -1906,11 +1906,30 @@ def _mint_decision_event_id() -> str:
 
 
 def append_decision_event(project_id: str, data: dict) -> str:
+    """decision event を 1 件追記する。返り値は decision_id。
+
+    完遂 (= target が終端に到達した) decision は **同じ target が同じ verdict で二度
+    宣言されても 1 行しか残さない** (ms-166 e-6602)。何を重複と見なすかは単一真実源
+    ``decision_event.find_duplicate_completion`` が決める (3 backend で drift しない
+    ため、窓 ``window_decision_events`` と同じ分界)。重複なら append せず既存の
+    ``decision_id`` を返す。完遂族以外の kind は既存行の読み取りすら行わない。
+    """
     try:
         from decision_event import assert_no_outcome
         assert_no_outcome(data or {})
     except ImportError:
         pass
+    # ms-166 e-6602: 完遂 decision の冪等 reject。完遂族でなければ ``_dedup_key`` が
+    # None を返すので、既存行の読み取りは一切走らない。
+    try:
+        from decision_event import completion_dedup_key, find_duplicate_completion
+    except ImportError:
+        completion_dedup_key = find_duplicate_completion = None
+    if completion_dedup_key is not None and \
+            completion_dedup_key(data or {}) is not None:
+        _dup = find_duplicate_completion((_DECISION_EVENTS_FALLBACK.get(project_id) or []), data or {})
+        if _dup:
+            return str(_dup.get("decision_id") or "")
     payload = dict(data or {})
     decision_id = payload.get("decision_id") or _mint_decision_event_id()
     payload["decision_id"] = decision_id

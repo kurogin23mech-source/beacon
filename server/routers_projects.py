@@ -1661,6 +1661,14 @@ def make_router(
         required when decided_by set / non-empty kind+decision), so a malformed
         decision is a 400, never a silent drop. ``who`` is stamped server-side
         from the token; only project writers may record.
+
+        完遂 decision (= target が終端に到達した記録) は store 層が冪等に reject する
+        (ms-166 e-6602 — 同じ target×verdict は 1 行しか残さない)。その時この route は
+        既存行の ``decision_id`` と ``deduplicated: true`` を返す: **黙って既存 id を
+        返すと、呼び出し側は「自分の記録が載った」と誤解する** ので、reject されたこと
+        自体を応答に出す。判定は追加の read を要しない — builder が ``decision_id`` を
+        採番済みで、store は重複時に *別の* (既存の) id を返すため、差分がそのまま
+        「append されたか」の信号になる。
         """
         data = db.get_project(project_id)
         if not data:
@@ -1693,7 +1701,12 @@ def make_router(
                 status_code=502,
                 detail=f"decision stream append failed: {exc}",
             )
-        return {"decision_id": decision_id, "kind": rec["kind"]}
+        out = {"decision_id": decision_id, "kind": rec["kind"]}
+        # 完遂の冪等 reject (e-6602): store が返した id が builder の採番と違えば、
+        # append されず既存行に畳まれた。その事実を応答に出す (silent にしない)。
+        if decision_id and decision_id != rec.get("decision_id"):
+            out["deduplicated"] = True
+        return out
 
     @router.get("/api/projects/{project_id}/decisions")
     def list_decisions(project_id: str,

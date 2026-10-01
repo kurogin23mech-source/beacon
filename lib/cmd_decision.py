@@ -110,7 +110,15 @@ def cmd_decision_record():
         print(json.dumps(result, ensure_ascii=False))
     else:
         did = result.get("decision_id", "?") if isinstance(result, dict) else "?"
-        print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
+        # ms-166 e-6602: 完遂 decision は同じ target×verdict で二度書かれない
+        # (store 層の冪等 reject)。その時 "recorded" と出すと「自分の記録が載った」
+        # と誤解させるので、既存行に畳まれたことを明示する。
+        if isinstance(result, dict) and result.get("deduplicated"):
+            print(f"Decision already recorded [{did}]: {kind} — {what[:60]}")
+            print("  この target の同じ判定は既に記録済みのため、追記しませんでした "
+                  "(完遂の記録は 1 度だけ残ります)")
+        else:
+            print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
 
 
 def cmd_decision_list():
