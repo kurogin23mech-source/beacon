@@ -780,9 +780,25 @@ def python_verb_flags(
 
 
 _BASH_FUNC_RE = re.compile(r"^cmd_[a-z0-9_]+\(\)", re.MULTILINE)
-# A case label like ``--priority)`` or ``--acceptance-criteria|--ac)`` — capture
-# the whole ``--a|--b`` alias group that precedes the closing paren.
-_BASH_CASE_FLAG_RE = re.compile(r"^\s*(--[a-zA-Z0-9|=?*.\-]+)\)", re.MULTILINE)
+# A case label like ``--priority)``, ``--acceptance-criteria|--ac)`` or
+# ``-r|--reason)`` — capture the whole alias group before the closing paren.
+# The group may LEAD with a short alias (``-r|--reason``, ``-m|--ms``), so this
+# anchors on a single ``-``; callers keep only the ``--`` spellings. Anchoring on
+# ``--`` instead (as this did until ms-133 e-6611) silently dropped every flag
+# whose case label happened to list its short form first — ``milestone wait``'s
+# ``--reason`` and ``milestone occupations``' ``--ms`` among them — which reads as
+# "the flag does not exist" and is a false finding, not a missed one.
+# Label POSITION is what makes this safe to un-anchor from line start: a label
+# follows the ``in`` of a ``case``, a previous arm's ``;;``, or starts the line.
+# Bash writes short arms inline (``case "$1" in --json) f=1; shift ;; *) shift
+# ;; esac`` — how ``sales target list`` takes ``--json``), so a line-anchored
+# pattern misses them and reports the flag as nonexistent. Matching a bare
+# ``--flag)`` anywhere instead would be worse: usage prose like
+# ``[--naming <p>] | --clear))`` would register ``--clear`` as implemented,
+# turning a missed finding into a silent false pass.
+_BASH_CASE_FLAG_RE = re.compile(
+    r"(?:^[ \t]*|\bin[ \t]+|;;[ \t]*)(-[a-zA-Z0-9|=?*.\-]+)\)", re.MULTILINE
+)
 
 
 def bash_verb_flags(verb: str, bin_path: Path = BIN_BEACON) -> "set[str] | None":
@@ -816,13 +832,12 @@ def bash_verb_flags(verb: str, bin_path: Path = BIN_BEACON) -> "set[str] | None"
         return None
     nxt = _BASH_FUNC_RE.search(text, m.end())
     body = text[m.start():nxt.start()] if nxt else text[m.start():]
-    flags: set[str] = set()
-    for group in _BASH_CASE_FLAG_RE.findall(body):
-        for token in group.split("|"):
-            token = token.split("=")[0]  # normalise ``--x=…`` shapes
-            if token.startswith("--") and token != "--":
-                flags.add(token)
-    return flags
+    # Shared with the ghost-flag check via _case_label_flags (ms-133 e-6611):
+    # one scanner, so a fix to flag reading cannot land on only one of two
+    # copies and make the two reports contradict each other. This call stays a
+    # whole-body scan (no comment/string blanking, no arm scoping) to keep the
+    # curated parity contract's behaviour exactly as it was.
+    return _case_label_flags(body)
 
 
 def collect_flag_parity(
@@ -864,6 +879,569 @@ def collect_flag_parity(
         "missing_from_python_flags": sorted(missing_python),
         "missing_from_bash_flags": sorted(missing_bash),
         "missing_bash_functions": sorted(missing_bash_functions),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ms-133 e-6611: help registry ↔ parser flag drift
+#   "advertised but accepted by no front"
+# ---------------------------------------------------------------------------
+#
+# e-3897 made every help surface render from ONE registry (_help_registry), so
+# help can no longer drift against *other help*. What stayed open is help
+# drifting against the *parsers*: the registry is a hand-written list, so it can
+# advertise a flag that neither entry point accepts. `beacon doc add --title X`
+# was the reported case — the registry said ``--title <title>``, both fronts take
+# ``title`` as a positional, and the call dies with "'--title' is not a valid
+# flag". AI agents trust help and get rejected (AX 原則 1/3; 原則 6 says close
+# the gap structurally rather than by proofreading).
+#
+# What counts as "real" here
+# --------------------------
+# A flag is real when **at least one** front accepts it: the bash hand-parser
+# (macOS/Linux) OR the Python argparse dispatcher (Windows pipx). The registry
+# describes one conceptual CLI, so a flag that only one front implements is NOT
+# this check's finding — that asymmetry is ``REQUIRED_FLAG_PARITY``'s contract,
+# a deliberately curated list. This check answers the narrower question only:
+# *does the advertised flag exist anywhere at all?* Keeping the two contracts
+# separate is what makes this one safe to run blanket over all 191 entries.
+#
+# Why flags are unioned along the whole sub-verb path
+# ---------------------------------------------------
+# The bash front puts a sub-command's flags in two different places:
+#   * inside the sub-arm      — ``cmd_doc()`` → ``add)`` → its own arg loop;
+#   * in the PARENT arm       — ``stop)`` parses ``--target/--reason/...`` in one
+#                               shared loop *before* dispatching on ``scoped``.
+# So the flags of ``stop scoped`` live on ``stop``, while the flags of
+# ``doc add`` live on ``add``. Unioning every arm along the path handles both
+# without special-casing, at the cost of over-approximating across siblings (a
+# flag only meaningful for ``stop global`` also counts as existing for
+# ``stop scoped``). That trade is deliberate: this check must never cry wolf on
+# a flag the CLI really does accept, and "exists but on the sibling" is still
+# "exists", which is all it claims.
+
+
+# Registry commands whose advertised flags are knowingly not resolvable here.
+# Every entry needs a reason; an entry that stops being needed must be deleted,
+# not left to rot (a stale allowlist silently re-opens the hole it covered).
+#
+# KEYED BY VERB PATH, not by the registry's display string. A row's display text
+# carries placeholders that get reworded for documentation reasons alone
+# ("beacon pr add" → "beacon pr add <github-url>" in this very change), and a
+# raw-string key would stop matching on such a rename even though nothing about
+# the implementation moved. The guard would then report the same flag as a NEW
+# ghost and the allowlist row as stale, simultaneously — and both messages would
+# point at the wrong repair. The verb path is the part that only changes when the
+# command itself does. (ms-133 e-6611; raised independently by both the AX and
+# the maintainability review of PR #771, which is why it is fixed rather than
+# noted.)
+ALLOW_ADVERTISED_FLAG: dict[tuple[str, ...], set[str]] = {
+    # --- Fixed by open PR #680 (fix/help-registry-flag-drift), not yet merged.
+    # Listed so this guard can land first without editing the same registry
+    # lines that PR rewrites. DELETE these three once #680 is on main — if the
+    # entries survive the merge, the guard goes red and names them again.
+    ("doc", "add"): {"--title"},
+    ("stuck", "check"): {"--idle-min"},
+    ("milestone", "list"): {"--json"},
+}
+
+
+_HEREDOC_RE = re.compile(r"<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?")
+
+
+def _blank_span(line: str, start: int, end: int) -> str:
+    """Replace ``line[start:end]`` with spaces, preserving length.
+
+    Every stripper here is length-preserving on purpose: arm boundaries are
+    computed as offsets into the stripped text and then used to slice it, so a
+    stripper that shortened lines would silently misalign every slice.
+    """
+    return line[:start] + " " * (end - start) + line[end:]
+
+
+def _strip_comments_and_strings(body: str, keep_strings: bool = False) -> str:
+    """Blank out bash comments and (optionally) quoted string contents.
+
+    Case labels are always bare code — ``--flag)`` never appears inside quotes —
+    so prose can only ever produce FALSE matches. Without this, a mere comment
+    or usage ``echo`` containing the characters ``in --notaflag)`` registers
+    ``--notaflag`` as a flag the CLI implements, and a genuinely nonexistent flag
+    advertised in help then passes the guard silently. That is the one failure
+    direction this whole check must never have: a detector that cannot fail reads
+    as a safety net while guaranteeing nothing (ms-133 e-6611, found by the
+    independent AX review of PR #771 with a working reproduction).
+
+    ``keep_strings=True`` leaves quoted contents intact for the test-compare
+    reader, which legitimately needs them (``[[ "$2" == "--json" ]]`` puts the
+    flag inside quotes). Comments are blanked in both modes.
+    """
+    out: list[str] = []
+    for line in body.splitlines(keepends=True):
+        nl = len(line) - len(line.rstrip("\n"))
+        text, tail = (line[: len(line) - nl], line[len(line) - nl:]) if nl else (line, "")
+        i = 0
+        quote: str | None = None
+        q_start = 0
+        while i < len(text):
+            ch = text[i]
+            if quote is None:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == "#":
+                    # Unquoted '#' starts a comment: blank to end of line.
+                    text = _blank_span(text, i, len(text))
+                    break
+                if ch in "\"'":
+                    quote = ch
+                    q_start = i
+            else:
+                if ch == "\\" and quote == '"':
+                    i += 2
+                    continue
+                if ch == quote:
+                    if not keep_strings:
+                        # Blank the contents, keep the delimiters so the shape
+                        # of the line (and its length) is unchanged.
+                        text = _blank_span(text, q_start + 1, i)
+                    quote = None
+            i += 1
+        out.append(text + tail)
+    return "".join(out)
+# A case label like ``add)`` / ``list|ls)`` — a verb-shaped arm, never a flag
+# arm (those start with ``-`` and are matched by _BASH_CASE_FLAG_RE instead).
+_BASH_CASE_VERB_RE = re.compile(
+    r"^([ \t]+)([a-z0-9][a-z0-9|_*?.\-]*)\)", re.MULTILINE
+)
+
+
+def _strip_heredocs(body: str) -> str:
+    """Blank out heredoc bodies so usage prose can't be read as bash syntax.
+
+    Usage text routinely contains ``…| other)`` and similar, which the case-label
+    regex would happily match as an arm — slicing the wrong region and letting a
+    ghost flag pass. Replacing heredoc lines with blanks (rather than deleting
+    them) keeps every offset stable, so slices computed on the stripped text
+    still line up with the original.
+    """
+    out: list[str] = []
+    pending: list[str] = []
+    terminator: str | None = None
+    for line in body.splitlines(keepends=True):
+        if terminator is None:
+            out.append(line)
+            for m in _HEREDOC_RE.finditer(line):
+                pending.append(m.group(1))
+            if pending:
+                terminator = pending.pop(0)
+            continue
+        if line.strip() == terminator:
+            out.append(line)
+            terminator = pending.pop(0) if pending else None
+        else:
+            # Same length, no bash tokens: offsets stay valid.
+            out.append(" " * (len(line) - 1) + "\n" if line.endswith("\n") else " " * len(line))
+    return "".join(out)
+
+
+def _outer_case_arms(body: str) -> "list[tuple[int, int, int, list[str]]]":
+    """Split ``body`` into its shallowest-indent case arms.
+
+    Returns ``(label_start, content_start, end, alternatives)`` per arm.
+    ``content_start`` sits just past the label so a nested lookup never re-reads
+    the arm's own label as if it were an inner arm — doing so would collapse the
+    indent floor to the label's own level and make every inner arm invisible.
+    "Shallowest indent" is what separates a function's sub-command arms from the
+    flag arms nested inside each one.
+    """
+    labels = [
+        (m.start(), m.end(), m.group(1), m.group(2))
+        for m in _BASH_CASE_VERB_RE.finditer(body)
+    ]
+    if not labels:
+        return []
+    indent = min(len(ind) for _, _, ind, _ in labels)
+    outer = [(s, e, lbl) for s, e, ind, lbl in labels if len(ind) == indent]
+    arms: list[tuple[int, int, int, list[str]]] = []
+    for i, (start, label_end, lbl) in enumerate(outer):
+        end = outer[i + 1][0] if i + 1 < len(outer) else len(body)
+        arms.append((start, label_end, end, lbl.split("|")))
+    return arms
+
+
+def _preamble_flags(body: str) -> set[str]:
+    """Flags parsed in ``body`` *outside* any of its sub-command arms.
+
+    This is the shared arg loop a parent runs before dispatching on the
+    sub-command (``stop)`` reads ``--target/--reason/...`` for all of
+    ``scoped|global|status``). Taking only the preamble — instead of the whole
+    body — is what keeps a sibling's flag from masquerading as this path's:
+    ``cmd_doc()`` holds ``--title`` for ``doc update``, and scanning the whole
+    function would have declared the advertised ``doc add --title`` real, which
+    is the exact bug this guard exists to catch.
+    """
+    arms = _outer_case_arms(body)
+    return _case_flags(body if not arms else body[: arms[0][0]])
+
+
+# ``[[ "${2:-}" == "--json" ]]`` — a flag read by an explicit test instead of a
+# case arm. Restricted to lines that actually open a test (``[``/``[[``) so a
+# plain assignment such as ``default="--json"`` is not mistaken for a parser
+# accepting the flag.
+_BASH_TEST_FLAG_RE = re.compile(r"(?:==|!=|=)[ \t]*\"?(--[a-zA-Z0-9\-]+)\"?")
+
+
+def _test_compare_flags(body: str) -> set[str]:
+    """Long flags a body matches by string comparison inside a ``[``/``[[`` test.
+
+    ``beacon help --json`` is dispatched this way (``if [[ "${2:-}" == "--json"
+    ]]``). Reading only case labels would call that flag nonexistent even though
+    it is the documented way to get machine-readable help.
+    """
+    flags: set[str] = set()
+    for line in body.splitlines():
+        if "[[" not in line and "[ " not in line:
+            continue
+        for token in _BASH_TEST_FLAG_RE.findall(line):
+            if token != "--":
+                flags.add(token)
+    return flags
+
+
+def _case_label_flags(body: str) -> set[str]:
+    """Long flags named by ``--flag)`` case labels in ``body``.
+
+    The single implementation of "read the flags out of a bash arg loop",
+    shared by ``bash_verb_flags`` (curated bash↔Python parity) and
+    ``_case_flags`` (the registry ghost-flag check). Keeping one copy matters
+    because the two callers' reports are printed side by side: if a fix to this
+    scan landed in only one of two duplicated loops, parity could call a flag
+    missing while the ghost check calls the same flag real, and nothing would
+    say which one to believe.
+
+    Comment / string blanking is the CALLER's job, and the two callers differ:
+    ``_case_flags`` blanks both (labels are bare code), while
+    ``bash_verb_flags`` is a plain whole-function scan. See ``_case_flags``.
+    """
+    flags: set[str] = set()
+    for group in _BASH_CASE_FLAG_RE.findall(body):
+        for token in group.split("|"):
+            token = token.split("=")[0]  # normalise ``--x=…`` shapes
+            if token.startswith("--") and token != "--":
+                flags.add(token)
+    return flags
+
+
+def _case_flags(body: str) -> set[str]:
+    """Long flags ``body`` parses — ``--flag)`` case labels plus test compares.
+
+    The two readers need different views of the same text, which is why the
+    stripping happens here rather than once upstream: a case label is bare code,
+    so quoted prose must be blanked before scanning for it; a test compare keeps
+    its flag INSIDE quotes, so that reader needs them left alone. Comments are
+    noise to both.
+
+    Note the deliberate difference from ``bash_verb_flags``: that one scans a
+    whole ``cmd_<verb>()`` body as one scope and so also sees sibling sub-arms'
+    flags, which is fine for its curated parity contract but would make
+    ``doc update``'s ``--title`` look like ``doc add``'s. Path-scoped callers go
+    through ``bash_flags_for_path``, which separates preamble from arm.
+    """
+    labels = _case_label_flags(_strip_comments_and_strings(body))
+    return labels | _test_compare_flags(
+        _strip_comments_and_strings(body, keep_strings=True)
+    )
+
+
+def _bash_main_switch(bin_path: Path = BIN_BEACON) -> str:
+    """The user-facing dispatcher switch in bin/beacon (column-0 ``case``).
+
+    Nouns with no ``cmd_<noun>()`` function (``trek``, ``stop``, ``resume``,
+    ``claim``, ``dm``) are handled inline here, so a path lookup has to be able
+    to fall back to it.
+
+    bin/beacon has MORE THAN ONE column-0 ``case "${1:-}" in``: an early one
+    decides whether to relocate to the project root. Taking the first match
+    yields a 12-line switch that contains almost no verbs, and every inline noun
+    then resolves as "absent" — which this check would report as a ghost flag for
+    a flag the CLI really accepts. The dispatcher is the LAST column-0 switch
+    (the file's own comment calls it "--- Main dispatch ---"), so scan from the
+    end.
+    """
+    if not bin_path.exists():
+        return ""
+    text = bin_path.read_text(encoding="utf-8")
+    starts = [m.start() for m in re.finditer(r'^case "\$\{1:-\}" in$', text, re.MULTILINE)]
+    if not starts:
+        return ""
+    rest = text[starts[-1]:]
+    m = re.search(r"^esac\s*$", rest, re.MULTILINE)
+    return rest[: m.end()] if m else rest
+
+
+def _bash_function_body(name: str, source: str) -> "str | None":
+    """Slice ``cmd_<name>()``'s body out of the combined bash source."""
+    header = re.compile(r"^" + re.escape(name) + r"\(\)", re.MULTILINE)
+    m = header.search(source)
+    if m is None:
+        return None
+    nxt = _BASH_FUNC_RE.search(source, m.end())
+    return source[m.start(): nxt.start() if nxt else len(source)]
+
+
+def _bash_fn_name(tokens: "list[str]") -> str:
+    """``["account", "transcript-source"]`` → ``cmd_account_transcript_source``.
+
+    Hyphens in a sub-verb become underscores in the bash function name
+    (``transcript-source`` → ``..._transcript_source``); forgetting that reads as
+    "handler absent" and would make a real finding invisible.
+    """
+    return "cmd_" + "_".join(tokens).replace("-", "_")
+
+
+# ``exec "$BEACON_DIR/bin/beacon" bus send --channel dm "$@"`` — a verb that
+# re-enters the CLI at another path instead of parsing flags itself.
+_BASH_DELEGATE_RE = re.compile(
+    r"""exec\s+(?:"[^"]*/bin/beacon"|\$?\{?BEACON[A-Z_]*\}?/bin/beacon|beacon)\s+"""
+    r"""((?:[a-z][a-z0-9\-]*\s+){1,3})""",
+    re.VERBOSE,
+)
+
+
+def _delegated_flags(
+    body: str, bin_path: Path = BIN_BEACON, _depth: int = 0
+) -> set[str]:
+    """Flags of the path an arm ``exec``s into, when it delegates parsing.
+
+    ``beacon dm send`` is the live case: the arm validates one thing then
+    ``exec``s ``bus send --channel dm "$@"``, so ``--to-user`` /
+    ``--recipient-confirmed`` are parsed by ``bus send`` and appear nowhere in the
+    ``dm`` arm. Without following the hop, every flag the delegate owns reads as
+    nonexistent — a wall of false findings on a verb that works. ``_depth`` caps
+    the hops so a delegation cycle can't spin.
+    """
+    if _depth > 2:
+        return set()
+    flags: set[str] = set()
+    for m in _BASH_DELEGATE_RE.finditer(body):
+        target = [tok for tok in m.group(1).split() if not tok.startswith("-")]
+        if not target:
+            continue
+        got = bash_flags_for_path(target, bin_path)
+        if got:
+            flags |= got
+    return flags
+
+
+def bash_flags_for_path(
+    tokens: "list[str]", bin_path: Path = BIN_BEACON
+) -> "set[str] | None":
+    """Union of long flags the bash front accepts along the sub-verb path.
+
+    ``tokens`` is the full path, noun first (``["doc", "add"]``,
+    ``["account", "transcript-source", "set"]``). Resolution tries, in order:
+    the most specific dedicated ``cmd_<noun>_<sub>…()`` function, then shorter
+    prefixes, then the inline main-switch arm. Whatever anchors the path, the
+    remaining tokens are followed down nested case arms and every arm's flags
+    along the way are unioned (see the module note on why the parent counts).
+
+    Returns ``None`` when the path can't be anchored at all — a *different*
+    failure from "anchored but the flag is absent", and the caller must keep
+    them apart: one means "the registry names a command bash doesn't implement",
+    the other "the registry names a flag that command doesn't take".
+    """
+    if not tokens:
+        return None
+    source = _strip_heredocs(_bash_function_source(bin_path))
+
+    body: str | None = None
+    rest: list[str] = []
+    for cut in range(len(tokens), 0, -1):
+        body = _bash_function_body(_bash_fn_name(tokens[:cut]), source)
+        if body is not None:
+            rest = list(tokens[cut:])
+            break
+    if body is None:
+        main = _strip_heredocs(_bash_main_switch(bin_path))
+        for _s, content, end, alts in _outer_case_arms(main):
+            if tokens[0] in alts:
+                body = main[content:end]
+                rest = list(tokens[1:])
+                break
+    if body is None:
+        return None
+
+    flags = _preamble_flags(body)
+    for token in rest:
+        for _s, content, end, alts in _outer_case_arms(body):
+            if token in alts:
+                body = body[content:end]
+                flags |= _preamble_flags(body)
+                break
+        else:
+            # The path stops resolving part-way: keep what we gathered rather
+            # than returning None. The prefix really is implemented, so this is
+            # not the "command absent" case, and the parent arm's shared flag
+            # loop is often exactly where the flags live.
+            return flags
+    # Leaf reached: this arm's own flags are this path's, siblings excluded.
+    flags |= _case_flags(body)
+    return flags | _delegated_flags(body, bin_path)
+
+
+def python_flags_for_path(tokens: "list[str]", parser=None) -> "set[str] | None":
+    """Long flags argparse accepts at ``tokens``, descending nested subparsers.
+
+    Returns ``None`` when the path doesn't exist in the Python dispatcher (it
+    may still exist in bash — the caller unions the two).
+    """
+    if not tokens:
+        return None
+    if parser is None:
+        try:
+            parser = _load_dispatch_parser()
+        except Exception as e:  # pragma: no cover - import-environment guard
+            print(f"[cli-drift] WARN: could not load dispatch parser ({e})",
+                  file=sys.stderr)
+            return None
+    node = parser
+    for token in tokens:
+        action = _subparsers_action(node)
+        if action is None or token not in action.choices:
+            return None
+        node = action.choices[token]
+    return {
+        opt
+        for action in node._actions
+        for opt in action.option_strings
+        if opt.startswith("--")
+    }
+
+
+_REGISTRY_FLAG_RE = re.compile(r"^(--[a-zA-Z0-9][a-zA-Z0-9\-]*)")
+
+
+def _registry_entries(commands_py: Path = COMMANDS_PY) -> "list[dict]":
+    """The raw ``_help_registry()`` rows (command + flags), not just verbs.
+
+    ``parse_help_json`` deliberately reduces to a verb set; this check needs the
+    advertised flag strings, so it reads the registry function directly.
+    """
+    if not commands_py.exists():
+        return []
+    spec = importlib.util.spec_from_file_location("_beacon_commands_reg", commands_py)
+    if spec is None or spec.loader is None:
+        return []
+    lib_path = str(commands_py.parent)
+    added = False
+    if lib_path not in sys.path:
+        sys.path.insert(0, lib_path)
+        added = True
+    try:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return list(mod._help_registry())
+    except Exception as e:
+        print(f"[cli-drift] WARN: could not read _help_registry ({e})", file=sys.stderr)
+        return []
+    finally:
+        if added:
+            try:
+                sys.path.remove(lib_path)
+            except ValueError:
+                pass
+
+
+def _registry_path(command: str) -> "list[str] | None":
+    """``"beacon stop scoped <target>"`` → ``["stop", "scoped"]``.
+
+    Stops at the first placeholder (``<id>``) or flag, which is where the verb
+    path ends and arguments begin.
+    """
+    parts = command.split()
+    if len(parts) < 2 or parts[0] != "beacon":
+        return None
+    path: list[str] = []
+    for token in parts[1:]:
+        if token.startswith("<") or token.startswith("-") or token.startswith("["):
+            break
+        path.append(token)
+    return path or None
+
+
+def collect_help_flag_drift(
+    bin_path: Path = BIN_BEACON,
+    commands_py: Path = COMMANDS_PY,
+    parser=None,
+) -> dict:
+    """Every registry-advertised long flag must be accepted by some front.
+
+    Returns ``ok`` plus:
+      * ``ghost_flags``      — ``"<command> <flag>"``: advertised, accepted by
+                               neither front. The registry is lying; fix the
+                               registry (or the parser, if the flag was meant
+                               to exist).
+      * ``unresolved``       — commands whose verb path neither front exposes.
+                               Reported separately and NOT a failure: several
+                               registry rows are prose-shaped
+                               (``beacon log [message]``) and the sub-verb
+                               checks above already own "command missing".
+      * ``stale_allowlist``  — ALLOW_ADVERTISED_FLAG entries that no longer
+                               correspond to a ghost. A fixed drift must drop
+                               its allowlist line, else the next regression on
+                               that flag passes silently.
+    """
+    ghosts: list[str] = []
+    unresolved: list[str] = []
+    matched_allow: dict[tuple[str, ...], set[str]] = {}
+
+    for entry in _registry_entries(commands_py):
+        command = entry.get("command", "")
+        advertised: set[str] = set()
+        for raw in entry.get("flags", []) or []:
+            m = _REGISTRY_FLAG_RE.match(str(raw).strip())
+            if m:
+                advertised.add(m.group(1))
+        if not advertised:
+            continue
+        path = _registry_path(command)
+        if path is None:
+            continue
+
+        real: set[str] = set()
+        anchored = False
+        for getter in (
+            lambda: python_flags_for_path(path, parser=parser),
+            lambda: bash_flags_for_path(path, bin_path),
+        ):
+            got = getter()
+            if got is not None:
+                anchored = True
+                real |= got
+        if not anchored:
+            unresolved.append(command)
+            continue
+
+        key = tuple(path)
+        allowed = ALLOW_ADVERTISED_FLAG.get(key, set())
+        for flag in sorted(advertised - real):
+            if flag in allowed:
+                matched_allow.setdefault(key, set()).add(flag)
+            else:
+                ghosts.append(f"{command} {flag}")
+
+    stale: list[str] = []
+    for key, flags in ALLOW_ADVERTISED_FLAG.items():
+        for flag in sorted(flags - matched_allow.get(key, set())):
+            # Rendered as a command line so the report reads like the help it
+            # describes, even though the key itself is the verb path.
+            stale.append("beacon " + " ".join(key) + " " + flag)
+
+    return {
+        "ok": not (ghosts or stale),
+        "ghost_flags": sorted(ghosts),
+        "unresolved": sorted(unresolved),
+        "stale_allowlist": sorted(stale),
     }
 
 
@@ -1185,6 +1763,9 @@ def collect_drift(
     # ms-127 e-4867: family file `# requires-fn/var/cmd:` seam vs reality.
     requires_drift = collect_requires_drift(bin_path)
 
+    # ms-133 e-6611: registry-advertised flags vs what any front accepts.
+    help_flag_drift = collect_help_flag_drift(bin_path, commands_path)
+
     report = {
         "ok": not (
             bin_missing
@@ -1194,6 +1775,7 @@ def collect_drift(
             or not flag_parity["ok"]
             or not subverb_drift["ok"]
             or not requires_drift["ok"]
+            or not help_flag_drift["ok"]
         ),
         "missing_requires_fn": requires_drift["missing_requires_fn"],
         "missing_requires_var": requires_drift["missing_requires_var"],
@@ -1218,6 +1800,12 @@ def collect_drift(
         # choices — the noun+subcommand parity that top-level checks miss):
         "missing_from_python_subverbs": subverb_drift["missing_from_python_subverbs"],
         "missing_from_bash_subverbs": subverb_drift["missing_from_bash_subverbs"],
+        # ms-133 e-6611 surface (help registry vs the parsers): a flag the help
+        # advertises that NO front accepts, and allowlist rows that outlived
+        # their drift.
+        "ghost_flags": help_flag_drift["ghost_flags"],
+        "ghost_flag_unresolved": help_flag_drift["unresolved"],
+        "stale_advertised_flag_allowlist": help_flag_drift["stale_allowlist"],
     }
     return report
 
@@ -1317,6 +1905,21 @@ def _format_text(report: dict) -> str:
         lines.append("    -> add the called function to that file's `# requires-cmd:` line so the")
         lines.append("       lib→lib dependency is a machine-verified contract (a zero-context reader")
         lines.append("       must see the dep without grepping all of bin/lib/).")
+    if report.get("ghost_flags"):
+        lines.append("  - help advertises a flag NO front accepts (`beacon help --json` lies):")
+        for v in report["ghost_flags"]:
+            lines.append(f"      {v}")
+        lines.append("    -> an AI that trusts help calls this and gets rejected (or, worse, the flag")
+        lines.append("       is silently dropped). Fix the `flags` list of that row in")
+        lines.append("       lib/commands.py:_help_registry to match the parsers — or implement the")
+        lines.append("       flag if help was describing the intent. Only if it genuinely cannot be")
+        lines.append("       resolved here, add it to ALLOW_ADVERTISED_FLAG with a reason.")
+    if report.get("stale_advertised_flag_allowlist"):
+        lines.append("  - ALLOW_ADVERTISED_FLAG entry no longer matches any drift:")
+        for v in report["stale_advertised_flag_allowlist"]:
+            lines.append(f"      {v}")
+        lines.append("    -> the drift it covered is fixed; delete the line. Leaving it in place")
+        lines.append("       would silently swallow the next regression on that same flag.")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
     lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")
