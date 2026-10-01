@@ -109,6 +109,7 @@ from cmd_session import (  # noqa: F401  (re-exported for dispatch + import-path
     cmd_session_working,
     cmd_session_fork,
     cmd_session_fork_list,
+    cmd_session_fork_cleanup,
     _release_all_occupations_for_session,
 )
 
@@ -6548,6 +6549,11 @@ def _help_registry():
         {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
         {"command": "beacon note clear --yes", "flags": [], "description": "Delete all session notes (-y is accepted as shorthand; --confirm is an accepted alias). Both stores are backed up first (local .bak + cloud .cloud.bak) and, in cloud mode, NOTHING is deleted if that cloud snapshot cannot be taken — so this command needs cloud reachability. The cloud copy is shared by every session on the project. Recover with: beacon note restore"},
         {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
+        # ms-178 e-6702/e-6703: the fork family was absent from this registry, so
+        # `--help` on it fell through to the parsers (the e-6654 footgun class).
+        {"command": "beacon session fork <ms-id>", "flags": ["--json"], "description": "Create a sibling worktree + workspace to work a milestone in parallel"},
+        {"command": "beacon session fork list", "flags": ["--json"], "description": "List active fork worktrees, with each one's unpromoted handoff-note count and how long ago it was last worked in"},
+        {"command": "beacon session fork cleanup <worktree-path>", "flags": ["--force", "--json"], "description": "Remove a merged fork worktree. Refuses if the branch is unmerged, if the worktree holds uncommitted work (the merge check only sees committed history, so this is its own gate and the files are named in the refusal), if a session is still working in it (inactivity threshold 300s, override with BEACON_FORK_IDLE_THRESHOLD_S), or if liveness cannot be determined. Handoff notes are snapshotted to .beacon/fork-notes-backup/ before anything is deleted; --force overrides the first three refusals but NEVER a failed snapshot, and is rejected on any other fork sub-verb. A refused run still leaves the snapshot and names it. In --json, `removed` reports the worktree alone and `branch_removed` the branch, so 'worktree gone, branch left' is distinguishable"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
         {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
@@ -11131,6 +11137,7 @@ if __name__ == "__main__":
         "session_working": cmd_session_working,
         "session_fork": cmd_session_fork,
         "session_fork_list": cmd_session_fork_list,
+        "session_fork_cleanup": cmd_session_fork_cleanup,
         "channel_install": cmd_channel_install,
         "channel_uninstall": cmd_channel_uninstall,
         "channel_opt_out": cmd_channel_opt_out,

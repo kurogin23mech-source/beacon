@@ -1638,7 +1638,13 @@ def build_parser() -> argparse.ArgumentParser:
     # bin/beacon @ line 2770.
     p_session_fork = session_sub.add_parser("fork", add_help=False)
     p_session_fork.add_argument("ms_id_or_list", nargs="?", default="",
-                                 help="Target ms-id, or literal 'list'")
+                                 help="Target ms-id, or literal 'list' / 'cleanup'")
+    # ms-178 e-6702: `session fork cleanup <worktree-path>` needs a second
+    # positional and --force. Wired on BOTH frontends so the guarded deletion
+    # behaves identically whichever entry point a caller uses.
+    p_session_fork.add_argument("fork_path", nargs="?", default="",
+                                 help="With 'cleanup': the worktree path to remove")
+    p_session_fork.add_argument("--force", action="store_true")
     p_session_fork.add_argument("--json", action="store_true")
 
     p_session_log = session_sub.add_parser("log", add_help=False)
@@ -5232,6 +5238,44 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
         # positional discrimination on `list`, mirrored here so Skills can
         # call either path identically.
         positional = (getattr(args, "ms_id_or_list", "") or "").strip()
+        # e-6782: --force belongs to `cleanup` alone. It lives on the shared
+        # `fork` subparser (argparse has no per-positional flags), so without
+        # this guard `fork list --force` and `fork <ms-id> --force` parse fine
+        # here while bin/beacon's `list` arm refuses them via _guard_flag — the
+        # two frontends disagreeing, which is the very class of defect the
+        # cleanup verb was added to close. Refuse rather than ignore: silently
+        # swallowing a flag the caller believed in is how the ms-160 wiring bugs
+        # stayed invisible.
+        if positional != "cleanup":
+            # Independent AX review of PR #770 (AX-1, high): `fork_path` and
+            # `--force` both live on the SHARED `fork` subparser because argparse
+            # cannot scope an argument to one positional value. Before they
+            # existed, `beacon session fork ms-9 typo-arg` failed with
+            # "unrecognized arguments"; afterwards argparse binds the stray token
+            # to `fork_path`, nobody reads it for this verb, and the call exits 0.
+            # That is the same silent-swallow this verb was added to close,
+            # recreated one line away from it. Refuse both here so the two
+            # frontends agree (bin/beacon's `list` arm already refuses them).
+            if getattr(args, "force", False):
+                _eprint("Error: --force is only valid for 'beacon session fork "
+                        "cleanup <worktree-path>'.")
+                return 2
+            if (getattr(args, "fork_path", "") or "").strip():
+                _eprint("Error: 'beacon session fork {0}' takes no second "
+                        "argument (got '{1}'). A worktree path is only used by "
+                        "'beacon session fork cleanup <worktree-path>'.".format(
+                            positional or "<ms-id>",
+                            (getattr(args, "fork_path", "") or "").strip()))
+                return 2
+        if positional == "cleanup":
+            # ms-178 e-6702/e-6703: delegate to the guarded verb; never call
+            # `git worktree remove` from here.
+            env = {
+                "BEACON_FORK_PATH": (getattr(args, "fork_path", "") or "").strip(),
+                "BEACON_FORK_CLEANUP_FORCE": "1" if getattr(args, "force", False) else "",
+                "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            }
+            return _run_commands_py(root, "session_fork_cleanup", env)
         if positional == "list":
             env = {
                 "BEACON_JSON": "1" if getattr(args, "json", False) else "",
@@ -5240,6 +5284,7 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
         if not positional:
             _eprint("Usage: beacon session fork <ms-id> [--json]")
             _eprint("       beacon session fork list [--json]")
+            _eprint("       beacon session fork cleanup <worktree-path> [--force] [--json]")
             return 2
         env = {
             "BEACON_SESSION_FORK_MS_ID": positional,

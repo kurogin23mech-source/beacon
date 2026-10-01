@@ -429,6 +429,12 @@ REQUIRED_FLAG_PARITY: dict[str, set[str]] = {
     # function-based model. Their bash↔Python argv→env parity is pinned instead by
     # test_attention_roster_e6293.py::TestDispatchParity and
     # test_session_working_e6291.py::TestDispatchSessionWorking.
+    #
+    # ms-178 #770 (maintainability): `session fork cleanup --force` has the same
+    # shape (nested verb, case arm) and so is pinned the same way, by
+    # test_fork_cleanup_preserves_notes_e6702.py::test_force_flag_parity_across_frontends
+    # — which drives --force through BOTH frontends' argv rather than injecting
+    # the env var, so a broken parse on either side fails CI.
 }
 
 

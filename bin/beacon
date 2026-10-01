@@ -2126,7 +2126,34 @@ except ValueError as e:
                 # ms-67 / e-1553: `fork list` sub-sub-command to enumerate
                 # active forks (used by /beacon-session-merge-back picker).
                 shift 2
-                if [[ "${1:-}" == "list" ]]; then
+                if [[ "${1:-}" == "cleanup" ]]; then
+                    # ms-178 e-6702/e-6703: the deletion lives in the tool layer
+                    # so its "snapshot notes ⇒ then delete" ordering cannot be
+                    # skipped by a caller.
+                    shift
+                    _sfc_path="" _sfc_force="" _sfc_json=""
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --force) _sfc_force="1"; shift ;;
+                            --json)  _sfc_json="1"; shift ;;
+                            -?*)     _guard_flag "$1" ;;
+                            *)
+                                # AX review PR#770: a second positional used to
+                                # be dropped in silence here while dispatch.py's
+                                # argparse rejected it — the two frontends
+                                # disagreed, and a typo'd arg vanished without a
+                                # trace. Same guard as `note list` (e-6654).
+                                if [[ -n "$_sfc_path" ]]; then
+                                    _guard_no_positional "session fork cleanup" "$1"
+                                fi
+                                _sfc_path="$1"; shift ;;
+                        esac
+                    done
+                    BEACON_FORK_PATH="$_sfc_path" \
+                        BEACON_FORK_CLEANUP_FORCE="$_sfc_force" \
+                        BEACON_JSON="$_sfc_json" \
+                        python3 "$COMMANDS_PY" session_fork_cleanup
+                elif [[ "${1:-}" == "list" ]]; then
                     shift
                     _sfl_json=""
                     while [[ $# -gt 0 ]]; do
@@ -2169,6 +2196,7 @@ except ValueError as e:
                 echo "       beacon session working --target <kind:id> [--title <t>] | --clear | --show [--json]"
                 echo "       beacon session fork <ms-id> [--json]"
                 echo "       beacon session fork list [--json]"
+                echo "       beacon session fork cleanup <worktree-path> [--force] [--json]"
                 echo "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
                 ;;
             *)
