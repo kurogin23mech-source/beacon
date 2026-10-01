@@ -261,3 +261,19 @@ def test_the_green_message_states_its_method_not_a_guarantee(capsys):
     assert mod.main() == 0
     out = capsys.readouterr().out
     assert "no NEW" in out and "not 'every mapping is proven'" in out, out
+
+
+def test_the_declined_fingerprint_argument_records_its_expiry():
+    """AX-3 (high) を却下した根拠は「座標の意味が 1 つ」だが、それはこの検査が
+    キーの存在だけを見ている間しか成り立たない。値の照合や分岐の網羅を足した
+    瞬間に座標は 2 つの意味を持ち、fingerprint が要る。
+
+    却下は判断の記録として残るので、**その期限も一緒に残っていること**を
+    固定する。次に厳密化する人が、却下の理由ごと引き継げるように
+    (親レビュー PR #781 の条件付き支持)。
+    """
+    src = (ROOT / "scripts" / "check-cli-env-parity.py").read_text(encoding="utf-8")
+    assert "AX-3" in src, "却下した指摘の出所が残っていません"
+    assert "expiry" in src, "根拠の期限が書かれていません"
+    for clue in ("KEY PRESENCE", "wrong flag", "ONE branch", "fingerprint"):
+        assert clue in src, clue

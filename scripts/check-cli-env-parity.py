@@ -392,8 +392,27 @@ def _collect_raw() -> list:
 
 
 # The backlog as it stood when this checker was written (ms-160 e-6674). Data,
-# not a verdict: each row is classified in the task's audit. Burning it down is
+# not a verdict: every row carries its classification inline. Burning it down is
 # follow-up work; the checker exists so the list can only shrink.
+#
+# WHY A BARE COORDINATE IS ENOUGH HERE — AND WHEN IT STOPS BEING ENOUGH.
+# An independent review (PR #781 AX-3, severity high) asked for a content
+# fingerprint per row, so that a DIFFERENT defect landing on an already-listed
+# (verb, env, frontend) could not hide behind the old entry. That was declined,
+# because this checker reports exactly one state — "this frontend does not put
+# this key in the env it passes" — and exactly one thing produces it: no
+# mapping. There is no second cause for a fingerprint to tell apart.
+#
+# That argument has an expiry, and it is worth stating because the next person
+# to touch this will not re-derive it. It holds only while the checker tests
+# KEY PRESENCE. Two things it deliberately does not look at today:
+#   (a) the key is passed but its VALUE comes from the wrong flag;
+#   (b) the key is passed on only ONE branch of a conditional.
+# Both currently count as "passed". The moment this checker is tightened to
+# judge either of them, a single coordinate gains two distinct meanings
+# ("absent" vs "present but wrong"), the one-cause argument fails, and
+# KNOWN_GAPS needs the fingerprint AX-3 asked for. Reconsider it then rather
+# than rediscovering the question.
 KNOWN_GAPS: dict = {
     ("account_add", "BEACON_ACCOUNT_ASSIGNEE", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
