@@ -58,7 +58,16 @@ def _import_modules(install_root: Path):
     lib_dir = str(_resolve_lib_dir(install_root))
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
-    import codex_receive_loop as crl  # noqa: E402
+    # ms-133 e-6686: 兄弟 6 本と同じく個別に包む。ここだけ素のままだったため、
+    # 空/壊れた lib を掴んだとき ModuleNotFoundError の生 traceback が Codex に
+    # 抜けていた (PR #773 の独立レビュー 2 体が合意で指摘、空 lib で実測確認)。
+    # bin/hook_bootstrap.py が全 hook に課す原則は「import できないなら silent
+    # no-op に縮退し、harness へ raise しない」。姉妹の codex-halt-check-hook.py は
+    # それを満たしていたので、こちらも揃える。
+    try:
+        import codex_receive_loop as crl  # noqa: E402
+    except Exception:
+        crl = None
     try:
         import api_client as ac  # noqa: E402
     except Exception:
@@ -238,6 +247,11 @@ def main() -> int:
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = args.cwd or os.getcwd()
     crl, ac, cs, ss, bd, uf, du = _import_modules(install_root)
+    if crl is None:
+        # 受信箱を読む手段そのものが無い (= lib が空/壊れている)。注入できる文脈は
+        # 無いので空の additionalContext を返して黙って降りる。Codex 側を壊さない。
+        print(json.dumps({}))
+        return 0
 
     entries = crl.list_inbox_events(cwd=cwd)
     if not entries:
@@ -429,4 +443,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # ms-133 e-6686: 二層目の安全網。個別 import は上で包んだが、想定外の例外も
+    # Codex へ抜かさない (= bin/hook_bootstrap.py の fail-safe 原則、姉妹の
+    # codex-halt-check-hook.py と同じ契約)。main() は 200 行超なので本体を包むと
+    # 純粋な再インデント差分になる。実際に Codex が叩く経路はここなので、網は
+    # 入口に置く (= main() を import して直接呼ぶ経路には網が無い点に注意)。
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        try:
+            print(json.dumps({}))
+        except Exception:
+            pass
+        sys.exit(0)

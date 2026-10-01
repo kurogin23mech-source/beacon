@@ -176,3 +176,77 @@ def test_guard_goes_red_on_a_reintroduced_private_copy(tmp_path):
     assert _layout_literals_in_code(good) == set(), (
         "docstring 中の言及を規則の写しと誤検知した (= 偽陽性でガードが使われなくなる)"
     )
+
+
+# ---------------------------------------------------------------------------
+# resolve_lib_dir が検証しないことの前提 = 呼び出し元の失敗挙動を実測で固定する。
+# ---------------------------------------------------------------------------
+#
+# 「検証を入れない」判断の根拠は docstring に書いてあるが、その根拠は *別ファイルの
+# 呼び出し元がどう失敗するか* に依存している。散文だけだと、遠くの実装が変わった
+# ときに根拠が黙って崩れる (実際に崩れていた: codex-inbox-hook.py の先頭 import
+# だけが無防備で、docstring の「hook 2 本は silent no-op」は事実と違った。PR #773
+# の独立レビュー 2 体が合意で指摘)。ここで実行して固定する。
+
+HOOKS_THAT_MUST_NEVER_RAISE = ("codex-inbox-hook.py", "codex-halt-check-hook.py")
+
+
+def _run_hook_with_broken_lib(hook_name: str, tmp_path: Path):
+    """空の ``lib/`` だけを持つ install を作り、そこから hook を実行する。"""
+    import shutil
+    import subprocess
+    import sys
+
+    fake = tmp_path / "install"
+    (fake / "scripts").mkdir(parents=True)
+    (fake / "lib").mkdir()  # 存在するが空 = resolve_lib_dir はこれを返す
+    for f in ("_install_paths.py", hook_name):
+        shutil.copy(SCRIPTS / f, fake / "scripts" / f)
+    return subprocess.run(
+        [sys.executable, str(fake / "scripts" / hook_name), "--cwd", str(fake)],
+        input="{}", capture_output=True, text=True, timeout=60,
+    )
+
+
+@pytest.mark.parametrize("hook_name", HOOKS_THAT_MUST_NEVER_RAISE)
+def test_hook_degrades_silently_on_a_broken_lib(hook_name, tmp_path):
+    """空/壊れた lib を掴んでも hook は Codex へ例外を抜かない。
+
+    ``bin/hook_bootstrap.py`` が全 hook に課す fail-safe 原則
+    ("must degrade to a silent no-op, never raise into the harness") の実行確認。
+    これが崩れると ``resolve_lib_dir`` の「検証しない」判断の根拠も崩れる。
+    """
+    r = _run_hook_with_broken_lib(hook_name, tmp_path)
+    assert r.returncode == 0, (
+        f"{hook_name} は空 lib で exit {r.returncode} になりました。"
+        f"stderr 末尾: {(r.stderr.strip().splitlines() or [''])[-1]}"
+    )
+    assert "Traceback" not in r.stderr, (
+        f"{hook_name} が生の traceback を Codex 側へ出しています:\n{r.stderr[-400:]}"
+    )
+
+
+def test_daemon_is_deliberately_loud_on_a_broken_lib():
+    """daemon 側は逆に loud に落ちる — それが docstring の根拠の片側。
+
+    ``codex-receive-loop.py:_import_modules`` が import を包まないことを構造で
+    確認する。ここが将来 try/except で包まれたら、docstring の「daemon は読める
+    エラーで落ちる」側の根拠が変わるので、その時にこのテストが知らせる。
+    """
+    daemon = SCRIPTS / "codex-receive-loop.py"
+    (fn,) = _func_defs(daemon, "_import_modules")
+    guarded = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Try):
+            for s in ast.walk(node):
+                if isinstance(s, (ast.Import, ast.ImportFrom)):
+                    guarded.add(id(s))
+    bare = [
+        n for n in ast.walk(fn)
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and id(n) not in guarded
+    ]
+    assert bare, (
+        "codex-receive-loop._import_modules の import が全て try/except で包まれて "
+        "います。daemon が silent になったなら resolve_lib_dir の docstring の根拠 "
+        "(daemon は読めるエラーで落ちる) を書き直してください"
+    )

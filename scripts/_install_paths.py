@@ -44,17 +44,28 @@ def resolve_lib_dir(install_root: "str | Path") -> Path:
         ``beacon_cli`` パッケージ自身で ``_bundled_lib`` を持ち ``lib`` を
         持たない)。つまりここでの検証は ``import_lib`` のような**候補を読み飛ばす
         fallback 機構にはならず、エラー文言の差し替えにしかならない**。
-      * **呼び出し元のうち import を素で行う側は、既に読めるエラーで落ちる**。
-        ``scripts/codex-receive-loop.py:_import_modules`` は try/except 無しで
-        ``import codex_session`` 等を行うので、空/壊れた lib なら
-        ``ModuleNotFoundError: No module named 'codex_session'`` が
-        sys.path 付きで出る。欠けているモジュール名が既に名指しされており、
-        事前検証が足す情報は無い。
-      * **try/except で包む側 (Codex hook 2 本) は、契約として silent no-op**
-        ("degrades to a silent no-op rather than raising into Codex")。ここで
-        事前検証しても沈黙が 1 層早まるだけで、沈黙そのものは消えない。hook の
-        no-op が見えない問題は配置解決ではなく hook の可観測性の課題であり、
-        別に扱うべき関心事。
+      * **daemon 側 (``scripts/codex-receive-loop.py:_import_modules``) は、既に
+        読めるエラーで落ちる**。try/except 無しで ``import codex_session`` 等を
+        行うので、空/壊れた lib なら
+        ``ModuleNotFoundError: No module named 'codex_session'`` が sys.path 付きで
+        出る。欠けているモジュール名が既に名指しされており、事前検証が足す情報は
+        無い。daemon は人が起動して出力を見るものなので、loud に落ちるのが正しい。
+      * **Codex hook 2 本 (``codex-inbox-hook.py`` / ``codex-halt-check-hook.py``)
+        は、契約として silent no-op**。``bin/hook_bootstrap.py`` が全 hook に課す
+        原則 ("fails SAFE: a hook that cannot import its lib must degrade to a
+        silent no-op, never raise into the harness") に従い、空 lib でも
+        ``{}`` を出して exit 0 する。ここで事前検証しても沈黙が 1 層早まるだけで、
+        沈黙そのものは消えない。hook の no-op が見えない問題は配置解決ではなく
+        可観測性の課題であり、別に扱うべき関心事。
+
+        この 2 本目の性質は **e-6686 で揃えたもの**で、元から成立していたのでは
+        ない。``codex-inbox-hook.py`` は先頭の ``import codex_receive_loop`` だけが
+        無防備で、空 lib では生の traceback が Codex へ抜けていた (PR #773 の独立
+        レビュー 2 体が合意で指摘し、一方は実際に空 lib で走らせて exit 1 を実測
+        した)。当初この docstring は姉妹 hook の文言を 2 本に一般化して書いており、
+        **事実と食い違っていた**。import を包み、入口に二層目の網を置いて主張を真に
+        し、両 hook が空 lib で exit 0 することを
+        ``tests/test_scripts_lib_resolution_e6686.py`` で固定した。
       * ``commands.py`` という目印そのものがこの呼び出し元にとって誤り。実際に
         import されるのは ``codex_session`` / ``api_client`` / ``bus_protocol`` /
         ``stop_signal`` で、``commands`` は実 install で偶然一致する代理に
