@@ -353,3 +353,65 @@ def test_task_done_prints_completion_after_the_save_in_both_paths():
     for text, lineno in claims:
         assert any(s < lineno for s in saves), (
             f"{text!r} at line {lineno} is printed before any save: {saves}")
+
+# --- 5. ALLOW の stale 検出 (親レビュー PR #777) -----------------------------
+#
+# 広めに allowlist を取る doctrine (「false positive は 1 行で済むが false
+# negative は壊れるまで気づかれない」) が成り立つ前提は、**その行が今も必要だと
+# 誰かが保証していること**。stale 検出はその保証を人間の記憶から機械へ移す側で、
+# doctrine と対になっている。姉妹ガード
+# check-cli-help-drift.collect_help_flag_drift が同じ理由で同じ検査を持つ。
+#
+# 実際、この検査を入れた瞬間に ALLOW 7 行のうち 5 行が既に死んでいた (経路解析を
+# 厳密化した時点で、それらの print はもう検出されなくなっていた)。死んだ行は
+# 同じ (ファイル, 関数, 文頭) に対する次の退行を黙って免除する。
+
+def test_no_stale_allow_entries_today():
+    hits, stale = _checker().collect(with_stale=True)
+    assert stale == [], (
+        "ALLOW にもう何も免除していない行が残っています: " + repr(stale))
+    assert hits == [], hits
+
+
+def test_stale_check_reports_an_entry_that_matches_nothing(monkeypatch, tmp_path):
+    """親レビューの明示的な要求: stale 検出自身が stale な行で赤くなることを
+    実測する。これを確かめないと『stale 検出はあるが何も検出しない』形になりうる
+    (このガードが防ごうとしている失敗そのもの)。"""
+    mod = _checker()
+    dummy = ("cmd_nonexistent.py", "cmd_never_defined", "Done: ")
+    monkeypatch.setitem(mod.ALLOW, dummy, "a deliberately stale row")
+    hits, stale = mod.collect(with_stale=True)
+    assert any("cmd_never_defined" in row for row in stale), (
+        "stale 行が報告されていません: " + repr(stale))
+
+
+def test_stale_check_does_not_flag_an_entry_that_is_still_exempting(tmp_path):
+    """逆向きの確認: 実際に print を免除している行は stale と報告されない。
+    そうでないと、生きている行を消させる方向に誤誘導する。"""
+    mod = _checker()
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "cmd_x.py").write_text(
+        "def cmd_x():\n"
+        "    print('Keepme: informational')\n"
+        "    save_project(data)\n", encoding="utf-8")
+    saved = dict(mod.ALLOW)
+    mod.ALLOW.clear()
+    mod.ALLOW[("cmd_x.py", "cmd_x", "Keepme:")] = "still exempting a real print"
+    try:
+        hits, stale = mod.collect(lib, with_stale=True)
+    finally:
+        mod.ALLOW.clear()
+        mod.ALLOW.update(saved)
+    assert hits == [], hits
+    assert stale == [], "生きている行を stale と誤報告しました: " + repr(stale)
+
+
+def test_main_exits_nonzero_on_a_stale_entry_alone(monkeypatch):
+    """hits が 0 でも stale があれば CI は赤であること。stale だけ警告で通すと、
+    結局誰も消さない。"""
+    mod = _checker()
+    monkeypatch.setitem(mod.ALLOW,
+                        ("cmd_nonexistent.py", "cmd_never_defined", "Done: "),
+                        "a deliberately stale row")
+    assert mod.main() == 1
