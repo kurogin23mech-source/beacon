@@ -2989,6 +2989,42 @@ def best_effort_completion_decision(target_id: str, verdict: str):
         yield
 
 
+def record_completion_decision(client, project_id: str, payload: dict, *,
+                               target_id: str, verdict: str) -> Optional[dict]:
+    """完遂 verdict の decision を書く **唯一の収束口** (ms-166 e-6602 独立レビュー AX-1 /
+    保守性 M-1 反映)。失敗契約と **冪等 reject の開示** を 1 箇所で持つ。
+
+    なぜ関数で、context manager (:func:`best_effort_completion_decision`) だけでは
+    足りないか: store 層は同じ対象×同じ結論の完遂を二度書かず、既存行の
+    ``decision_id`` を返す (= 冪等 reject)。context manager は ``yield`` するだけで
+    **応答を見られない**ため、各呼び出し元が ``client.record_decision(...)`` の戻り値を
+    自分で受けて ``deduplicated`` を読む必要があり、実際 B〜F の 5 経路すべてが
+    戻り値を捨てていた (= 新設した開示シグナルを握り潰していた)。独立レビュー 2 体が
+    これを同時に指摘した: 「reject されたのに成功したと思い込む」という本来塞ぎたかった
+    誤解が、塞いだはずの経路以外で再現する。
+
+    開示は **WARNING ログ**で行う (print でなく): 失敗契約が既に logging を使っており、
+    完遂コマンドの stdout は機械が読む契約を持つ。ハンドラ未設定の CLI では
+    ``logging.lastResort`` が WARNING を stderr に出すので、人も AI も端末で気付ける。
+
+    戻り値は server 応答 dict (``decision_id`` / ``kind`` / ``deduplicated``)。書き込みが
+    失敗した場合は ``None`` (= 失敗契約どおり WARNING を出して飲み、呼び出し元の完遂
+    フローは壊さない)。新しい完遂経路を足す人はこの関数を呼ぶだけで、失敗の可視化と
+    冪等 reject の開示が自動で付いてくる (= 1 箇所忘れて silent に戻る事故を構造で防ぐ。
+    ``tests/test_completion_decision_idempotency_e6602`` が全経路の経由を AST で検査する)。
+    """
+    with best_effort_completion_decision(target_id, verdict):
+        result = client.record_decision(project_id, payload) or {}
+        if isinstance(result, dict) and result.get("deduplicated"):
+            logging.getLogger(__name__).warning(
+                "completion-verdict for target=%s verdict=%s was NOT appended — "
+                "同じ対象・同じ結論の完遂判定が既に記録済みです (既存 %s に畳まれ、"
+                "この呼び出しの rationale / evidence は残りません)。",
+                target_id or "?", verdict, result.get("decision_id") or "?")
+        return result
+    return None
+
+
 # ms-166 e-5971: review 採否の disposition 語彙の単一真実源 (SKILL.md はこれを写す
 # 側)。合成 verdict の集計・入力検証はこの定数を経由する (旧: 散文だけ + prefix-match)。
 ADJUDICATION_DISPOSITIONS: tuple = ("accepted", "declined", "deferred")

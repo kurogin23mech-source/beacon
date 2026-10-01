@@ -72,9 +72,14 @@ def cmd_decision_record():
     decided_by = explicit_decided_by or decided_by_for_review()
     evidence = _split_evidence(os.environ.get("BEACON_DECISION_EVIDENCE", ""))
     related_task = os.environ.get("BEACON_DECISION_RELATED_TASK", "").strip()
-    # ms-166 e-6603 (独立レビュー AX-3): 対象を **明示指定** する口。読み側の
-    # `decision list --target` と対になる書き側で、無いと「本文の言い回しを変える」以外に
-    # 曖昧を解消する手段が無かった。明示指定は本文からの導出より優先する。
+    # 対象 (related.target_id) を **明示指定** する口。読み側の
+    # `beacon decision list --target` と対になる書き側で、2 つの機能が独立に同じ旗を
+    # 必要とした (ms-166 e-6602 + e-6603):
+    #   - e-6602 (完遂の冪等): 冪等判定が related.target_id を鍵に含むので、この経路から
+    #     completion-verdict を記録するには対象を立てられる必要がある。無いと下の
+    #     「既に記録済み」表示が構造的に到達不能だった。
+    #   - e-6603 (帰属・対象の機械決定): 本文からの導出に対して明示指定を優先させるため。
+    #     無いと「本文の言い回しを変える」以外に曖昧を解消する手段が無かった。
     related_target = os.environ.get("BEACON_DECISION_RELATED_TARGET", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
@@ -126,7 +131,8 @@ def cmd_decision_record():
     # (記録はあるのに辿れない)。曖昧なときは推測せず空のまま残す。
     import decision_derive as _dd
     derived_target = _dd.resolve_target_from_text(what, rationale)
-    # 明示指定 > 本文からの導出 (独立レビュー AX-3)。
+    # 明示指定 > 本文からの導出 (独立レビュー AX-3)。明示だけを見る e-6602 の形は
+    # こちらに包含される (related_target が立っていればそれが勝つ)。
     resolved_target = related_target or derived_target
     if resolved_target:
         related["target_id"] = resolved_target
@@ -167,7 +173,17 @@ def cmd_decision_record():
         print(json.dumps(out, ensure_ascii=False))
     else:
         did = result.get("decision_id", "?") if isinstance(result, dict) else "?"
-        print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
+        # 2 つの開示は **排他ではない** (ms-166 e-6602 + e-6603)。「明示または導出で対象が
+        # 決まった上で、同じ対象×結論が既に在るので既存行に畳まれた」という状態があり得る
+        # ので、追記されたかどうか (e-6602) と、帰属・対象がどう決まったか (e-6603) を
+        # 両方出す。片方だけにすると、畳まれた時に対象が見えない / 新規記録の時に
+        # 追記の有無が見えない、のどちらかが欠ける。
+        if isinstance(result, dict) and result.get("deduplicated"):
+            print(f"Decision already recorded [{did}]: {kind} — {what[:60]}")
+            print("  この target の同じ判定は既に記録済みのため、追記しませんでした "
+                  "(完遂の記録は 1 度だけ残ります)")
+        else:
+            print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
         print(f"  帰属: {decided_by} ({_attr_source})")
         if resolved_target:
             print(f"  対象: {resolved_target} ({_target_source})")

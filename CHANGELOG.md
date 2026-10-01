@@ -2,6 +2,55 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.64.0] - 2026-10-01
+
+- Merge pull request #769 from kurogin23mech-source/ms-160-fork-8bbd7c
+- fix(ms-160): #769 CI 失敗の修正 — ガードを pytest 非依存の素のスクリプトに切り出す (e-6349)
+- fix(ms-160): #769 独立レビュー採否反映 — 但し書きを JSON からも落とさない、綴り違いの channel に黙って答えない (e-6349, AX A-1〜A-4 + 保守性 M-1/M-2)
+- fix(ms-160): 宛先確認が要るかを手順書に書き写させず、判定に問い合わせる形にする (e-6349)
+- Merge pull request #768 from kurogin23mech-source/ms-160-fork-8bbd7c
+- refactor(ms-160): #768 送信元の動詞を sales identity に集約し、顧客の設定を account 側へ戻す (e-5981, AX A-3)
+- fix(ms-160): #768 独立レビュー採否反映 — 余分な引数の黙殺を両フロントで止め、ガードをランタイム文言まで広げる (e-5981, AX A-1/A-2/A-4/A-5 + 保守性 M-1/M-2)
+- feat(ms-160): 送信元台帳と送信 identity を CLI 動詞にし、手順書の層飛ばしを構造で塞ぐ (e-5981)
+- fix(ms-160): 既に在る CLI 動詞を手順書が飛ばしていた 10 件を CLI 経由に戻す + 予定変更のカレンダー旗欠落を埋める (e-5981)
+- feat(ms-160): 返信待ちの張り込みを CLI 動詞として使えるようにする — watch_* の層飛ばしを塞ぐ (e-5981)
+- Merge pull request #766 from kurogin23mech-source/ms-178-fork-9efc4a
+- fix(ms-178): #766 既存ヘルパーを覆い隠していた同名定義を直し、その型をテストで塞ぐ
+- Merge pull request #767 from kurogin23mech-source/ms-146-fork-093f8e
+- Merge pull request #765 from kurogin23mech-source/fix/dm-slimping-pointer-e6670
+- Merge pull request #764 from kurogin23mech-source/ms-133-fork-29e04b
+- fix(ms-178): #766 独立レビュー指摘を反映 — 復元の偽成功を潰し、確認ゲートに賭け金を出す
+- fix(ms-146): 独立レビュー (AX / 保守性) の指摘 7 件を反映 — 照合ゲート自身の fail-open を塞ぐ (e-5336)
+- fix(ms-133): #764 独立レビュー反映 — drift guard の検出漏れを塞ぎ、lib 解決の重複を 1 箇所に寄せる (e-6591, AX-1/AX-2 + M-1)
+- fix(ms-178): メモ削除は両ストアを退避してから — 退避が取れなければ削除しない (e-6656)
+- feat(ms-146): 着手時に書いた十分ラインと照合しないと終わらせられなくする (e-5336)
+- fix(ms-101): DM slim ping のポインタを実取得手段に直す (e-6670)
+- fix(ms-133): Windows で「生きてますか」がプロセスを殺すのを止める — pid 生存判定を単一 probe に集約 (e-6591)
+- fix(ms-178): メモの真値源を揃え「読めなかった」を「存在しない」と言わせない (e-6655)
+- fix(ms-178): ヘルプを求めただけでメモが消える事故を構造で止める (e-6654)
+- Merge pull request #763 from kurogin23mech-source/ms-177-fork-a0266a
+- fix(ms-177): 独立レビュー (AX / 保守性) の指摘のうち書き漏れ・命名の 3 件を反映 (AX-2/AX-3/M-2)
+- docs(ms-177): 運用室の状態語彙の定義文を止まり方 2 分割に合わせる (e-6642)
+- feat(ms-177): 運用室の「停止」を『終了』と『中断』に割り、中断は畳まず赤で出す (e-6642, e-6643)
+- test(ms-177): 中断判定を固定し、ガードが本当に噛むことを実証する (e-6640)
+- feat(ms-177): 事故で落ちたセッションを『中断』として名指しする — 停止の正体を導出の正典で割る (e-6639, e-6641)
+- Merge pull request #762 from kurogin23mech-source/ms-176-fork-ce1898
+- Merge pull request #761 from kurogin23mech-source/ms-166-fork-965709
+- refactor(ms-166): PR #761 親採否の反映 — 判断の帰属を単一真実源へ集約 + 検証述語を必須化 (e-6599/e-6601, review M-1/AX-3/M-3/AX-2)
+- fix(ms-176): 独立レビュー (AX / 保守性) の指摘を反映 — 日付と --clear の排他ガード、help 台帳登録、ボール表示の一本化
+- feat(ms-176): フェーズ seed 活動の同義重複を除き、各 seed に「何のための活動か」を持たせる (e-6607)
+- feat(ms-176): 商談の骨格 (想定金額 / 期日) を業務イベントに寄生させて埋める + 期日を後から設定する経路 (e-6606)
+- feat(ms-166): 完遂 terminal の「台帳の列挙漏れ」を機構で検出する + 手動決着の完遂発火漏れを塞ぐ (e-6601)
+- feat(ms-176): 送信アカウント台帳が空のまま外部送信できる穴を hard gate で閉じる (e-6608)
+- feat(ms-176): ボール(次に動くのは誰か)を証跡からの導出で読むよう読み手を統一する (e-6605)
+- feat(ms-166): 商談のフェーズ判断を decision arm に構造溶接する — 判断 seam を漏らさない漏斗に一本化 (e-6599)
+- feat(ms-176): 営業の証跡を「満たした予定」に溶接する検知と綴じ直し導線を記録 seam に入れる (e-6604)
+- Merge pull request #760 from kurogin23mech-source/ms-159-fork-a34e2a
+- refactor(ms-159): #760 親採否反映 — 旧単一ファイル reader readContextUsage の export を削除し、fail-safe テストを per-session reader 経由に統合 (e-6588, review F1/M1)
+- fix(ms-159): コンテキスト残量通知の状態を session 毎に分離 — 同一フォルダ並走で 20/40% 通知が再発火する退行を構造で止める (e-6588)
+- docs(release): update README/CHANGELOG for v0.63.5
+- chore(release): bump formula to 0.63.5
+
 ## [v0.63.5] - 2026-09-24
 
 ## [v0.63.4] - 2026-09-18

@@ -1436,17 +1436,25 @@ def make_router(
         # decision-arm event. milestone → done carries the attainment claim
         # (lib/transition_approval). Best-effort: never break the done response.
         try:
-            db.append_decision_event(
-                project_id,
-                decision_event_mod.decision_event_from_completion_verdict(
-                    target_id=ms_id,
-                    verdict="done",
-                    done_reason=(captured.get("done_reason") or None),
-                    decided_by=decided_by,
-                    decider_user_id=user.get("sub", ""),
-                    agent=decision_event_mod.agent_from_claims(user),
-                ),
+            _cv_rec = decision_event_mod.decision_event_from_completion_verdict(
+                target_id=ms_id,
+                verdict="done",
+                done_reason=(captured.get("done_reason") or None),
+                decided_by=decided_by,
+                decider_user_id=user.get("sub", ""),
+                agent=decision_event_mod.agent_from_claims(user),
             )
+            _cv_id = db.append_decision_event(project_id, _cv_rec)
+            # ms-166 e-6602 (独立レビュー AX-1 / 保守性 M-1): store は同じ対象×同じ結論の
+            # 完遂を二度書かず既存行の id を返す。返り値を捨てると「reject されたのに
+            # 記録されたと思い込む」誤解が残るので、ここでも開示する (client 側の収束口
+            # commands_shared.record_completion_decision と対の server 側 1 箇所)。
+            if _cv_id and _cv_id != _cv_rec.get("decision_id"):
+                logging.getLogger(__name__).warning(
+                    "completion-verdict for ms_id=%s was NOT appended — an identical "
+                    "completion decision already exists (%s); this call's done_reason "
+                    "is not recorded.", ms_id, _cv_id,
+                )
         except Exception as _dec_exc:  # pragma: no cover - defensive
             logging.getLogger(__name__).warning(
                 "append_decision_event (completion-verdict) failed for ms_id=%s: %s",
@@ -1661,6 +1669,14 @@ def make_router(
         required when decided_by set / non-empty kind+decision), so a malformed
         decision is a 400, never a silent drop. ``who`` is stamped server-side
         from the token; only project writers may record.
+
+        完遂 decision (= target が終端に到達した記録) は store 層が冪等に reject する
+        (ms-166 e-6602 — 同じ target×verdict は 1 行しか残さない)。その時この route は
+        既存行の ``decision_id`` と ``deduplicated: true`` を返す: **黙って既存 id を
+        返すと、呼び出し側は「自分の記録が載った」と誤解する** ので、reject されたこと
+        自体を応答に出す。判定は追加の read を要しない — builder が ``decision_id`` を
+        採番済みで、store は重複時に *別の* (既存の) id を返すため、差分がそのまま
+        「append されたか」の信号になる。
         """
         data = db.get_project(project_id)
         if not data:
@@ -1693,7 +1709,16 @@ def make_router(
                 status_code=502,
                 detail=f"decision stream append failed: {exc}",
             )
-        return {"decision_id": decision_id, "kind": rec["kind"]}
+        # 完遂の冪等 reject (e-6602): store が返した id が builder の採番と違えば、
+        # append されず既存行に畳まれた。その事実を応答に出す (silent にしない)。
+        # ``deduplicated`` は **常に載せる** (独立レビュー AX-3): true の時だけ生やすと
+        # 「キーが無い = false」と「この版の API にそのフィールドが無い」を呼び出し側が
+        # 区別できず、`"deduplicated" in result` で判定するコードが常に false に倒れる。
+        return {
+            "decision_id": decision_id,
+            "kind": rec["kind"],
+            "deduplicated": bool(decision_id and decision_id != rec.get("decision_id")),
+        }
 
     @router.get("/api/projects/{project_id}/decisions")
     def list_decisions(project_id: str,

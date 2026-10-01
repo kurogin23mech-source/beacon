@@ -39,9 +39,12 @@ def _record_completion_decision(target: dict, verdict: str, reason: str) -> None
     swallowed, and never breaks the completion flow) is the single source
     ``commands_shared.best_effort_completion_decision`` — shared with the milestone/target
     approve path so the two never drift."""
-    from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
+    from commands_shared import (best_effort_completion_decision,
+                                 record_completion_decision, _is_cloud_mode,
                                  _get_api_client, decided_by_for_gate)
     tid = ((target or {}).get("id") or "").strip()
+    # 外側の契約 (e-5978 の単一真実源) は cloud 判定・client 解決まで覆う。write 自体と
+    # 冪等 reject の開示は収束口が自分の契約で持つ (入れ子は無害)。
     with best_effort_completion_decision(tid, verdict):
         if not _is_cloud_mode():
             return
@@ -51,15 +54,19 @@ def _record_completion_decision(target: dict, verdict: str, reason: str) -> None
         project_id = config.get("project_id", "")
         if not project_id:
             return
-        decided_by = decided_by_for_gate()
-        client.record_decision(project_id, {
+        # ms-166 e-6602 (独立レビュー AX-1 / 保守性 M-1): 失敗の可視化と **冪等 reject
+        # の開示** は収束口 record_completion_decision が持つ。ここで
+        # client.record_decision を直接呼ぶと戻り値 (deduplicated) を握り潰し、
+        # 「reject されたのに記録されたと思い込む」誤解が B〜E の 4 経路で再現する
+        # (旧実装がそれだった)。
+        record_completion_decision(client, project_id, {
             "kind": "completion-verdict",
             "decision": (verdict or "done"),
             "rationale": (reason or None),
-            "decided_by": decided_by,
+            "decided_by": decided_by_for_gate(),
             "evidence": [],
             "related": {"target_id": tid},
-        })
+        }, target_id=tid, verdict=(verdict or "done"))
 
 
 def on_target_completion(data: dict, target: dict, *, verdict: str = "done",

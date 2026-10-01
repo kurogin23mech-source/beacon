@@ -815,3 +815,84 @@ def mysql_window_eval(rows, sql: str, params) -> list:
     if "LIMIT %s" in sql:
         out = out[:int(params[-1])]
     return out
+
+# ──────────────────────────────────────────────────────────────────────────
+# 以下は #772 (e-6602 完遂の冪等) 由来。上の read 窓の絞り込み仕様 (e-5986) とは
+# 独立した追記で、名前の衝突も無いため両方を残している (merge 合成)。
+# ──────────────────────────────────────────────────────────────────────────
+
+# ── 完遂 (= target が終端に到達した) decision の冪等規則 (ms-166 e-6602) ──────────
+#
+# 完遂を宣言できる入口は 7 経路ある (A: milestone done / target close、B: opportunity
+# judge terminal、C: opportunity phase <terminal>、D: operation close、E: acquisition
+# status <terminal>、F: target approve = review gate、G: server の done_milestone route)。
+# どれも ``append_decision_event`` へ収束するが、そこに冪等制約が無く decision_id を
+# 毎回新規 mint して無条件 append していたため、**同じ target が同じ verdict で二度
+# 完遂を宣言されると同一内容の行が 2 本残る** 状態だった (例: ``opportunity phase 失注``
+# で決着した後に ``judge terminal 失注``、``milestone done`` の後に ``target approve``)。
+#
+# 対になる deliverable 側は ``deliverable_capture.capture_target_completion`` が
+# 「同じ target×category の active 行が在れば append しない」= first-write-wins の
+# 冪等性を既に持っている。decision 側だけ非対称に開いていたのを閉じる (= 受入条件2
+# 「deliverable と decision の冪等性が対称」)。
+#
+# 鍵を ``(target, kind, decision)`` の 3 つ組にして ``decision`` (= verdict) を含めるのは、
+# **1 つの target が異なる verdict で段階的に完遂しうる**から。実データでも
+# ``observing`` で完遂した後に ``done`` へ倒る target が在り、``(target, kind)`` だけを
+# 鍵にすると後段の正当な状態変化が落ちる (さらに F の rich rationale を持つ記録が
+# 失われる)。「同じ結論を二度書かない」だけを弾き、結論が変わった記録は残す。
+#
+# 窓 (``window_decision_events``) と同じ理由でこのモジュールに置く: 3 つの store
+# backend に逐語コピーすると 1 箇所だけ直した時に silent に drift する。backend は
+# 「行の取得」と「append の中止」だけを担い、**何を重複と見なすか**はここが決める。
+COMPLETION_DECISION_KINDS: frozenset[str] = frozenset({"completion-verdict"})
+
+
+def completion_dedup_key(row: dict) -> tuple[str, str, str] | None:
+    """完遂 decision の冪等キー ``(target_id, kind, decision)`` — 対象外なら ``None``。
+
+    ``None`` は「この行に冪等制約を課さない」の意 (= 従来どおり無条件 append)。
+    対象外になるのは 2 つ:
+
+    - ``kind`` が完遂族 (:data:`COMPLETION_DECISION_KINDS`) でない。dm-send /
+      review-adjudication / task-done 等は同じ内容が正当に反復しうる (同じ PR を
+      二度採否する、同じ相手に二度送る) ので、ここで止めてはならない。
+    - 完遂族だが ``related.target_id`` が空。どの target の完遂かが判らない行は
+      重複判定の基準を持てないので、落とさず残す (= 安全側: 記録を消さない)。
+
+    ``target_id`` の読み出しは :func:`_row_target_id` (``related.target_id`` →
+    top-level ``target_id`` fallback) に委ねる。窓の target 絞りと同じ規則で読む
+    ことで、「list --target で引ける行」と「重複と見なされる行」がズレない。
+    """
+    kind = str((row or {}).get("kind") or "")
+    if kind not in COMPLETION_DECISION_KINDS:
+        return None
+    target_id = _row_target_id(row or {})
+    # 空白のみの target も「target 無し」として扱う (= 冪等対象外、記録を消さない)。
+    # ただしキーに載せる値は _row_target_id が返したままにする: 窓の target 絞りは
+    # 完全一致なので、重複判定だけ正規化すると「list --target で引けない行を重複と
+    # 見なす」ズレが生まれる。読む側と同じ値で突き合わせる。
+    if not target_id.strip():
+        return None
+    return (target_id, kind, str((row or {}).get("decision") or ""))
+
+
+def find_duplicate_completion(rows, record: dict) -> dict | None:
+    """``rows`` の中から ``record`` と同じ完遂キーを持つ既存行を返す (無ければ ``None``)。
+
+    純関数。``record`` が完遂族でない / target を持たない場合は常に ``None`` を返す
+    (= 冪等制約の対象外なので「重複は無い」と答える)。複数一致した場合は
+    **最初の 1 件** を返す: first-write-wins なので、残すべきは最も古い記録。
+
+    各 backend の ``append_decision_event`` が書き込み直前に呼ぶ。返り行が在れば
+    append を中止し、その ``decision_id`` を呼び出し側へ返す (= 冪等な reject:
+    「記録は 1 度だけ在る」という事実を正しく返しつつ、best-effort な完遂フローを
+    例外で壊さない)。
+    """
+    key = completion_dedup_key(record or {})
+    if key is None:
+        return None
+    for row in (rows or []):
+        if completion_dedup_key(row) == key:
+            return row
+    return None
