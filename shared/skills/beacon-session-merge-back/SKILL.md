@@ -140,6 +140,20 @@ beacon session fork cleanup "$TARGET_FORK_WORKTREE_PATH"
 指摘で入った: それ以前は force が退避失敗ゲートまで素通りし、手順書の記述と実装が
 食い違っていた。
 
+拒否されても **メモの控えは取られている**。退避は拒否判定より先に走るので、拒否メッセージに
+出る退避先パスをそのままユーザーに伝える (= 消せなかったが控えは残っている、を明示する)。
+`--json` では `notes_backup` に入る (ms-166 e-6780)。
+
+`--force` は **cleanup 専用の旗**。`beacon session fork list --force` や
+`beacon session fork <ms-id> --force` は両フロントで拒否される (ms-166 e-6782)。
+
+削除結果の読み方 (ms-166 e-6781): `removed` は **worktree を消せたか** だけを表す。
+branch の削除可否は `branch_removed` で別に返る。`removed: true` + `branch_removed: false`
+は「worktree は消えたが branch が残っている」状態で、`errors` に理由が入る
+(`--force` で未取り込みを上書きしたときは `git branch -d` が必ず拒否するのでこの形になる)。
+この場合 **再実行しても解決しない** (その worktree はもう fork 一覧に無いので
+「not an active fork worktree」で止まる)。残った branch を消すかはユーザー判断として提示する。
+
 成功したら次へ。
 
 ## Step 5: 未 merge の場合の警告と中止

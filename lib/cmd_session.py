@@ -1042,6 +1042,15 @@ def cmd_session_fork_cleanup():
             print(f"削除しませんでした: {record['worktree_path']}", file=sys.stderr)
             for b in refusals:
                 print(f"  - {b}", file=sys.stderr)
+            # e-6780: the snapshot is taken BEFORE the refusal check, so a
+            # refused call still leaves a backup. Saying so matters most right
+            # here: the operator just learned the fork cannot be removed, and
+            # the notes they were worried about are already safe on disk. It was
+            # only visible in --json, which is how the ms-160 fork's notes came
+            # to survive by accident rather than by design (2026-10-01).
+            if backup_path:
+                print(f"  ℹ 削除はしていませんが、引き継ぎメモ {n_notes} 件の控えは "
+                      f"取ってあります: {backup_path}", file=sys.stderr)
             if n_notes:
                 print(f"  ℹ 引き継ぎメモが {n_notes} 件あります。このフォークで "
                       f"/beacon-session-end を走らせると、残す価値のあるものを "
@@ -1055,7 +1064,17 @@ def cmd_session_fork_cleanup():
         sys.exit(1)
 
     # --- remove: worktree first, then the branch ----------------------------
+    # e-6781: `removed` reports the WORKTREE, not "everything went perfectly".
+    # It used to be `not errors`, so a successful worktree removal whose
+    # `git branch -d` failed reported removed=false while the directory was
+    # already gone. A caller reading that retries, and the retry cannot even
+    # find the fork any more (it is no longer in list_forks), so the real
+    # leftover — the branch — becomes unreachable. The --force path hits this
+    # every time: forcing past the unmerged-branch blocker leaves a branch that
+    # `git branch -d` is guaranteed to refuse.
     errors = []
+    worktree_removed = False
+    branch_removed = False
     rm = subprocess.run(["git", "worktree", "remove", record["worktree_path"]],
                         cwd=repo_root, capture_output=True, text=True)
     if rm.returncode != 0 and force:
@@ -1064,14 +1083,19 @@ def cmd_session_fork_cleanup():
             cwd=repo_root, capture_output=True, text=True)
     if rm.returncode != 0:
         errors.append(f"git worktree remove failed: {rm.stderr.strip()}")
-    elif branch:
-        br = subprocess.run(["git", "branch", "-d", branch],
-                            cwd=repo_root, capture_output=True, text=True)
-        if br.returncode != 0:
-            errors.append(f"git branch -d failed: {br.stderr.strip()}")
+    else:
+        worktree_removed = True
+        if branch:
+            br = subprocess.run(["git", "branch", "-d", branch],
+                                cwd=repo_root, capture_output=True, text=True)
+            if br.returncode != 0:
+                errors.append(f"git branch -d failed: {br.stderr.strip()}")
+            else:
+                branch_removed = True
 
     result = {
-        "removed": not errors,
+        "removed": worktree_removed,
+        "branch_removed": branch_removed,
         "worktree_path": record["worktree_path"],
         "branch": branch,
         "unpromoted_notes": n_notes,
@@ -1082,13 +1106,17 @@ def cmd_session_fork_cleanup():
     if json_out:
         print(json.dumps(result, ensure_ascii=False))
     else:
-        if errors:
-            for e in errors:
-                print(f"Error: {e}", file=sys.stderr)
-        else:
+        if worktree_removed:
             print(f"片付けました: {record['worktree_path']}")
-            if branch:
+            if branch_removed:
                 print(f"  branch {branch} も削除しました")
+            elif branch:
+                # e-6781: say what is still there, by name. "消しました" with a
+                # surviving branch sends the operator looking in the wrong place.
+                print(f"  ⚠ branch {branch} は残っています "
+                      f"(git branch -d が拒否しました)", file=sys.stderr)
+        for e in errors:
+            print(f"Error: {e}", file=sys.stderr)
         if backup_path:
             print(f"  引き継ぎメモ {n_notes} 件を退避: {backup_path}")
     if errors:

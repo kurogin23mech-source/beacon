@@ -5230,6 +5230,18 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
         # positional discrimination on `list`, mirrored here so Skills can
         # call either path identically.
         positional = (getattr(args, "ms_id_or_list", "") or "").strip()
+        # e-6782: --force belongs to `cleanup` alone. It lives on the shared
+        # `fork` subparser (argparse has no per-positional flags), so without
+        # this guard `fork list --force` and `fork <ms-id> --force` parse fine
+        # here while bin/beacon's `list` arm refuses them via _guard_flag — the
+        # two frontends disagreeing, which is the very class of defect the
+        # cleanup verb was added to close. Refuse rather than ignore: silently
+        # swallowing a flag the caller believed in is how the ms-160 wiring bugs
+        # stayed invisible.
+        if getattr(args, "force", False) and positional != "cleanup":
+            _eprint("Error: --force is only valid for 'beacon session fork cleanup "
+                    "<worktree-path>'.")
+            return 2
         if positional == "cleanup":
             # ms-178 e-6702/e-6703: delegate to the guarded verb; never call
             # `git worktree remove` from here.

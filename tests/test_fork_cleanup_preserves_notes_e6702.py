@@ -470,3 +470,90 @@ def test_force_flag_parity_across_frontends(repo):
     combined = r2.stdout + r2.stderr
     assert '"forced": true' in combined or "not an active fork" in combined, (
         "dispatch.py did not pass --force through: " + combined)
+
+
+# --- parent review of PR #770 (ms-166 e-6780 / e-6781 / e-6782) -------------
+# Three defects the fork's own tests could not see, because each one lives in
+# the gap between what the code does and what it TELLS the caller it did.
+
+
+def test_refusal_says_where_the_backup_went(repo):
+    """e-6780: a refused cleanup still snapshots — say so in the human output.
+
+    The snapshot runs BEFORE the refusal check, so a refused call leaves a
+    backup on disk. That was reported only in --json, which is how the ms-160
+    fork's notes came to survive by accident (2026-10-01) rather than by design:
+    the operator is told the fork cannot be removed and is NOT told that the
+    notes they were worried about are already safe.
+    """
+    root, wt = repo
+    _set_notes(wt, 3)
+    _set_activity(wt, 10)  # live ⇒ refused
+    e = dict(os.environ)
+    e.pop("BEACON_FORK_CLEANUP_FORCE", None)
+    e["BEACON_FORK_PATH"] = str(wt)
+    e.pop("BEACON_JSON", None)  # human-readable path
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "lib" / "commands.py"), "session_fork_cleanup"],
+        cwd=str(root), capture_output=True, text=True, env=e)
+    assert r.returncode == 1, r.stdout + r.stderr
+    backups = list((root / ".beacon" / "fork-notes-backup").glob("*.jsonl"))
+    assert backups, "a refused cleanup must still have taken the snapshot"
+    assert str(backups[0]) in r.stderr, (
+        "the human-readable refusal must name the backup path:\n" + r.stderr)
+
+
+def test_removed_reports_the_worktree_not_overall_success(repo):
+    """e-6781: worktree gone + branch left must not report removed=false.
+
+    `removed` used to be `not errors`, so forcing past the unmerged-branch
+    blocker (where `git branch -d` is guaranteed to refuse) reported
+    removed=false while the directory was already gone. A caller reading that
+    retries, and the retry cannot find the fork any more — the real leftover,
+    the branch, becomes unreachable.
+    """
+    root, wt = repo
+    # make the branch unmerged so gate 1 blocks and `git branch -d` will refuse
+    (wt / "new.txt").write_text("x\n", encoding="utf-8")
+    _git("add", "-A", cwd=wt)
+    _git("commit", "-qm", "fork work", cwd=wt)
+    _set_activity(wt, 99999)  # idle ⇒ only the unmerged gate blocks
+    r = _cleanup(root, wt, env={"BEACON_FORK_CLEANUP_FORCE": "1"})
+    out = json.loads(r.stdout)
+    assert not Path(wt).exists(), "the worktree should be gone"
+    assert out["removed"] is True, (
+        "removed must describe the worktree, which WAS removed: " + r.stdout)
+    assert out["branch_removed"] is False, r.stdout
+    assert out["errors"], "the surviving branch must still be reported"
+    assert out["branch"] == "ms-9-fork-abc"
+
+
+def test_force_is_rejected_outside_cleanup_on_both_frontends(repo):
+    """e-6782: --force belongs to cleanup alone, on BOTH frontends.
+
+    PR #770 put --force on the shared `fork` subparser, so `fork list --force`
+    parsed fine on the Python frontend while bin/beacon's `list` arm refused it
+    — the two frontends disagreeing, which is the class of defect the cleanup
+    verb exists to close.
+    """
+    root, _wt = repo
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT), str(ROOT / "lib")])
+    for argv in (["session", "fork", "list", "--force"],
+                 ["session", "fork", "ms-9", "--force"]):
+        code = (
+            "import sys, pathlib\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from beacon_cli.dispatch import dispatch\n"
+            f"sys.exit(dispatch(pathlib.Path({str(ROOT)!r}), {argv!r}))\n"
+        )
+        py = subprocess.run([sys.executable, "-c", code], cwd=str(root),
+                            capture_output=True, text=True, env=env)
+        assert py.returncode != 0, (
+            f"python frontend must refuse {argv}: {py.stdout}{py.stderr}")
+        assert "--force" in (py.stdout + py.stderr)
+
+        sh = subprocess.run([str(ROOT / "bin" / "beacon"), *argv],
+                            cwd=str(root), capture_output=True, text=True)
+        assert sh.returncode != 0, (
+            f"bash frontend must refuse {argv}: {sh.stdout}{sh.stderr}")
