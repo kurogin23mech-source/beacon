@@ -52,7 +52,11 @@ def _write_session_file(project_dir: Path, **overrides):
         "session_id": "sv-cached-1234",
         "actor": {"machine": "test-mac", "agent": "test-agent"},
         "created_at": _iso(-3600),
-        "last_active": _iso(-60),  # 1 minute ago — fresh under default 300s TTL
+        "last_active": _iso(-60),  # 1 minute ago
+        # ms-173 / e-6776: cache の freshness gate が見るのはこちら。last_active は
+        # 受信プロセスが別用途で 60 秒ごとに書くので throttle の時計に使えなかった
+        # (gate が永久に通り、心拍が二度と出ずサーバの last_heartbeat_at が凍結した)。
+        "last_cloud_heartbeat_at": _iso(-60),  # fresh under default 300s TTL
         "harness": "test",
         "source": "server_minted",
         "machine_id": "mc-abc-def",
@@ -150,11 +154,22 @@ def test_cache_miss_when_pid_differs_calls_heartbeat(
     assert result["minted"] is True
 
 
-def test_cache_miss_when_stale_last_active_calls_heartbeat(
+def test_cache_miss_when_stale_heartbeat_stamp_calls_heartbeat(
     isolated_project, monkeypatch,
 ):
-    """Old last_active (past TTL window) ⇒ heartbeat runs."""
-    _write_session_file(isolated_project, last_active=_iso(-999999))
+    """心拍 stamp が TTL を超えて古い ⇒ network に出る。
+
+    契約の変更点 (ms-173 / e-6776): このテストは以前 ``last_active`` の古さで cache
+    miss を固定していた。だが ``last_active`` を書くのは **受信プロセス** (60 秒ごと)
+    で、このスロットルとは無関係な用途の stamp。受信プロセスが生きている間それは常に
+    新しいので gate を一度も超えず、**心拍が二度と出ずサーバの last_heartbeat_at が
+    最初の mint 時刻で凍結していた** (2026-10-01 実測: 稼働中 14 セッション中
+    heartbeat_fresh=True は 1 件)。gate が見る値を「自分が前回送った時刻」に付け替えた
+    ので、古さの判定もそちらで行う。``last_active`` が新しくても miss することは
+    tests/test_cloud_mint_throttle_clock_e6776.py が別途固定している。
+    """
+    _write_session_file(isolated_project,
+                        last_cloud_heartbeat_at=_iso(-999999))
     _stub_pid(monkeypatch, 42424)
     _stub_machine_cache(monkeypatch)
     monkeypatch.setattr(

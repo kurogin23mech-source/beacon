@@ -386,7 +386,8 @@ def _cloud_mint_cache_hit(
          ``machine_id`` and same ``parent_pid``. Any drift means the
          server would mint a new sid, so the cache must not short-
          circuit that.
-      4. Cached ``last_active`` is within the TTL window.
+      4. Cached ``last_cloud_heartbeat_at`` is within the TTL window
+         (ms-173 / e-6776 — **not** ``last_active``, see below).
       5. Cached ``source`` proves the sid came from an earlier server
          mint (``server_minted``). We refuse to return a locally-minted
          sid via the cloud path — that would confuse the server on the
@@ -412,7 +413,22 @@ def _cloud_mint_cache_hit(
     if existing.get("source") != "server_minted":
         return None
     now = _now_iso()
-    if not _is_fresh(existing.get("last_active", ""), now, ttl):
+    # ms-173 / e-6776 — スロットルの時計は「自分が前回いつ送ったか」でなければならない。
+    #
+    # ここは以前 ``last_active`` を見ていたが、その値を書くのは **受信プロセス**
+    # (channel/bus.mjs の createLocalSessionHeartbeat が 60 秒ごとに書く) で、この
+    # スロットルとは無関係な用途の stamp だった。結果、受信プロセスが生きている間
+    # ``last_active`` は常に 60 秒以内なので TTL (既定 300 秒) を一度も超えず、
+    # **cache が永久に当たって /api/me/heartbeat が二度と呼ばれなかった**。
+    # サーバ側の ``last_heartbeat_at`` は最初の mint 時刻で凍結し、健全性 3 軸のうち
+    # 「人/AI が実際に動かしているか」(= heartbeat_fresh) が構造的に常に false になって
+    # いた (2026-10-01 実測: 稼働中 14 セッション中 True は 1 件、stamp の古さは 3.6 時間
+    # 〜7 日、一方 poll は 0〜8 秒)。
+    #
+    # 「前回送ってから十分経ったか」を他人の活動で判定していたのが誤り。この stamp は
+    # 実際に心拍を送った経路だけが書く (下の payload 参照)。欠けている場合は「送った
+    # 記録が無い」= cache miss にして 1 回だけ network に出る (以降は定常運転)。
+    if not _is_fresh(existing.get("last_cloud_heartbeat_at", ""), now, ttl):
         return None
     # Cache hit — refresh last_active in-memory so downstream readers see
     # a current timestamp, but don't rewrite the file (that would defeat
@@ -532,6 +548,10 @@ def _get_or_mint_session_via_server_impl() -> dict:
         "actor": actor,
         "created_at": heartbeat.get("created_at") or now,
         "last_active": now,
+        # ms-173 / e-6776: この経路 (= 実際に /api/me/heartbeat を叩いた所) だけが書く
+        # stamp。cache のスロットルはこれを見る。last_active と分けてあるのが要で、
+        # last_active は受信プロセスが別用途で更新するため throttle の時計に使えない。
+        "last_cloud_heartbeat_at": now,
         "harness": _detect_harness(),
         "source": "server_minted",
         "machine_id": machine_id,

@@ -221,8 +221,14 @@ def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
 # 推定ではなく、嘘をついている証拠そのもの。だから倒す向きを人に問う必要がない。
 #
 # 誤爆しない側の安全弁が「裏付けを複数源から取る」こと: poll 報告が無い古い bridge でも、
-# 人/AI が実際に動かしていれば PostToolUse hook 由来の heartbeat (last_heartbeat_at) が
-# 新しい。だから「古い bridge かどうか」ではなく「生きている痕跡があるか」で救う。
+# 人/AI が実際に動かしていれば CLI 由来の heartbeat (last_heartbeat_at) が新しい。
+# だから「古い bridge かどうか」ではなく「生きている痕跡があるか」で救う。
+#
+# ms-173 / e-6776 の訂正: 当初この行は last_heartbeat_at を「PostToolUse hook 由来」と
+# 書いていたが誤りで、実際は CLI の session 解決が /api/me/heartbeat を叩いた副産物。
+# さらに throttle cache の時計が別の書き手 (受信プロセスの last_active) を見ていたため、
+# この stamp は最初の mint 時刻で凍結し **安全弁として機能していなかった** (実測: 稼働中
+# 14 セッション中 heartbeat_fresh=True は 1 件)。e-6776 で時計を付け替えて実効化した。
 WS_SUPPRESS_POLL_STALE = "ws-zombie-poll-stale"          # e-6563 と同一の理由文字列 (互換)
 WS_SUPPRESS_NO_EVIDENCE = "ws-zombie-no-liveness-evidence"
 

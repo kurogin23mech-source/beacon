@@ -1997,9 +1997,14 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # ms-165 (e-5965): informational signal. `live` (above) is the deliverability
     # gate — it proves the bridge polls and, post-e-5964, will deliver even to an
     # idle session. `heartbeat_fresh` is a SEPARATE, weaker signal: whether the
-    # interactive heartbeat (last_heartbeat_at, written by POST /api/me/heartbeat
-    # = the PostToolUse hook) is recent, i.e. a human/AI is actively driving the
-    # session. It is deliberately named for the MECHANISM (heartbeat freshness),
+    # interactive heartbeat (last_heartbeat_at) is recent, i.e. a human/AI is
+    # actively driving the session.
+    #
+    # ms-173 / e-6776 — 書き手の訂正: この stamp を書くのは **PostToolUse hook では
+    # ない**。CLI の session 解決 (lib/session.get_or_mint_session_via_server) が
+    # /api/me/heartbeat を叩いたときの副産物で、beacon コマンドが走ると更新される。
+    # 誤記のままだったため「hook が毎回書いている」と信じられ、この軸が構造的に死んで
+    # いること (= throttle cache が永久に当たり心拍が二度と出ない) が長く見逃された。 It is deliberately named for the MECHANISM (heartbeat freshness),
     # NOT "attentive"/"consuming" — a wedged bridge can be heartbeat_fresh yet not
     # drain its inbox, so importing a deliverability connotation would mislead.
     # It is NOT folded into `live` (an idle fork stays live — no delivery
