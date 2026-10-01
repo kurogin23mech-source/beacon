@@ -25,14 +25,14 @@ e-6582 (汚染された『確認待ち』の降格) と違い、ここには曖�
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "lib"))
 
+# sys.path は tests/conftest.py が一括で用意する (ms-142 e-5144)。
+# 「tests/ 配下のファイルは独自の insert をしない」が明文の規約なので従う。
 import bus_liveness  # noqa: E402
 
 POLL_LIMIT = 1800          # 30 分 (既存 _WS_ZOMBIE_POLL_AGE_S)
