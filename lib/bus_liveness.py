@@ -124,13 +124,29 @@ ALL_STATES = DECLARABLE_STATES | frozenset({STATE_UNKNOWN, STATE_INTERRUPTED})
 def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[bool]:
     """Return whether a session is *draining* its inbox.
 
-    - ``True``  — no unread backlog, OR the oldest unread event is younger than
-      ``window_seconds`` (still in the normal in-flight grace period).
+    - ``True``  — 未読のバックログがあり、その最古が ``window_seconds`` より新しい
+      (= 実際に消化できていることを **観測した**)。
+    - ``None``  — バックログが無い。消化できるかどうかの **証拠が無い** (下記参照)。
     - ``False`` — the oldest event still unread by the recipient is OLDER than
       ``window_seconds``: it is receiving (polling) but not consuming = wedged.
-    - ``None``  — unknown (no timestamp to judge, or unparseable). Never a hard
-      signal; callers treat ``None`` as "not definitively wedged" so an idle
-      session with no backlog is never wrongly dropped.
+      ``None`` はほかに「判断する時刻が無い / 読めない」場合も返る。いずれも hard
+      signal ではなく、呼び出し側は ``None`` を「確定的に wedge ではない」と扱うので、
+      バックログの無い idle session が誤って落とされることはない。
+
+    ms-173 / e-6777 — **バックログが無いときに ``True`` を返さない。**
+
+    以前はここで ``True`` (健全) を返していた。そのため「誰からも送られないセッション」と
+    「瞬時に消化しているセッション」が同じ最高評価になり、**受信していないセッションが
+    最も健全に見える** 指標になっていた (実測 2026-10-01: live 14 行のうち 13 行が
+    draining=True だが、その大半は送られた実績が無い。一方 DM が集まる本体だけが
+    draining=False で到達不能と判定された)。指標が「受信しないこと」を報酬にしていた。
+
+    消化の証拠が無いなら「不明」が正直な値。``True`` は **観測した** ときだけ出す。
+
+    この変更が配信を壊さない理由: :func:`is_reachable` と
+    :func:`classify_send_delivery` はどちらも ``False`` だけを悪い信号として扱い、
+    ``None`` と ``True`` を同じく扱う (reachable / SEND_NORMAL)。よって送信経路の挙動は
+    byte 単位で不変で、受信者を誤って落とすリスクなしに指標の嘘だけを消せる。
 
     ``oldest_unread_created_at`` is the ``created_at`` of the OLDEST event still
     unread by the recipient (past its cursor), or a falsy value when the inbox
@@ -139,8 +155,9 @@ def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[b
     a wedge, not in-flight latency) — no new constant, per SPEC 方針 a.
     """
     if not oldest_unread_created_at:
-        # No backlog past the cursor → the session is keeping up.
-        return True
+        # e-6777: バックログが無い = 消化の証拠が無い → 不明。健全 (True) と言わない。
+        # ここを True に戻すと「受信していないセッションが最も健全」に逆戻りする。
+        return None
     try:
         oldest = datetime.datetime.fromisoformat(
             str(oldest_unread_created_at).replace("Z", "+00:00"))

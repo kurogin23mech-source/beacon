@@ -54,8 +54,19 @@ class TestDeriveDraining:
         fresh = _iso(now - datetime.timedelta(seconds=5))  # in-flight, not a wedge
         assert bus_liveness.derive_draining(fresh, now, 300) is True
 
-    def test_no_backlog_is_draining(self):
-        assert bus_liveness.derive_draining("", _now(), 300) is True
+    def test_no_backlog_is_unknown_not_healthy(self):
+        """契約の変更点 (ms-173 / e-6777): バックログが無いときは ``None`` (不明)。
+
+        以前はここで ``True`` (健全) を固定していた。そのため「誰からも送られない
+        セッション」と「瞬時に消化しているセッション」が同じ最高評価になり、**受信して
+        いないセッションが最も健全に見える** 指標になっていた (実測 2026-10-01: live 14 行
+        のうち 13 行が draining=True だが大半は送られた実績が無く、DM が集まる本体だけが
+        draining=False で到達不能と判定された)。消化の証拠が無いなら「不明」が正直。
+
+        送信経路は不変: is_reachable / classify_send_delivery はどちらも ``False`` だけを
+        悪い信号として扱い ``None`` と ``True`` を同じく扱う (下の 2 テストで固定済)。
+        """
+        assert bus_liveness.derive_draining("", _now(), 300) is None
 
     def test_unparseable_is_unknown(self):
         assert bus_liveness.derive_draining("not-a-date", _now(), 300) is None
@@ -103,7 +114,10 @@ class TestStampReachability:
         _app._stamp_session_liveness(s, "proj", now)
         # live union UNCHANGED (SPEC 方針 c): a healthy poll keeps it live.
         assert s["live"] is True
-        assert s["draining"] is True     # no backlog ⇒ keeping up
+        # ms-173 / e-6777: バックログが無い = 消化の証拠が無い ⇒ 不明 (健全と言わない)。
+        assert s["draining"] is None
+        # **ここが本質**: 不明でも reachable は True のまま = 配信は一切変わらない。
+        # 指標の嘘だけを消し、受信者を誤って落とすリスクは負わない。
         assert s["reachable"] is True    # live AND not-False ⇒ reachable
 
     def test_live_but_stale_backlog_is_wedged_not_reachable(self, _app, monkeypatch):
@@ -261,3 +275,49 @@ class TestSendPathGraded:
         # Negative regression: the healthy common path grows NO new keys.
         assert "recipient_wedged" not in out
         assert "delivery_uncertain" not in out
+
+
+# ===========================================================================
+# ms-173 / e-6777 — 指標が「受信しないこと」を報酬にしない。
+#
+# draining は「消化できているか」を答える指標だが、バックログが無いときに True
+# (健全) を返していたため、送られた実績の無いセッションが最高評価になっていた。
+# True は **観測したとき** だけ出す。
+# ===========================================================================
+
+class TestDrainingDoesNotRewardNotReceiving:
+    def test_never_received_and_drained_instantly_are_distinguishable(self):
+        """この 2 つが同じ値だったのが e-6777 の核。"""
+        now = _now()
+        never_received = bus_liveness.derive_draining("", now, 300)
+        drained_fast = bus_liveness.derive_draining(
+            _iso(now - datetime.timedelta(seconds=5)), now, 300)
+        assert never_received is None, "送られた実績が無いのに健全と主張している"
+        assert drained_fast is True, "実際に消化している証拠は True であるべき"
+        assert never_received is not drained_fast
+
+    def test_true_requires_observed_consumption(self):
+        """True を返す経路が「未読があって新しい」ときだけであること。"""
+        now = _now()
+        assert bus_liveness.derive_draining(
+            _iso(now - datetime.timedelta(seconds=1)), now, 300) is True
+        for no_evidence in ("", None, "not-a-date"):
+            assert bus_liveness.derive_draining(no_evidence, now, 300) is None
+
+    def test_delivery_behaviour_is_unchanged_by_the_honesty_fix(self):
+        """**配信は一切変わらない**。これがこの修正を安全に入れられる理由で、
+        ここが壊れると受信者を誤って落とすので、指標の正直さより優先される。"""
+        for v in (None, True):
+            assert bus_liveness.is_reachable(True, v) is True
+            assert bus_liveness.classify_send_delivery(True, v) \
+                == bus_liveness.SEND_NORMAL
+        # 確定的な wedge だけが悪い信号。
+        assert bus_liveness.is_reachable(True, False) is False
+        assert bus_liveness.classify_send_delivery(True, False) \
+            == bus_liveness.SEND_WEDGED
+
+    def test_wedge_detection_is_untouched(self):
+        """古い未読は従来どおり wedge。指標を正直にしただけで、検出は緩めない。"""
+        now = _now()
+        assert bus_liveness.derive_draining(
+            _iso(now - datetime.timedelta(seconds=600)), now, 300) is False
