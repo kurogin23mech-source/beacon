@@ -640,3 +640,115 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
     if limit and limit > 0:
         out = out[-limit:]
     return out
+
+# ── read 窓の絞り込み仕様 (ms-166 e-5986) ────────────────────────────────────
+#
+# 窓の意味論は :func:`window_decision_events` が持つが、**MySQL backend は同じ絞り込みを
+# SQL へ押し下げる** 必要がある (append-only の流れは無制限に伸び、全件を Python に読むと
+# 2026-08-20 の本番停止と同型の負荷になる / CORE doc scale-contract-principle)。
+#
+# そこで「どの項目を・どの JSON パスで・どう比べるか」を **この 1 つの仕様表** に置き、
+# Python 述語と SQL 片の両方をここから導く。2 箇所に書くと、片方だけ直したときに
+# 「一覧には出るのに SQL では落ちる (逆も)」という最悪の drift になる — しかも手元の
+# 規模テストは偽カーソルが WHERE を解釈しないので **誤りが緑で通る**。
+#
+# 各項目: (名前, JSON パスの候補列, 比較の種類)
+#   - パス候補が複数なら **先に見つかった非空** を使う (``target`` の related → top-level
+#     fallback がこれ。:func:`_row_target_id` と同じ順序)
+#   - 比較は "eq" (等値) / "gt" (より大きい = since) / "not_in" (除外集合)
+#
+# NULL / 欠損の扱い (SQL 側で明示的に揃える):
+#   JSON に無い / JSON null の項目は Python では ``""`` になる。SQL では
+#   ``JSON_UNQUOTE(JSON_EXTRACT(...))`` が NULL か文字列 ``'null'`` を返すので、
+#   ``NULLIF(..., 'null')`` で潰してから ``COALESCE(..., '')`` で空文字に落とす。
+#   これを忘れると ``NULL NOT IN (...)`` が NULL になり、種別を持たない行が **SQL でだけ
+#   静かに消える**。
+_WINDOW_FILTERS: tuple = (
+    ("kind", ("$.kind",), "eq"),
+    ("session", ("$.who.session_id",), "eq"),
+    ("target", ("$.related.target_id", "$.target_id"), "eq"),
+    ("since", ("$.created_at",), "gt"),
+    ("exclude_kinds", ("$.kind",), "not_in"),
+)
+
+# 並び順の基準 (newest-limit を SQL に寄せるため)。Python 側の sort key と同じ順序。
+_WINDOW_ORDER: tuple = ("$.created_at",)
+
+
+def window_filter_spec() -> tuple:
+    """絞り込み仕様表を返す (公開アクセサ)。SQL 生成側と検査テストが参照する。"""
+    return _WINDOW_FILTERS
+
+
+def _row_value(row: dict, paths) -> str:
+    """``paths`` の候補を順に見て、最初の非空を文字列で返す (無ければ ``""``)。
+
+    ``$.a.b`` 形式の JSON パスを dict 辿りに写す。SQL 側の
+    ``COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '$.a.b')), 'null'), …, '')``
+    と同じ値を返すのが契約。
+    """
+    for path in paths:
+        cur = row
+        for part in path.lstrip("$.").split("."):
+            if not isinstance(cur, dict):
+                cur = None
+                break
+            cur = cur.get(part)
+        if cur:
+            return str(cur)
+    return ""
+
+
+def mysql_window_sql(*, kind: str = "", limit: int = 100, since: str = "",
+                     session: str = "", target: str = "", exclude_kinds=None):
+    """絞り込み仕様表から MySQL の ``WHERE`` / ``ORDER BY`` / ``LIMIT`` を組む。
+
+    返り値は ``(sql_tail, params)``。``sql_tail`` は ``WHERE pk=%s`` に続けて
+    ``AND …`` を並べ、``ORDER BY … DESC`` + ``LIMIT %s`` までを含む断片。
+    **newest-limit を SQL に寄せる**ので、呼び出し側は返ってきた行を昇順に並べ直して
+    :func:`window_decision_events` に通す (意味論の最終判定はそちらが持つ)。
+
+    純関数 — DB に触らない。SQL 文字列はテストで固定されるので、将来の変更が差分に出る。
+    """
+    values = {"kind": kind, "session": session, "target": target,
+              "since": since, "exclude_kinds": exclude_kinds}
+    # 除外集合は ``kind`` 明示時に ``kind`` 自身を引く (window_decision_events と同じ規則)
+    if exclude_kinds:
+        values["exclude_kinds"] = sorted(
+            frozenset(exclude_kinds) - ({kind} if kind else frozenset()))
+    clauses: list = []
+    params: list = []
+    for name, paths, op in _WINDOW_FILTERS:
+        value = values.get(name)
+        if not value:
+            continue
+        expr = _mysql_coalesced_expr(paths)
+        if op == "eq":
+            clauses.append(f"{expr} = %s")
+            params.append(value)
+        elif op == "gt":
+            clauses.append(f"{expr} > %s")
+            params.append(value)
+        elif op == "not_in":
+            holes = ", ".join(["%s"] * len(value))
+            clauses.append(f"{expr} NOT IN ({holes})")
+            params.extend(value)
+    tail = "".join(f" AND {c}" for c in clauses)
+    order = ", ".join(f"{_mysql_coalesced_expr((p,))} DESC" for p in _WINDOW_ORDER)
+    tail += f" ORDER BY {order}, sk DESC"
+    if limit and limit > 0:
+        tail += " LIMIT %s"
+        params.append(int(limit))
+    return tail, params
+
+
+def _mysql_coalesced_expr(paths) -> str:
+    """JSON パス候補列を「最初の非空、無ければ空文字」の MySQL 式に写す。
+
+    ``NULLIF(..., 'null')`` で JSON null (= MySQL では文字列 ``'null'``) を潰し、
+    最後に ``COALESCE(..., '')`` で欠損を空文字に落とす。:func:`_row_value` と同じ値を
+    返すのが契約。
+    """
+    inner = ", ".join(
+        f"NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '{p}')), 'null')" for p in paths)
+    return f"COALESCE({inner}, '')"
