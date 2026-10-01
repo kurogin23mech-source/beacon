@@ -110,6 +110,49 @@ def is_genuine_awaiting_human(marker) -> bool:
     return not is_idle_notification(marker.get("state_detail"))
 
 
+def is_contaminated_awaiting_human(marker) -> bool:
+    """``awaiting_human`` を名乗るが待機内容がアイドル文言 = 取り違えで書かれた汚染か。
+
+    :func:`is_genuine_awaiting_human` の裏返しだが、**``state_detail`` を持たない
+    ``awaiting_human`` はどちらでもない** (genuine 扱いで保護する) ので、単純な否定では
+    ない。message 無しの分類不能な Notification を ``awaiting_human`` に倒す設計
+    (fail-safe は過剰発火側) を壊さないため、detail の不在を汚染の証拠にしない。
+    """
+    if not isinstance(marker, dict):
+        return False
+    if marker.get("declared_state") != bus_liveness.STATE_AWAITING_HUMAN:
+        return False
+    return is_idle_notification(marker.get("state_detail"))
+
+
+def repair_contaminated_marker(marker) -> Optional[dict]:
+    """汚染マーカーを ``idle`` へ降格した新しい marker を返す。汚染でなければ ``None``。
+
+    ms-173 / e-6582 — **一度だけ洗う** ための純粋変換。
+
+    なぜ恒久的な実行時ルールでなく修復なのか: 汚染マーカーを作る経路は producer 修正
+    (62766932 + 3cfc6a0f) で閉じており、**汚染はもう増えない有限の集合**。増えない集合に
+    対して「読む側で降格する」恒久ルールを足すと、修正前 beacon では汚染と『本物の待ちが
+    上書きされた行』が完全同形になるため、本物の確認待ちを隠す恐れを永久に抱え込む。
+    有限のレガシーデータはデータ側で直すのが筋。
+
+    保つもの:
+      * ``declared_at`` と ``state_since`` は **書き換えない**。ここを now にすると、
+        死んだセッションが「たった今宣言した」ように見え、``derive_state`` の
+        not-live 猶予窓 (= 直後の死は宣言を信じる) をすり抜けて状態が復活する。
+        修復は「何を宣言していたか」を正すだけで、「いつ宣言したか」を偽らない。
+      * ``state_detail`` は落とす (アイドル文言は待機内容ではない)。
+      * ``source_event`` に修復の痕跡を残す (後から「これは人/道具が直した行」と分かる)。
+    """
+    if not is_contaminated_awaiting_human(marker):
+        return None
+    repaired = dict(marker)
+    repaired["declared_state"] = bus_liveness.STATE_IDLE
+    repaired.pop("state_detail", None)
+    repaired["source_event"] = "beacon-repair-e6582"
+    return repaired
+
+
 def ask_question_detail(tool_input) -> str:
     """AskUserQuestion の tool_input から待機内容 (先頭の質問文) を引く。
 
