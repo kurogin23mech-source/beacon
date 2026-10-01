@@ -70,4 +70,12 @@ echo "[ci-strict-drift-guards] Windows-unsafe pid liveness probes (ms-133 e-6591
 # (both did, before the 2026-09-29 independent AX review caught the hole).
 python3 "$ROOT/scripts/check-pid-liveness.py" --strict
 
+echo "[ci-strict-drift-guards] 成功表示が書き込みより先に出ていないか (ms-160 e-6688)…"
+# `beacon task done e-5981` が stdout に "Done: [e-5981] ..." を出しつつ、stderr に
+# 並行書き込みガードの中止を出して exit 1 し、タスクは todo のまま残った (2026-09-29)。
+# save_project は正しく中止していて、欠陥は順序だった。ターミナルでは 2 つの流れが
+# 混ざるので、読み手 (人間でも AI でも) に残るのは成功行の方になる。
+# 順序はコメントでは保てないので機械で止める。
+python3 "$ROOT/scripts/check-print-before-save.py"
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."

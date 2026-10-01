@@ -300,20 +300,28 @@ def cmd_task_done():
                     file=sys.stderr,
                 )
             ms, entry = core.pr_merge(data, entry_id, date=today)
-            print(f"Merged PR [{entry_id}]: {entry['description']}")
             core.update_progress(ms, progress)
+            # ms-160 e-6688: print AFTER the write lands. save_project exits
+            # non-zero when the lost-update guard trips, so anything printed
+            # above it is a success line for a write that never happened.
+            save_project(data)
+            print(f"Merged PR [{entry_id}]: {entry['description']}")
             if progress:
                 print(f"  Progress: {ms.get('progress', 0)}%")
-            save_project(data)
             return
     ms, entry = core.task_done(data, entry_id, date=today, reason=reason)
+    core.update_progress(ms, progress)
+    # ms-160 e-6688: the completion lines belong AFTER the write. Observed
+    # 2026-09-29: `beacon task done e-5981` printed "Done: [e-5981] ..." on
+    # stdout while save_project aborted on stderr ("Cloud project changed
+    # since it was read"); the task stayed todo. In a terminal the two streams
+    # interleave, so the success line is what the reader (human or AI) keeps.
+    save_project(data, op={"op": "task_done", "entry_id": entry_id, "reason": reason})
     print(f"Done: [{entry_id}] {entry['description']}")
     if reason:
         print(f"  Reason: {reason}")
-    core.update_progress(ms, progress)
     if progress:
         print(f"  Progress: {ms.get('progress', 0)}%")
-    save_project(data, op={"op": "task_done", "entry_id": entry_id, "reason": reason})
     # ms-154 e-5650: record the done judgment on the decision arm (the CLI path
     # otherwise never reaches the server done route — see helper docstring).
     _record_task_done_decision(entry_id, reason)
