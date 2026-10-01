@@ -2354,17 +2354,57 @@ def _mint_decision_event_id() -> str:
     return f"dec-{_secrets.token_hex(8)}"
 
 
+def _fetch_decision_rows(project_id: str) -> list[dict]:
+    """``projects/{pid}/decision_events`` の全行を取得する (窓も絞りも掛けない)。
+
+    read 窓 (:func:`list_decision_events`) と完遂冪等チェック
+    (:func:`append_decision_event`) の両方が同じ取得経路を使うための 1 箇所
+    (ms-166 e-6602)。document id を ``decision_id`` に写すのはここだけ — 2 箇所に
+    コピーすると、片方だけ直した時に「窓では引けるのに重複判定では見えない」行が
+    生まれる。
+    """
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DECISION_EVENTS_SUBCOLLECTION)
+    )
+    rows: list[dict] = []
+    for d in col.stream():
+        rec = d.to_dict() or {}
+        rec["decision_id"] = d.id
+        rows.append(rec)
+    return rows
+
+
 def append_decision_event(project_id: str, data: dict) -> str:
     """Append a decision event (= minted decision_id). Returns the decision_id.
 
     Stamps ``decision_id`` / ``created_at`` if absent and rejects
     outcome-like fields before the write (= SPEC §設計方針2 invariant).
+
+    完遂 (= target が終端に到達した) decision は **同じ target が同じ verdict で二度
+    宣言されても 1 行しか残さない** (ms-166 e-6602)。何を重複と見なすかは単一真実源
+    ``decision_event.find_duplicate_completion`` が決める (3 backend で drift しない
+    ため、窓 ``window_decision_events`` と同じ分界)。重複なら append せず既存の
+    ``decision_id`` を返す。完遂族以外の kind は既存行の読み取りすら行わない。
     """
     try:
         from decision_event import assert_no_outcome
         assert_no_outcome(data or {})
     except ImportError:
         pass
+    # ms-166 e-6602: 完遂 decision の冪等 reject。完遂族でなければ ``_dedup_key`` が
+    # None を返すので、既存行の読み取りは一切走らない。
+    try:
+        from decision_event import completion_dedup_key, find_duplicate_completion
+    except ImportError:
+        completion_dedup_key = find_duplicate_completion = None
+    if completion_dedup_key is not None and \
+            completion_dedup_key(data or {}) is not None:
+        _dup = find_duplicate_completion(_fetch_decision_rows(project_id), data or {})
+        if _dup:
+            return str(_dup.get("decision_id") or "")
     payload = dict(data or {})
     decision_id = payload.get("decision_id") or _mint_decision_event_id()
     payload["decision_id"] = decision_id
@@ -2395,16 +2435,6 @@ def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
     decision once the append-only backlog exceeded ``limit``).
     """
     from decision_event import window_decision_events
-    col = (
-        get_db()
-        .collection(COLLECTION)
-        .document(project_id)
-        .collection(DECISION_EVENTS_SUBCOLLECTION)
-    )
-    rows: list[dict] = []
-    for d in col.stream():
-        rec = d.to_dict() or {}
-        rec["decision_id"] = d.id
-        rows.append(rec)
-    return window_decision_events(rows, kind=kind, limit=limit, since=since,
-                                  session=session, target=target)
+    return window_decision_events(_fetch_decision_rows(project_id), kind=kind,
+                                  limit=limit, since=since, session=session,
+                                  target=target)

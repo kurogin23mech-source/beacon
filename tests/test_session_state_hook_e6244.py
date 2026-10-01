@@ -567,3 +567,139 @@ class TestHookCarriesAskSignals:
         # アイドル通知は選択肢待ちの宣言を clobber しない。
         assert marker["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
         assert marker["state_detail"] == "続けますか？"
+
+
+# ===========================================================================
+# 6. ms-173 / e-6582 — 残留した「確認待ち」宣言の自己治癒。
+#
+#    62766932 (section 5) より前の beacon は、アイドル通知を awaiting_human に
+#    写したうえで state_detail にアイドル文言そのものを載せた。section 5 の
+#    no-clobber 規則は declared_state だけを見るので、その汚染マーカーを「本物の
+#    待ち」として *保護* してしまい、hook が二度と発火しない放置セッションでは
+#    運用室が永久に橙のまま残った (2026-09-19 実測 3 行)。
+#
+#    判別軸は state_detail 自身 (アイドル文言を載せた awaiting_human は汚染)。
+#    保護の条件を「本物であること」に絞ることで、次のアイドル通知で idle へ
+#    降格して自然に治る。section 5 の契約 (本物の待ちは保護される) は不変。
+# ===========================================================================
+
+_IDLE_MSG = "Claude is waiting for your input"
+_PERM_MSG = "Claude needs your permission to use Bash"
+
+
+def _contaminated_marker(detail=_IDLE_MSG):
+    """修正前の beacon が書いた形 — awaiting_human + アイドル文言の state_detail。"""
+    return {
+        "declared_state": bus_liveness.STATE_AWAITING_HUMAN,
+        "declared_at": "2026-09-18T00:00:00.000Z",
+        "state_since": "2026-09-18T00:00:00.000Z",
+        "source_event": "Notification",
+        "state_detail": detail,
+    }
+
+
+class TestIsGenuineAwaitingHuman:
+    def test_genuine_permission_wait(self):
+        assert session_state_hook.is_genuine_awaiting_human(
+            _contaminated_marker(detail=_PERM_MSG))
+
+    def test_contaminated_idle_detail_is_not_genuine(self):
+        assert not session_state_hook.is_genuine_awaiting_human(
+            _contaminated_marker())
+
+    def test_idle_detail_match_is_case_insensitive(self):
+        assert not session_state_hook.is_genuine_awaiting_human(
+            _contaminated_marker(detail="Claude Is WAITING For Your INPUT"))
+
+    def test_awaiting_human_without_detail_is_protected(self):
+        """message 無しの分類不能な Notification は従来どおり awaiting_human に
+        倒す設計 (fail-safe は過剰発火側)。detail の不在を汚染の証拠にしない。"""
+        m = _contaminated_marker()
+        del m["state_detail"]
+        assert session_state_hook.is_genuine_awaiting_human(m)
+
+    def test_other_states_are_not_awaiting_human(self):
+        for state in (bus_liveness.STATE_RUNNING, bus_liveness.STATE_IDLE,
+                      bus_liveness.STATE_BLOCKED, bus_liveness.STATE_TERMINATED):
+            m = _contaminated_marker(detail=_PERM_MSG)
+            m["declared_state"] = state
+            assert not session_state_hook.is_genuine_awaiting_human(m)
+
+    def test_non_dict_is_not_genuine(self):
+        for junk in (None, "", 0, [], "awaiting_human"):
+            assert not session_state_hook.is_genuine_awaiting_human(junk)
+
+
+class TestContaminatedAwaitingHumanSelfHeals:
+    def test_idle_notification_demotes_contaminated_marker(self):
+        """e-6582 の本体: 汚染マーカーは保護せず idle へ降格する (橙が消える)。"""
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:00:00.000Z",
+            prev_marker=_contaminated_marker(), detail=_IDLE_MSG)
+        assert m is not None, "汚染マーカーを保護し続けている (永久橙の再発)"
+        assert m["declared_state"] == bus_liveness.STATE_IDLE
+        assert "state_detail" not in m  # アイドル文言は待機内容ではない
+
+    def test_demotion_resets_state_since(self):
+        """awaiting_human → idle は本物の遷移なので「いつからこの状態か」は now。
+        汚染時代の state_since を持ち越すと、治った後も古い時刻で並ぶ。"""
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:00:00.000Z",
+            prev_marker=_contaminated_marker(), detail=_IDLE_MSG)
+        assert m["state_since"] == "2026-09-19T00:00:00.000Z"
+
+    def test_genuine_wait_is_still_protected(self):
+        """section 5 の契約の退行ガード: 本物の待ちは今も clobber されない。
+        ここが None でなくなったら、確認待ちが 60 秒ごとに消える穴が再発する。"""
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:00:00.000Z",
+            prev_marker=_contaminated_marker(detail=_PERM_MSG), detail=_IDLE_MSG)
+        assert m is None
+
+    def test_detail_less_wait_is_still_protected(self):
+        prev = _contaminated_marker()
+        del prev["state_detail"]
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:00:00.000Z",
+            prev_marker=prev, detail=_IDLE_MSG)
+        assert m is None
+
+    def test_healing_is_idempotent(self):
+        """降格後にもう一度アイドル通知が来ても idle のまま (state_since 保持)。"""
+        first = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:00:00.000Z",
+            prev_marker=_contaminated_marker(), detail=_IDLE_MSG)
+        second = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:05:00.000Z",
+            prev_marker=first, detail=_IDLE_MSG)
+        assert second["declared_state"] == bus_liveness.STATE_IDLE
+        assert second["state_since"] == first["state_since"]
+
+    def test_genuine_wait_after_healing_still_declares(self):
+        """治った後に本物の許可要求が来れば、ちゃんと確認待ちが立つ。"""
+        healed = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:00:00.000Z",
+            prev_marker=_contaminated_marker(), detail=_IDLE_MSG)
+        m = session_state_hook.build_state_marker(
+            "Notification", "2026-09-19T00:01:00.000Z",
+            prev_marker=healed, detail=_PERM_MSG)
+        assert m["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert m["state_detail"] == _PERM_MSG
+
+
+class TestContaminatedMarkerHealsEndToEnd:
+    def test_hook_heals_contaminated_marker_on_disk(self, tmp_path):
+        """実機経路 (hook stdin → マーカー書き換え) で汚染が消えることを押さえる。
+        pure 関数だけ直して hook 経路が古い prev を渡していない保証が要る。"""
+        (tmp_path / ".beacon").mkdir()
+        with open(_marker_path(tmp_path), "w", encoding="utf-8") as f:
+            json.dump(_contaminated_marker(), f)
+        proc = _run_hook({
+            "hook_event_name": "Notification", "cwd": str(tmp_path),
+            "message": _IDLE_MSG,
+        })
+        assert proc.returncode == 0, proc.stderr
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["declared_state"] == bus_liveness.STATE_IDLE
+        assert "state_detail" not in marker

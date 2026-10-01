@@ -255,8 +255,12 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
     ``commands_shared.best_effort_completion_decision`` — shared with the generic
     completion seam so the two never drift.
     """
-    from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
+    from commands_shared import (best_effort_completion_decision,
+                                 record_completion_decision, _is_cloud_mode,
                                  _get_api_client)
+    # 外側の契約は rich rationale の組み立て (meta / review_evidence の読み出し) まで
+    # 覆う。実際の write と冪等 reject の開示は収束口 record_completion_decision が
+    # 自分の契約で持つ (入れ子は無害 — 内側が先に飲む)。
     with best_effort_completion_decision(target_id, verdict):
         if not _is_cloud_mode():
             return
@@ -288,14 +292,18 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
         project_id = config.get("project_id", "")
         if not project_id:
             return
-        client.record_decision(project_id, {
+        # ms-166 e-6602 (独立レビュー AX-1 / 保守性 M-1): 収束口を経由する。この経路は
+        # 独立レビューの verdict / 根拠 / intent を含む rich rationale を運ぶので、同じ
+        # 対象×結論が先に別経路 (operation close 等) で bare rationale で記録済みだと
+        # store 層で畳まれ、この rich な記録が残らない。収束口が WARNING で開示する。
+        record_completion_decision(client, project_id, {
             "kind": "completion-verdict",
             "decision": verdict,
             "rationale": rationale,
             "decided_by": _decided_by_for_gate(),
             "evidence": evidence,
             "related": {"target_id": target_id},
-        })
+        }, target_id=target_id, verdict=verdict)
 
 
 def cmd_target_approve():
