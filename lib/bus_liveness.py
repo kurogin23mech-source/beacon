@@ -70,6 +70,46 @@ DECLARABLE_STATES = frozenset({
     STATE_TERMINATED,
 })
 
+# ms-173 / e-6775 — 「待機内容 (state_detail) を持つ状態」の正典。
+#
+# 不変条件: **state_detail は state に属する。両者は必ず一緒に動く。** 待ちでない状態
+# (running / idle / terminated …) は待機内容を持たない。
+#
+# これを明文化する理由 (実害 2026-10-01 実測 6 行): session row は merge 保存なので、
+# 宣言が awaiting_human → running に変わってもマーカーが state_detail を省くと **古い
+# 待機内容が永久に残る**。`state=running` なのに「Claude needs your permission」が
+# ぶら下がった行が現に 6 件あった。消費側 (lib/working_target) は待ち状態でしか detail を
+# 読まないので画面には出にくいが、行の中身は嘘になっており、detail を読む別の consumer が
+# 増えた瞬間に表に出る。
+#
+# この集合はここが唯一の定義。lib/working_target は別名で参照するだけ (以前は
+# working_target 側に private な複製があり、server からは参照できなかった)。
+WAIT_DETAIL_STATES = frozenset({STATE_AWAITING_HUMAN, STATE_BLOCKED})
+
+
+def state_carries_wait_detail(state) -> bool:
+    """``state`` が待機内容 (``state_detail``) を持つ状態か。
+
+    持たない状態で detail が残っていたら、それは前の状態の残骸。保存側はここを見て
+    空に揃える (:func:`state_detail_for_declaration`)。
+    """
+    return str(state or "") in WAIT_DETAIL_STATES
+
+
+def state_detail_for_declaration(declared_state, state_detail):
+    """宣言と一緒に保存すべき ``state_detail`` を返す。
+
+    待ちでない状態なら ``""`` (= 空で上書きして古い残骸を消す)。待ち状態なら渡された値を
+    そのまま (空なら空 — でっち上げない)。宣言が無い (= 状態を宣言していない heartbeat)
+    なら ``None`` を返し、保存側は **何も触らない** (merge の既存値を保つ)。
+    """
+    if not declared_state:
+        return None
+    if not state_carries_wait_detail(declared_state):
+        return ""
+    return state_detail if isinstance(state_detail, str) else ""
+
+
 # The COMPLETE range of ``derive_state`` — every value a consumer (ops room,
 # Go viewer, roster ordering, attention filter) may receive. Consumers that
 # enumerate states MUST check exhaustiveness against THIS set, not against

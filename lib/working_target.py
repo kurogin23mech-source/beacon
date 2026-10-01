@@ -35,10 +35,9 @@ import bus_liveness
 # 相手の返信待ち". When no detail is known we return EMPTY rather than falling back
 # to the head subject — 判定できない待機理由は素直に空にする (ms-173 SPEC 方針2 =
 # データはでっち上げず消費側は空欄で正しく描画する)。
-_WAIT_DETAIL_STATES = frozenset({
-    bus_liveness.STATE_AWAITING_HUMAN,
-    bus_liveness.STATE_BLOCKED,
-})
+# ms-173 / e-6775: 定義は lib/bus_liveness.WAIT_DETAIL_STATES に一本化した
+# (server 側も同じ集合を使う必要が出たため)。ここは別名のみ。
+_WAIT_DETAIL_STATES = bus_liveness.WAIT_DETAIL_STATES
 
 # ms-159 / e-6533 (#755 review AX-F1/AX-F2): the KIND of a row's ``activity`` —
 # what the 1-line string (and its emptiness) MEANS — so a consumer can interpret
