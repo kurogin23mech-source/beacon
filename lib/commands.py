@@ -1455,8 +1455,15 @@ def cmd_cloud_join():
 
 # Default command groups probed by the AX full-surface snapshot. These are
 # *group* commands (they dispatch to subcommands), so probing them with an
-# unknown subcommand exercises the usage / error / exit-code surface WITHOUT
-# executing real logic (no cloud calls, no state change) — safe to run on demand.
+# unknown subcommand exercises the usage / error / exit-code surface.
+#
+# ms-160 e-6715: "a group command cannot execute real logic" turned out to be
+# an assumption, not a property. `beacon note` takes free text as its
+# positional, so the bogus token was not rejected as bogus — it was saved as a
+# real session note (17 of the 48 notes in the live project store were this
+# probe string, polluting every parallel session's note list and session-end).
+# The probe therefore runs under the read-only gate (BEACON_SURFACE_PROBE), and
+# safety no longer depends on anyone vetting this list correctly.
 _SURFACE_SNAPSHOT_COMMANDS = [
     "milestone", "task", "doc", "pr", "target", "review", "bus", "trigger",
     "operation", "note", "session", "member", "claim",
@@ -1479,17 +1486,35 @@ def _collect_surface_snapshot(commands_list=None) -> list:
         beacon_bin = "beacon"  # fall back to PATH
     cmds = commands_list if commands_list is not None else _SURFACE_SNAPSHOT_COMMANDS
     probes = []
-    bogus = "__ax_surface_probe__"
+    import cli_surface
+    import readonly_gate
+    bogus = cli_surface.SURFACE_PROBE_SENTINEL
+    # ms-160 e-6715: run every probe read-only. The gate is in the python
+    # dispatch chokepoint, so it holds for whichever front end the bogus token
+    # reaches — and for command groups added to the list later.
+    probe_env = dict(os.environ)
+    probe_env["BEACON_SURFACE_PROBE"] = "1"
     for c in cmds:
         entry = {"cmd": c, "probe_argv": f"{c} {bogus}"}
         try:
             p = subprocess.run([beacon_bin, c, bogus], capture_output=True,
-                               text=True, timeout=20)
+                               text=True, timeout=20, env=probe_env)
             entry["exit_code"] = p.returncode
             entry["stdout"] = (p.stdout or "")[:2000]
             entry["stderr"] = (p.stderr or "")[:2000]
-            # a bogus subcommand that exits 0 with no stderr is a silent no-op
-            entry["silent_no_op"] = (p.returncode == 0 and not (p.stderr or "").strip())
+            # The gate fired: the bogus token reached a verb that WRITES, so
+            # what follows is the refusal, not the command's real surface. Say
+            # so, rather than letting a judge read the refusal as the answer.
+            blocked = (p.returncode == readonly_gate.PROBE_REFUSAL_EXIT)
+            entry["blocked_by_readonly_gate"] = blocked
+            # a bogus subcommand that exits 0 with no stderr is a silent no-op.
+            # A blocked probe is never that — it exited non-zero ON stderr — but
+            # pin it to False explicitly so the two signals can't be conflated.
+            entry["silent_no_op"] = (
+                not blocked
+                and p.returncode == 0
+                and not (p.stderr or "").strip()
+            )
         except (subprocess.TimeoutExpired, OSError) as e:
             entry["error"] = f"{type(e).__name__}: {e}"
         probes.append(entry)
@@ -11201,30 +11226,28 @@ if __name__ == "__main__":
         "view": cmd_view,
     }
     fn = commands.get(cmd)
-    # ms-178 e-6654: help must never mutate. bin/beacon sets BEACON_HELP_ONLY
-    # when -h/--help was on the command line but the help registry had no entry
-    # for that command, so the bash dispatcher fell through to the command's own
-    # parser. A parser that ignores trailing flags then EXECUTES the verb —
-    # `beacon note clear --help` wiped every session note exactly this way.
+    # ms-178 e-6654 / ms-160 e-6715: an inspection path must never mutate. Two
+    # callers reach a verb for a reason that is not "perform this verb" — a
+    # --help that fell through to the command's own parser, and the AX surface
+    # probe sampling the error surface with a bogus subcommand. Both executed
+    # real writes (`note clear --help` wiped the notes; `note <bogus>` saved the
+    # probe string as a real note). One chokepoint, several reasons, so a
+    # command added later is covered without anyone remembering to.
     #
-    # The gate is the verb ledger rather than a hand-written list of dangerous
-    # verbs: reconcile() pins the ledger against the live dispatch surface, so
-    # every key here is classified and a new verb cannot be forgotten. Only
-    # Q (read-only) may run under --help; an unclassified verb is treated as
-    # unsafe (fail-closed), since "no classification" is not evidence of safety.
-    if fn and os.environ.get("BEACON_HELP_ONLY") == "1":
-        try:
-            from verb_ledger import classify as _vl_classify
-            _entry = _vl_classify(cmd)
-        except Exception:
-            _entry = None
-        if not (_entry and _entry.get("cls") == "Q"):
-            _path = (os.environ.get("BEACON_HELP_QUERY") or cmd.replace("_", " ")).strip()
-            print(f"beacon {_path} — no help entry is registered for this command, "
-                  f"and it is not read-only, so it was NOT executed.")
-            print("Run 'beacon help' for the command list, or re-run without "
-                  "--help to actually perform it.")
-            sys.exit(0)
+    # The gate reads the verb ledger rather than a hand-written list of
+    # dangerous verbs: reconcile() pins the ledger against the live dispatch
+    # surface, so every key here is classified and a new verb cannot be
+    # forgotten. Only Q (read-only) may run; unclassified is refused, since "no
+    # classification" is not evidence of safety. Policy lives in
+    # lib/readonly_gate.py (pure, unit-tested); this site only prints and exits.
+    if fn:
+        import readonly_gate
+        _ro_reason = readonly_gate.active_reason()
+        if _ro_reason and not readonly_gate.verb_is_read_only(cmd):
+            _msg, _to_stderr, _code = readonly_gate.refusal(
+                cmd, _ro_reason, os.environ.get("BEACON_HELP_QUERY") or "")
+            print(_msg, file=sys.stderr if _to_stderr else sys.stdout)
+            sys.exit(_code)
     # ms-54 e-1319: the CLI-side heartbeat (formerly bumped here, ms-57 e-1035)
     # has been retired. Post Option C (PR #111 / commit 78048b6) the bridge
     # poll loop is the truth source for both ``last_active`` (proof of life)
