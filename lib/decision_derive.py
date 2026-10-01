@@ -100,3 +100,65 @@ def covered_pr_numbers(existing_decisions) -> set:
             if isinstance(ev, str) and ev.startswith("pr:"):
                 covered.add(ev[len("pr:"):])
     return covered
+
+
+# ── 本文から作業対象 (target) を解決する (ms-166 e-6603) ──────────────────────
+#
+# log-backstop (= commit 時に AI が自己申告する判断記録) は実データで 16/16 すべて
+# ``related.target_id`` が空だった。判断記録が「どの対象の話か」を持たないと、
+# session-start や session-end の「この対象の判断」という引き方 (``decision list
+# --target``) に一件も載らず、記録はあるのに辿れない。
+#
+# 本文 (``--what`` / ``--rationale``) には実際には対象 id が書かれていることが多い
+# (例「opp-3 の成約を…」「ms-166 の掃討で…」)。それを機械で拾って target に解決する。
+#
+# 曖昧なときは **推測しない**: 複数の異なる対象 id が出てきたら空を返す。1 件に絞れた
+# ときだけ解決する。間違った対象に判断を帰属させるのは、帰属が無いより悪い (監査で
+# 「この対象はこう判断された」と誤読される)。
+#
+# 対象 prefix は :func:`work_model.known_target_prefixes` から引く (= ハードコードしない)。
+# 新しい target クラスが台帳に載った瞬間にこの解決も効くようにするため。``e-`` (タスク /
+# エントリ) は target prefix ではないので拾われない。
+_TARGET_REF_RE = None
+
+
+def _target_ref_pattern():
+    """本文中の対象 id を拾う正規表現 (遅延生成 + キャッシュ)。
+
+    ``work_model.known_target_prefixes()`` から組むので、prefix 表に新クラスが増えれば
+    自動で対象になる。``op-`` が ``opp-`` の接頭辞だが、リテラルに ``-`` を含むので
+    ``opp-3`` が ``op-`` として誤match することはない (長い方を先に並べて明示的に優先)。
+    """
+    global _TARGET_REF_RE
+    if _TARGET_REF_RE is None:
+        import re
+        import work_model as _wm
+        prefixes = sorted(_wm.known_target_prefixes(), key=len, reverse=True)
+        alt = "|".join(re.escape(p) for p in prefixes)
+        # 対象 id = prefix + 英数字 1 文字以上。直前が英数字 / ハイフンなら拾わない
+        # (= 別語の一部を切り出さない)。
+        _TARGET_REF_RE = re.compile(r"(?<![0-9A-Za-z-])(" + alt + r")([0-9A-Za-z]+)")
+    return _TARGET_REF_RE
+
+
+def target_ids_in_text(*texts) -> list:
+    """``texts`` に現れる対象 id を重複なし・出現順で返す (純関数)。"""
+    found = []
+    pat = _target_ref_pattern()
+    for text in texts:
+        for m in pat.finditer(str(text or "")):
+            tid = m.group(1) + m.group(2)
+            if tid not in found:
+                found.append(tid)
+    return found
+
+
+def resolve_target_from_text(*texts) -> str:
+    """本文から対象 id を 1 件に解決する。曖昧 (= 0 件 or 2 件以上) なら ``""``。
+
+    「1 件に絞れたときだけ解決する」が肝。複数の対象に触れた判断を片方に帰属させると、
+    監査で「この対象はこう判断された」と誤読される。空で返して、呼び出し側が明示指定を
+    促せるようにする (= 黙って一方に寄せない)。
+    """
+    found = target_ids_in_text(*texts)
+    return found[0] if len(found) == 1 else ""

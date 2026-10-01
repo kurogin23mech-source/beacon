@@ -1729,14 +1729,25 @@ def make_router(
         + ``has_more``) is a deliberate follow-up, not supported here yet.
         """
         _load(project_id, user)  # read-access guard (404 / 403 as appropriate)
+        # ms-166 e-6603: 既定 read から「決定でない kind」(= dm-send) を外す。実データでは
+        # decided_by も related.target_id も None の通信ログで、既定の窓を埋めて本物の判断を
+        # 押し出していた。**消さず既定から外すだけ** — ``kind=dm-send`` を明示すれば従来
+        # どおり全件引ける。除外は窓の内側 (limit の前) で効くので、除外分だけ判断が
+        # こぼれることはない。
+        _excluded = (sorted(decision_event_mod.NON_DECISION_KINDS)
+                     if not kind else [])
         try:
             rows = db.list_decision_events(
                 project_id, kind=kind, limit=limit, since=since,
-                session=session, target=target)
+                session=session, target=target,
+                exclude_kinds=(decision_event_mod.NON_DECISION_KINDS
+                               if not kind else None))
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"decision stream read failed: {exc}")
-        return {"decisions": rows, "count": len(rows)}
+        # 既定で外した kind を応答に出す (= 黙って狭めない。「送ったはずの dm-send が
+        # 消えた」と読み手を誤らせないための開示で、見たい時の引き方も示せる)。
+        return {"decisions": rows, "count": len(rows), "excluded_kinds": _excluded}
 
     @router.get("/api/projects/{project_id}/deliverables")
     def list_deliverables(project_id: str,

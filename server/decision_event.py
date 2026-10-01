@@ -62,6 +62,21 @@ KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
 # 「既知 kind の集合」を指す点に注意 (語彙自体は開いている)。
 DECISION_KINDS = KNOWN_DECISION_KINDS
 
+
+# 「決定」ではない kind (ms-166 e-6603)。既定の read から外す。
+#
+# dm-send は ms-90 期に「DM 発信も決定の 1 経路」として同じストリームに束ねられたが、
+# 実データで見ると**判断ではなく通信ログ**である: decided_by が None (= 誰の判断でもない)、
+# related.target_id も None (= どの対象の話かも持たない)。直近 100 件で 3 件、時期に
+# よっては半分を占め、session-start の「最近の決定」が送信ログで埋まって**本物の判断が
+# 読めない** (= ms-166 が塞ぎたい silent 非機能そのもの)。
+#
+# **消すのではなく既定から外すだけ**。`kind=dm-send` を明示すれば従来どおり全件引ける
+# (= データを到達不能にしない。既定を黙って狭めるのは silent scope narrowing で、
+# 「送ったはずの記録が消えた」と読み手を誤らせる)。既定除外は応答の ``excluded_kinds``
+# で開示する。
+NON_DECISION_KINDS: frozenset[str] = frozenset({"dm-send"})
+
 # decided_by (= 誰が決めたか) の一級 enum は decision_vocab.DECIDED_BY が単一ソース
 # (上で import 済、ここから re-export)。旧: この module に重複定義していた (ms-154 e-5652)。
 
@@ -570,7 +585,7 @@ def _row_target_id(row: dict) -> str:
 
 def window_decision_events(rows, *, kind: str = "", limit: int = 100,
                            since: str = "", session: str = "",
-                           target: str = "") -> list[dict]:
+                           target: str = "", exclude_kinds=None) -> list[dict]:
     """decision_events の read 窓の**単一真実源** (ms-166 e-5970 / ms-164 e-6030).
 
     3 つの store backend (firestore / mysql / dynamodb) は「行の取得」だけを担い、
@@ -588,6 +603,11 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
     ``limit`` 件」を返す (ms-164 e-6030: session-end が『このセッション / この target の
     判断』を件数窓こぼれなく取れる = scale-contract-principle 準拠)。
 
+    ``exclude_kinds`` (ms-166 e-6603) は **``kind`` 未指定のときだけ** 効く既定除外
+    (:data:`NON_DECISION_KINDS` を渡す想定)。``limit`` の前に適用するので、除外した分
+    だけ本物の判断が窓からこぼれることはない。``kind`` を明示した read では無視する
+    (= 「その kind を見たい」という意図が既定より強い)。
+
     ``rows`` は各 backend が取得した decision dict の list (``decision_id`` / ``kind``
     / ``created_at`` / ``who`` / ``related`` を持つ)。純関数 — 副作用なし、入力 list は
     変更しない。
@@ -595,6 +615,13 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
     out = list(rows or [])
     if kind:
         out = [r for r in out if (r.get("kind") or "") == kind]
+    elif exclude_kinds:
+        # ms-166 e-6603: 既定 read から「決定でない kind」を外す。**limit の前**に絞るのが
+        # 要点 — 後で絞ると「最新 limit 件の中の残り」になって、除外した分だけ本物の判断が
+        # 窓からこぼれる (e-5970 で直した filter-after-truncate と同じ穴を再生産する)。
+        # ``kind`` 明示時は適用しない (= その kind を見たいという明示意図が既定より強い)。
+        _ex = frozenset(exclude_kinds)
+        out = [r for r in out if (r.get("kind") or "") not in _ex]
     if session:
         out = [r for r in out if _row_session_id(r) == session]
     if target:

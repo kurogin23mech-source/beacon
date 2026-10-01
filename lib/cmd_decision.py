@@ -58,7 +58,15 @@ def cmd_decision_record():
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip() or "log-backstop"
     what = os.environ.get("BEACON_DECISION_WHAT", "").strip()
     rationale = os.environ.get("BEACON_DECISION_RATIONALE", "").strip()
-    decided_by = os.environ.get("BEACON_DECISION_DECIDED_BY", "").strip() or "autonomous-AI"
+    # ms-166 e-6603 (2): 帰属を **session-kind から機械決定** する。旧実装は既定が
+    # "autonomous-AI" の固定文字列で、人間端末から打った判断まで「人間未確認の AI 単独
+    # 決定」として残っていた (実データで帰属が逆)。導出は commands_shared の
+    # decided_by_for_review (= 人間端末なら human-delegated、そうでなければ
+    # autonomous-AI) を再利用する — 同じ写像を 2 つ目のコピーとして書かない。
+    # --decided-by の明示指定は従来どおり勝つ (= 呼び出し側が判断主体を知っている場合)。
+    from commands_shared import decided_by_for_review
+    decided_by = (os.environ.get("BEACON_DECISION_DECIDED_BY", "").strip()
+                  or decided_by_for_review())
     evidence = _split_evidence(os.environ.get("BEACON_DECISION_EVIDENCE", ""))
     related_task = os.environ.get("BEACON_DECISION_RELATED_TASK", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -90,8 +98,18 @@ def cmd_decision_record():
     }
     if rationale:
         payload["rationale"] = rationale
+    related = {}
     if related_task:
-        payload["related"] = {"task_id": related_task}
+        related["task_id"] = related_task
+    # ms-166 e-6603 (1): 本文に書かれている対象 id を target に解決する。これが無いと
+    # 判断記録が「どの対象の話か」を持たず、`decision list --target` に一件も載らない
+    # (記録はあるのに辿れない)。曖昧なときは推測せず空のまま残す。
+    import decision_derive as _dd
+    derived_target = _dd.resolve_target_from_text(what, rationale)
+    if derived_target:
+        related["target_id"] = derived_target
+    if related:
+        payload["related"] = related
 
     try:
         client, config = _get_api_client()
@@ -111,6 +129,17 @@ def cmd_decision_record():
     else:
         did = result.get("decision_id", "?") if isinstance(result, dict) else "?"
         print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
+        # 導出した帰属と対象を開示する (= 機械が何を決めたかを書いた本人が確認できる)。
+        print(f"  帰属: {decided_by} (session 種別から導出)" if not
+              os.environ.get("BEACON_DECISION_DECIDED_BY", "").strip()
+              else f"  帰属: {decided_by} (明示指定)")
+        if derived_target:
+            print(f"  対象: {derived_target} (本文から解決)")
+        else:
+            _amb = _dd.target_ids_in_text(what, rationale)
+            if len(_amb) > 1:
+                print(f"  ⚠ 対象を解決できません — 本文に {', '.join(_amb)} が在り"
+                      f"どれの判断か決められません (取り違えを避けて空のまま記録しました)")
 
 
 def cmd_decision_list():
@@ -179,6 +208,12 @@ def cmd_decision_list():
             print(f"      なぜ: {r['rationale']}")
         if ev:
             print(f"      根拠: {', '.join(ev)}")
+    # ms-166 e-6603 (3): 既定 read から外した kind を開示する。黙って狭めると
+    # 「送ったはずの dm-send が消えた」と読み手を誤らせるので、外した事実と引き方を出す。
+    _ex = result.get("excluded_kinds") or [] if isinstance(result, dict) else []
+    if _ex:
+        print(f"  (既定では {', '.join(_ex)} を除いています — 通信ログであって判断では"
+              f"ないため。見るときは --kind {_ex[0]})")
 
 
 def cmd_decision_derive():

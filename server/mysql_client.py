@@ -2772,7 +2772,7 @@ def append_decision_event(project_id: str, data: dict) -> str:
 
 def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "", session: str = "",
-                         target: str = "") -> list[dict]:
+                         target: str = "", exclude_kinds=None) -> list[dict]:
     """decision_events を取得して窓を掛けて返す (ms-166 e-5970 / ms-164 e-6030).
 
     この backend は「行の取得」だけを担い、read 窓のセマンティクス (kind / session /
@@ -2784,4 +2784,5 @@ def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
     from decision_event import window_decision_events
     return window_decision_events(
         _query("decision_events", project_id),
-        kind=kind, limit=limit, since=since, session=session, target=target)
+        kind=kind, limit=limit, since=since, session=session, target=target,
+        exclude_kinds=exclude_kinds)
