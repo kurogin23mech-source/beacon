@@ -45,18 +45,10 @@ from decision_vocab import DECIDED_BY  # noqa: F401  (re-exported below)
 
 # 既知の決定経路 (= 参照用の語彙リスト。ms-154 §設計方針1 で語彙を開いたので hard gate
 # ではない = 未知の kind も build_decision_event は受け付ける)。新経路を足したらここに
-# 文書化する。ms-90 の 5 経路 + ms-154 decision arm の捕獲対象。
-KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
-    {
-        # ms-90 Trek 由来の 4(+1) 経路
-        "dm-send", "trek-review", "scope-approval", "halt", "resume",
-        # ms-154 decision arm の捕獲対象 (e-5592 / e-5593 / e-5594)
-        "task-done", "completion-verdict", "review-adjudication", "log-backstop",
-        # ms-166 e-6599: 判断 (gate judgement) = 対象を次のどの状態へ倒すか の決定。
-        # 完遂 (completion-verdict) とは別族 — advance / retry は完遂ではない。
-        "gate-judgement",
-    }
-)
+# 文書化する。定義本体は ms-166 e-6633 で lib/decision_vocab.py に移した — CLI 側
+# (beacon decision list) が「指定された kind が既知か」を判定するのに同じ集合を要し、
+# server/ は CLI の import 経路に無いため (DECIDED_BY が e-5652 で同じ理由で移設済)。
+from decision_vocab import KNOWN_DECISION_KINDS  # noqa: F401  (re-exported below)
 
 # 後方互換の別名 (= ms-90 期の import 名を壊さない)。閉語彙だった頃の意味ではなく、
 # 「既知 kind の集合」を指す点に注意 (語彙自体は開いている)。

@@ -30,3 +30,25 @@ DECIDED_BY: frozenset[str] = frozenset(
         "programmatic",             # コードが機械的に決めた (= AI 判断ですらない)
     }
 )
+
+
+# ではない = 未知の kind も build_decision_event は受け付ける)。新経路を足したらここに
+# 文書化する。ms-90 の 5 経路 + ms-154 decision arm の捕獲対象。
+KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
+    {
+        # ms-90 Trek 由来の 4(+1) 経路
+        "dm-send", "trek-review", "scope-approval", "halt", "resume",
+        # ms-154 decision arm の捕獲対象 (e-5592 / e-5593 / e-5594)
+        "task-done", "completion-verdict", "review-adjudication", "log-backstop",
+        # ms-166 e-6599: 判断 (gate judgement) = 対象を次のどの状態へ倒すか の決定。
+        # 完遂 (completion-verdict) とは別族 — advance / retry は完遂ではない。
+        "gate-judgement",
+        # ms-166 e-6756: 採否 (disposition) = 達成主張を通す前に、未着手の重要タスクを
+        # どう処分したか (done / superseded / blocks-attainment) の判定。
+        # ``cmd_target._record_disposition_decision`` が e-5651 から書いていたのに、
+        # 「新経路を足したらここに文書化する」という上の規律が守られておらず、本番に
+        # 1000 件中 86 件あるのに既知 kind として載っていなかった (= 捕獲台帳の被覆
+        # 検査が disposition を素通りし、配線が外れても checker が緑のままだった)。
+        "disposition",
+    }
+)

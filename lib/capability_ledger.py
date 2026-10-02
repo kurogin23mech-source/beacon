@@ -1088,6 +1088,9 @@ DECISION_CAPTURE_PRODUCERS = {
     "log-backstop": frozenset({"cmd_decision_record"}),
     # ms-166 e-6599: 判断 seam は営業の商談ゲート settle (全 4 遷移の唯一の漏斗)。
     "gate-judgement": frozenset({"stage_gate_judgement_decision"}),
+    # ms-166 e-6756: 採否 (未着手の重要タスクをどう処分したか) の seam。達成ゲートが
+    # 書いているのに台帳に無く、配線が外れても checker が落ちなかった。
+    "disposition": frozenset({"_record_disposition_decision"}),
     # 導出 kind (KNOWN_DECISION_KINDS 外だが判断軌跡の一級 source): PR intent から導出。
     # Must be listed in DECISION_CAPTURE_DERIVED_KINDS below (the orphan-guard's exception set).
     "pr-intent": frozenset({"build_pr_intent_decision"}),
@@ -1108,6 +1111,26 @@ DECISION_CAPTURE_DERIVED_KINDS: frozenset = frozenset({"pr-intent"})
 # exists so that IF a future kind names a conversational-only judgment, it is declared
 # here on purpose (visible boundary) rather than silently failing the coverage checker.
 DECISION_CAPTURE_BOUNDARY: frozenset = frozenset()
+
+# 実行時に名付けられる kind (ms-166 e-6756)。``beacon decision record`` は
+# ``BEACON_DECISION_KIND`` に渡された **任意の文字列** を kind として受け付ける
+# (語彙は意図的に開いている / server/decision_event.py 冒頭の設計方針)。ゆえに
+# 「kind ごとに専用 producer を持つ」という上の表は、この経路で生まれた kind を
+# 原理的に覆えない — 覆えるのは **seam に溶接された kind** だけ。被覆保証の射程を
+# 正直に書いておくためのセット。
+#
+# 書き手は特定済みで、旧版の遺物ではない: 汎用の記録口 ``cmd_decision_record``
+# (台帳では log-backstop の producer として既に覆われている) が唯一の入口。
+#
+#   "triage" — タスクの優先度をどう格付けしたかの判定。本番 1000 件中 1 件。
+#              初出 2026-09-29 (dec-3602f589b54a38c6 / e-6637 の優先度を untriaged
+#              から highest にした判断)。専用 seam は無く、人または AI が
+#              ``beacon decision record`` で名付けて書いた。
+#
+# ここに足すのは **本番データに現れたが専用 seam を持たない kind** のみ。専用 seam を
+# 後から作ったら、この行を外して DECISION_CAPTURE_PRODUCERS に移す
+# (``test_decision_capture_adhoc_kinds_have_no_producer`` が二重登録を止める)。
+DECISION_CAPTURE_ADHOC_KINDS: frozenset = frozenset({"triage"})
 
 # Ratchet allowlist for accepted-pending decision-capture gaps (owner ms-166). A kind
 # whose producer is not yet wired, accepted as debt. ONE-WAY ratchet (same discipline as
