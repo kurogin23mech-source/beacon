@@ -1163,6 +1163,11 @@ def build_parser() -> argparse.ArgumentParser:
     # refused on one frontend and accepted on the other.
     p_note.add_argument("--yes", "-y", "--confirm", dest="assume_yes",
                         action="store_true")
+    # NOT --all: every other --all in this CLI widens a READ. Reusing it
+    # to widen a DESTRUCTIVE scope teaches an agent the wrong reflex
+    # (AX review, PR #782).
+    p_note.add_argument("--include-other-sessions", dest="note_all",
+                        action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- decision (ms-154 e-5594: log-time decision backstop の記録口) ----
@@ -3962,7 +3967,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear --yes   (-y / --confirm も可)\n"
+            "       beacon note clear --yes [--include-other-sessions]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
@@ -3978,9 +3983,11 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
     if sub == "clear":
         # ms-178 e-6654: pass the confirmation through; the python side
         # refuses without it (the cloud notes are shared project-wide).
+        # ms-160 e-6714: --all opts out of the this-session-only default.
         return _run_commands_py(
             root, "note_clear",
-            {"BEACON_NOTE_CLEAR_YES": "1" if args.assume_yes else ""},
+            {"BEACON_NOTE_CLEAR_YES": "1" if args.assume_yes else "",
+             "BEACON_NOTE_CLEAR_ALL": "1" if getattr(args, "note_all", False) else ""},
         )
     if sub == "restore":
         # ms-178 e-6656: recover from the backups clear left. Additive and
@@ -3999,7 +4006,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear --yes   (-y / --confirm も可)\n"
+            "       beacon note clear --yes [--include-other-sessions]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"

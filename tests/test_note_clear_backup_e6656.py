@@ -40,8 +40,18 @@ def _write_local(beacon_dir, *notes):
 
 @pytest.fixture(autouse=True)
 def _confirmed(monkeypatch):
-    """These tests are about the backup, not the e-6654 confirmation gate."""
+    """These tests are about the backup, not the e-6654 confirmation gate.
+
+    ms-160 e-6714 scoped `note clear`'s DEFAULT to the calling session's own
+    notes. What this file pins — snapshot both stores before deleting, abort
+    when the snapshot cannot be taken, report a failed cloud delete instead of
+    swallowing it, round-trip through `note restore` — is the contract for
+    clearing the SHARED store, which is now spelled `--all`. The contract is
+    unchanged; only the verb that reaches it is. Set here rather than per test
+    so the file keeps testing one thing.
+    """
     monkeypatch.setenv("BEACON_NOTE_CLEAR_YES", "1")
+    monkeypatch.setenv("BEACON_NOTE_CLEAR_ALL", "1")
     monkeypatch.delenv("BEACON_JSON", raising=False)
 
 
