@@ -494,7 +494,7 @@ Ephemeral memos that survive context compaction within a session — cleared at 
 |---------|-------------|
 | `beacon note "text" [--context "label"]` | Add a session note / セッションメモ追加 |
 | `beacon note list [--json]` | Show session notes; cloud mode merges other sessions' notes (origin=local\|both\|cloud) / メモ一覧 (cloud mode は他セッション分も統合) |
-| `beacon note clear --yes` | Clear all session notes / 全削除 (`--yes` 必須、両ストアを退避してから削除) |
+| `beacon note clear --yes [--all]` | Clear THIS session's notes / 自セッション分を削除 (`--yes` 必須、両ストアを退避してから削除。`--all` で全セッション分、誰の分を消すか提示してから) |
 | `beacon note restore` | Restore notes from the backups `note clear` left / 退避からメモを復元 |
 | `beacon note purge-probes [--confirm]` | Remove the junk notes an AX surface audit left behind (dry-run unless `--confirm`) / 点検機構が書いたゴミメモを除去（`--confirm` 無しは下見） |
 

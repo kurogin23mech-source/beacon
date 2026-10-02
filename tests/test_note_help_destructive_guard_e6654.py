@@ -39,7 +39,13 @@ BASH = shutil.which("bash")
 
 sys.path.insert(0, str(ROOT / "lib"))
 
+# ms-160 e-6714 scoped `note clear`'s DEFAULT to the calling session's own
+# notes. This file is about the --help / confirmation gate on the SHARED store,
+# which is now spelled `--all`; the gate's contract is unchanged, only the verb
+# that reaches it. The note is left untagged on purpose — it stands for
+# "somebody else's / legacy", which the scoped default must never assume.
 NOTE_LINE = json.dumps({"ts": "2026-09-29T10:00:00+0900", "text": "handoff"}) + "\n"
+CLEAR_ALL = ["clear", "--all"]
 
 
 @pytest.fixture
@@ -73,7 +79,7 @@ def _run(cwd, *args, env=None):
 def test_note_clear_help_does_not_delete_notes(project, flag):
     """The named breakage: `note clear --help` must explain, not wipe."""
     cwd, notes = project
-    r = _run(cwd, "note", "clear", flag)
+    r = _run(cwd, "note", *CLEAR_ALL, flag)
     assert notes.exists(), (
         f"`beacon note clear {flag}` DELETED the session notes — asking for help "
         "must never mutate data (e-6654)"
@@ -114,7 +120,7 @@ def test_bare_note_clear_refuses_without_yes(project):
     """clear removes the project's SHARED cloud notes too, so a bare verb must
     not be enough. Refusal is non-zero and names the count + recovery path."""
     cwd, notes = project
-    r = _run(cwd, "note", "clear")
+    r = _run(cwd, "note", *CLEAR_ALL)
     assert r.returncode != 0, "bare `note clear` succeeded silently: " + r.stdout
     assert notes.exists(), "bare `note clear` deleted the notes"
     assert "--yes" in r.stderr, r.stderr
@@ -127,7 +133,7 @@ def test_note_clear_with_yes_still_clears(project, flag):
     """The guard must not break the intended operation (it is a confirmation,
     not a removal): with --yes the notes are cleared and .bak is left behind."""
     cwd, notes = project
-    r = _run(cwd, "note", "clear", flag)
+    r = _run(cwd, "note", *CLEAR_ALL, flag)
     assert r.returncode == 0, r.stdout + r.stderr
     assert not notes.exists(), "clear --yes did not clear: " + r.stdout
     assert notes.with_suffix(".jsonl.bak").exists(), "local backup was not kept"
@@ -207,7 +213,7 @@ def test_dispatch_frontend_also_refuses_bare_clear(project):
     """Beacon has two CLI frontends (bin/beacon bash + beacon_cli/dispatch.py).
     A gate on one only is a gate the other walks around, so pin the second."""
     cwd, notes = project
-    r = _dispatch_note(cwd, "note", "clear")
+    r = _dispatch_note(cwd, "note", *CLEAR_ALL)
     assert r.returncode != 0, r.stdout + r.stderr
     assert notes.exists(), "dispatch.py cleared notes without --yes"
     assert "--yes" in r.stderr, r.stderr
@@ -218,7 +224,7 @@ def test_dispatch_frontend_clears_with_yes(project, flag):
     """...and that the second frontend can still actually clear (it must pass
     the confirmation through, not merely fail to)."""
     cwd, notes = project
-    r = _dispatch_note(cwd, "note", "clear", flag)
+    r = _dispatch_note(cwd, "note", *CLEAR_ALL, flag)
     assert r.returncode == 0, r.stdout + r.stderr
     assert not notes.exists(), "dispatch.py --yes did not clear: " + r.stdout
 

@@ -2345,19 +2345,25 @@ EOF
                 # a bare verb.
                 shift 2
                 note_yes=""
+                note_all=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         -y|--yes|--confirm) note_yes="1"; shift ;;
+                        # ms-160 e-6714: default is this session's notes only.
+                        # --all takes every session's, and says whose first.
+                        --all)    note_all="1"; shift ;;
                         -?*)      _guard_flag "$1" ;;
                         *)        _guard_no_positional "note clear" "$1" ;;
                     esac
                 done
-                BEACON_NOTE_CLEAR_YES="$note_yes" python3 "$COMMANDS_PY" note_clear
+                BEACON_NOTE_CLEAR_YES="$note_yes" \
+                    BEACON_NOTE_CLEAR_ALL="$note_all" \
+                    python3 "$COMMANDS_PY" note_clear
                 ;;
             "")
                 echo "Usage: beacon note \"<text>\" [--context \"<label>\"]"
                 echo "       beacon note list [--json]"
-                echo "       beacon note clear -y|--yes"
+                echo "       beacon note clear -y|--yes [--all]   (既定は自セッション分のみ)"
                 echo "       beacon note restore"
                 echo "       beacon note purge-probes [--confirm]   (-y / --yes も可)"
                 ;;

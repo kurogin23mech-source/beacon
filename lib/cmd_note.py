@@ -272,97 +272,267 @@ def cmd_note_list():
         print(f"  {n['ts'][:16]}{ctx}: {n['text']}{mark}")
 
 
-def cmd_note_clear():
+
+def _clear_backup_desc(local, cloud, project_id) -> str:
+    """Write the backups `note restore` reads (ms-178 e-6656): local pre-clear
+    content at ``.jsonl.bak``, cloud pre-clear content at ``.cloud.bak``.
+
+    Scoped clearing must keep writing BOTH. An earlier draft of e-6714 replaced
+    them with one combined file and silently orphaned ``note restore`` — the
+    recovery path e-6656 exists to provide. Caught only because e-6656's tests
+    are written against the contract rather than the implementation.
+    """
     path = _get_notes_path()
-    # ms-178 e-6654: refuse without an explicit confirmation. Clearing removes
-    # the local file (recoverable from .bak) AND the project's cloud notes,
-    # which are a store SHARED by every session on the project — one session
-    # tidying up deletes the other sessions' handoff notes (observed 2026-09-28:
-    # a fork's 3 notes were lost to the parent's cleanup). The gate lives here,
-    # not only in bin/beacon, so the python entrypoint is safe no matter which
-    # front end (bash dispatcher, Windows/Codex shim, direct call) reaches it.
-    if os.environ.get("BEACON_NOTE_CLEAR_YES") != "1":
-        count = 0
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                count = sum(1 for line in f if line.strip())
-        print(f"Refusing to clear {count} session note(s) without confirmation.",
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path + ".bak", "w", encoding="utf-8") as f:
+        for n in local:
+            f.write(json.dumps(n, ensure_ascii=False) + "\n")
+    if project_id:
+        cb = _cloud_backup_path()
+        os.makedirs(os.path.dirname(cb) or ".", exist_ok=True)
+        with open(cb, "w", encoding="utf-8") as f:
+            for n in cloud:
+                f.write(json.dumps(n, ensure_ascii=False) + "\n")
+        return path + ".bak + " + cb
+    return path + ".bak"
+
+
+def _combined_backup_desc(local, cloud, project_id) -> str:
+    """One file holding both stores, for purge-probes. Deliberately NOT the
+    clear backups: either operation must not destroy the other's recovery
+    route."""
+    dest = _purge_backup_path()
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        for n in local:
+            f.write(json.dumps(dict(n, origin="local"), ensure_ascii=False) + "\n")
+        for n in cloud:
+            f.write(json.dumps(dict(n, origin="cloud"), ensure_ascii=False) + "\n")
+    return dest
+
+
+def _selective_delete(should_delete, *, label, write_backups, confirm,
+                      rerun_hint, preview=None, on_unconfirmed="refuse"):
+    """Delete the notes ``should_delete(note)`` picks; keep the rest.
+
+    One mechanism, two policies. ``note clear`` (this session's notes) and
+    ``note purge-probes`` (machine garbage) are the same operation with a
+    different predicate; writing it twice would give the backup ordering, the
+    re-post accounting and the failure reporting two chances each to be wrong.
+
+    The cloud store has no delete-one, so its leg is snapshot → clear → re-post
+    the survivors. That window can lose a note another session writes while it
+    runs; disclosed rather than designed away, because a server endpoint needs
+    a production deploy this project does not currently do.
+
+    Ordering is the guarantee: no backup ⇒ no delete.
+
+    ``on_unconfirmed`` is "refuse" for the destructive verb (state the stake on
+    stderr, exit non-zero) and "preview" for the opt-in cleanup (dry run on
+    stdout, exit 0). Returns the number removed, or -1 when nothing was done.
+    """
+    path = _get_notes_path()
+    project_id = _cloud_project_id()
+
+    local = _read_local_notes(path)
+    local_go = [n for n in local if should_delete(n)]
+    local_keep = [n for n in local if not should_delete(n)]
+
+    cloud, cloud_go, cloud_keep, cloud_error = [], [], [], ""
+    if project_id:
+        cloud, cloud_error = _fetch_cloud_notes(project_id)
+        if cloud_error and confirm:
+            # A store we cannot read is a store we cannot back up, so when we
+            # are about to delete we delete from neither. While only SIZING
+            # the stake, an unreadable cloud is reported as "count unknown" —
+            # refusing to describe the operation would hide the stake instead
+            # of stating it (ms-178 e-6656).
+            print("Aborted: cloud のメモを取得できず退避が取れません "
+                  "(%s)。" % cloud_error, file=sys.stderr)
+            print("  何も削除していません (退避の取れない削除は行いません)。",
+                  file=sys.stderr)
+            sys.exit(1)
+        cloud_go = [n for n in cloud if should_delete(n)]
+        cloud_keep = [n for n in cloud if not should_delete(n)]
+
+    total = len(local_go) + len(cloud_go)
+
+    if total == 0 and on_unconfirmed == "refuse":
+        # Nothing of ours to clear. Exit 0 so the session-end routine
+        # COMPLETES — being unable to finish it while others were working is
+        # the defect e-6714 is about, and refusing here would reproduce it in
+        # a new place. Say what is left and how to reach it.
+        others = len(local) + len(cloud) - total
+        print("%sはありません (削除するものなし)。" % label)
+        if others:
+            print("  他セッション分が %d 件あります。消す必要があるなら "
+                  "'beacon note clear --all --yes' を明示してください。" % others)
+        return -1
+
+    if not confirm and on_unconfirmed == "refuse":
+        # A confirmation gate that hides the stake is not a gate (ms-178, AX
+        # review of PR#766). Size it on stderr and exit non-zero: this is a
+        # refusal, not a successful preview.
+        print("Refusing to clear %d session note(s) without confirmation (%s)."
+              % (len(local_go), label), file=sys.stderr)
+        print("  local: %s (moved to %s.bak, recoverable)" % (path, path),
               file=sys.stderr)
-        print(f"  local: {path} (moved to {path}.bak, recoverable)",
-              file=sys.stderr)
-        pid = _cloud_project_id()
-        if pid:
-            # AX review (PR#766): sizing only the local leg let the operator see
-            # an exact number for "my" notes and a vague "some others exist" for
-            # the SHARED store it is about to destroy — it could not tell 0 from
-            # 200. A confirmation gate that hides the stake is not a gate.
-            cloud_notes, cloud_error = _fetch_cloud_notes(pid)
+        if project_id:
             if cloud_error:
                 others = "件数不明 — cloud を確認できません"
             else:
-                local_keys = {_note_key(n) for n in _read_local_notes(path)}
-                n_other = sum(1 for n in cloud_notes
+                local_keys = {_note_key(n) for n in local}
+                n_other = sum(1 for n in cloud_go
                               if _note_key(n) not in local_keys)
-                others = f"他セッション分 {n_other} 件を含む計 {len(cloud_notes)} 件"
-            print(f"  cloud: this project's notes are SHARED by every session "
-                  f"({others}) — clearing removes other sessions' handoff notes "
-                  f"too. Snapshotted to {_cloud_backup_path()} first; restore "
-                  f"with 'beacon note restore'.", file=sys.stderr)
-        print("Re-run as 'beacon note clear --yes' to proceed.", file=sys.stderr)
+                others = ("他セッション分 %d 件を含む計 %d 件"
+                          % (n_other, len(cloud_go)))
+            print("  cloud: this project's notes are SHARED by every session "
+                  "(%s) — clearing removes other sessions' handoff notes too. "
+                  "Snapshotted to %s first; restore with 'beacon note restore'."
+                  % (others, _cloud_backup_path()), file=sys.stderr)
+        if preview:
+            preview(local_go, cloud_go, local_keep, cloud_keep)
+        print("Re-run as '%s' to proceed." % rerun_hint, file=sys.stderr)
         sys.exit(1)
-    # ms-178 e-6656: take the CLOUD snapshot before deleting anything. The local
-    # file was always moved to .bak, but the cloud notes were deleted outright —
-    # so ".bak exists, therefore it is recovered" was structurally false, and a
-    # note really did stay lost after a restore was reported as complete.
-    #
-    # Ordering is the guarantee: no backup ⇒ no delete. If the cloud cannot be
-    # read we abort BOTH legs rather than clearing local and leaving the two
-    # stores disagreeing about what happened.
-    project_id = _cloud_project_id()
-    cloud_notes = []
-    if project_id:
-        cloud_notes, cloud_error = _fetch_cloud_notes(project_id)
-        if cloud_error:
-            print(f"Aborted: cloud のメモを取得できず退避が取れません ({cloud_error})。",
-                  file=sys.stderr)
-            print("  何も削除していません (退避の取れない削除は行いません)。"
-                  "接続を回復してから再実行してください。", file=sys.stderr)
-            sys.exit(1)
-        backup = _cloud_backup_path()
-        try:
-            os.makedirs(os.path.dirname(backup) or ".", exist_ok=True)
-            with open(backup, "w", encoding="utf-8") as f:
-                for n in cloud_notes:
+
+    if total == 0:
+        print("%sは見つかりませんでした。削除するものはありません。" % label)
+        return -1
+
+    print("削除対象 (%s): local %d 件 / cloud %d 件"
+          % (label, len(local_go), len(cloud_go)))
+    print("残すメモ: local %d 件 / cloud %d 件"
+          % (len(local_keep), len(cloud_keep)))
+    if preview:
+        preview(local_go, cloud_go, local_keep, cloud_keep)
+    if not confirm:
+        print()
+        print("これは下見です (まだ何も変更していません)。")
+        if project_id:
+            print("  実行すると cloud のメモを一度すべて消してから、残すメモを"
+                  "投稿し直します。")
+            print("  この間に別セッションが書いたメモは失われます "
+                  "(退避は取るので復元の手当ては可能)。")
+        print("  実行する: %s" % rerun_hint)
+        return -1
+
+    try:
+        backup_desc = write_backups(local, cloud, project_id)
+    except OSError as exc:
+        print("Aborted: 退避を書けません (%s)。何も削除していません。" % exc,
+              file=sys.stderr)
+        sys.exit(1)
+
+    if local_go:
+        if local_keep:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                for n in local_keep:
                     f.write(json.dumps(n, ensure_ascii=False) + "\n")
-        except OSError as exc:
-            print(f"Aborted: cloud の退避を書けません ({backup}: {exc})。"
-                  f"何も削除していません。", file=sys.stderr)
-            sys.exit(1)
+        elif os.path.exists(path):
+            # Nothing survives: the file goes away rather than being left
+            # empty — the post-condition `note restore` was written against.
+            os.remove(path)
 
-    if os.path.exists(path):
-        import shutil
-        shutil.move(path, path + ".bak")
-
-    cloud_cleared = True
-    if project_id:
+    reposted, failed = 0, []
+    if project_id and cloud_go:
         try:
             client, error = _note_api_client()
             if error:
                 raise RuntimeError(error)
             client.clear_notes(project_id)
         except Exception as exc:
-            # Previously swallowed: a failed cloud delete still printed
-            # "Session notes cleared.", so the two stores silently diverged.
-            cloud_cleared = False
-            print(f"Warning: cloud のメモを削除できませんでした ({exc})。"
-                  f"ローカルのみクリアされ、cloud 側は残っています。", file=sys.stderr)
+            print("Warning: cloud のメモを削除できませんでした (%s)。"
+                  "ローカルのみクリアされ、cloud 側は残っています。" % exc,
+                  file=sys.stderr)
+            cloud_keep = []
+        for n in cloud_keep:
+            payload = {k: v for k, v in n.items() if k != "origin"}
+            push_error = _push_note_to_cloud_or_error(payload)
+            if push_error:
+                failed.append((n, push_error))
+                continue
+            reposted += 1
 
     print("Session notes cleared.")
-    if os.path.exists(path + ".bak"):
-        print(f"  local 退避: {path}.bak")
-    if project_id and cloud_cleared:
-        print(f"  cloud 退避: {_cloud_backup_path()} ({len(cloud_notes)} 件)")
+    print("  退避: %s" % backup_desc)
+    if project_id:
+        print("  cloud に戻したメモ: %d / %d 件" % (reposted, len(cloud_keep)))
     print("  復元: beacon note restore")
+    if failed:
+        # Counting attempts as successes is the ms-178 e-6656 defect; report
+        # the shortfall instead of inventing it.
+        print("Warning: cloud への再投稿に %d 件失敗しました。退避 %s に全文が"
+              "残っています。" % (len(failed), backup_desc), file=sys.stderr)
+        for n, why in failed[:5]:
+            print("  - %s %s: %s" % ((n.get("ts") or "?")[:16],
+                                     (n.get("text") or "")[:40], why),
+                  file=sys.stderr)
+        sys.exit(1)
+    return total
+
+
+def _session_label(note) -> str:
+    sid = (note.get("session_id") or "").strip()
+    return sid[-12:] if sid else "(セッション未記録)"
+
+
+def cmd_note_clear():
+    """Clear session notes — by default ONLY this session's (ms-160 e-6714).
+
+    Before this, `clear` wiped the whole shared store. The cloud notes belong
+    to every session on the project, so one session tidying up took the other
+    sessions' handoff notes with it (2026-09-28: a fork lost 3 notes to the
+    parent's cleanup; 2026-10-01: 28 notes of which 10 were other sessions').
+
+    The heavier consequence was not the lost notes but that it made the
+    session-end routine *unperformable* while anyone else was working — so
+    notes accumulated instead of being promoted. Scoping the default makes the
+    routine completable whatever else is running. `--all` still clears
+    everything and says whose notes it is about to take first.
+    """
+    confirm = os.environ.get("BEACON_NOTE_CLEAR_YES") == "1"
+    want_all = os.environ.get("BEACON_NOTE_CLEAR_ALL") == "1"
+    session_id = (_resolve_session_id() or "").strip()
+
+    if want_all:
+        def _preview(local_go, cloud_go, local_keep, cloud_keep):
+            # "N 件消えます" does not let the operator weigh the cost; whose
+            # notes, and how many each, does.
+            by = {}
+            for n in local_go + cloud_go:
+                by[_session_label(n)] = by.get(_session_label(n), 0) + 1
+            mine = _session_label({"session_id": session_id})
+            out = sys.stderr if not confirm else sys.stdout
+            print("  内訳 (セッション別):", file=out)
+            for lab in sorted(by, key=lambda k: -by[k]):
+                tag = " ← このセッション" if (lab == mine and session_id) else ""
+                print("    %s: %d 件%s" % (lab, by[lab], tag), file=out)
+            if session_id and any(k != mine for k in by):
+                print("  ⚠ 他セッションの引き継ぎメモが含まれます。"
+                      "自分の分だけなら --all を外してください。", file=out)
+
+        _selective_delete(lambda n: True, label="全セッションのメモ",
+                          write_backups=_clear_backup_desc, confirm=confirm,
+                          rerun_hint="beacon note clear --all --yes",
+                          preview=_preview)
+        return
+
+    if not session_id:
+        # Without an id we cannot tell our notes from anyone else's. Deleting
+        # "probably mine" is the exact failure this scoping exists to stop.
+        print("Error: このセッションの id が解決できないため、自分のメモだけを"
+              "選べません。", file=sys.stderr)
+        print("  全件消すなら 'beacon note clear --all --yes' を明示してください "
+              "(他セッションのメモも消えます)。", file=sys.stderr)
+        sys.exit(1)
+
+    _selective_delete(
+        lambda n: (n.get("session_id") or "").strip() == session_id,
+        label="このセッション (%s) のメモ" % _session_label(
+            {"session_id": session_id}),
+        write_backups=_clear_backup_desc, confirm=confirm,
+        rerun_hint="beacon note clear --yes")
 
 
 def cmd_note_restore():
@@ -463,122 +633,19 @@ def _is_probe_note(note: dict) -> bool:
 
 
 def cmd_note_purge_probes():
-    """Remove the probe notes an unguarded AX surface audit already wrote
-    (ms-160 e-6715).
+    """Remove the probe notes an unguarded AX surface audit wrote (ms-160 e-6715).
 
-    The gate in readonly_gate stops NEW ones; this clears the backlog. 17 of
-    the 48 notes in the live project store were this string.
-
-    Dry-run by default — it prints what would go and exits without touching
-    anything. ``--confirm`` performs it.
-
-    Why it is shaped like clear+restore rather than a per-note delete: the
-    notes API exposes list / add / clear and no delete-one, and adding a server
-    endpoint needs a production deploy this project does not currently do. So
-    the cloud leg is "snapshot → clear → re-post the survivors", which carries
-    a real window: a note another session writes between the clear and the
-    re-post is lost. That window is disclosed to the operator rather than
-    designed around, and the snapshot is kept either way.
+    The read-only gate stops NEW ones; this clears the backlog. Shares the
+    delete mechanism with `note clear` (e-6714) — same operation, different
+    predicate — so the backup ordering and the re-post accounting exist once.
     """
-    path = _get_notes_path()
-    confirm = os.environ.get("BEACON_NOTE_PURGE_CONFIRM") == "1"
-    project_id = _cloud_project_id()
+    import cli_surface
+    _selective_delete(
+        _is_probe_note,
+        label="点検メモ (%s)" % cli_surface.SURFACE_PROBE_SENTINEL,
+        write_backups=_combined_backup_desc,
+        confirm=os.environ.get("BEACON_NOTE_PURGE_CONFIRM") == "1",
+        rerun_hint="beacon note purge-probes --confirm",
+        on_unconfirmed="preview")
 
-    local = _read_local_notes(path)
-    local_probes = [n for n in local if _is_probe_note(n)]
-    local_keep = [n for n in local if not _is_probe_note(n)]
 
-    cloud = []
-    cloud_probes = []
-    cloud_keep = []
-    if project_id:
-        cloud, cloud_error = _fetch_cloud_notes(project_id)
-        if cloud_error:
-            # Same rule as `note clear` (ms-178 e-6656): a store we cannot read
-            # is a store we cannot back up, so we do not delete from either.
-            print(f"Aborted: cloud のメモを取得できず退避が取れません ({cloud_error})。",
-                  file=sys.stderr)
-            print("  何も削除していません (退避の取れない削除は行いません)。",
-                  file=sys.stderr)
-            sys.exit(1)
-        cloud_probes = [n for n in cloud if _is_probe_note(n)]
-        cloud_keep = [n for n in cloud if not _is_probe_note(n)]
-
-    total_probes = len(local_probes) + len(cloud_probes)
-    if total_probes == 0:
-        import cli_surface
-        print("点検メモ ({0}) は見つかりませんでした。"
-              "削除するものはありません。".format(cli_surface.SURFACE_PROBE_SENTINEL))
-        return
-
-    print(f"点検メモ: local {len(local_probes)} 件 / cloud {len(cloud_probes)} 件")
-    print(f"残すメモ: local {len(local_keep)} 件 / cloud {len(cloud_keep)} 件")
-    if not confirm:
-        print()
-        print("これは下見です (まだ何も変更していません)。")
-        if project_id:
-            print("  実行すると cloud のメモを一度すべて消してから、残すメモを"
-                  "投稿し直します。")
-            print("  この間に別セッションが書いたメモは失われます "
-                  "(退避は取るので 'beacon note restore' 相当の手当ては可能)。")
-        print("  実行する: beacon note purge-probes --confirm")
-        return
-
-    # --- snapshot BOTH stores first; no backup ⇒ no delete -----------------
-    backup = _purge_backup_path()
-    try:
-        os.makedirs(os.path.dirname(backup) or ".", exist_ok=True)
-        with open(backup, "w", encoding="utf-8") as f:
-            for n in local:
-                f.write(json.dumps(dict(n, origin="local"), ensure_ascii=False) + "\n")
-            for n in cloud:
-                f.write(json.dumps(dict(n, origin="cloud"), ensure_ascii=False) + "\n")
-    except OSError as exc:
-        print(f"Aborted: 退避を書けません ({backup}: {exc})。何も削除していません。",
-              file=sys.stderr)
-        sys.exit(1)
-
-    # --- local leg: rewrite with the survivors ------------------------------
-    if local_probes:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            for n in local_keep:
-                f.write(json.dumps(n, ensure_ascii=False) + "\n")
-
-    # --- cloud leg: clear, then re-post the survivors ----------------------
-    reposted = 0
-    failed = []
-    if project_id and cloud_probes:
-        try:
-            client, error = _note_api_client()
-            if error:
-                raise RuntimeError(error)
-            client.clear_notes(project_id)
-        except Exception as exc:
-            print(f"Warning: cloud のメモを削除できませんでした ({exc})。"
-                  f"local のみ整理され、cloud 側は点検メモが残っています。",
-                  file=sys.stderr)
-            print(f"  退避: {backup}", file=sys.stderr)
-            cloud_keep = []  # nothing was cleared, so nothing to re-post
-        for n in cloud_keep:
-            payload = {k: v for k, v in n.items() if k != "origin"}
-            push_error = _push_note_to_cloud_or_error(payload)
-            if push_error:
-                failed.append((n, push_error))
-                continue
-            reposted += 1
-
-    print(f"点検メモを削除しました: 計 {total_probes} 件")
-    print(f"  退避: {backup} (local {len(local)} 件 + cloud {len(cloud)} 件、"
-          f"削除前の全文)")
-    if project_id:
-        print(f"  cloud に戻したメモ: {reposted} / {len(cloud_keep)} 件")
-    if failed:
-        # Counting attempts as successes is exactly what ms-178 e-6656 had to
-        # undo on `note restore`; report the shortfall instead of inventing it.
-        print(f"Warning: cloud への再投稿に {len(failed)} 件失敗しました。"
-              f"退避 {backup} に全文が残っています。", file=sys.stderr)
-        for n, why in failed[:5]:
-            print(f"  - {n.get('ts', '?')[:16]} "
-                  f"{(n.get('text') or '')[:40]}: {why}", file=sys.stderr)
-        sys.exit(1)
