@@ -421,12 +421,16 @@ const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '120000
 // 主張を再開する — 一時的なクラウド障害で受信能力を自ら手放さないため (prosess を
 // exit させるのは孤児のときだけ、下の maybeExitIfOrphaned を参照)。
 // 対になる server 側の閾値 (独立レビュー AX-2): server/app.py の
-// BEACON_WS_ZOMBIE_POLL_AGE_S (既定 30 分) / BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S (既定 3 時間)。
+// BEACON_WS_ZOMBIE_POLL_AGE_S (既定 30 分) / BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S (既定 3 時間)
+// / BEACON_RUNNING_DECL_STALE_AGE_S (既定 30 分、e-6774 で追加)。
 // **この値 (bridge 側) < server 側** の順序で初めて意図通りに働く: 先に bridge が自分で
 // 黙り、それが届かない古い bridge だけを server が捕まえる。逆転させると bridge が黙る前に
 // server が not-live にしてしまい、健全なセッションを誤って落とす。片方だけ変えないこと
 // (語彙が LIVENESS/STALL と ZOMBIE/AGE で分かれており、名前からは関連に気づけない)。
 // 単位も違う (こちらは ms、server は秒)。
+// この順序は **テストで機械的に固定されている**: tests/test_liveness_threshold_pair_ordering.py
+// (独立レビュー AX-1: コメントだけでは構造的な歯止めにならない、の指摘を受けて追加)。
+// 片側の既定値を変えると CI が赤くなる。実行時 env での上書きは検出できない (別プロセス)。
 const LIVENESS_ASSERT_MAX_STALL_MS = parseInt(
   process.env.BEACON_BUS_LIVENESS_STALL_MS || '600000', 10)  // 10 分
 // AX-3: 閾値が不正 (NaN / 0 以下) なら門は何もしない = fail-open。健全な bridge を設定ミスで

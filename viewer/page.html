@@ -464,6 +464,9 @@ const HIDDEN_BY_DEFAULT_STATES = ["stop"];
 // s.server_state の値域 (サーバ正典、lib/bus_liveness.derive_state が所管):
 //   running | idle | awaiting_human | blocked | terminated | interrupted | unknown
 // s.state はローカル道具の申告 (busy | idle) で別系統 — 混ぜない (e-6454)。
+// s.server_state_origin はその状態になった由来 (declared | stale-running |
+//   never-declared | transport-lost | no-trace、同じく lib/bus_liveness が所管)。
+//   unknown を 2 経緯に割る唯一の材料。古いサーバでは空 = 由来不明。
 // なお activity_kind は wait だけが判定材料になる (wait = 「待っている」という
 // 情報を運ぶ)。work は wait 以外の全行に付く既定値で情報量が無いため、状態判定に
 // は使わない (PR#759 AX レビュー採否)。
@@ -501,6 +504,21 @@ function liveness(s) {
   // 読み方ラベルで、idle/unknown 行にも "work" が付く)。
   if (s.state === "busy" || s.server_state === "running") {
     return {key: "work", label: OPS_STATES.work.label, on: true};
+  }
+  // 止まった「作業中」を待機中と同じ見た目にしない (ms-173 独立レビュー AX-4)。
+  // server_state=unknown には 2 経緯があり、状態名だけでは区別できない:
+  //   never-declared = 生きているが一度も何をしているか言っていない (= 本当に手待ち
+  //                    かもしれない。ここは従来どおり待機中で良い)
+  //   stale-running  = 「作業中」と宣言したのに declared_at が止まった (= 実測では
+  //                    いずれも待機内容に許可要求の文面が残っており、許可待ちで
+  //                    止まっていた)。人が見に行くべき行なので、待機中に沈めない。
+  // 由来はサーバが運ぶ (server_state_origin)。画面側で declared_at から再計算しない
+  // — 導出が正典と画面の 2 箇所に割れると、次に穴が空いたときどちらが正か分からなく
+  // なる (interrupted のときと同じ原則)。
+  if (s.server_state === "unknown" && s.server_state_origin === "stale-running") {
+    return {key: "confirm", label: OPS_STATES.confirm.label, on: true,
+            hint: "「作業中」と宣言したまま進んでいません。許可待ちで止まっている"
+                + "可能性があります (端末を見に行くと分かります)"};
   }
   return {key: "idle", label: OPS_STATES.idle.label, on: false};
 }

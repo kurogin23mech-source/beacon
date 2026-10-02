@@ -174,6 +174,12 @@ type SessionRow struct {
 	// (busy/idle) とは別系統なので、SessionOverview では server_state として運ぶ
 	// (e-6562 — 確認待ち判定の源)。
 	State string `json:"state,omitempty"`
+	// StateOrigin は State がその値になった由来。**unknown を割るための項目** —
+	// 「一度も何をしているか言っていない」(never-declared) と「作業中と言ったのに
+	// 止まった」(stale-running) は同じ unknown だが、後者は許可待ちで止まっている
+	// 疑いが濃く、人が見に行く話になる。ここで畳むと運用室が両者を取り違える
+	// (ms-173 独立レビュー AX-4)。値域は lib/bus_liveness.ALL_STATE_ORIGINS。
+	StateOrigin string `json:"state_origin,omitempty"`
 	Live        bool   `json:"live"`
 	Healthy     bool   `json:"healthy"`
 	LastActive  string `json:"last_active"`

@@ -54,6 +54,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
+import bus_liveness  # ms-173 e-6775: state と state_detail の対の不変条件
 import core
 import inspect  # ms-157 e-5749: derive add_work_item's reserved kwargs from source
 import occupation  # ms-157 e-5749: target-class 横断の generic target 投影
@@ -3235,6 +3236,20 @@ def make_collab_router(
         """
         _load_meta_only(project_id, user)
         payload = {k: v for k, v in body.model_dump().items() if v is not None}
+        # ms-173 / e-6775 — state_detail は state に属する。両者を必ず一緒に動かす。
+        #
+        # この行は merge 保存なので、宣言が awaiting_human → running に変わっても
+        # client が state_detail を省くと **古い待機内容が永久に残る** (実測 2026-10-01:
+        # state=running なのに「Claude needs your permission」がぶら下がった行が 6 件)。
+        # 待ちでない状態を宣言した heartbeat では空で上書きして残骸を消す。
+        #
+        # client 側ではなくここで閉じる理由: 全 client の宣言が必ず通る唯一の口なので、
+        # 直した bridge が入っていない古い client の行も同時に正される。判定は
+        # lib/bus_liveness (状態の正典) が所管し、ここは適用するだけ。
+        _detail = bus_liveness.state_detail_for_declaration(
+            payload.get("declared_state"), payload.get("state_detail"))
+        if _detail is not None:
+            payload["state_detail"] = _detail
         email = user.get("email", "")
         uid = user.get("sub", "")
 

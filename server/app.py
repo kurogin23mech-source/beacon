@@ -1739,9 +1739,15 @@ _POLL_HEALTH_DEFAULT_INTERVAL_MS = 2000
 _POLL_HEALTH_INTERVAL_MULTIPLIER = 2
 
 # ms-165 (e-5965): attentiveness window. last_heartbeat_at is written only by
-# POST /api/me/heartbeat (the interactive PostToolUse hook path), so its
-# freshness proves a human/AI is actively DRIVING the session — distinct from
-# `live` (bridge polling). Env-overridable.
+# POST /api/me/heartbeat, so its freshness proves a human/AI is actively DRIVING
+# the session — distinct from `live` (bridge polling). Env-overridable.
+#
+# ms-173 / e-6776 — 書き手の訂正: その POST を出すのは **PostToolUse hook ではない**。
+# CLI の session 解決 (lib/session.get_or_mint_session_via_server) の副産物で、beacon
+# コマンドが走ると出る。書き手の正典はその呼び出し元の docstring
+# (lib/session._cloud_mint_cache_hit) 1 箇所。ここを含め散在していた「hook 由来」の誤記が、
+# この軸が構造的に死んでいること (throttle cache が永久に当たり心拍が二度と出ない) を
+# 長く見逃させた。
 _ATTENTIVE_HEARTBEAT_MAX_AGE_S = int(
     os.environ.get("BEACON_ATTENTIVE_MAX_AGE_S", "300") or "300")
 
@@ -1872,6 +1878,18 @@ _WS_ZOMBIE_POLL_AGE_S = int(
 _WS_ZOMBIE_NO_HISTORY_AGE_S = int(
     os.environ.get("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", "10800") or "10800")
 
+# ms-173 (e-6774): live なのに ``running`` の宣言が進まなくなった行を訂正する閾値。
+# 本当に動いていれば PreToolUse / PostToolUse が次々に発火して declared_at が進む。
+# 進まないなら「作業中」はもう本当ではない (実測: 許可待ちで止まった行が 38 分
+# 「作業中」のまま居た)。
+#
+# **1 回の tool 呼び出しの最長を上回る値でなければならない**: PreToolUse と PostToolUse の
+# 間 (= 長いテスト実行や CI 待ち) は declared_at が凍るので、短く取ると正常な長時間作業を
+# unknown にしてしまう。30 分は手元の最長実測 (テスト全走 3.5 分) に対して十分な余裕。
+# 誤爆しても次の hook で running に戻るだけ (回復可能) なのも、この向きを選べる理由。
+_RUNNING_DECL_STALE_AGE_S = int(
+    os.environ.get("BEACON_RUNNING_DECL_STALE_AGE_S", "1800") or "1800")
+
 # ms-173 独立レビュー AX-2: 対になる bridge 側の閾値との関係をここに書き留める。
 # bridge (channel/bus.mjs の BEACON_BUS_LIVENESS_STALL_MS、既定 10 分) は「生存報告が
 # 通らなくなったら ping を止める」側、ここ (既定 30 分 / 履歴なし 3 時間) は「それでも
@@ -1880,12 +1898,22 @@ _WS_ZOMBIE_NO_HISTORY_AGE_S = int(
 # 捕まえる。逆転させると、bridge が黙る前に server が not-live にしてしまい、健全な
 # セッションを誤って落とす。片方だけ変えないこと (語彙が LIVENESS/STALL と ZOMBIE/AGE で
 # 分かれており、名前からは関連に気づけないため明記する)。
+# この順序は **テストで機械的に固定されている**: tests/test_liveness_threshold_pair_ordering.py
+# (独立レビュー AX-1: 保護がコメントだけでは構造的な歯止めにならない、の再提起を受けて追加)。
 #
 # AX-3: 閾値が不正 (0 以下) ならガードは何もしない = fail-open。健全な行を設定ミスで
 # 黙らせないための向きだが、黙って無効化されると「設定したのに何も起きない」になる。
 # 起動時に 1 度だけ警告して、無効化されていることを可視化する。
-for _name, _val in (("BEACON_WS_ZOMBIE_POLL_AGE_S", _WS_ZOMBIE_POLL_AGE_S),
-                    ("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", _WS_ZOMBIE_NO_HISTORY_AGE_S)):
+# ms-173 独立レビュー 保守性 M-3: 閾値を追加するたびにこのループへ手で足す運用だと
+# 必ず忘れる (実際 _RUNNING_DECL_STALE_AGE_S を足したとき忘れた)。fail-open な閾値は
+# **この 1 リストに登録する** のを唯一の作法にし、網羅をテストで固定する
+# (tests/test_fail_open_threshold_warnings.py)。
+_FAIL_OPEN_THRESHOLDS = (
+    ("BEACON_WS_ZOMBIE_POLL_AGE_S", _WS_ZOMBIE_POLL_AGE_S),
+    ("BEACON_WS_ZOMBIE_NO_HISTORY_AGE_S", _WS_ZOMBIE_NO_HISTORY_AGE_S),
+    ("BEACON_RUNNING_DECL_STALE_AGE_S", _RUNNING_DECL_STALE_AGE_S),
+)
+for _name, _val in _FAIL_OPEN_THRESHOLDS:
     if _val <= 0:
         print(
             f"WARNING: {_name}={_val} (<= 0) — zombie-WS liveness guard is DISABLED. "
@@ -1898,17 +1926,36 @@ for _name, _val in (("BEACON_WS_ZOMBIE_POLL_AGE_S", _WS_ZOMBIE_POLL_AGE_S),
 
 def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
                                         now_dt) -> str:
-    """Return the ``created_at`` of the OLDEST event still unread by
-    ``recipient_sid`` (past its cursor watermark), or ``""`` if none is found
-    within the bounded scan.
+    """Return the ``created_at`` of the OLDEST event addressed to
+    ``recipient_sid`` that the recipient's OWN receive path has not fetched, or
+    ``""`` if none is found within the bounded scan.
 
-    Reads the recipient's cursor, then a single oldest-first window of events
-    newer than it, returning the first one addressed to the recipient — because
-    the stream is oldest-first, that IS the oldest unread event. Session-scoped
-    only (``recipient_user_id=""``): the documented wedge is session-pinned DMs
+    Reads the recipient's cursor as the scan START, then a single oldest-first
+    window of events newer than it, returning the first addressed event with no
+    delivery receipt from this recipient — because the stream is oldest-first,
+    that IS the oldest unconsumed event. Session-scoped only
+    (``recipient_user_id=""``): the documented wedge is session-pinned DMs
     piling up (a695553f), and resolving the session's user_id per call would add
     cost for the far rarer user-scoped case. Best-effort — callers wrap in a
     fail-open try/except and treat any miss as unknown draining.
+
+    ms-173 / e-6799 — **cursor だけで「未読」を決めるのをやめた**。``bus_cursors``
+    を進めるのは ``bin/beacon-bus-inbox-hook.py`` (人の打鍵ごとに走る hook) と
+    ``beacon bus receive`` だけで、idle-wake を実際に配る MCP bridge は ms-140 で
+    意図的に cursor から切り離されている (channel/bus.mjs は自分の watermark を
+    ``.beacon/bridges/<sid>.delivery.json`` に持ち ``bus_cursors`` を触らない)。
+    その cursor を「消化の真値」として読むと、bridge が 1 秒で配った DM でも人が
+    その端末に戻るまで未読のままで、窓 (= 人の注目窓 300 秒) を超えた瞬間に wedge
+    と判定された。実測 (2026-10-02): 直近 31 件の DM はすべて ``delivered_at`` が
+    ``created_at`` +0〜1 秒で、配信は成立していた。一方 cursor は hook が非空の
+    unread を得たときだけ進むため、打鍵の無いセッションでは 25 時間止まっていた。
+    よって **DM が最も集まる本体セッションが恒久的に到達不能**と出た (e-6799)。
+    消化の証拠は receipt に取る (``bus_liveness.delivered_to_recipient``)。
+
+    cursor を起点に残す理由: receipt の有無で判定するなら全履歴を走るのが筋だが、
+    それは 2026-08-20 の全件読み込み停止と同型の規模事故になる。cursor は
+    「ここより前はもう見なくてよい」という単調な下限として安全に使える (hook が
+    進んでいなければ下限が緩いだけで、判定は receipt が決める)。
     """
     if not recipient_sid:
         return ""
@@ -1917,14 +1964,26 @@ def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
     batch = db.list_bus_events(
         project_id, since=since, channel="", limit=_DRAINING_SCAN_LIMIT) or []
     for e in batch:
-        if _bus_event_addressed_to(e, recipient_sid, ""):
-            return str(e.get("created_at") or "")
+        if not _bus_event_addressed_to(e, recipient_sid, ""):
+            continue
+        if bus_liveness.delivered_to_recipient(e, recipient_sid):
+            # この recipient 自身の受信経路が実際に取った = 消化済。cursor が
+            # 進んでいなくても (= hook が走っていなくても) wedge ではない。
+            continue
+        return str(e.get("created_at") or "")
     return ""
 
 
-def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
-    """Stamp poll_health / bridge / ws_live / live / draining / reachable onto a
-    session row in place (ms-101 / e-3010, ms-165 / e-5965).
+def _stamp_session_liveness(session: dict, project_id: str,
+                            now_dt) -> Optional[bool]:
+    """Stamp poll_health / bridge / ws_live / live / reachable onto a session row
+    in place, and RETURN the internal ``draining`` 3-value (ms-101 / e-3010,
+    ms-165 / e-5965, ms-173 独立レビュー AX-2).
+
+    ``draining`` (None = 消化の証拠が無い / True = 消化を観測 / False = 確定的な
+    wedge) は **行に stamp しない**: 3 値を公開 API に平文で乗せると truthy 判定で
+    None が False に畳まれる。内部の送信経路だけがこの戻り値を読み、外へ出るのは
+    ラッパー済みの ``reachable`` だけ。
 
     従来 directory の「この session は今 DM を受け取れるか」の signal は
     ``poll_health.healthy`` だった。これは ``last_poll_at`` (= 最後にポーリング
@@ -1968,8 +2027,11 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # (履歴の有無は猶予の長さと理由文字列の選択にだけ使う)。
     #
     # 裏付けは互いに独立した 3 源を渡す。poll 報告が無い古い bridge でも、人/AI が実際に
-    # 動かしていれば PostToolUse hook 由来の last_heartbeat_at が新しいので救われる
-    # (= 「古い bridge かどうか」ではなく「生きている痕跡があるか」で救う)。
+    # 動かしていれば last_heartbeat_at が新しいので救われる (= 「古い bridge かどうか」
+    # ではなく「生きている痕跡があるか」で救う)。書き手は CLI の session 解決
+    # (正典: lib/session._cloud_mint_cache_hit の docstring)。**PostToolUse hook ではない**
+    # — e-6776 で訂正。この誤記を信じてここの安全弁を据えたが、当時 stamp は凍結しており
+    # 安全弁は機能していなかった。
     if live:
         _suppressed = bus_liveness.ws_only_liveness_suppression(
             # 全て keyword で渡す (独立レビュー AX-1)。先頭 3 つは型が同系なので
@@ -1997,9 +2059,14 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # ms-165 (e-5965): informational signal. `live` (above) is the deliverability
     # gate — it proves the bridge polls and, post-e-5964, will deliver even to an
     # idle session. `heartbeat_fresh` is a SEPARATE, weaker signal: whether the
-    # interactive heartbeat (last_heartbeat_at, written by POST /api/me/heartbeat
-    # = the PostToolUse hook) is recent, i.e. a human/AI is actively driving the
-    # session. It is deliberately named for the MECHANISM (heartbeat freshness),
+    # interactive heartbeat (last_heartbeat_at) is recent, i.e. a human/AI is
+    # actively driving the session.
+    #
+    # ms-173 / e-6776 — 書き手の訂正: この stamp を書くのは **PostToolUse hook では
+    # ない**。CLI の session 解決 (lib/session.get_or_mint_session_via_server) が
+    # /api/me/heartbeat を叩いたときの副産物で、beacon コマンドが走ると更新される。
+    # 誤記のままだったため「hook が毎回書いている」と信じられ、この軸が構造的に死んで
+    # いること (= throttle cache が永久に当たり心拍が二度と出ない) が長く見逃された。 It is deliberately named for the MECHANISM (heartbeat freshness),
     # NOT "attentive"/"consuming" — a wedged bridge can be heartbeat_fresh yet not
     # drain its inbox, so importing a deliverability connotation would mislead.
     # It is NOT folded into `live` (an idle fork stays live — no delivery
@@ -2026,7 +2093,14 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
                 oldest, now_dt, _ATTENTIVE_HEARTBEAT_MAX_AGE_S)
         except Exception:  # pragma: no cover - defensive; fail-open to unknown
             draining = None
-    session["draining"] = draining
+    # ms-173 独立レビュー AX-2: ``draining`` は **行に stamp せず戻り値で返す**。
+    # 公開 API (= GET /sessions / `bus directory --json`) の行に 3 値 (None/True/
+    # False) が平文で乗ると、`if row.get("draining"):` のような truthy 判定で
+    # None が False に畳まれ、**健全な多数派 (= バックログ無し) が「未消化」に
+    # 誤分類** される。それは e-6777 で内部的に直した「受信しないことが報酬」の
+    # 逆転を、ラッパーの外側で再生産することになる。外に出すのはラッパー済みの
+    # ``reachable`` だけにし、3 値を解釈する責務を server の内側に閉じる
+    # (consumer は実測で 0 件だったので互換の破れは無い)。
     session["reachable"] = bus_liveness.is_reachable(session["live"], draining)
 
     # ms-159 (e-6245): project the canonical work-unit `state` + `state_since`
@@ -2039,9 +2113,17 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # bus_liveness.ALL_STATES, with no change needed here (e-6641).
     declared_state = session.get("declared_state") or ""
     declared_at = session.get("declared_at") or ""
-    state = bus_liveness.derive_state(
-        declared_state, declared_at, session["live"], now_dt, _STATE_DECL_GRACE_S)
+    # ms-173 独立レビュー AX-4: 状態と **その値になった由来** を一緒に受け取る。
+    # ``unknown`` には「一度も言っていない (never-declared)」と「running と言ったのに
+    # 止まった (stale-running)」の 2 経緯が畳まれており、対応の仕方が違う (後者は
+    # 許可待ちで止まっている疑いが濃い)。状態集合は増やさず (全 UI がこの凍結集合
+    # だけを読む契約)、由来を隣のフィールドに刻む。
+    state, state_origin = bus_liveness.derive_state_with_origin(
+        declared_state, declared_at, session["live"], now_dt, _STATE_DECL_GRACE_S,
+        # e-6774: running だけは live でも経年で疑う (待ち状態は従来どおり疑わない)。
+        running_stale_after_seconds=_RUNNING_DECL_STALE_AGE_S)
     session["state"] = state
+    session["state_origin"] = state_origin
     # `state_since` = when the session entered `state`. When the derived state
     # matches what the session declared, the hook-tracked entry time is authoritative
     # (preserved across re-declarations, so a long wait sorts correctly). When the
@@ -2107,6 +2189,9 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # (方針3: model is multi-user, default view is self). Best-effort: the actor's
     # user_id when present, else its email (the identity sid_to_uid keys on).
     session["user_id"] = (actor.get("user_id") or actor.get("email") or "")
+    # AX-2: 3 値の ``draining`` は行に乗せず、ここで内部 caller に返す
+    # (公開されるのはラッパー済みの ``reachable`` だけ)。
+    return draining
 
 
 def _classify_recipient_send_delivery(project_id: str, recipient_sid: str,
@@ -2129,9 +2214,8 @@ def _classify_recipient_send_delivery(project_id: str, recipient_sid: str,
                 if s.get("session_id") == recipient_sid), None)
     if row is None:
         return None
-    _stamp_session_liveness(row, project_id, now_dt)
-    return bus_liveness.classify_send_delivery(
-        row.get("live"), row.get("draining"))
+    draining = _stamp_session_liveness(row, project_id, now_dt)
+    return bus_liveness.classify_send_delivery(row.get("live"), draining)
 
 
 # ---------------------------------------------------------------------------

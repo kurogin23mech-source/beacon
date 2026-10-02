@@ -52,7 +52,11 @@ def _write_session_file(project_dir: Path, **overrides):
         "session_id": "sv-cached-1234",
         "actor": {"machine": "test-mac", "agent": "test-agent"},
         "created_at": _iso(-3600),
-        "last_active": _iso(-60),  # 1 minute ago — fresh under default 300s TTL
+        "last_active": _iso(-60),  # 1 minute ago
+        # ms-173 / e-6776: cache の freshness gate が見るのはこちら。last_active は
+        # 受信プロセスが別用途で 60 秒ごとに書くので throttle の時計に使えなかった
+        # (gate が永久に通り、心拍が二度と出ずサーバの last_heartbeat_at が凍結した)。
+        "last_cloud_heartbeat_sent_at": _iso(-60),  # fresh under default 300s TTL
         "harness": "test",
         "source": "server_minted",
         "machine_id": "mc-abc-def",
@@ -150,11 +154,70 @@ def test_cache_miss_when_pid_differs_calls_heartbeat(
     assert result["minted"] is True
 
 
-def test_cache_miss_when_stale_last_active_calls_heartbeat(
+def test_mint_writes_the_throttle_stamp_into_session_json(
     isolated_project, monkeypatch,
 ):
-    """Old last_active (past TTL window) ⇒ heartbeat runs."""
-    _write_session_file(isolated_project, last_active=_iso(-999999))
+    """心拍を実際に送った経路が throttle の時計を書くこと (**振る舞いで確認**)。
+
+    ms-173 / e-6776 + 独立レビュー 保守性 M-4: 元はこれを lib/session.py のソース字面
+    (``'"last_cloud_heartbeat_sent_at": now'``) の一致で見ていたが、無害な整形変更でも
+    赤くなる脆いテストだった。実際に書かれた session.json を読む形に置き換えた。
+
+    これが書かれないと gate は永久に miss し、毎回 network に出る (= throttle が消える)。
+    """
+    # cache を強制的に miss させる (stamp を持たない古い session.json)
+    p = _write_session_file(isolated_project)
+    del p["last_cloud_heartbeat_sent_at"]
+    (isolated_project / ".beacon" / "session.json").write_text(
+        json.dumps(p), encoding="utf-8")
+    _stub_pid(monkeypatch, 42424)
+    _stub_machine_cache(monkeypatch)
+    monkeypatch.setattr(
+        session._agent, "get_actor",
+        lambda: {"machine": "test-mac", "agent": "test-agent"},
+    )
+
+    def _client_factory():
+        class _Client:
+            def me_upsert_machine(self, *a, **k):
+                return {"machine_id": "mc-abc-def"}
+
+            def me_heartbeat(self, *a, **k):
+                return {"session_id": "sv-minted-9999", "minted": True}
+        return _Client(), {}
+
+    monkeypatch.setattr(session, "_commands", None, raising=False)
+    import commands as _commands
+    monkeypatch.setattr(_commands, "_get_api_client", _client_factory)
+
+    result = session.get_or_mint_session_via_server()
+    assert result["session_id"] == "sv-minted-9999"
+
+    written = json.loads(
+        (isolated_project / ".beacon" / "session.json").read_text(encoding="utf-8"))
+    assert written.get("last_cloud_heartbeat_sent_at"), (
+        "心拍を送ったのに throttle の時計を書いていない — gate が永久に miss する")
+    # 受信プロセスが書く last_active とは別フィールドであること (混ざると e-6776 再発)。
+    assert "last_active" in written
+    assert written["last_cloud_heartbeat_sent_at"] != "" 
+
+
+def test_cache_miss_when_stale_heartbeat_stamp_calls_heartbeat(
+    isolated_project, monkeypatch,
+):
+    """心拍 stamp が TTL を超えて古い ⇒ network に出る。
+
+    契約の変更点 (ms-173 / e-6776): このテストは以前 ``last_active`` の古さで cache
+    miss を固定していた。だが ``last_active`` を書くのは **受信プロセス** (60 秒ごと)
+    で、このスロットルとは無関係な用途の stamp。受信プロセスが生きている間それは常に
+    新しいので gate を一度も超えず、**心拍が二度と出ずサーバの last_heartbeat_at が
+    最初の mint 時刻で凍結していた** (2026-10-01 実測: 稼働中 14 セッション中
+    heartbeat_fresh=True は 1 件)。gate が見る値を「自分が前回送った時刻」に付け替えた
+    ので、古さの判定もそちらで行う。``last_active`` が新しくても miss することは
+    tests/test_cloud_mint_throttle_clock_e6776.py が別途固定している。
+    """
+    _write_session_file(isolated_project,
+                        last_cloud_heartbeat_sent_at=_iso(-999999))
     _stub_pid(monkeypatch, 42424)
     _stub_machine_cache(monkeypatch)
     monkeypatch.setattr(

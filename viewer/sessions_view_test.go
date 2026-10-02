@@ -1029,3 +1029,54 @@ func TestStopBucketSplitAndInterruptNotHiddenByDefault(t *testing.T) {
 			"定数が飾りになり、上の 1 行ガードが素通りする")
 	}
 }
+
+// 止まった「作業中」が、一度も宣言していない行と同じ見た目に沈まないこと
+// (ms-173 独立レビュー AX-4)。server_state=unknown には 2 経緯があり、
+// stale-running (= 作業中と言ったのに止まった) は許可待ちの疑いが濃いので人が見に
+// 行くべき行。never-declared (= 一度も言っていない) は従来どおり待機中で良い。
+// 由来はサーバが運ぶ 1 項目 (state_origin) で、画面側で declared_at から再計算しない。
+func TestStateOriginCarriedToOverview(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	named := []SessionRow{
+		{ID: "sv-stuck", Agent: "claude-code", Cwd: "/Users/x/p", ProjectID: "p",
+			Live: true, LastActive: fresh, State: "unknown",
+			StateOrigin: "stale-running"},
+		{ID: "sv-quiet", Agent: "claude-code", Cwd: "/other/q", ProjectID: "q",
+			Live: true, LastActive: fresh, State: "unknown",
+			StateOrigin: "never-declared"},
+	}
+	local := []LocalSessionRow{{
+		Tool: "claude-code", Directory: "/Users/x/p", LastActive: fresh,
+		Running: true, SessionID: "sv-stuck",
+	}}
+	view := assembleSessions(local, named, 24*time.Hour, now)
+	got := map[string]string{}
+	for _, s := range view.Sessions {
+		got[s.SessionID] = s.ServerStateOrigin
+	}
+	// 両構築パス (このマシンの行 / 別マシンの追補) の両方で運ばれること。
+	if got["sv-stuck"] != "stale-running" {
+		t.Errorf("このマシンの行に state_origin が運ばれていない: %q — "+
+			"止まった「作業中」が待機中と区別できなくなる", got["sv-stuck"])
+	}
+	if got["sv-quiet"] != "never-declared" {
+		t.Errorf("別マシンの行に state_origin が運ばれていない: %q", got["sv-quiet"])
+	}
+}
+
+// 画面が由来を実際に読んでいること。運ぶだけ運んで消費側が無いと、項目を足しても
+// 誰の目にも入らない (= 「足した」≠「効いている」)。
+// TestConfirmConditionReadsServerState と同型の Go↔画面 drift ガード。
+func TestStuckRunningSurfacesInPage(t *testing.T) {
+	page, err := os.ReadFile("page.html")
+	if err != nil {
+		t.Fatalf("page.html が読めない: %v", err)
+	}
+	if !strings.Contains(string(page),
+		`s.server_state === "unknown" && s.server_state_origin === "stale-running"`) {
+		t.Error("page.html が止まった「作業中」を由来で拾っていない — " +
+			"stale-running の行が待機中に沈み、許可待ちで止まったセッションに " +
+			"誰も気づけない (ms-173 独立レビュー AX-4)")
+	}
+}
