@@ -128,6 +128,38 @@ _NOT_THE_TESTS_FAULT = frozenset({
 # instrument than this one.
 
 
+# Leaks that already existed when this guard went in. Recorded debt, not a
+# verdict: each name is a file some test creates in the repository's own
+# .beacon/, and burning the list down is follow-up work (e-6833) rather than a
+# precondition for stopping the bleeding — the same split the sibling guards use
+# (scripts/check-cli-env-parity.py's KNOWN_GAPS, scripts/check-pid-liveness.py's
+# ALLOWLIST).
+#
+# Keyed on the FILE, not on (test, file), and that is deliberate. The guard
+# reports only the first test to create a given file, so which test gets named
+# changes with collection order: five runs of the same suite blamed five
+# different tests (test_review_context_kernel → test_surface_snapshot →
+# test_pr_create_infer → test_api_client → test_attainment_backlog_disposition).
+# An allowlist keyed on the test would therefore be flaky by construction.
+#
+# What this still gates: any file NAME not listed here fails immediately, so new
+# code cannot introduce a new KIND of leak. What it does not gate: another test
+# leaking one of these two names. That is the debt, and it is why the list must
+# shrink to empty rather than grow.
+KNOWN_LEAKS = frozenset({
+    "session.json",   # in-process calls that stamp session state (lib/session.py,
+                      # which resolves via Path.cwd() and so ignores
+                      # BEACON_PROJECT_FILE — see e-6820)
+    "project.db",     # the local SQLite store, materialised by any project read
+                      # discovered from the cwd (+ its -shm/-wal sidecars, which
+                      # are excluded above so the report stays one line)
+})
+
+# Which KNOWN_LEAKS names were actually observed this run, so a fixed one does
+# not sit in the list exempting the next regression at the same name.
+_OBSERVED_LEAKS: "set[str]" = set()
+
+
 def _snapshot_beacon_dir(beacon_dir: str) -> "set[str]":
     """Relative paths of files under ``beacon_dir``, excluded entries dropped.
 
@@ -201,7 +233,9 @@ def _fail_on_repo_beacon_write(request):
         return
     before = _snapshot_beacon_dir(beacon_dir)
     yield
-    created = sorted(_snapshot_beacon_dir(beacon_dir) - before)
+    created_all = _snapshot_beacon_dir(beacon_dir) - before
+    _OBSERVED_LEAKS.update(created_all & KNOWN_LEAKS)
+    created = sorted(created_all - KNOWN_LEAKS)
     if created:
         raise AssertionError(
             "this test created {0} in the repository's own .beacon/ — it must "
@@ -271,3 +305,24 @@ def fake_cloud_config(tmp_path, monkeypatch):
     monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
     return beacon_dir
 
+
+def pytest_sessionfinish(session, exitstatus):
+    """Report KNOWN_LEAKS entries that never happened — i.e. already fixed.
+
+    A fixed entry left in the list exempts the next regression at the same name,
+    which is the failure mode #777 and #781 both guard against on their own
+    allowlists. Reported only when the whole suite ran: under ``-k`` / ``-m`` /
+    ``--deselect`` an unobserved name means "not exercised", not "fixed", and
+    crying stale on a subset run would teach people to ignore the message.
+    """
+    opt = session.config.option
+    filtered = bool(getattr(opt, "keyword", "") or getattr(opt, "markexpr", "")
+                    or getattr(opt, "deselect", None) or getattr(opt, "file_or_dir", None) != ["tests/"])
+    if filtered or exitstatus != 0:
+        return
+    fixed = sorted(KNOWN_LEAKS - _OBSERVED_LEAKS)
+    if fixed:
+        print("\n[repo-beacon-leaks] KNOWN_LEAKS entries that no longer happen: "
+              + ", ".join(fixed)
+              + "\n  -> delete them from tests/conftest.py; a fixed entry left in "
+                "the list exempts the next regression at the same name (e-6833).")

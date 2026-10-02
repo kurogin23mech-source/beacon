@@ -339,3 +339,57 @@ def test_a_misspelled_opt_out_marker_cannot_be_silent():
         "a misspelled marker was accepted — the typo would read as an opt-out "
         "while doing nothing:\n" + r.stdout + r.stderr)
     assert "allow_repo_beacon_writes" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+# --- recorded debt, not a silenced guard (ms-166 e-6621 / e-6833) ------------
+
+
+def test_known_leaks_are_recorded_not_hidden():
+    """The debt must be readable as debt, with each entry explained.
+
+    A bare set of filenames is indistinguishable from "we decided these are
+    fine". What makes it debt is that it is named, reasoned, and shrinking.
+    """
+    import conftest
+    assert conftest.KNOWN_LEAKS, "an empty list means the gate is fully closed"
+    src = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    block = src.split("KNOWN_LEAKS = frozenset({", 1)[1].split("})", 1)[0]
+    for name in conftest.KNOWN_LEAKS:
+        assert name in block, name
+    assert "e-6833" in src, "the debt must point at the task that burns it down"
+
+
+def test_a_new_kind_of_leak_still_fails(tmp_path):
+    """The gate that remains: a file name NOT in KNOWN_LEAKS fails the test.
+
+    This is the whole justification for recording the two known names instead of
+    disabling the guard — new code cannot introduce a new kind of leak.
+    """
+    watch = tmp_path / "watched"
+    watch.mkdir()
+    body = (
+        "import os\n"
+        f"WATCH = {str(watch)!r}\n"
+        "def test_new_kind():\n"
+        "    open(os.path.join(WATCH, 'brand-new-leak.json'), 'w').write('{}')\n"
+    )
+    r = _run_one(body, "test_e6621_probe_newkind.py", watch)
+    assert r.returncode != 0, (
+        "a leak of an unlisted kind was not reported:\n" + r.stdout + r.stderr)
+    assert "brand-new-leak.json" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+def test_a_known_leak_does_not_fail(tmp_path):
+    """And the recorded ones do not, which is what lets CI go green today."""
+    watch = tmp_path / "watched"
+    watch.mkdir()
+    body = (
+        "import os\n"
+        f"WATCH = {str(watch)!r}\n"
+        "def test_known_kind():\n"
+        "    open(os.path.join(WATCH, 'session.json'), 'w').write('{}')\n"
+    )
+    r = _run_one(body, "test_e6621_probe_knownkind.py", watch)
+    assert r.returncode == 0, (
+        "a recorded leak failed the suite — CI would stay red:\n"
+        + r.stdout + r.stderr)
