@@ -23,6 +23,9 @@ from commands_shared import _is_cloud_mode, _get_api_client
 # 語彙外を弾いて server 400 を待たず早期に気付けるようにするが、語彙の定義は server と
 # 共有する (旧: 二重定義していた = 片方だけ増やすと silent に割れる §2 SSoT 違反)。
 from decision_vocab import DECIDED_BY as _DECIDED_BY  # noqa: F401
+# ms-166 e-6633: 種別の既知集合も同じ単一ソースから引く (server/ は CLI の import
+# 経路に無いので、e-6633 で lib/decision_vocab.py へ移設した)。
+from decision_vocab import KNOWN_DECISION_KINDS as _KNOWN_KINDS
 
 
 def _split_evidence(raw: str) -> list:
@@ -193,6 +196,31 @@ def cmd_decision_record():
                   f"--related-target <id> で直接指定できます")
 
 
+def _recognized_decision_kinds() -> frozenset:
+    """「見覚えのある種別」の集合 (ms-166 e-6633)。
+
+    種別の語彙は **意図的に開いている** (任意の文字列を kind として書ける /
+    server/decision_event.py 冒頭の設計方針) ので、これは拒否のための許可リストでは
+    なく **綴り違いに気づかせるための既知集合**。3 つを合わせる:
+
+    * ``decision_vocab.KNOWN_DECISION_KINDS`` — seam (コード上の判断地点) に
+      溶接された種別。
+    * ``capability_ledger.DECISION_CAPTURE_DERIVED_KINDS`` — 既存の成果物から
+      導出される種別 (pr-intent = PR の意図から導出)。
+    * ``capability_ledger.DECISION_CAPTURE_ADHOC_KINDS`` — 実行時に名付けられた
+      種別 (triage = ``beacon decision record`` で人や AI が名付けて書いたもの)。
+
+    後ろ 2 つを足すのが要点。忘れると、本番に実在する pr-intent / triage を
+    「知らない種別」と言ってしまい、**警告そのものが嘘になる**。e-6756 で台帳に
+    載せた事実をここで消費する形。
+    """
+    from capability_ledger import (DECISION_CAPTURE_DERIVED_KINDS,
+                                   DECISION_CAPTURE_ADHOC_KINDS)
+    return frozenset(set(_KNOWN_KINDS)
+                     | set(DECISION_CAPTURE_DERIVED_KINDS)
+                     | set(DECISION_CAPTURE_ADHOC_KINDS))
+
+
 def cmd_decision_list():
     """List decisions from the unified stream (ms-154 e-5595).
 
@@ -242,8 +270,24 @@ def cmd_decision_list():
         sys.exit(1)
 
     rows = result.get("decisions", []) if isinstance(result, dict) else []
+    # ms-166 e-6633: 存在しない種別名を渡しても黙って 0 件が返っていた。綴りを
+    # 間違えた人は「この種別の判断は 1 件も無い」と読み、実際には **問い合わせ自体が
+    # 的を外していた** ことに気づけない (e-6603 で直した「全部除外されて 0 件」と
+    # 同型の、0 件の意味が潰れる病理)。語彙は開いているので **拒否はしない** —
+    # 既知集合に無いことを開示するだけ。
+    _recognized = None
+    if kind:
+        _known = _recognized_decision_kinds()
+        _recognized = kind in _known
     if json_mode:
-        print(json.dumps(result, ensure_ascii=False))
+        # text と json で同じ情報を出す (e-6603 独立レビュー AX-2): --json は自動化
+        # 経路の正規手段なので、人間向け文言にだけ開示を書くと機械の読み手から消える。
+        out = dict(result) if isinstance(result, dict) else {"result": result}
+        if kind:
+            out["kind_filter"] = kind
+            out["kind_recognized"] = _recognized
+            out["recognized_kinds"] = sorted(_known)
+        print(json.dumps(out, ensure_ascii=False))
         return
     # 既定で外した kind (独立レビュー AX-1): この開示は **0 件のときこそ要る**。
     # 旧実装は `if not rows: print("(決定なし)"); return` が開示より手前にあり、
@@ -254,6 +298,14 @@ def cmd_decision_list():
                 f"ないため。見るときは --kind {_ex[0]})") if _ex else ""
     if not rows:
         print("(決定なし)")
+        if _recognized is False:
+            # 0 件の理由が「その種別の判断が無い」ではなく「種別名が的を外している」
+            # 可能性を示す。断定はしない (語彙は開いているので、本当に新しい種別を
+            # 誰かが書き始めた直後という場合もある)。
+            print(f"  ⚠ 種別 '{kind}' は見覚えのある種別に含まれていません "
+                  f"(綴り違いの可能性)。0 件は「この種別の判断が無い」ではなく "
+                  f"「問い合わせが的を外している」かもしれません。")
+            print(f"  見覚えのある種別: {', '.join(sorted(_recognized_decision_kinds()))}")
         if _ex_note:
             print(_ex_note)
         return
