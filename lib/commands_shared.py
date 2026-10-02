@@ -2984,8 +2984,22 @@ def best_effort_decision_write(what: str, *, recovery_hint: str = ""):
             client.record_decision(project_id, {...})
     """
     hint = f" ({recovery_hint})" if recovery_hint else ""
+    import cloud_write_guard as _cwg   # ms-166 e-6637: tell a guard refusal apart
     try:
         yield
+    except _cwg.ProdWriteBlocked as exc:
+        # ms-166 e-6637: a test-context prod-write refusal is NOT a failure — the
+        # guard did its job. ``ProdWriteBlocked`` is a distinct type precisely so a
+        # broad handler can tell it apart instead of swallowing it into a degraded
+        # path (its own docstring / e-5300). We still do not re-raise here: the
+        # best-effort contract is that an audit side-effect never breaks the
+        # caller's flow, and a test that trips this guard is usually not testing
+        # decisions at all. But we must not MISREPORT it as "write failed", which
+        # would send the reader hunting for an endpoint problem that does not exist.
+        logging.getLogger(__name__).warning(
+            "decision write refused by the prod-test-write guard for %s "
+            "(this is the guard working, not a failure — the record was NOT "
+            "written): %s", what, exc)
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "decision write failed for %s: %s%s", what, exc, hint)
