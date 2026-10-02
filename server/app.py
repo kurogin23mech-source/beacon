@@ -1924,17 +1924,36 @@ for _name, _val in _FAIL_OPEN_THRESHOLDS:
 
 def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
                                         now_dt) -> str:
-    """Return the ``created_at`` of the OLDEST event still unread by
-    ``recipient_sid`` (past its cursor watermark), or ``""`` if none is found
-    within the bounded scan.
+    """Return the ``created_at`` of the OLDEST event addressed to
+    ``recipient_sid`` that the recipient's OWN receive path has not fetched, or
+    ``""`` if none is found within the bounded scan.
 
-    Reads the recipient's cursor, then a single oldest-first window of events
-    newer than it, returning the first one addressed to the recipient — because
-    the stream is oldest-first, that IS the oldest unread event. Session-scoped
-    only (``recipient_user_id=""``): the documented wedge is session-pinned DMs
+    Reads the recipient's cursor as the scan START, then a single oldest-first
+    window of events newer than it, returning the first addressed event with no
+    delivery receipt from this recipient — because the stream is oldest-first,
+    that IS the oldest unconsumed event. Session-scoped only
+    (``recipient_user_id=""``): the documented wedge is session-pinned DMs
     piling up (a695553f), and resolving the session's user_id per call would add
     cost for the far rarer user-scoped case. Best-effort — callers wrap in a
     fail-open try/except and treat any miss as unknown draining.
+
+    ms-173 / e-6799 — **cursor だけで「未読」を決めるのをやめた**。``bus_cursors``
+    を進めるのは ``bin/beacon-bus-inbox-hook.py`` (人の打鍵ごとに走る hook) と
+    ``beacon bus receive`` だけで、idle-wake を実際に配る MCP bridge は ms-140 で
+    意図的に cursor から切り離されている (channel/bus.mjs は自分の watermark を
+    ``.beacon/bridges/<sid>.delivery.json`` に持ち ``bus_cursors`` を触らない)。
+    その cursor を「消化の真値」として読むと、bridge が 1 秒で配った DM でも人が
+    その端末に戻るまで未読のままで、窓 (= 人の注目窓 300 秒) を超えた瞬間に wedge
+    と判定された。実測 (2026-10-02): 直近 31 件の DM はすべて ``delivered_at`` が
+    ``created_at`` +0〜1 秒で、配信は成立していた。一方 cursor は hook が非空の
+    unread を得たときだけ進むため、打鍵の無いセッションでは 25 時間止まっていた。
+    よって **DM が最も集まる本体セッションが恒久的に到達不能**と出た (e-6799)。
+    消化の証拠は receipt に取る (``bus_liveness.delivered_to_recipient``)。
+
+    cursor を起点に残す理由: receipt の有無で判定するなら全履歴を走るのが筋だが、
+    それは 2026-08-20 の全件読み込み停止と同型の規模事故になる。cursor は
+    「ここより前はもう見なくてよい」という単調な下限として安全に使える (hook が
+    進んでいなければ下限が緩いだけで、判定は receipt が決める)。
     """
     if not recipient_sid:
         return ""
@@ -1943,8 +1962,13 @@ def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
     batch = db.list_bus_events(
         project_id, since=since, channel="", limit=_DRAINING_SCAN_LIMIT) or []
     for e in batch:
-        if _bus_event_addressed_to(e, recipient_sid, ""):
-            return str(e.get("created_at") or "")
+        if not _bus_event_addressed_to(e, recipient_sid, ""):
+            continue
+        if bus_liveness.delivered_to_recipient(e, recipient_sid):
+            # この recipient 自身の受信経路が実際に取った = 消化済。cursor が
+            # 進んでいなくても (= hook が走っていなくても) wedge ではない。
+            continue
+        return str(e.get("created_at") or "")
     return ""
 
 

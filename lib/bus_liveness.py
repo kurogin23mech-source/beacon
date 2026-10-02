@@ -14,11 +14,24 @@ failure mode the others can't see:
     (``heartbeat_fresh``). Informational only.
 
 The wedge this dimension catches: a session whose bridge polls (so ``live`` is
-true) but never advances its cursor — DMs addressed to it pile up unread. The
-sender is fooled into "sent✓ delivered✗" because the transport check only
-proves polling. ``draining`` is derived from the EXISTING unread + cursor state
-(no new schema): if the oldest event still unread by the recipient is older
-than the attentiveness window, the session is receiving but not consuming.
+true) but never actually takes the events addressed to it — DMs pile up
+undelivered. The sender is fooled into "sent✓ delivered✗" because the transport
+check only proves polling.
+
+**何を "未消化" と数えるか (ms-173 / e-6799 で引き直した)**: 初版は recipient の
+``bus_cursors`` をここの真値源にしていたが、**その cursor は実配信経路のものでない**。
+cursor を進めるのは ``bin/beacon-bus-inbox-hook.py`` (= 人の打鍵ごとに走る hook) と
+``beacon bus receive`` だけで、idle-wake を実際に配る MCP bridge は ms-140 で
+**意図的に cursor から切り離されている** (自分の watermark を
+``.beacon/bridges/<sid>.delivery.json`` に持ち、``bus_cursors`` を読み書きしない —
+channel/bus.mjs の ms-140 コメント)。よって "cursor を越えていない" は
+「配られていない」でなく「**人がそのセッションでまだ打鍵していない**」を意味していた。
+結果、bridge が 1 秒で配った DM でも、人がその端末に戻るまで 5 分を超えれば
+wedge と判定され、**DM が最も集まる本体セッションが恒久的に到達不能**になった。
+そこで現在は per-event receipt (``delivered_at`` / ``delivered_by``) を消化の証拠に
+使う (:func:`delivered_to_recipient`)。receipt は bridge が filter chain より前で全取得
+event に刻む (e-1348) ので、「受信経路がこの event を取ったか」の網羅的な証拠になる。
+cursor はここでは scan の起点 (= コスト境界) としてしか使わない。
 
 Pure functions only — the impure store scan that produces
 ``oldest_unread_created_at`` lives on the server (``app._oldest_unread_addressed_created_at``).
@@ -121,6 +134,31 @@ def state_detail_for_declaration(declared_state, state_detail):
     return state_detail if isinstance(state_detail, str) else ""
 
 
+def delivered_to_recipient(event, recipient_sid) -> bool:
+    """``event`` を ``recipient_sid`` 自身の受信経路が実際に取得したか (ms-173 / e-6799)。
+
+    真値源は per-event receipt (``delivered_at`` / ``delivered_by``)。これは
+    ``set_bus_event_receipt`` が stage=``delivered`` で刻むもので、bridge は
+    **filter chain より手前で全取得 event に刻む** (channel/bus.mjs e-1348 の
+    「stamp delivered BEFORE the filter chain」)。よって「受信経路がこの event を
+    取ったか」の網羅的な証拠になり、bridge が落とした event にも receipt が残る。
+
+    ``delivered_by`` の一致を必須にする理由: receipt は stage ごとに
+    first-write-wins で、**最初に取った 1 セッションの名前しか残らない**。
+    broadcast event (= DM 以外の channel で宛先無指定) で「誰かが取った」を全員の
+    消化と読むと、残り全員の本物の wedge をまとめて隠す。だから「自分が取った」
+    以外は消化と数えない。
+
+    ``delivered_at`` があるのに ``delivered_by`` が空の event は **帰属不明**なので
+    消化と数えない (= 安全側。未消化として wedge 判定に残す)。
+    """
+    if not recipient_sid or not isinstance(event, dict):
+        return False
+    if not event.get("delivered_at"):
+        return False
+    return str(event.get("delivered_by") or "") == str(recipient_sid)
+
+
 def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[bool]:
     """Return whether a session is *draining* its inbox.
 
@@ -148,9 +186,12 @@ def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[b
     ``None`` と ``True`` を同じく扱う (reachable / SEND_NORMAL)。よって送信経路の挙動は
     byte 単位で不変で、受信者を誤って落とすリスクなしに指標の嘘だけを消せる。
 
-    ``oldest_unread_created_at`` is the ``created_at`` of the OLDEST event still
-    unread by the recipient (past its cursor), or a falsy value when the inbox
-    has no backlog. The threshold reuses the attentiveness window (a healthy
+    ``oldest_unread_created_at`` is the ``created_at`` of the OLDEST event
+    addressed to the recipient that **その recipient 自身の受信経路がまだ取って
+    いない** もの、または backlog が無いときは falsy。ms-173 / e-6799 まで、この
+    入力は「recipient の cursor を越えていない最古」だった = 実配信経路ではなく
+    inbox-hook (人の打鍵) の進み具合を測っていた。取得の判定は
+    :func:`delivered_to_recipient` が所管し、cursor は scan の起点にしか使わない。 The threshold reuses the attentiveness window (a healthy
     bridge drains in seconds; a backlog older than the human-attention window is
     a wedge, not in-flight latency) — no new constant, per SPEC 方針 a.
     """

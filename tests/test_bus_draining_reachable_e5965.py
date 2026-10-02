@@ -321,3 +321,136 @@ class TestDrainingDoesNotRewardNotReceiving:
         now = _now()
         assert bus_liveness.derive_draining(
             _iso(now - datetime.timedelta(seconds=600)), now, 300) is False
+
+
+# ===========================================================================
+# ms-173 / e-6799 — 「未読」を cursor でなく受信の証跡 (receipt) で決める。
+#
+# cursor (``bus_cursors``) を進めるのは inbox-hook (人の打鍵ごとに走る) と
+# ``beacon bus receive`` だけで、idle-wake を実際に配る MCP bridge は ms-140 で
+# 意図的に cursor から切り離されている。その cursor を消化の真値として読むと、
+# 「配られていない」ではなく「人がまだ打鍵していない」を測ってしまい、DM が最も
+# 集まる本体セッションが恒久的に到達不能と判定された。
+# ===========================================================================
+
+class TestDeliveredToRecipient:
+    def test_own_receipt_counts_as_consumed(self):
+        assert bus_liveness.delivered_to_recipient(
+            {"delivered_at": "2026-10-02T01:00:00Z", "delivered_by": "sv-a"},
+            "sv-a") is True
+
+    def test_another_sessions_receipt_does_not_count(self):
+        """receipt は stage ごとに first-write-wins = 最初に取った 1 名の名前しか
+        残らない。broadcast で「誰かが取った」を全員の消化と読むと、残り全員の
+        本物の wedge をまとめて隠す。"""
+        assert bus_liveness.delivered_to_recipient(
+            {"delivered_at": "2026-10-02T01:00:00Z", "delivered_by": "sv-other"},
+            "sv-a") is False
+
+    def test_no_receipt_is_not_consumed(self):
+        assert bus_liveness.delivered_to_recipient(
+            {"created_at": "2026-10-02T01:00:00Z"}, "sv-a") is False
+
+    def test_unattributed_receipt_is_not_consumed(self):
+        """``delivered_at`` はあるが ``delivered_by`` が空 = 帰属不明。安全側に
+        倒して未消化として残す (wedge を見逃す方向に倒さない)。"""
+        assert bus_liveness.delivered_to_recipient(
+            {"delivered_at": "2026-10-02T01:00:00Z", "delivered_by": ""},
+            "sv-a") is False
+
+    def test_bad_input_is_not_consumed(self):
+        assert bus_liveness.delivered_to_recipient(None, "sv-a") is False
+        assert bus_liveness.delivered_to_recipient({"delivered_at": "t",
+                                                    "delivered_by": "sv-a"},
+                                                   "") is False
+
+
+class TestStaleCursorDoesNotFakeAWedge:
+    @pytest.fixture(autouse=True)
+    def _app(self, monkeypatch):
+        import app as app_module
+        monkeypatch.setattr(app_module.redis_client, "ws_session_live",
+                            lambda pid, sid: None)
+        return app_module
+
+    def _live_session(self, now):
+        return {"session_id": "sv-main",
+                "last_poll_at": _iso(now - datetime.timedelta(seconds=3)),
+                "last_active": _iso(now - datetime.timedelta(seconds=3)),
+                "poll_interval_ms": 5000}
+
+    def _dm(self, created_at, *, delivered_by=None, recipient="sv-main"):
+        e = {"event_id": "e1", "channel": "dm", "sender_session_id": "sv-peer",
+             "created_at": created_at,
+             "payload": {"recipient_session_id": recipient}}
+        if delivered_by is not None:
+            # bridge は filter chain より手前で全取得 event に刻む (e-1348)。
+            e["delivered_at"] = created_at
+            e["delivered_by"] = delivered_by
+        return e
+
+    def test_delivered_dm_behind_a_frozen_cursor_is_not_a_wedge(self, _app,
+                                                                monkeypatch):
+        """e-6799 の再現形。実測された本番の形そのもの: cursor は 25 時間止まって
+        いて、その先に 10 時間前の DM が居る。しかし receipt は created_at +0 秒で、
+        bridge は即座に配っていた。これを wedge と呼んでいた。"""
+        now = _now()
+        old = _iso(now - datetime.timedelta(hours=10))
+        monkeypatch.setattr(_app.db, "get_bus_cursor", lambda pid, rid: {
+            "last_seen_at": _iso(now - datetime.timedelta(hours=25))})
+        monkeypatch.setattr(_app.db, "list_bus_events", lambda pid, **k: [
+            self._dm(old, delivered_by="sv-main"),
+        ])
+        s = self._live_session(now)
+        _app._stamp_session_liveness(s, "proj", now)
+        assert s["live"] is True
+        assert s["draining"] is None, "配信済なのに未消化のバックログと数えている"
+        assert s["reachable"] is True, "配信できているセッションを到達不能と判定した"
+
+    def test_undelivered_dm_is_still_a_wedge(self, _app, monkeypatch):
+        """test-the-test: 本物の wedge (= 受信経路が取っていない) は従来どおり
+        False で落ちる。ここが緑のままだと「偽の安全」になる。"""
+        now = _now()
+        old = _iso(now - datetime.timedelta(seconds=600))
+        monkeypatch.setattr(_app.db, "get_bus_cursor", lambda pid, rid: {})
+        monkeypatch.setattr(_app.db, "list_bus_events", lambda pid, **k: [
+            self._dm(old),  # receipt なし = bridge が一度も取っていない
+        ])
+        s = self._live_session(now)
+        _app._stamp_session_liveness(s, "proj", now)
+        assert s["live"] is True
+        assert s["draining"] is False
+        assert s["reachable"] is False
+
+    def test_receipt_by_another_session_does_not_clear_my_backlog(self, _app,
+                                                                  monkeypatch):
+        """broadcast (= dm 以外の channel で宛先無指定) は全員宛と判定される。
+        他人が先に取った receipt で自分の wedge が消えてはいけない。"""
+        now = _now()
+        old = _iso(now - datetime.timedelta(seconds=600))
+        monkeypatch.setattr(_app.db, "get_bus_cursor", lambda pid, rid: {})
+        monkeypatch.setattr(_app.db, "list_bus_events", lambda pid, **k: [
+            {"event_id": "b1", "channel": "operation-trigger",
+             "sender_session_id": "sv-peer", "created_at": old, "payload": {},
+             "delivered_at": old, "delivered_by": "sv-someone-else"},
+        ])
+        s = self._live_session(now)
+        _app._stamp_session_liveness(s, "proj", now)
+        assert s["draining"] is False
+        assert s["reachable"] is False
+
+    def test_oldest_unconsumed_wins_over_a_newer_delivered_one(self, _app,
+                                                               monkeypatch):
+        """配信済を飛ばして走査を続け、未消化の最古を返すこと (先頭が配信済でも
+        後ろの未消化を取りこぼさない)。"""
+        now = _now()
+        delivered = _iso(now - datetime.timedelta(hours=3))
+        stuck = _iso(now - datetime.timedelta(seconds=900))
+        monkeypatch.setattr(_app.db, "get_bus_cursor", lambda pid, rid: {})
+        monkeypatch.setattr(_app.db, "list_bus_events", lambda pid, **k: [
+            self._dm(delivered, delivered_by="sv-main"),
+            self._dm(stuck),
+        ])
+        s = self._live_session(now)
+        _app._stamp_session_liveness(s, "proj", now)
+        assert s["draining"] is False, "未消化の最古を飛ばして健全と判定した"
