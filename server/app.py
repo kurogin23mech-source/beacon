@@ -2113,11 +2113,17 @@ def _stamp_session_liveness(session: dict, project_id: str,
     # bus_liveness.ALL_STATES, with no change needed here (e-6641).
     declared_state = session.get("declared_state") or ""
     declared_at = session.get("declared_at") or ""
-    state = bus_liveness.derive_state(
+    # ms-173 独立レビュー AX-4: 状態と **その値になった由来** を一緒に受け取る。
+    # ``unknown`` には「一度も言っていない (never-declared)」と「running と言ったのに
+    # 止まった (stale-running)」の 2 経緯が畳まれており、対応の仕方が違う (後者は
+    # 許可待ちで止まっている疑いが濃い)。状態集合は増やさず (全 UI がこの凍結集合
+    # だけを読む契約)、由来を隣のフィールドに刻む。
+    state, state_origin = bus_liveness.derive_state_with_origin(
         declared_state, declared_at, session["live"], now_dt, _STATE_DECL_GRACE_S,
         # e-6774: running だけは live でも経年で疑う (待ち状態は従来どおり疑わない)。
         running_stale_after_seconds=_RUNNING_DECL_STALE_AGE_S)
     session["state"] = state
+    session["state_origin"] = state_origin
     # `state_since` = when the session entered `state`. When the derived state
     # matches what the session declared, the hook-tracked entry time is authoritative
     # (preserved across re-declarations, so a long wait sorts correctly). When the

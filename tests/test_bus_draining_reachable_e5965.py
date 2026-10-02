@@ -522,3 +522,116 @@ class TestTriStateIsNotPublished:
                     "heartbeat_fresh", "state", "activity", "activity_kind",
                     "user_id"):
             assert key in row, f"stamp が {key} を埋めていない (早期 return の疑い)"
+
+
+class TestUnknownCarriesItsOrigin:
+    """ms-173 独立レビュー AX-4: ``unknown`` の 2 経緯を名前 1 つに畳まない。
+
+    (a) live だが一度も何をしているか言っていない (never-declared) と
+    (b) ``running`` と宣言したのに declared_at が止まった (stale-running) は、
+    どちらも「生きているが何をしているか言えない」= ``state`` としては同じ値が正しい。
+    しかし **対応の仕方が違う**: (b) は許可待ちで止まっている疑いが濃く (実測した 2 件は
+    いずれも待機内容に許可要求の文面が残っていた)、人が見に行く話になる。由来を失うと
+    consumer が (b) を (a) と読んで取り違える。
+
+    状態集合は増やさない (全 UI / inbox / attention面 がこの凍結集合だけを読む契約)。
+    由来は隣のフィールドに刻む。
+    """
+
+    def test_the_two_unknown_origins_are_distinguishable(self):
+        now = _now()
+        stale = _iso(now - datetime.timedelta(hours=2))
+        stuck_running = bus_liveness.derive_state_with_origin(
+            bus_liveness.STATE_RUNNING, stale, True, now, 600,
+            running_stale_after_seconds=1800)
+        never_said = bus_liveness.derive_state_with_origin(
+            "", None, True, now, 600)
+        # state は同じ値が正しい (でっち上げない)
+        assert stuck_running[0] == bus_liveness.STATE_UNKNOWN
+        assert never_said[0] == bus_liveness.STATE_UNKNOWN
+        # 由来は別でなければならない — ここが AX-4 の本体
+        assert stuck_running[1] == bus_liveness.STATE_ORIGIN_STALE_RUNNING
+        assert never_said[1] == bus_liveness.STATE_ORIGIN_NEVER_DECLARED
+        assert stuck_running[1] != never_said[1]
+
+    def test_every_branch_returns_a_known_origin(self):
+        """「由来が無い」と「由来が不明」を同じ空値に畳まないこと。
+
+        e-6777 の None/True、AX-2 の三値 truthy 畳み込みと同型の病理を作らない。
+        """
+        now = _now()
+        stale = _iso(now - datetime.timedelta(hours=2))
+        fresh = _iso(now - datetime.timedelta(seconds=5))
+        cases = [
+            (bus_liveness.STATE_TERMINATED, stale, False),
+            (bus_liveness.STATE_RUNNING, stale, True),
+            (bus_liveness.STATE_AWAITING_HUMAN, stale, True),
+            (bus_liveness.STATE_RUNNING, fresh, False),
+            (bus_liveness.STATE_RUNNING, stale, False),
+            ("", None, True),
+            ("", None, False),
+            ("bogus-state", stale, True),
+        ]
+        for declared, at, live in cases:
+            state, origin = bus_liveness.derive_state_with_origin(
+                declared, at, live, now, 600, running_stale_after_seconds=1800)
+            assert state in bus_liveness.ALL_STATES, (declared, at, live, state)
+            assert origin in bus_liveness.ALL_STATE_ORIGINS, (
+                f"{(declared, at, live)} の由来が未知: {origin!r} — "
+                "全経路が由来を返す契約を破っている")
+
+    def test_the_string_api_is_unchanged(self):
+        """既存の呼び出し (= 状態だけ欲しい側) は 1 文字列のまま。判定は 1 箇所。"""
+        now = _now()
+        stale = _iso(now - datetime.timedelta(hours=2))
+        for declared, at, live in (("running", stale, True), ("", None, True),
+                                   ("", None, False), ("running", stale, False)):
+            assert bus_liveness.derive_state(
+                declared, at, live, now, 600,
+                running_stale_after_seconds=1800) == \
+                bus_liveness.derive_state_with_origin(
+                    declared, at, live, now, 600,
+                    running_stale_after_seconds=1800)[0]
+
+
+class TestStateOriginIsStampedOnTheRow:
+    @pytest.fixture(autouse=True)
+    def _app(self, monkeypatch):
+        import app as app_module
+        monkeypatch.setattr(app_module.redis_client, "ws_session_live",
+                            lambda pid, sid: None)
+        monkeypatch.setattr(app_module.db, "get_bus_cursor", lambda pid, rid: {})
+        monkeypatch.setattr(app_module.db, "list_bus_events", lambda pid, **k: [])
+        return app_module
+
+    def _row(self, now, **over):
+        row = {"session_id": "sv-o",
+               "last_poll_at": _iso(now - datetime.timedelta(seconds=3)),
+               "last_active": _iso(now - datetime.timedelta(seconds=3)),
+               "poll_interval_ms": 5000}
+        row.update(over)
+        return row
+
+    def test_stuck_running_row_says_why_it_is_unknown(self, _app, monkeypatch):
+        now = _now()
+        row = self._row(now, declared_state="running",
+                        declared_at=_iso(now - datetime.timedelta(hours=2)))
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["state"] == bus_liveness.STATE_UNKNOWN
+        assert row["state_origin"] == bus_liveness.STATE_ORIGIN_STALE_RUNNING, (
+            "止まった『作業中』が、一度も宣言していない行と区別できない")
+
+    def test_never_declared_row_says_so(self, _app, monkeypatch):
+        now = _now()
+        row = self._row(now)
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["state"] == bus_liveness.STATE_UNKNOWN
+        assert row["state_origin"] == bus_liveness.STATE_ORIGIN_NEVER_DECLARED
+
+    def test_origin_is_always_present_and_known(self, _app, monkeypatch):
+        now = _now()
+        row = self._row(now, declared_state="awaiting_human",
+                        declared_at=_iso(now - datetime.timedelta(hours=5)))
+        _app._stamp_session_liveness(row, "proj", now)
+        assert row["state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert row["state_origin"] in bus_liveness.ALL_STATE_ORIGINS

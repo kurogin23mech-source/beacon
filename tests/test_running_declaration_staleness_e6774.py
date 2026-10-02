@@ -111,10 +111,27 @@ class TestServerWiring:
                    / "server" / "app.py").read_text(encoding="utf-8")
 
     def test_server_passes_the_threshold(self):
-        i = self.src.index("bus_liveness.derive_state(")
-        block = self.src[i:i + 400]
-        assert "running_stale_after_seconds=" in block, (
-            "server が閾値を渡していない = 止まった作業中が訂正されない")
+        """状態導出の **全ての呼び出し** が閾値を渡していること。
+
+        初版は ``bus_liveness.derive_state(`` という綴りを 1 つ探していたので、
+        入口の名前が変わると「見つからない」で落ち、変更者には何が壊れたのか
+        分からなかった (実際 AX-4 で導出を ``derive_state_with_origin`` に寄せた
+        ときに落ちた)。固定したい契約は綴りではなく **閾値が渡されていること** で、
+        しかも呼び出しが 1 つだけという前提も危うい (閾値を渡さない 2 本目が後から
+        増えると、そこだけ止まった作業中が訂正されない)。だから入口名に寛容で、
+        呼び出しの数には厳しくする。
+        """
+        import re
+        calls = list(re.finditer(
+            r"bus_liveness\.derive_state(?:_with_origin)?\(", self.src))
+        assert calls, (
+            "server が状態導出を呼んでいない — 綴りを変えたなら "
+            "bus_liveness.derive_state / derive_state_with_origin のどちらかに揃える")
+        for m in calls:
+            block = self.src[m.start():m.start() + 400]
+            assert "running_stale_after_seconds=" in block, (
+                f"server の状態導出 ({m.group(0)}, 位置 {m.start()}) が閾値を "
+                "渡していない = その経路では止まった作業中が訂正されない")
 
     def test_threshold_is_generous_enough_for_a_long_tool_call(self):
         """短い既定値は正常な長時間作業を unknown にする。"""

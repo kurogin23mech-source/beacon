@@ -271,6 +271,12 @@ type rosterSessionDTO struct {
 	// サーバが導出する正典の作業状態 (running / idle / awaiting_human / blocked /
 	// terminated / unknown)。ローカル道具の申告 (busy/idle) とは別系統 (e-6562)。
 	State string `json:"state"`
+	// StateOrigin は「なぜその状態になったか」(declared / stale-running /
+	// never-declared / transport-lost / no-trace、lib/bus_liveness が所管)。
+	// unknown には「一度も言っていない」と「作業中と言ったのに止まった」の 2 経緯が
+	// あり、対応の仕方が違う (後者は許可待ちの疑いが濃い)。状態名だけでは区別できない
+	// ので由来を運ぶ (ms-173 独立レビュー AX-4)。古いサーバでは空。
+	StateOrigin string `json:"state_origin"`
 	Actor      struct {
 		Email   string `json:"email"`
 		Machine string `json:"machine"`
@@ -369,6 +375,8 @@ func (c *CloudSource) sessions(scope RosterScope) ([]SessionRow, error) {
 			HeadSubject: s.Git.HeadSubject,
 			// サーバの正典 state。確認待ち (awaiting_human) 判定の源 (e-6562)。
 			State: s.State,
+			// 状態になった由来 (止まった「作業中」を区別する源、AX-4)。
+			StateOrigin: s.StateOrigin,
 		}
 
 		// 担当はサーバが解決した working_target を使う。

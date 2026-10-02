@@ -99,6 +99,13 @@ type SessionOverview struct {
 	// いる」の宣言そのものなので、待機内容 (Activity) が引けなくても確認待ちに
 	// する (e-6562 — 内容の有無と待っている事実を混同しない)。
 	ServerState string `json:"server_state,omitempty"`
+	// ServerStateOrigin は ServerState がその値になった由来 (declared /
+	// stale-running / never-declared / transport-lost / no-trace)。
+	// **unknown を割るための項目** — 「一度も何をしているか言っていない」と
+	// 「作業中と言ったのに止まった」は同じ unknown だが、後者は許可待ちで止まって
+	// いる疑いが濃い。運用室はそこに注意を向ける必要があるので、状態名に畳まない
+	// (ms-173 独立レビュー AX-4)。古いサーバでは空 = 由来不明。
+	ServerStateOrigin string `json:"server_state_origin,omitempty"`
 	// Named は Beacon に名乗っているか。
 	//
 	// **送れるのはこれが真のものだけ。** 名乗っていないセッションには、外から
@@ -497,6 +504,8 @@ func applyNamed(o *SessionOverview, n SessionRow) {
 	o.ActivityKind = n.ActivityKind
 	// サーバの正典 state (確認待ち判定の源、e-6562)。
 	o.ServerState = n.State
+	// その状態になった由来 (止まった「作業中」を割る源、AX-4)。
+	o.ServerStateOrigin = n.StateOrigin
 	o.Harness = n.Harness
 	// コンテキスト使用率 (未申告なら nil のまま = バッジ非表示)。
 	o.ContextPct = n.ContextPct

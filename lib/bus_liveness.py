@@ -94,6 +94,37 @@ DECLARABLE_STATES = frozenset({
 ALL_STATES = DECLARABLE_STATES | frozenset({STATE_UNKNOWN, STATE_INTERRUPTED})
 
 
+# ms-173 独立レビュー AX-4 — **状態がその値になった「由来」**。
+#
+# ``unknown`` には 2 つの異なる経緯が畳まれている: (a) live だが一度も何をしているか
+# 言っていない (ms-177 の本来の意味) と (b) ``running`` と宣言したのに declared_at が
+# 止まった (e-6774 で足した投影先)。どちらも「生きているが何をしているか言えない」
+# なので ``state`` としては同じ値が正しい — しかし **対応の仕方は違う**: (a) は宣言を
+# 促す話、(b) は許可待ちで止まっている疑いが濃い (実測した 2 件はいずれも待機内容に
+# 許可要求の文面が残っていた) ので人が見に行く話。名前 1 つに 2 つの原因を畳むと、
+# consumer が (b) を (a) と読んで取り違える。
+#
+# 状態集合 (``ALL_STATES``) は増やさない: 全 UI / inbox / attention面 がこの小さな
+# 凍結集合だけを読む契約 (ms-159 判断1) で、7 番目の状態を足すと全消費側に波及する。
+# 代わりに **由来を別フィールドに並べて刻む** (先例: ``live_suppressed_reason`` =
+# 「抑止を silent にしない。理由を行に刻む」)。
+#
+# **全ての導出経路に由来を付ける** のが要: 「由来が無い」と「由来が不明」が同じ空値に
+# 畳まれると、また同じ取り違えが別の形で起きる (e-6777 の None/True、AX-2 の三値の
+# truthy 畳み込みと同型の病理)。
+STATE_ORIGIN_DECLARED = "declared"              # 宣言どおり (= 最も多い)
+STATE_ORIGIN_STALE_RUNNING = "stale-running"    # running と言ったが止まった → unknown
+STATE_ORIGIN_NEVER_DECLARED = "never-declared"  # live だが一度も言っていない → unknown
+STATE_ORIGIN_TRANSPORT_LOST = "transport-lost"  # 受信経路が消え宣言も古い → interrupted
+STATE_ORIGIN_NO_TRACE = "no-trace"              # 受信経路も宣言も無い → terminated
+
+ALL_STATE_ORIGINS = frozenset({
+    STATE_ORIGIN_DECLARED, STATE_ORIGIN_STALE_RUNNING,
+    STATE_ORIGIN_NEVER_DECLARED, STATE_ORIGIN_TRANSPORT_LOST,
+    STATE_ORIGIN_NO_TRACE,
+})
+
+
 # ms-173 / e-6775 — 「待機内容 (state_detail) を持つ状態」の正典。
 #
 # 不変条件: **state_detail は state に属する。両者は必ず一緒に動く。** 待ちでない状態
@@ -397,7 +428,29 @@ def ws_only_liveness_suppression(*, ws_live, poll_healthy, has_poll_history,
 def derive_state(declared_state, declared_at, live, now,
                  stale_after_seconds, *,
                  running_stale_after_seconds=None) -> str:
-    """Project a work unit's canonical ``state`` (ms-159 / e-6243).
+    """Project a work unit's canonical ``state`` — 由来を要らない呼び出し側向けの薄い窓口。
+
+    判定は :func:`derive_state_with_origin` が 1 箇所で行い、ここはその状態側だけを
+    返す (= 2 箇所で分岐を書かない。独立レビュー AX-4 で由来を足すとき、同じ分岐を
+    もう一度書くと必ず drift する)。既存の呼び出しと戻り値は不変。
+    """
+    return derive_state_with_origin(
+        declared_state, declared_at, live, now, stale_after_seconds,
+        running_stale_after_seconds=running_stale_after_seconds)[0]
+
+
+def derive_state_with_origin(declared_state, declared_at, live, now,
+                             stale_after_seconds, *,
+                             running_stale_after_seconds=None):
+    """Project a work unit's canonical ``state`` **と、その値になった由来** を返す
+    (ms-159 / e-6243 + ms-173 独立レビュー AX-4)。
+
+    Returns:
+        ``(state, origin)`` — ``state`` は ``ALL_STATES`` の 1 つ、``origin`` は
+        ``ALL_STATE_ORIGINS`` の 1 つ。**全経路が由来を返す** (「由来が無い」と
+        「由来が不明」を同じ空値に畳まない)。とくに ``unknown`` は 2 経緯
+        (``stale-running`` / ``never-declared``) を持つので、名前 1 つで区別できない
+        のをここで区別する。
 
     The one place every value in ``ALL_STATES`` is decided. Pure: the
     impure liveness scan that produces ``live`` lives on the server; keeping the
@@ -471,15 +524,14 @@ def derive_state(declared_state, declared_at, live, now,
         stale_after_seconds: post-death grace window (only consulted when
             ``live`` is false).
 
-    Returns:
-        One of ``ALL_STATES``: ``STATE_RUNNING`` / ``STATE_IDLE`` /
-        ``STATE_AWAITING_HUMAN`` / ``STATE_BLOCKED`` / ``STATE_TERMINATED`` /
-        ``STATE_INTERRUPTED`` / ``STATE_UNKNOWN``.
+    State values: ``STATE_RUNNING`` / ``STATE_IDLE`` / ``STATE_AWAITING_HUMAN`` /
+    ``STATE_BLOCKED`` / ``STATE_TERMINATED`` / ``STATE_INTERRUPTED`` /
+    ``STATE_UNKNOWN`` (= ``ALL_STATES``)。由来は ``ALL_STATE_ORIGINS`` を参照。
     """
     # 1. Terminal declaration is authoritative forever — never let age or a
     #    dropped transport flip an ended session to unknown.
     if declared_state == STATE_TERMINATED:
-        return STATE_TERMINATED
+        return STATE_TERMINATED, STATE_ORIGIN_DECLARED
 
     # 2. A recognized non-terminal declaration.
     if declared_state in DECLARABLE_STATES:  # non-terminal (terminated handled)
@@ -511,21 +563,24 @@ def derive_state(declared_state, declared_at, live, now,
                     and running_stale_after_seconds > 0
                     and _declaration_is_stale(
                         declared_at, now, running_stale_after_seconds)):
-                return STATE_UNKNOWN
+                # 由来を残す: 「一度も言っていない」(never-declared) と読まれると、
+                # 許可待ちで止まっている疑いという **対応の違う** 情報が消える。
+                return STATE_UNKNOWN, STATE_ORIGIN_STALE_RUNNING
             # Live heartbeat re-affirms the marker → trust it regardless of age.
             # This keeps a long-waiting awaiting_human at the top of attention.
-            return declared_state
+            return declared_state, STATE_ORIGIN_DECLARED
         # Not live: the heartbeat is gone, so staleness now decides.
         if not _declaration_is_stale(declared_at, now, stale_after_seconds):
-            return declared_state          # very recent death: grace window
+            # very recent death: grace window — まだ宣言どおりに読む
+            return declared_state, STATE_ORIGIN_DECLARED
         # Gone + stale, and it HAD declared real work ⇒ 中断 (ms-177). This is
         # the 固着 backstop as before — the frozen awaiting_human stops nagging —
         # but it is now named for what it actually is instead of being dumped in
         # ``unknown``: a session that was working and died without ending.
-        return STATE_INTERRUPTED
+        return STATE_INTERRUPTED, STATE_ORIGIN_TRANSPORT_LOST
 
     # 3. No (or unrecognized) declaration ⇒ liveness fallback (判断4 safe side).
     #    live ⇒ up but unstated ⇒ unknown; not live ⇒ gone ⇒ terminated.
     if live:
-        return STATE_UNKNOWN
-    return STATE_TERMINATED
+        return STATE_UNKNOWN, STATE_ORIGIN_NEVER_DECLARED
+    return STATE_TERMINATED, STATE_ORIGIN_NO_TRACE
