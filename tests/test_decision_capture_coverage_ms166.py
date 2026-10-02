@@ -193,97 +193,134 @@ def test_no_stale_decision_capture_gap():
 # テストが本番を読みに行かないため (= ms-166 が別途塞いでいる汚染経路を増やさない) と、
 # 新しい writer を足した瞬間に手元で赤くなるため。
 #
-# 射程の限界 (正直に書く — ここを曖昧にすると偽の安全になる):
-# kind が実行時に決まる経路はリテラルが無いので列挙できない。該当するのは
-#   * ``beacon decision record`` の ``BEACON_DECISION_KIND`` (任意文字列)
-#   * ``decision_event_from_halt`` の resumed フラグによる halt / resume の切替
-# 前者が triage の出所で、DECISION_CAPTURE_ADHOC_KINDS に宣言して射程外であることを
-# 明示する。後者は両 kind が既に台帳に在る。
+# 射程 — 何を真値源とし、何を見ていないか (曖昧にすると偽の安全になる):
+#
+# 判断記録の payload を **形** で見分ける。``kind`` と ``decision`` を両方持ち、かつ
+# ``rationale`` / ``decided_by`` / ``related`` のいずれかを持つ辞書リテラルが判断記録の
+# payload。これは命名規約ではなく構造の判別軸で、無関係な辞書 (bus event / target の
+# arm マッピング / claim の応答) は後者の目印を持たないので構造的に外れる。
+#
+# この形にしたのは、独立 AX レビュー (PR #783) が **書き込み関数の呼び出し地点だけを
+# 見る** 初版の穴を突いたため。初版は ``record_decision`` 等の呼び出し引数と、
+# ファイル名が ``decision_`` で始まるモジュールの ``*_KIND`` 定数しか見ていなかった。
+# ところが本番で使われている gate-judgement の実際の書き込み地点は
+# ``lib/sales_entities.py`` が ``decision_outbox.stage(payload, ...)`` に積む形で、
+# 3 つの書き込み関数を一つも呼ばない。拾えていたのは定数が偶然
+# ``decision_outbox.py`` (= ``decision_`` 接頭辞) に在ったからで、**ガードの覆域が
+# 実際の書き込み経路ではなくファイル名の慣習に依っていた**。新しい target class が
+# 同じ形で新種別を積めば、ガードは緑のまま未宣言の種別が出荷される —
+# e-6756 が構造的に不可能にしたはずの退行そのもの。
+#
+# kind の値はリテラルだけでなく **定数参照も解く** (同一モジュールの ``NAME`` と
+# ``<module>.NAME`` の両形)。これで gate-judgement は実際の積み地点で、pr-intent は
+# 書き込みを呼ばない payload 生成関数で、それぞれ名前の慣習に頼らず見つかる。
+#
+# 見ていないもの: kind が **実行時に決まる** 地点 (環境変数 / HTTP body / 条件式)。
+# リテラルにも定数にも解けないので列挙できない。これを黙って飛ばすと射程の嘘に
+# なるので、``test_unresolved_kind_sites_are_all_declared`` が「解けない地点は宣言済の
+# ものだけ」を機械で固定する (新しい実行時命名経路が無言で増えない)。
 
-_DECISION_WRITERS = frozenset({"record_decision", "build_decision_event",
-                               "append_decision_event"})
+# 判断記録の payload を見分ける形 (命名でなく構造)。
+_PAYLOAD_REQUIRED_KEYS = frozenset({"kind", "decision"})
+_PAYLOAD_MARKER_KEYS = frozenset({"rationale", "decided_by", "related"})
+# kind を kwarg で受ける builder (payload を組み立てて返す唯一の収束口)。
+_KIND_KWARG_CALLEES = frozenset({"build_decision_event"})
 
-
-def _callee_name(call: ast.Call) -> str:
-    f = call.func
-    return f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
-
-
-def _kind_literal_of_dict(d: ast.Dict):
-    for k, v in zip(d.keys, d.values):
-        if (isinstance(k, ast.Constant) and k.value == "kind"
-                and isinstance(v, ast.Constant) and isinstance(v.value, str)):
-            return v.value
-    return None
-
-
-def _dict_assigned_to(scope: ast.AST, name: str):
-    """同一スコープで ``name`` に代入された辞書リテラル (``payload = {...}`` の解決)。"""
-    for node in ast.walk(scope):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if (isinstance(t, ast.Name) and t.id == name
-                        and isinstance(node.value, ast.Dict)):
-                    return node.value
-    return None
-
-
-def _kinds_written_in(path: str) -> dict:
-    """``path`` の decision 書き込み地点で使われている kind リテラルを ``{kind: {site}}`` で返す。
-
-    走査するのは **書き込み呼び出しの引数だけ**。関数まるごとを走査すると、巨大な
-    router factory に同居する無関係な ``"kind"`` (bus event / target kind 等) を
-    7 件拾って偽陽性になることを実測したため。
-    """
-    tree = ast.parse(open(path, encoding="utf-8").read())
-    found: dict = {}
-    base = os.path.basename(path)
-    scopes = [n for n in ast.walk(tree)
-              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module))]
-    for scope in scopes:
-        label = getattr(scope, "name", "<module>")
-        for call in [n for n in ast.walk(scope) if isinstance(n, ast.Call)]:
-            if _callee_name(call) not in _DECISION_WRITERS:
-                continue
-            seen = []
-            payloads = list(call.args) + [kw.value for kw in call.keywords
-                                          if kw.arg in ("data", "payload", "decision")]
-            for a in payloads:
-                if isinstance(a, ast.Dict):
-                    seen.append(_kind_literal_of_dict(a))
-                elif isinstance(a, ast.Name):
-                    d = _dict_assigned_to(scope, a.id)
-                    if d is not None:
-                        seen.append(_kind_literal_of_dict(d))
-            for kw in call.keywords:
-                if (kw.arg == "kind" and isinstance(kw.value, ast.Constant)
-                        and isinstance(kw.value.value, str)):
-                    seen.append(kw.value.value)
-            for k in seen:
-                if k:
-                    found.setdefault(k, set()).add(f"{base}:{label}")
-    return found
+# kind が実行時に決まるため解けない書き込み地点。(ファイル名 → なぜ解けないか) で宣言する。
+# 新しい実行時命名経路が増えたらここに足す — 足さないと下の guard が落ちる。
+_RUNTIME_NAMED_KIND_SITES = {
+    "cmd_decision.py": "BEACON_DECISION_KIND が任意の文字列を kind にする汎用の記録口",
+    "decision_event.py": "halt / resume は resumed フラグで kind を切り替える + builder 内部",
+    "routers_projects.py": "HTTP の body が運ぶ kind をそのまま通す汎用 route",
+    "root_target.py": "arm マッピングの kind (判断記録ではない) が添字で決まる",
+}
 
 
-def _kind_constants_in(path: str) -> dict:
-    """decision モジュールの module-level ``*_KIND = "..."`` 定数。
-
-    対象を decision モジュールに限るのは、``*_KIND`` を全ファイルで走査すると bus
-    channel や target kind の定数 (``ROOT_TARGET_KIND`` / ``WELCOME_TICK_KIND`` 等) を
-    拾って偽陽性になるため。
-    """
-    tree = ast.parse(open(path, encoding="utf-8").read())
-    found: dict = {}
-    base = os.path.basename(path)
+def _module_level_str_const(path: str, name: str):
+    """``path`` の module-level ``name = "..."`` を文字列で返す (無ければ None)。"""
+    try:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+    except (OSError, SyntaxError):
+        return None
     for node in tree.body:
         if not isinstance(node, ast.Assign):
             continue
         for t in node.targets:
-            if (isinstance(t, ast.Name) and t.id.endswith("_KIND")
+            if (isinstance(t, ast.Name) and t.id == name
                     and isinstance(node.value, ast.Constant)
                     and isinstance(node.value.value, str)):
-                found.setdefault(node.value.value, set()).add(f"{base}:{t.id}")
-    return found
+                return node.value.value
+    return None
+
+
+def _resolve_kind_value(value: ast.AST, path: str):
+    """kind の値を ``(文字列 or None, どう解いたか)`` で返す。
+
+    リテラル / 同一モジュールの定数 / ``<module>.定数`` の 3 形を解く。解けない形
+    (= 実行時に決まる) は ``None`` を返し、呼び出し側が宣言済かを照合する。
+    """
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value, "literal"
+    if isinstance(value, ast.Name):
+        got = _module_level_str_const(path, value.id)
+        return (got, "const " + value.id) if got else (None, "name " + value.id)
+    if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+        for root in (_LIB_DIR, _SERVER_DIR, os.path.dirname(path)):
+            candidate = os.path.join(root, value.value.id + ".py")
+            if os.path.exists(candidate):
+                got = _module_level_str_const(candidate, value.attr)
+                if got:
+                    return got, "const " + value.value.id + "." + value.attr
+        return None, "attribute " + value.value.id + "." + value.attr
+    return None, type(value).__name__.lower()
+
+
+def _literal_keys(d: ast.Dict) -> set:
+    return {k.value for k in d.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+
+
+def _is_decision_payload(d: ast.Dict) -> bool:
+    keys = _literal_keys(d)
+    return bool(_PAYLOAD_REQUIRED_KEYS <= keys and (_PAYLOAD_MARKER_KEYS & keys))
+
+
+def kind_sites_in(path: str):
+    """1 ファイルの判断記録 kind を ``({kind: {site}}, [解けなかった site])`` で返す。"""
+    try:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+    except (OSError, SyntaxError):
+        return {}, []
+    resolved: dict = {}
+    unresolved: list = []
+    base = os.path.basename(path)
+    for d in [n for n in ast.walk(tree) if isinstance(n, ast.Dict)]:
+        if not _is_decision_payload(d):
+            continue
+        for k, v in zip(d.keys, d.values):
+            if not (isinstance(k, ast.Constant) and k.value == "kind"):
+                continue
+            kind, how = _resolve_kind_value(v, path)
+            if kind:
+                resolved.setdefault(kind, set()).add(
+                    base + ":" + str(d.lineno) + " (" + how + ")")
+            else:
+                unresolved.append((base, d.lineno, how))
+    for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)]:
+        f = call.func
+        callee = f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
+        if callee not in _KIND_KWARG_CALLEES:
+            continue
+        for kw in call.keywords:
+            if kw.arg != "kind":
+                continue
+            kind, how = _resolve_kind_value(kw.value, path)
+            if kind:
+                resolved.setdefault(kind, set()).add(
+                    base + ":" + str(call.lineno) + " (kwarg " + how + ")")
+            else:
+                unresolved.append((base, call.lineno, "kwarg " + how))
+    return resolved, unresolved
 
 
 def _declared_kinds() -> set:
@@ -294,22 +331,23 @@ def _declared_kinds() -> set:
             | set(cl.DECISION_CAPTURE_ADHOC_KINDS))
 
 
-def kinds_written_in_code() -> dict:
-    """lib/ + server/ の decision 書き込みで使われる kind リテラルを全列挙する。"""
-    out: dict = {}
+def _scan_all():
+    resolved: dict = {}
+    unresolved: list = []
     for root in (_LIB_DIR, _SERVER_DIR):
         for name in sorted(os.listdir(root)):
             if not name.endswith(".py"):
                 continue
-            path = os.path.join(root, name)
-            src = open(path, encoding="utf-8").read()
-            if any(w in src for w in _DECISION_WRITERS):
-                for k, sites in _kinds_written_in(path).items():
-                    out.setdefault(k, set()).update(sites)
-            if name.startswith("decision_") or name == "decision_event.py":
-                for k, sites in _kind_constants_in(path).items():
-                    out.setdefault(k, set()).update(sites)
-    return out
+            r, u = kind_sites_in(os.path.join(root, name))
+            for k, sites in r.items():
+                resolved.setdefault(k, set()).update(sites)
+            unresolved += u
+    return resolved, unresolved
+
+
+def kinds_written_in_code() -> dict:
+    """lib/ + server/ の判断記録 payload が運ぶ kind を ``{kind: {site}}`` で全列挙する。"""
+    return _scan_all()[0]
 
 
 def test_every_kind_written_in_code_is_declared_in_the_ledger():
@@ -317,8 +355,9 @@ def test_every_kind_written_in_code_is_declared_in_the_ledger():
     written = kinds_written_in_code()
     undeclared = {k: sorted(v) for k, v in written.items() if k not in declared}
     assert not undeclared, (
-        "decision を書いているのに語彙にも台帳にも載っていない kind があります "
-        f"(ms-166 e-6756 — 被覆検査が素通りし、配線が外れても気づけない): {undeclared}。"
+        "判断記録を書いているのに語彙にも台帳にも載っていない kind があります "
+        "(ms-166 e-6756 — 被覆検査が素通りし、配線が外れても気づけない): "
+        + repr(undeclared) + "。"
         "専用 seam があるなら KNOWN_DECISION_KINDS に文書化して "
         "DECISION_CAPTURE_PRODUCERS に producer を足す。seam に届かない会話判断なら "
         "DECISION_CAPTURE_BOUNDARY、既存成果物からの導出なら "
@@ -326,58 +365,144 @@ def test_every_kind_written_in_code_is_declared_in_the_ledger():
         "DECISION_CAPTURE_ADHOC_KINDS に理由付きで宣言してください。")
 
 
-def test_the_written_kind_extractor_actually_finds_a_new_kind(tmp_path):
-    # test-the-test: 台帳に無い kind を書く writer を合成して、抽出器が拾うことを確かめる。
-    # 「0 件だから緑」なのか「抽出器が何も見ていないから緑」なのかを区別する。
-    src = textwrap.dedent('''
-        def _record_something():
-            client.record_decision(project_id, {
-                "kind": "brand-new-judgement",
-                "decision": "x",
-            })
-    ''')
-    p = tmp_path / "cmd_new.py"
+def test_unresolved_kind_sites_are_all_declared():
+    """解けなかった書き込み地点は、宣言済の実行時命名経路だけであること。
+
+    これが無いと「解けないものは黙って飛ばす」= 射程の嘘になる。新しい実行時命名
+    経路が増えたら、ここで落ちて宣言を促す。
+    """
+    _, unresolved = _scan_all()
+    undeclared = sorted({(f, line, how) for f, line, how in unresolved
+                         if f not in _RUNTIME_NAMED_KIND_SITES})
+    assert not undeclared, (
+        "kind を解けない判断記録の書き込み地点が宣言されていません "
+        "(実行時に kind が決まるなら _RUNTIME_NAMED_KIND_SITES に理由付きで "
+        "足してください): " + repr(undeclared))
+
+
+# --- test-the-test: 捕まえるべき形ごとに赤くなるか / 正しい形は緑か -----------
+
+def test_extractor_finds_the_outbox_staging_site_not_a_filename_convention():
+    """独立 AX レビュー (PR #783) が突いた穴の回帰ピン。
+
+    gate-judgement の実際の書き込み地点は ``lib/sales_entities.py`` が
+    ``decision_outbox.stage`` に積む形で、書き込み関数を一つも呼ばない。初版の
+    抽出器はこの地点を見ておらず、定数が偶然 ``decision_`` 接頭辞のファイルに在った
+    から拾えていた。実際の積み地点で見つかることを固定する。
+    """
+    sites = kinds_written_in_code().get("gate-judgement") or set()
+    assert any("sales_entities.py" in s for s in sites), (
+        "gate-judgement を実際の書き込み地点で拾えていません: " + repr(sorted(sites)))
+    assert any("decision_outbox.GATE_JUDGEMENT_KIND" in s for s in sites), (
+        "定数参照を解けていません: " + repr(sorted(sites)))
+
+
+def test_extractor_finds_a_kind_that_only_a_builder_carries():
+    # pr-intent は書き込みを呼ばない payload 生成関数が運ぶ。呼び出し地点だけを見る
+    # 抽出器では拾えない形。
+    sites = kinds_written_in_code().get("pr-intent") or set()
+    assert any("decision_derive.py" in s for s in sites), repr(sorted(sites))
+
+
+def test_guard_fails_on_a_new_kind_staged_through_the_outbox(tmp_path):
+    # test-the-test: 書き込み関数を一つも呼ばず outbox に積むだけの新しい経路
+    # (= このレビューが指摘した拡張点そのもの) を合成して、拾うことを確かめる。
+    src = (
+        "import decision_outbox\n"
+        "\n"
+        "def stage_new_class_judgement(target, outcome, reason, actor):\n"
+        "    payload = {\n"
+        '        "kind": "brand-new-judgement",\n'
+        '        "decision": outcome,\n'
+        '        "rationale": reason or None,\n'
+        '        "decided_by": actor,\n'
+        '        "related": {"target_id": target},\n'
+        "    }\n"
+        "    return decision_outbox.stage(payload, verify=None)\n"
+    )
+    p = tmp_path / "new_class_entities.py"
     p.write_text(src, encoding="utf-8")
-    found = _kinds_written_in(str(p))
-    assert "brand-new-judgement" in found, f"抽出器が新しい kind を見逃しました: {found}"
+    resolved, _ = kind_sites_in(str(p))
+    assert "brand-new-judgement" in resolved, (
+        "新しい積み経路を見逃しました: " + repr(resolved))
     assert "brand-new-judgement" not in _declared_kinds()
 
 
-def test_the_written_kind_extractor_resolves_a_payload_variable(tmp_path):
-    # payload を変数に組んでから渡す形 (cmd_task.py の実際の形) も拾えること。
-    src = textwrap.dedent('''
-        def _record_something():
-            payload = {"kind": "via-variable", "decision": "x"}
-            client.record_decision(project_id, payload)
-    ''')
-    p = tmp_path / "cmd_var.py"
+def test_extractor_resolves_a_constant_reference(tmp_path):
+    # 定数参照の 2 形 (同一モジュール / <module>.定数) が解けること。
+    (tmp_path / "some_kinds.py").write_text(
+        'OTHER_KIND = "cross-module"\n', encoding="utf-8")
+    src = (
+        "import some_kinds\n"
+        '\nLOCAL_KIND = "same-module"\n'
+        "\n"
+        "def write_local(client, pid, outcome):\n"
+        "    client.record_decision(pid, {\n"
+        '        "kind": LOCAL_KIND,\n'
+        '        "decision": outcome,\n'
+        '        "decided_by": "autonomous-AI",\n'
+        "    })\n"
+        "\n"
+        "def write_cross(client, pid, outcome):\n"
+        "    client.record_decision(pid, {\n"
+        '        "kind": some_kinds.OTHER_KIND,\n'
+        '        "decision": outcome,\n'
+        '        "decided_by": "autonomous-AI",\n'
+        "    })\n"
+    )
+    p = tmp_path / "cmd_y.py"
     p.write_text(src, encoding="utf-8")
-    assert "via-variable" in _kinds_written_in(str(p))
+    resolved, unresolved = kind_sites_in(str(p))
+    assert "same-module" in resolved, repr(resolved)
+    assert "cross-module" in resolved, (
+        "<module>.定数 を解けていません: " + repr((resolved, unresolved)))
 
 
-def test_the_written_kind_extractor_ignores_unrelated_kind_keys(tmp_path):
-    # 偽陽性側も測る: decision 書き込みと無関係な "kind" を同じ関数に置いても拾わない。
-    # (巨大な router factory で実際に 7 件拾った病理。厳しすぎる guard は無視される。)
-    src = textwrap.dedent('''
-        def make_router():
-            bus.publish({"kind": "trek-progress-check", "to": "x"})
-            arms = {"kind": "root"}
-            client.record_decision(project_id, {"kind": "task-done"})
-            return arms
-    ''')
-    p = tmp_path / "routers_x.py"
+def test_extractor_ignores_dicts_that_are_not_decision_payloads(tmp_path):
+    """偽陽性側を測る。``kind`` と ``decision`` を持つだけの辞書は判断記録ではない。
+
+    実在の 2 例を縮めたもの: target の arm マッピング (``decision`` が辞書) と
+    claim の応答 (``reason`` / ``from_session_id`` を使う)。厳しすぎるガードは
+    無視されるので、ここが赤くならないことも検査の一部。
+    """
+    src = (
+        "def arms():\n"
+        "    return {\n"
+        '        "kind": "root",\n'
+        '        "phase_ball": None,\n'
+        '        "evidence_arms": [],\n'
+        '        "decision": {"kind": "completion_approval"},\n'
+        '        "deliverable": {"kind": "achievement"},\n'
+        "    }\n"
+        "\n"
+        "def claim_response(claim_id, decision, sid, reason):\n"
+        "    return {\n"
+        '        "kind": "claim_response",\n'
+        '        "claim_id": claim_id,\n'
+        '        "decision": decision,\n'
+        '        "from_session_id": sid,\n'
+        '        "reason": reason,\n'
+        "    }\n"
+        "\n"
+        "def bus_event():\n"
+        '    return {"kind": "trek-progress-check", "to": "x"}\n'
+    )
+    p = tmp_path / "unrelated.py"
     p.write_text(src, encoding="utf-8")
-    found = _kinds_written_in(str(p))
-    assert set(found) == {"task-done"}, f"無関係な kind を拾っています: {sorted(found)}"
+    resolved, unresolved = kind_sites_in(str(p))
+    assert resolved == {}, "判断記録でない辞書を拾っています: " + repr(resolved)
+    assert unresolved == [], (
+        "判断記録でない辞書を未解決として報告しています: " + repr(unresolved))
 
 
 def test_extractor_sees_the_real_tree_and_is_not_vacuous():
-    # 実コードから複数 kind が実際に取れていること (= 走査対象の解決に失敗して
-    # 空集合を返し、上の guard が無条件に緑になる形を防ぐ)。
+    # 走査対象の解決に失敗して空集合を返し、上の guard が無条件に緑になる形を防ぐ。
     written = kinds_written_in_code()
-    assert len(written) >= 6, f"実コードからの抽出が少なすぎます: {sorted(written)}"
-    for expected in ("task-done", "disposition", "review-adjudication", "pr-intent"):
-        assert expected in written, f"{expected} を抽出できていません: {sorted(written)}"
+    assert len(written) >= 8, "実コードからの抽出が少なすぎます: " + repr(sorted(written))
+    for expected in ("task-done", "disposition", "review-adjudication", "pr-intent",
+                     "gate-judgement", "completion-verdict"):
+        assert expected in written, (
+            expected + " を抽出できていません: " + repr(sorted(written)))
 
 
 # --- 実行時生成 kind の宣言セットが腐らないようにする -----------------------

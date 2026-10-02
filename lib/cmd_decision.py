@@ -275,17 +275,27 @@ def cmd_decision_list():
     # 的を外していた** ことに気づけない (e-6603 で直した「全部除外されて 0 件」と
     # 同型の、0 件の意味が潰れる病理)。語彙は開いているので **拒否はしない** —
     # 既知集合に無いことを開示するだけ。
-    _recognized = None
-    if kind:
-        _known = _recognized_decision_kinds()
-        _recognized = kind in _known
+    # 2 つの別の事実を混ぜない (独立 AX レビュー PR#783 の AX-1):
+    #   _in_vocab — 語彙 / 台帳に宣言済か。**生の事実**。
+    #   _suspect  — この応答を疑うべきか = 宣言に無く かつ 0 件。**行動につながる信号**。
+    # 初版は生の所属を kind_recognized という 1 つの可否に見える名前で --json に常時
+    # 載せ、人間向けには 0 件のときだけ警告していた。結果、宣言に無いが実データがある
+    # 種別で「kind_recognized: false なのに decisions が非空」という食い違いが起き、
+    # 自動化経路の読み手は **正しいデータを疑って** 綴りを直そうと再試行しうる
+    # (まさにこの修正が防ごうとした誤診の裏返し)。信号は 1 箇所で作り、両方の出力面に
+    # 同じものを流す。
+    _known = _recognized_decision_kinds() if kind else frozenset()
+    _in_vocab = (kind in _known) if kind else None
+    _suspect = bool(kind) and not _in_vocab and not rows
     if json_mode:
         # text と json で同じ情報を出す (e-6603 独立レビュー AX-2): --json は自動化
         # 経路の正規手段なので、人間向け文言にだけ開示を書くと機械の読み手から消える。
         out = dict(result) if isinstance(result, dict) else {"result": result}
         if kind:
             out["kind_filter"] = kind
-            out["kind_recognized"] = _recognized
+            # 生の事実と、行動につながる信号を別の名前で出す。
+            out["kind_in_known_vocabulary"] = _in_vocab
+            out["kind_filter_suspect"] = _suspect
             out["recognized_kinds"] = sorted(_known)
         print(json.dumps(out, ensure_ascii=False))
         return
@@ -298,10 +308,11 @@ def cmd_decision_list():
                 f"ないため。見るときは --kind {_ex[0]})") if _ex else ""
     if not rows:
         print("(決定なし)")
-        if _recognized is False:
+        if _suspect:
             # 0 件の理由が「その種別の判断が無い」ではなく「種別名が的を外している」
             # 可能性を示す。断定はしない (語彙は開いているので、本当に新しい種別を
-            # 誰かが書き始めた直後という場合もある)。
+            # 誰かが書き始めた直後という場合もある)。--json の kind_filter_suspect と
+            # 同じ信号から出している (= 2 つの面が食い違えない)。
             print(f"  ⚠ 種別 '{kind}' は見覚えのある種別に含まれていません "
                   f"(綴り違いの可能性)。0 件は「この種別の判断が無い」ではなく "
                   f"「問い合わせが的を外している」かもしれません。")

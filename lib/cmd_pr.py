@@ -588,11 +588,10 @@ def _record_review_decision(entry_id: str, verdict: str, rationale: str,
     review 採否 (approve / re-work / reject) は CLI 側の判断で server の書き込み口
     (= POST /api/projects/{id}/decisions) を通して統一 decision stream に載せる。
     cloud mode 専用 (= decision stream は server 側)。承認フローを絶対に壊さない
-    (= flag not gate) が、失敗は無言にしない。失敗契約 (ms-166 e-6757) の単一真実源は
-    ``commands_shared.best_effort_decision_write``: 通常の失敗と SystemExit は WARNING で
-    可視化して飲み、``KeyboardInterrupt`` (利用者の中断) は伝播する。旧
-    ``except BaseException: pass`` では、採否は PR に適用されたのに監査 arm には残らない、
-    という食い違いが無言で起きていた。
+    (= flag not gate) が、失敗は無言にしない。失敗契約の単一真実源は
+    ``commands_shared.best_effort_decision_write`` (ms-166 e-6757 — 例外ごとの挙動は
+    そちらの docstring を参照)。旧 ``except BaseException: pass`` では、採否は PR に
+    適用されたのに監査 arm には残らない、という食い違いが無言で起きていた。
 
     ``verdict`` は ``approve`` / ``re-work`` / ``reject``。``decided_by`` は誰が採否を
     決めたか (default ``autonomous-AI`` = 独立レビューは AI judge verdict が主で最も監査

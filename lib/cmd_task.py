@@ -239,11 +239,11 @@ def _record_task_done_decision(entry_id: str, reason: str) -> None:
 
     cloud-only (the decision stream is server-side).
 
-    失敗契約 (ms-166 e-6757): 書き込み失敗は **WARNING で可視化して飲む** — 単一真実源は
-    ``commands_shared.best_effort_decision_write``。``task done`` のフローは絶対に壊さない
-    が、失敗を無言にはしない。最も監査が要る「AI 自身の done 判断」が endpoint 障害で
-    記録されなかったとき、旧 ``except BaseException: pass`` では気づく手段が無かった。
-    ``KeyboardInterrupt`` (利用者の中断) は受け口が catch しないので伝播する。
+    失敗契約の単一真実源は ``commands_shared.best_effort_decision_write``
+    (ms-166 e-6757 — 例外ごとの挙動はそちらの docstring を参照)。``task done`` の
+    フローは絶対に壊さないが、失敗を無言にはしない。最も監査が要る「AI 自身の done
+    判断」が endpoint 障害で記録されなかったとき、旧 ``except BaseException: pass``
+    では気づく手段が無かった。
     """
     from commands_shared import (best_effort_decision_write, _is_cloud_mode,
                                  _get_api_client)

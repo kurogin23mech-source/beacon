@@ -114,21 +114,78 @@ def test_no_kind_filter_warns_nothing(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# 2. 機械向け出力 — text と同じ情報が --json にも出る (e-6603 独立レビュー AX-2)
+# 2. 機械向け出力 — text と食い違えないこと (独立 AX レビュー PR#783 の AX-1)
 # ---------------------------------------------------------------------------
+#
+# 初版は「語彙に宣言済か」という生の事実を kind_recognized という 1 つの可否に見える
+# 名前で --json に常時載せ、人間向けには 0 件のときだけ警告していた。結果、宣言に
+# 無いが実データがある種別で「kind_recognized: false なのに decisions が非空」という
+# 食い違いが起きた。自動化経路の読み手は正しいデータを疑い、綴りを直そうと再試行し
+# うる (この修正が防ごうとした誤診の、ちょうど裏返し)。
+#
+# 直した形: 2 つの別の事実を別の名前で出す。
+#   kind_in_known_vocabulary — 宣言済か (生の事実)
+#   kind_filter_suspect      — この応答を疑うべきか (= 宣言に無く かつ 0 件)
+# 人間向けの警告は後者と同じ信号から出すので、2 つの面は食い違えない。
 
-@pytest.mark.parametrize("kind,expected", [("dispostion", False), ("disposition", True),
-                                           ("pr-intent", True), ("triage", True)])
-def test_json_discloses_whether_the_kind_was_recognized(monkeypatch, capsys, kind, expected):
+# (種別, 既存データの有無) → (宣言済か, 疑うべきか, 人間向けに警告が出るか)
+_DISCLOSURE_CASES = [
+    pytest.param("dispostion", False, False, True, True, id="未宣言-0件=疑う"),
+    pytest.param("brand-new", True, False, False, False, id="未宣言-データ有=疑わない"),
+    pytest.param("disposition", False, True, False, False, id="宣言済-0件=疑わない"),
+    pytest.param("disposition", True, True, False, False, id="宣言済-データ有=疑わない"),
+    pytest.param("pr-intent", False, True, False, False, id="導出種別-0件=疑わない"),
+    pytest.param("triage", False, True, False, False, id="実行時命名-0件=疑わない"),
+]
+
+
+def _rows_for(kind):
+    return [{"decision_id": "dec-1", "kind": kind, "decision": "x",
+             "decided_by": "autonomous-AI"}]
+
+
+@pytest.mark.parametrize("kind,has_rows,in_vocab,suspect,warns", _DISCLOSURE_CASES)
+def test_json_and_text_never_disagree(monkeypatch, capsys, kind, has_rows,
+                                      in_vocab, suspect, warns):
+    rows = _rows_for(kind) if has_rows else []
+
     _env(monkeypatch, kind=kind, json_mode=True)
-    _cloud(monkeypatch, rows=[])
+    _cloud(monkeypatch, rows=rows)
     cmd_decision.cmd_decision_list()
     out = json.loads(capsys.readouterr().out)
     assert out["kind_filter"] == kind
-    assert out["kind_recognized"] is expected, out
+    assert out["kind_in_known_vocabulary"] is in_vocab, out
+    assert out["kind_filter_suspect"] is suspect, out
     assert isinstance(out["recognized_kinds"], list) and out["recognized_kinds"]
     # 既存の形 (decisions / count) を壊していないこと。
-    assert out["count"] == 0 and out["decisions"] == []
+    assert out["count"] == len(rows)
+
+    _env(monkeypatch, kind=kind, json_mode=False)
+    _cloud(monkeypatch, rows=rows)
+    cmd_decision.cmd_decision_list()
+    text = capsys.readouterr().out
+    warned = "見覚えのある種別に含まれていません" in text
+    assert warned is warns, (kind, has_rows, text)
+    # 2 つの面が同じ信号から出ていること = 疑うべきときだけ両方が言う。
+    assert warned is suspect, (
+        "text と --json が食い違っています (AX-1 の回帰): "
+        "text warned=" + repr(warned) + " / json suspect=" + repr(suspect))
+
+
+def test_json_does_not_report_data_as_suspect(monkeypatch, capsys):
+    """AX-1 の回帰ピン: 実データがある種別を「疑え」と言ってはならない。
+
+    データ自身がその種別の実在を証明しているのに疑いの信号を立てると、自動化経路が
+    正しい応答を捨てたり、綴りを直す無駄な再試行を回したりする。
+    """
+    _env(monkeypatch, kind="brand-new", json_mode=True)
+    _cloud(monkeypatch, rows=_rows_for("brand-new"))
+    cmd_decision.cmd_decision_list()
+    out = json.loads(capsys.readouterr().out)
+    assert out["count"] == 1
+    assert out["kind_filter_suspect"] is False, out
+    # 生の事実は正直に出す (宣言は無い) — 疑いの信号とは別の名前で。
+    assert out["kind_in_known_vocabulary"] is False, out
 
 
 def test_json_omits_the_fields_when_no_kind_filter(monkeypatch, capsys):
@@ -137,7 +194,8 @@ def test_json_omits_the_fields_when_no_kind_filter(monkeypatch, capsys):
     _cloud(monkeypatch, rows=[])
     cmd_decision.cmd_decision_list()
     out = json.loads(capsys.readouterr().out)
-    for f in ("kind_filter", "kind_recognized", "recognized_kinds"):
+    for f in ("kind_filter", "kind_in_known_vocabulary", "kind_filter_suspect",
+              "recognized_kinds"):
         assert f not in out, out
 
 
