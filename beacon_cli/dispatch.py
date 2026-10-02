@@ -1042,7 +1042,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_add.add_argument("--owner", default="")
     p_ms_add.add_argument("--assignee", default="")
 
-    ms_sub.add_parser("list", aliases=["ls"], add_help=False)
+    ms_sub.add_parser(
+        "list", aliases=["ls"], add_help=False,
+    ).add_argument("--json", action="store_true")
 
     p_ms_start = ms_sub.add_parser("start", add_help=False)
     p_ms_start.add_argument("ms_id", nargs="?", default="")
@@ -3685,7 +3687,11 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "milestone_add", env)
 
     if cmd in ("list", "ls"):
-        return _run_commands_py(root, "milestone_list", {})
+        # ms-160 e-6674 の同族: 旗を env へ写し忘れると、実装 (cmd_milestone_list の
+        # BEACON_JSON 分岐) と help の宣伝はあるのに --json が黙って効かない。
+        return _run_commands_py(
+            root, "milestone_list",
+            {"BEACON_JSON": "1" if getattr(args, "json", False) else ""})
 
     if cmd == "start":
         if not args.ms_id:

@@ -64,7 +64,17 @@ cmd_milestone_add() {
 
 cmd_milestone_list() {
     ensure_project
-    python3 "$COMMANDS_PY" milestone_list
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            -?*)    _guard_flag "$1" ;;
+            *)      shift ;;
+        esac
+    done
+
+    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_list
 }
 
 cmd_milestone_start() {

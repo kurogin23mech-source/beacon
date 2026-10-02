@@ -952,13 +952,15 @@ def collect_flag_parity(
 # the maintainability review of PR #771, which is why it is fixed rather than
 # noted.)
 ALLOW_ADVERTISED_FLAG: dict[tuple[str, ...], set[str]] = {
-    # --- Fixed by open PR #680 (fix/help-registry-flag-drift), not yet merged.
-    # Listed so this guard can land first without editing the same registry
-    # lines that PR rewrites. DELETE these three once #680 is on main — if the
-    # entries survive the merge, the guard goes red and names them again.
-    ("doc", "add"): {"--title"},
-    ("stuck", "check"): {"--idle-min"},
-    ("milestone", "list"): {"--json"},
+    # 空。PR #680 (fix/help-registry-flag-drift) が指摘した 3 件は 2026-10-02 に
+    # 解消したので、この allowlist から外した (#771 がここに置いた「#680 が main に
+    # 入ったら消せ」の指示どおり)。3 件のうち 2 件は #680 の内容どおり help の側が
+    # 嘘だったが、milestone list --json は **実装がある旗を dispatch が落としていた**
+    # ので、help から消すのではなく旗を配線する側で直した (#680 の案だと実バグを
+    # 隠すことになる)。
+    #
+    # ここに行を足すのは「意図的に非対称を残す」と決めたときだけにする。
+    # 直った漏れを残すと、同じ場所で次に起きる退行をこの allowlist が黙って通す。
 }
 
 

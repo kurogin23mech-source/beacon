@@ -352,7 +352,7 @@ case "${1:-}" in
     milestone|ms)
         case "${2:-}" in
             add)    shift 2; cmd_milestone_add "$@" ;;
-            list|ls) cmd_milestone_list ;;
+            list|ls) shift 2; cmd_milestone_list "$@" ;;
             start)  shift 2; cmd_milestone_start "$@" ;;
             join)   shift 2; cmd_milestone_join "$@" ;;
             done|close) shift 2; cmd_milestone_done "$@" ;;
