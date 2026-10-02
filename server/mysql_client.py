@@ -2789,16 +2789,46 @@ def append_decision_event(project_id: str, data: dict) -> str:
 
 def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "", session: str = "",
-                         target: str = "") -> list[dict]:
-    """decision_events を取得して窓を掛けて返す (ms-166 e-5970 / ms-164 e-6030).
+                         target: str = "", exclude_kinds=None) -> list[dict]:
+    """decision_events を窓付きで取得する (ms-166 e-5970 / ms-164 e-6030 / e-5986).
 
-    この backend は「行の取得」だけを担い、read 窓のセマンティクス (kind / session /
-    target 絞り → since 絞り → 直近 ``limit`` 件) は単一真実源
-    ``decision_event.window_decision_events`` に集約している (3 backend で drift
-    しないため)。窓の根拠 (なぜ最新側か = 最古 ``limit`` 件だと backlog 超過分の
-    新しい判断記録が不可視になる) はその helper を参照。
+    read 窓の **意味論** (kind / session / target 絞り → since 絞り → 直近 ``limit`` 件)
+    は単一真実源 ``decision_event.window_decision_events`` が持つ (3 backend で drift
+    しないため)。窓の根拠 (なぜ最新側か = 最古 ``limit`` 件だと backlog 超過分の新しい
+    判断記録が不可視になる) はその helper を参照。
+
+    **この backend は他の 2 つと違い、同じ絞り込みを SQL へ押し下げる** (e-5986)。
+    判断記録は append-only で無制限に伸びるので、全件を Python に読むと 2026-08-20 の
+    本番停止と同型の負荷になる。SQL 片は絞り込み仕様表から生成し (``mysql_window_sql``)、
+    読み込み量は ``limit`` 件に収まる。意味論の最終判定は引き続き helper が行うので、
+    返り値の契約は 3 backend で同一。
     """
-    from decision_event import window_decision_events
+    # ms-166 e-5986: 絞り込み・並び・件数制限を **SQL へ押し下げる**。以前はここで
+    # _query が project の decision_events を **全件** Python に読み込み、そのあとで
+    # 窓を適用していた。判断記録は append-only で無制限に伸びるので、2026-08-20 の
+    # 本番停止 (bus 取得が 98,943 件 / 72MB を毎秒 json.loads していた) と同型の負荷に
+    # なる経路だった (CORE doc scale-contract-principle)。
+    #
+    # SQL 片は **絞り込み仕様表から生成する** (decision_event.mysql_window_sql)。
+    # Python 述語と SQL を 2 箇所に書くと、片方だけ直したときに「一覧には出るのに SQL
+    # では落ちる (逆も)」という最悪の drift になる — しかも手元の規模テストは偽カーソルが
+    # WHERE を解釈しないので誤りが緑で通る。仕様表を単一真実源にして構造で防ぐ。
+    #
+    # newest-limit を SQL に寄せるため ORDER BY は **降順** で引き、Python 側で昇順に
+    # 並べ直してから窓ヘルパーに通す。意味論の最終判定は引き続きヘルパーが持つ
+    # (SQL は同じ絞り込みを先に適用して読み込み量を抑えるだけ)。
+    from decision_event import mysql_window_sql, window_decision_events
+    tail, params = mysql_window_sql(
+        kind=kind, limit=limit, since=since, session=session, target=target,
+        exclude_kinds=exclude_kinds)
+    sql = (f"SELECT sk, data FROM `{_table_name('decision_events')}` "
+           f"WHERE pk=%s{tail}")
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple([project_id] + params))
+        rows = cur.fetchall()
+    # 降順で引いたので昇順に戻す (ヘルパーは昇順前提で [-limit:] を取る)
+    fetched = [json.loads(r["data"]) for r in reversed(rows)]
     return window_decision_events(
-        _query("decision_events", project_id),
-        kind=kind, limit=limit, since=since, session=session, target=target)
+        fetched, kind=kind, limit=limit, since=since, session=session,
+        target=target, exclude_kinds=exclude_kinds)

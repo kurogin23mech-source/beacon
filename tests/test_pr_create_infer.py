@@ -15,6 +15,16 @@ import sys
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _isolate(isolated_project):
+    """ms-166 e-6621: these tests call cmd_pr_create() in-process, which stamps
+    session state. Without isolation that landed in the repository's own .beacon/
+    — invisible on a developer's machine where the file already exists, but in a
+    clean checkout it CREATED .beacon/, which then let a later test materialise
+    the SQLite store there. See conftest.isolated_project for why isolation needs
+    both the env var and the cwd (e-6820)."""
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
