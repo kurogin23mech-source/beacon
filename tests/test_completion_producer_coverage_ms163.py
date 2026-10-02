@@ -217,9 +217,17 @@ def test_server_is_in_the_completion_scan_population():
 
 # --- the generic seam itself (e-5879/5880) ---
 
-def test_on_target_completion_captures_a_declared_deliverable():
+def test_on_target_completion_captures_a_declared_deliverable(isolated_project):
     # the seam delegates deliverable capture — a milestone (declares 機能) completing through
     # it appends the produced-value entry, exactly as the direct capture would (AC5).
+    #
+    # ms-166 e-6637: ``isolated_project`` forces local mode. Without it this test ran
+    # against whatever project the developer's cwd resolved to — in this repo a cloud
+    # one — so the seam's decision write landed on the **production** append-only
+    # stream as a fake ms-9 completion every time the suite ran. Measured: ~90 of one
+    # session's 100 decisions were test residue of this shape. The choke-point guard
+    # (api_client.record_decision) now refuses such a write, but a test must not rely
+    # on a guard to be hermetic — it should not be reaching for the cloud at all.
     import target_completion as tc
     import deliverable_changelog as dc
     data = {"name": "P", "profession": "dev", "milestones": []}
@@ -228,9 +236,14 @@ def test_on_target_completion_captures_a_declared_deliverable():
     assert [e["title"] for e in dc.active_deliverables(data)] == ["X"]
 
 
-def test_on_target_completion_noops_and_never_raises_in_local_mode():
+def test_on_target_completion_noops_and_never_raises_in_local_mode(isolated_project):
     # a class without a deliverable slot + local mode (no cloud) → no capture, no decision,
     # and crucially NO exception (best-effort: a completion flow must never break).
+    #
+    # ms-166 e-6637: the name claimed local mode but **nothing forced it** — the test
+    # inherited whatever the developer's cwd resolved to, so in this repo it ran against
+    # the production cloud and wrote a fake ``opp-3`` completion to the append-only
+    # decision stream. A name is not a constraint; ``isolated_project`` is.
     import target_completion as tc
     import deliverable_changelog as dc
     data = {"name": "P", "profession": "sales", "opportunities": []}

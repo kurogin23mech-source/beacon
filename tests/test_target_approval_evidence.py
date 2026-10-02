@@ -115,7 +115,7 @@ def _wire(monkeypatch, data):
     monkeypatch.delenv("BEACON_RATIONALE", raising=False)
 
 
-def test_approve_refused_without_independent_evidence(monkeypatch):
+def test_approve_refused_without_independent_evidence(monkeypatch, isolated_project):
     data = _data(_pending_entry(with_evidence=False))
     _wire(monkeypatch, data)
     with pytest.raises(SystemExit) as ex:
@@ -125,14 +125,19 @@ def test_approve_refused_without_independent_evidence(monkeypatch):
     assert data["milestones"][0]["entries"][0]["status"] == "pending"
 
 
-def test_approve_proceeds_with_independent_evidence(monkeypatch):
+def test_approve_proceeds_with_independent_evidence(monkeypatch, isolated_project):
+    # ms-166 e-6637: ``isolated_project`` forces local mode. ``cmd_target_approve``
+    # records a completion verdict on the decision arm, and _wire patches only
+    # load/save — so without this the approve wrote a fake ``ms-T`` completion to the
+    # **production** append-only stream on every suite run (one of the residue shapes
+    # measured at ~90 of a session's 100 decisions).
     data = _data(_pending_entry(with_evidence=True))
     _wire(monkeypatch, data)
     commands.cmd_target_approve()  # no SystemExit
     assert data["milestones"][0]["entries"][0]["status"] == "approved"
 
 
-def test_approve_proceeds_with_explicit_ack_and_audits_it(monkeypatch):
+def test_approve_proceeds_with_explicit_ack_and_audits_it(monkeypatch, isolated_project):
     data = _data(_pending_entry(with_evidence=False))
     _wire(monkeypatch, data)
     monkeypatch.setenv("BEACON_ACK_NO_EVIDENCE", "1")

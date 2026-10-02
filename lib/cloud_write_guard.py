@@ -177,6 +177,45 @@ def guard_prod_bus_write(base_url: str) -> None:
     )
 
 
+def guard_prod_decision_write(base_url: str) -> None:
+    """Raise if a test context is about to append a decision to production.
+
+    ms-166 e-6637. The decision stream (= 誰が何をなぜ決めたかの恒久記録) is
+    **append-only**: there is no delete path, so a row a test writes can never be
+    taken back. That makes it the worst place for test residue — worse than a
+    leaked project (archivable) or a bus event (transient). Measured on the live
+    stream: of one session's 100 decisions, roughly 90 were its own test runs
+    (ms-9 / opp-3 / ms-T and others), so the audit arm — the thing a human reads
+    to check what an AI decided — was mostly fiction.
+
+    Why the guard belongs HERE and not in the callers: ``record_decision`` is the
+    single door every writer passes through. ``lib/`` alone holds 11 call sites
+    across 7 files, and a caller-layer fix leaves 8 of them (plus every future
+    path) open — the same "one door guarded, the others are bypass doors" shape
+    that e-5194 found for the bus and e-5216 then closed at the choke point.
+
+    No-op outside a test context (normal CLI / autonomous use is unaffected) and
+    no-op for non-prod targets (local mode, staging, a sandbox cloud). The escape
+    hatch ``BEACON_ALLOW_PROD_TEST_WRITE=1`` lets a test that genuinely must write
+    to the live stream opt in — but note there is **no teardown counterpart** for
+    an append-only stream (unlike ``disposable_project``), so an opted-in test
+    leaves a permanent row.
+    """
+    if not _prod_test_write_blocked(base_url):
+        return
+    raise ProdWriteBlocked(
+        "cloud_write_guard: refusing to append a decision to the production "
+        f"cloud ({base_url}) from a test context. The decision stream is "
+        "append-only — a test row cannot be deleted afterwards. Fake cloud mode "
+        "the canonical way: use the ``fake_cloud_config`` fixture (it points "
+        "BEACON_PROJECT_FILE at a tmp cloud.json so _get_cloud_config_path "
+        "resolves non-prod in EVERY module), force local mode, or give the "
+        "ApiClient a local/sandbox base_url. If this test genuinely must write to "
+        "the live stream, set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch "
+        "unlocks ALL prod test writes — project, bus AND decision — for the "
+        "process); there is no teardown that can remove the row afterwards."
+    )
+
 def _default_cleanup(client, project_id: str) -> None:
     """Best-effort archive of a disposable project via the envelope path.
 
