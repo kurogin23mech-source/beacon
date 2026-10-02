@@ -2350,8 +2350,12 @@ EOF
                     case "$1" in
                         -y|--yes|--confirm) note_yes="1"; shift ;;
                         # ms-160 e-6714: default is this session's notes only.
-                        # --all takes every session's, and says whose first.
-                        --all)    note_all="1"; shift ;;
+                        # --include-other-sessions takes every session's and says
+                        # whose first. NOT named --all: every other --all in this
+                        # CLI widens a READ (status / task list / trek list), so
+                        # reusing it for a destructive scope teaches the wrong
+                        # reflex (AX review, PR #782).
+                        --include-other-sessions) note_all="1"; shift ;;
                         -?*)      _guard_flag "$1" ;;
                         *)        _guard_no_positional "note clear" "$1" ;;
                     esac
@@ -2363,7 +2367,7 @@ EOF
             "")
                 echo "Usage: beacon note \"<text>\" [--context \"<label>\"]"
                 echo "       beacon note list [--json]"
-                echo "       beacon note clear -y|--yes [--all]   (既定は自セッション分のみ)"
+                echo "       beacon note clear -y|--yes [--include-other-sessions]   (既定は自セッション分のみ)"
                 echo "       beacon note restore"
                 echo "       beacon note purge-probes [--confirm]   (-y / --yes も可)"
                 ;;

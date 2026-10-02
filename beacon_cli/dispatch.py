@@ -1163,7 +1163,11 @@ def build_parser() -> argparse.ArgumentParser:
     # refused on one frontend and accepted on the other.
     p_note.add_argument("--yes", "-y", "--confirm", dest="assume_yes",
                         action="store_true")
-    p_note.add_argument("--all", dest="note_all", action="store_true")
+    # NOT --all: every other --all in this CLI widens a READ. Reusing it
+    # to widen a DESTRUCTIVE scope teaches an agent the wrong reflex
+    # (AX review, PR #782).
+    p_note.add_argument("--include-other-sessions", dest="note_all",
+                        action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- decision (ms-154 e-5594: log-time decision backstop の記録口) ----
@@ -3957,7 +3961,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear --yes [--all]   (既定は自セッション分のみ)\n"
+            "       beacon note clear --yes [--include-other-sessions]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
@@ -3996,7 +4000,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear --yes [--all]   (既定は自セッション分のみ)\n"
+            "       beacon note clear --yes [--include-other-sessions]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"

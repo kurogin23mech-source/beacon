@@ -162,5 +162,118 @@ def test_both_frontends_pass_the_all_flag():
     assert "BEACON_NOTE_CLEAR_ALL" in disp
     sys.path.insert(0, str(ROOT))
     from beacon_cli import dispatch
-    args = dispatch.build_parser().parse_args(["note", "clear", "--all", "--yes"])
+    args = dispatch.build_parser().parse_args(["note", "clear", "--include-other-sessions", "--yes"])
     assert args.note_all is True and args.assume_yes is True
+
+# --- 既定 (bare `note clear`) の確認ゲート -----------------------------------
+#
+# 独立レビュー (PR #782 M-1, high) の指摘。e-6654 の 2 ファイルは bin/beacon と
+# beacon_cli/dispatch.py を互いに正直に保つためのものだが、`--all` を全呼び出しに
+# 差し込んだ結果、**素の `note clear` を駆動する試験がどちらにも無くなっていた**。
+# 新しい既定経路の確認ゲートが無保護になり、「弱めていない」という私の主張は
+# 誤りだった。既定を owner するこのファイルで張り直す。
+
+import shutil
+import subprocess
+
+BIN = ROOT / "bin" / "beacon"
+BASH = shutil.which("bash")
+
+MY_NOTE = {"ts": "2026-10-02T09:00:00+0900", "text": "mine", "session_id": "sv-SELF"}
+
+
+@pytest.fixture
+def owned_project(tmp_path):
+    """A project whose single note THIS session owns.
+
+    The note is written through the CLI rather than hand-rolled, because the
+    session id is resolved by the session layer and cannot be steered from the
+    environment — hand-writing one would silently test the "no notes of mine"
+    path instead of the confirmation gate.
+    """
+    b = tmp_path / ".beacon"
+    b.mkdir()
+    (b / "project.json").write_text('{"name":"t","milestones":[]}', encoding="utf-8")
+    e = dict(os.environ)
+    e.pop("BEACON_PROJECT_FILE", None)
+    subprocess.run([sys.executable, str(ROOT / "lib" / "commands.py"), "note_add"],
+                   cwd=str(tmp_path), capture_output=True, text=True,
+                   env={**e, "BEACON_NOTE_TEXT": "mine"})
+    notes = b / "session_notes.jsonl"
+    if not notes.exists() or not notes.read_text(encoding="utf-8").strip():
+        pytest.skip("could not create a note owned by this session")
+    return tmp_path, notes
+
+
+def _bare_env():
+    e = dict(os.environ)
+    for k in ("BEACON_PROJECT_FILE", "BEACON_NOTE_CLEAR_YES", "BEACON_NOTE_CLEAR_ALL"):
+        e.pop(k, None)
+    return e
+
+
+@pytest.mark.skipif(BASH is None, reason="bash required")
+def test_bare_clear_refuses_without_confirmation_bash(owned_project):
+    """素の `note clear` (スコープ拡大フラグ無し) も確認なしでは拒否すること。
+
+    `--include-other-sessions` を全呼び出しに差し込んだ結果、既定経路の確認
+    ゲートを駆動する試験がどこにも無くなっていた (独立レビュー PR #782 M-1)。
+    「弱めていない」という私の主張は誤りだったので張り直す。
+    """
+    cwd, notes = owned_project
+    r = subprocess.run([BASH, str(BIN), "note", "clear"], cwd=str(cwd),
+                       capture_output=True, text=True, env=_bare_env())
+    assert r.returncode != 0, "bare `note clear` succeeded silently: " + r.stdout
+    assert notes.exists(), "bare `note clear` deleted the notes"
+    assert "--yes" in r.stderr, r.stderr
+
+
+def test_bare_clear_refuses_without_confirmation_python(owned_project):
+    """2 つ目のフロントでも同じこと。片方だけの gate は、もう片方が回り込む。"""
+    cwd, notes = owned_project
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, pathlib; sys.path.insert(0, %r);"
+         "from beacon_cli import dispatch;"
+         "sys.exit(dispatch.dispatch(pathlib.Path(%r), ['note','clear']))"
+         % (str(ROOT), str(ROOT))],
+        cwd=str(cwd), capture_output=True, text=True, env=_bare_env())
+    assert r.returncode != 0, "dispatch.py cleared without --yes: " + r.stdout
+    assert notes.exists(), "dispatch.py deleted the notes without --yes"
+
+
+def test_the_scoped_refusal_does_not_claim_it_touches_other_sessions(owned_project):
+    """既定スコープの拒否理由が『他セッションのメモも消える』と言わないこと。
+
+    共有メッセージを両経路で使い回したため、自分の分しか消さない操作が
+    『他者の引き継ぎを消す』と説明していた。拒否自体は正しくても、理由が
+    事実と違えば読み手を誤った判断に導く (PR #782 AX-1)。
+    """
+    cwd, _ = owned_project
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, pathlib; sys.path.insert(0, %r);"
+         "from beacon_cli import dispatch;"
+         "sys.exit(dispatch.dispatch(pathlib.Path(%r), ['note','clear']))"
+         % (str(ROOT), str(ROOT))],
+        cwd=str(cwd), capture_output=True, text=True, env=_bare_env())
+    assert "removes other sessions' handoff notes" not in r.stderr, r.stderr
+
+
+def test_the_policy_literal_cannot_be_mistyped():
+    """確認なしの扱いは複数の分岐で照合されるので、未知の値は黙ってどれかの
+    分岐に落ちるのではなく大きく失敗すること (PR #782 M-2)。"""
+    import cmd_note
+    with pytest.raises(ValueError):
+        cmd_note._selective_delete(lambda n: True, label="x",
+                                   write_backups=lambda *a: "b", confirm=False,
+                                   rerun_hint="h", on_unconfirmed="typo")
+
+
+def test_both_callers_name_their_policy_explicitly():
+    """既定値に頼らず、各コマンドが自分の安全方針を呼び出し側で明示すること。"""
+    src = (ROOT / "lib" / "cmd_note.py").read_text(encoding="utf-8")
+    assert src.count("on_unconfirmed=UNCONFIRMED_REFUSE") == 2, src.count(
+        "on_unconfirmed=UNCONFIRMED_REFUSE")
+    assert "on_unconfirmed=UNCONFIRMED_PREVIEW" in src
+    assert 'on_unconfirmed="refuse"' not in src and 'on_unconfirmed="preview"' not in src

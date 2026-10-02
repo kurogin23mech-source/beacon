@@ -311,8 +311,17 @@ def _combined_backup_desc(local, cloud, project_id) -> str:
     return dest
 
 
+# What an unconfirmed invocation does. Named rather than bare literals, and
+# required at every call site: the value is matched at more than one branch, so
+# a typo or a third caller must fail loudly rather than quietly land on
+# whichever branch it happens to equal (maintainability review, PR #782 M-2).
+UNCONFIRMED_REFUSE = "refuse"      # destructive verb: state the stake, exit non-zero
+UNCONFIRMED_PREVIEW = "preview"    # opt-in cleanup: dry run, exit 0
+
+
 def _selective_delete(should_delete, *, label, write_backups, confirm,
-                      rerun_hint, preview=None, on_unconfirmed="refuse"):
+                      rerun_hint, on_unconfirmed, preview=None,
+                      touches_other_sessions=True):
     """Delete the notes ``should_delete(note)`` picks; keep the rest.
 
     One mechanism, two policies. ``note clear`` (this session's notes) and
@@ -331,6 +340,8 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
     stderr, exit non-zero) and "preview" for the opt-in cleanup (dry run on
     stdout, exit 0). Returns the number removed, or -1 when nothing was done.
     """
+    if on_unconfirmed not in (UNCONFIRMED_REFUSE, UNCONFIRMED_PREVIEW):
+        raise ValueError("unknown on_unconfirmed policy: %r" % (on_unconfirmed,))
     path = _get_notes_path()
     project_id = _cloud_project_id()
 
@@ -357,19 +368,19 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
 
     total = len(local_go) + len(cloud_go)
 
-    if total == 0 and on_unconfirmed == "refuse":
+    if total == 0 and on_unconfirmed == UNCONFIRMED_REFUSE:
         # Nothing of ours to clear. Exit 0 so the session-end routine
         # COMPLETES — being unable to finish it while others were working is
         # the defect e-6714 is about, and refusing here would reproduce it in
         # a new place. Say what is left and how to reach it.
         others = len(local) + len(cloud) - total
-        print("%sはありません (削除するものなし)。" % label)
+        print("%s はありません (削除するものなし)。" % label)
         if others:
             print("  他セッション分が %d 件あります。消す必要があるなら "
-                  "'beacon note clear --all --yes' を明示してください。" % others)
+                  "'beacon note clear --include-other-sessions --yes' を明示してください。" % others)
         return -1
 
-    if not confirm and on_unconfirmed == "refuse":
+    if not confirm and on_unconfirmed == UNCONFIRMED_REFUSE:
         # A confirmation gate that hides the stake is not a gate (ms-178, AX
         # review of PR#766). Size it on stderr and exit non-zero: this is a
         # refusal, not a successful preview.
@@ -377,7 +388,7 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
               % (len(local_go), label), file=sys.stderr)
         print("  local: %s (moved to %s.bak, recoverable)" % (path, path),
               file=sys.stderr)
-        if project_id:
+        if project_id and touches_other_sessions:
             if cloud_error:
                 others = "件数不明 — cloud を確認できません"
             else:
@@ -390,13 +401,22 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
                   "(%s) — clearing removes other sessions' handoff notes too. "
                   "Snapshotted to %s first; restore with 'beacon note restore'."
                   % (others, _cloud_backup_path()), file=sys.stderr)
+        elif project_id:
+            # The scoped delete touches only this session's notes, so the
+            # shared-store warning would be false here. Saying it anyway made
+            # the refusal explain itself with a reason that does not apply —
+            # and would push a careful agent into stopping a safe operation
+            # (AX review, PR #782).
+            print("  cloud: 対象はこのセッションが書いたメモだけです "
+                  "(他セッションの引き継ぎメモは消えません)。退避は %s。"
+                  % _cloud_backup_path(), file=sys.stderr)
         if preview:
             preview(local_go, cloud_go, local_keep, cloud_keep)
         print("Re-run as '%s' to proceed." % rerun_hint, file=sys.stderr)
         sys.exit(1)
 
     if total == 0:
-        print("%sは見つかりませんでした。削除するものはありません。" % label)
+        print("%s は見つかりませんでした。削除するものはありません。" % label)
         return -1
 
     print("削除対象 (%s): local %d 件 / cloud %d 件"
@@ -488,7 +508,8 @@ def cmd_note_clear():
     The heavier consequence was not the lost notes but that it made the
     session-end routine *unperformable* while anyone else was working — so
     notes accumulated instead of being promoted. Scoping the default makes the
-    routine completable whatever else is running. `--all` still clears
+    routine completable whatever else is running. `--include-other-sessions`
+    still clears
     everything and says whose notes it is about to take first.
     """
     confirm = os.environ.get("BEACON_NOTE_CLEAR_YES") == "1"
@@ -510,12 +531,12 @@ def cmd_note_clear():
                 print("    %s: %d 件%s" % (lab, by[lab], tag), file=out)
             if session_id and any(k != mine for k in by):
                 print("  ⚠ 他セッションの引き継ぎメモが含まれます。"
-                      "自分の分だけなら --all を外してください。", file=out)
+                      "自分の分だけなら --include-other-sessions を外してください。", file=out)
 
         _selective_delete(lambda n: True, label="全セッションのメモ",
                           write_backups=_clear_backup_desc, confirm=confirm,
-                          rerun_hint="beacon note clear --all --yes",
-                          preview=_preview)
+                          rerun_hint="beacon note clear --include-other-sessions --yes",
+                          on_unconfirmed=UNCONFIRMED_REFUSE, preview=_preview)
         return
 
     if not session_id:
@@ -523,7 +544,7 @@ def cmd_note_clear():
         # "probably mine" is the exact failure this scoping exists to stop.
         print("Error: このセッションの id が解決できないため、自分のメモだけを"
               "選べません。", file=sys.stderr)
-        print("  全件消すなら 'beacon note clear --all --yes' を明示してください "
+        print("  全件消すなら 'beacon note clear --include-other-sessions --yes' を明示してください "
               "(他セッションのメモも消えます)。", file=sys.stderr)
         sys.exit(1)
 
@@ -532,7 +553,8 @@ def cmd_note_clear():
         label="このセッション (%s) のメモ" % _session_label(
             {"session_id": session_id}),
         write_backups=_clear_backup_desc, confirm=confirm,
-        rerun_hint="beacon note clear --yes")
+        rerun_hint="beacon note clear --yes",
+        on_unconfirmed=UNCONFIRMED_REFUSE, touches_other_sessions=False)
 
 
 def cmd_note_restore():
@@ -646,6 +668,6 @@ def cmd_note_purge_probes():
         write_backups=_combined_backup_desc,
         confirm=os.environ.get("BEACON_NOTE_PURGE_CONFIRM") == "1",
         rerun_hint="beacon note purge-probes --confirm",
-        on_unconfirmed="preview")
+        on_unconfirmed=UNCONFIRMED_PREVIEW)
 
 

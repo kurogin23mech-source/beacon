@@ -41,11 +41,11 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 # ms-160 e-6714 scoped `note clear`'s DEFAULT to the calling session's own
 # notes. This file is about the --help / confirmation gate on the SHARED store,
-# which is now spelled `--all`; the gate's contract is unchanged, only the verb
+# which is now spelled `--include-other-sessions`; the gate's contract is unchanged, only the verb
 # that reaches it. The note is left untagged on purpose — it stands for
 # "somebody else's / legacy", which the scoped default must never assume.
 NOTE_LINE = json.dumps({"ts": "2026-09-29T10:00:00+0900", "text": "handoff"}) + "\n"
-CLEAR_ALL = ["clear", "--all"]
+CLEAR_ALL = ["clear", "--include-other-sessions"]
 
 
 @pytest.fixture
