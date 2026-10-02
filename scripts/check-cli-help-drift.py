@@ -426,6 +426,10 @@ ALLOW_SUBVERB_MISSING_FROM_BASH: set[str] = {
 # itself is the scope. Verb keys are canonical "noun sub" (bash function
 # ``cmd_<noun>_<sub>`` / Python nested subparser ``<noun> <sub>``).
 REQUIRED_FLAG_PARITY: dict[str, set[str]] = {
+    # PR #784 AX-2: `milestone list` の 3 旗は bash / Python 両フロントに実在することを
+    # 機械で強制する。ALLOW_ADVERTISED_FLAG 側は「どちらかの front に旗があれば緑」なので、
+    # 片方の配線だけが外れる退行 (= この PR が直した欠陥そのもの) を拾えない。
+    "milestone list": {"--json", "--all", "--ms"},
     "milestone add": {"--priority", "--untriaged"},
     "milestone update": {"--priority"},
     "task add": {"--priority", "--untriaged"},

@@ -1042,9 +1042,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_add.add_argument("--owner", default="")
     p_ms_add.add_argument("--assignee", default="")
 
-    ms_sub.add_parser(
-        "list", aliases=["ls"], add_help=False,
-    ).add_argument("--json", action="store_true")
+    # `beacon status` と `beacon milestone list` は lib/cmd_milestone.py の同一
+    # cmd_milestone_list() を呼ぶ。その実装は BEACON_JSON / BEACON_ALL /
+    # BEACON_MS_FILTER の 3 つを読むので、**どちらの名前から入っても同じ能力**に
+    # なるよう 3 旗を揃える (status 側は p_status が同名で持っている)。1 つだけ
+    # 足すと「同じ実装なのに名前で能力が違う」非対称を作る (PR #784 AX-1)。
+    p_ms_list = ms_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_ms_list.add_argument("--json", action="store_true")
+    p_ms_list.add_argument("--all", "-a", action="store_true")
+    p_ms_list.add_argument("--ms", action="append", default=[])
 
     p_ms_start = ms_sub.add_parser("start", add_help=False)
     p_ms_start.add_argument("ms_id", nargs="?", default="")
@@ -3688,10 +3694,13 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
 
     if cmd in ("list", "ls"):
         # ms-160 e-6674 の同族: 旗を env へ写し忘れると、実装 (cmd_milestone_list の
-        # BEACON_JSON 分岐) と help の宣伝はあるのに --json が黙って効かない。
-        return _run_commands_py(
-            root, "milestone_list",
-            {"BEACON_JSON": "1" if getattr(args, "json", False) else ""})
+        # 各分岐) と help の宣伝はあるのに旗が黙って効かない。3 旗すべてを写す —
+        # status 経路 (上の cmd_status) と同じ写像にしておくこと。
+        return _run_commands_py(root, "milestone_list", {
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+            "BEACON_ALL": "1" if getattr(args, "all", False) else "",
+            "BEACON_MS_FILTER": ",".join(getattr(args, "ms", []) or []),
+        })
 
     if cmd == "start":
         if not args.ms_id:

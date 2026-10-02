@@ -213,7 +213,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | Command | Description |
 |---------|-------------|
 | `beacon milestone add "title" [-d date]` | Add milestone / 追加 |
-| `beacon milestone list` | List milestones / 一覧 |
+| `beacon milestone list [--json] [--all] [--ms <id>]` | List milestones / 一覧 |
 | `beacon milestone start <id>` | Activate + auto-create `ms-XX-<slug>` branch + self-add as assignee (use `--no-branch` / `--no-assignee` to opt out) / アクティブ化＋ブランチ自動作成＋自己 assignee 登録 |
 | `beacon milestone join <id> [--checkout]` | Add self as assignee (and optionally switch branch) / 他の MS に参加 |
 | `beacon milestone done <id>` | Mark as done / 完了 |
@@ -562,7 +562,7 @@ design.
 | `beacon claim handoff <claim-id> --to <session> [--reason <text>]` | Transfer an active claim to another session |
 | `beacon claim release <claim-id> [--outcome completed\|abandoned] [--reason <text>]` | Release a claim (outcome surfaces in `beacon morning`) |
 | `beacon claim list [--json]` | List active claims from local `.beacon/active_claims.json` |
-| `beacon stuck check [--telemetry-file <path>] [--idle-min N]` | Detect sessions idle past `--idle-min`; emit STUCK signals so `beacon morning` surfaces 介入要望 |
+| `beacon stuck check [--telemetry-inline <json>] [--telemetry-file <path>] [--timeout-minutes N] [--dry-run]` | Detect idle sessions past `--timeout-minutes`; emit STUCK signals so `beacon morning` surfaces 介入要望 |
 | `beacon morning [--since-hours N] [--events-file <path>] [--no-doc] [--json]` | 4-bucket digest (完了 / 停止 / skip / 介入要望); auto-saves as a `scope=report` doc |
 | `beacon attention [--all-projects] [--attention-only] [--scope self\|team] [--root <id>] [--json]` | Session roster grouped by root target (作業 target / 状態 / activity / 待機); `--attention-only` narrows to 要対応 (awaiting_human / blocked / terminated:failed); `--scope team` includes other members; `--root <id>` filters to one root target; `--all-projects` spans every project you belong to |
 

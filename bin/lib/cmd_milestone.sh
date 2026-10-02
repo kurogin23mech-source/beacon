@@ -64,17 +64,25 @@ cmd_milestone_add() {
 
 cmd_milestone_list() {
     ensure_project
+    # `beacon status` と同じ cmd_milestone_list() を呼ぶので、同じ 3 旗を同じ名前で
+    # 受ける (PR #784 AX-1: 1 つだけ足すと「同じ実装なのに名前で能力が違う」非対称に
+    # なる)。写像を変えるときは beacon_cli/dispatch.py の両経路も揃えること。
     local json_flag=""
+    local all_flag=""
+    local ms_filter=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --json) json_flag="1"; shift ;;
-            -?*)    _guard_flag "$1" ;;
-            *)      shift ;;
+            --json)      json_flag="1"; shift ;;
+            --all|-a)    all_flag="1"; shift ;;
+            --ms)        ms_filter="${ms_filter:+$ms_filter,}${2:-}"; shift 2 ;;
+            -?*)         _guard_flag "$1" ;;
+            *)           shift ;;
         esac
     done
 
-    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" milestone_list
+    BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" BEACON_MS_FILTER="$ms_filter" \
+        python3 "$COMMANDS_PY" milestone_list
 }
 
 cmd_milestone_start() {
