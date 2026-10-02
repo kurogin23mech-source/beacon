@@ -219,7 +219,7 @@ class ApiClient:
         ms-166 e-6637. Same shape as :meth:`_guard_bus_write` — the decision is
         made in ONE place so the next author cannot forget a copied preamble.
         ``record_decision`` is the only door into the append-only stream, so
-        guarding it here covers all 11 ``lib/`` call sites and every future one.
+        guarding it here covers every ``lib/`` call site and every future one.
         No-op off test context / non-prod.
         """
         import cloud_write_guard

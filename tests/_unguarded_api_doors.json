@@ -1,1 +1,273 @@
-["add_note", "add_org_member", "add_trek_blocker", "add_trek_scope", "add_trek_slot", "add_trek_task", "amend_trek_slot", "archive_project", "archive_trek", "claim_operation_fire", "claim_trek_slot", "clear_notes", "clear_trek_halt", "create_document", "create_org", "create_trek", "delete_active_claim", "delete_document", "delete_org", "extend_trek_task_ttl", "invite_trek_member", "issue_machine_key", "join_trek", "kickoff_trek", "leave_trek", "me_heartbeat", "me_upsert_machine", "operation_approve", "operation_revoke", "patch_trek", "pulse_ack_trek", "purge_entry", "purge_milestone", "purge_operation", "put_document", "reconcile_trek", "rehome_project", "remove_org_member", "remove_trek_blocker", "remove_trek_scope", "revoke_machine_key", "save_active_claim", "save_retro", "set_trek_halt", "set_trek_task_state", "start_trek", "take_over_trek", "transfer_trek_leader", "trek_summary_sent", "update_document", "upsert_session", "upsert_session_intent", "upsert_session_log"]
+[
+ {
+  "method": "add_note",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "add_org_member",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "add_trek_blocker",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "add_trek_scope",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "add_trek_slot",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "add_trek_task",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "amend_trek_slot",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "archive_project",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "archive_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "claim_operation_fire",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "claim_trek_slot",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "clear_notes",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "clear_trek_halt",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "create_document",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "create_org",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "create_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "delete_active_claim",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "delete_document",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "delete_org",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "extend_trek_task_ttl",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "invite_trek_member",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "issue_machine_key",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "join_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "kickoff_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "leave_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "me_heartbeat",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "me_upsert_machine",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "operation_approve",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "operation_revoke",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "patch_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "pulse_ack_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "purge_entry",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "purge_milestone",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "purge_operation",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "put_document",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "reconcile_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "rehome_project",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "remove_org_member",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "remove_trek_blocker",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "remove_trek_scope",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "revoke_machine_key",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "save_active_claim",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "save_retro",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "set_trek_halt",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "set_trek_task_state",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "start_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "take_over_trek",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "transfer_trek_leader",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "trek_summary_sent",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "update_document",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "upload_document_image",
+  "triage": "pending",
+  "owner_task": "e-6854",
+  "note": "生 HTTP (urllib.request.Request) で multipart POST する扉。PR#785 の独立 AX レビューが、検出器が post/put/delete/patch という verb 名だけを見ていてこの扉を 一度も見ていなかったこと (ガード済みでも負債でもなく存在しない扱い) を指摘して発覚した。"
+ },
+ {
+  "method": "upsert_session",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "upsert_session_intent",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ },
+ {
+  "method": "upsert_session_log",
+  "triage": "pending",
+  "owner_task": "e-6854"
+ }
+]

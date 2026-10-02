@@ -50,6 +50,7 @@ import pytest
 _LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
 sys.path.insert(0, _LIB)
 
+import _ast_structural as astx  # noqa: E402  (tests/ の共有プリミティブ)
 import api_client            # noqa: E402
 import cloud_write_guard     # noqa: E402
 import commands_shared       # noqa: E402
@@ -194,31 +195,59 @@ def test_seam_does_not_break_the_caller_on_a_guard_refusal():
 # ラチェットは一方通行: 扉がガードされたらこの一覧から削除する。直った項目を残すと
 # 同じ場所の次の退行を黙って通す (#781 の既知漏れ一覧で親が実際に踏んだ病理)。
 
-# 負債台帳は tests/ 直下のデータファイル (このテストの隣) に置く。Python の定数に
-# 53 件を埋め込むとレビュー差分で本体が読めなくなるため。
-_DEBT_FILE = os.path.join(os.path.dirname(__file__), "_unguarded_api_doors.json")
-_RECORDED_UNGUARDED_DOORS = frozenset(
-    json.load(open(_DEBT_FILE, encoding="utf-8")))
-
 _WRITE_VERBS = frozenset({"post", "put", "delete", "patch"})
+# 生 HTTP を自分で組む印 (ms-166 e-6637 / PR#785 独立 AX レビュー AX-1)。
+# 初版の検出器は post/put/delete/patch という **verb 名** だけを見ていたため、
+# ``upload_document_image`` (urllib.request.Request で multipart POST する本番書き込み)
+# を扉として一度も見ていなかった — ガード済みでも負債でもなく「存在しない」扱いで、
+# 非空性テスト (len(doors) >= 40) は緑のまま通った。覆域が呼び出しの **形** に
+# 依っていたので、形を変えた扉が素通りした。これはこのファイルが防ぐはずだった
+# 「緑のガードが実は何も見ていない」そのもの。
+_RAW_HTTP_MARKERS = frozenset({"Request", "urlopen"})
+# 生 HTTP を組む唯一の共有経路 = 廊下であって扉ではない。読み取り (GET) も通るので
+# ここにガードを置くと読みまで止まる。これ以外に生 HTTP を組むメソッドが現れたら
+# それは扉なので doors に入る (下の guard がそれを機械で確かめる)。
+_RAW_TRANSPORT = frozenset({"_request"})
+
+# 負債台帳の各項目に要る鍵と、許す triage の値。
+_LEDGER_TRIAGE_VALUES = frozenset({"pending", "exempt"})
 
 
-def _called_names(fn: ast.AST) -> set:
-    out = set()
-    for sub in ast.walk(fn):
-        if isinstance(sub, ast.Call):
-            f = sub.func
-            out.add(getattr(f, "attr", None) or getattr(f, "id", ""))
-    return out
+def _load_debt_ledger():
+    """負債台帳を ``{method: 項目}`` で返す。
+
+    項目は ``{"method", "triage", ...}``。bare な文字列配列ではなく項目にしたのは
+    (PR#785 独立 AX レビュー AX-4)、「どの扉を未ガードのまま許すか」の判断が扉ごとに
+    違うのに、台帳が名前しか運んでいなかったため — 次の読み手が判断を再導出するしか
+    なかった。``triage`` は ``pending`` (まだ仕分けていない / 担当 task を持つ) か
+    ``exempt`` (ガード不要と判断済み、``reason`` 必須) のどちらか。
+    """
+    rows = json.load(open(_DEBT_FILE, encoding="utf-8"))
+    return {r["method"]: r for r in rows}
+
+
+_DEBT_FILE = os.path.join(os.path.dirname(__file__), "_unguarded_api_doors.json")
+_DEBT_LEDGER = _load_debt_ledger()
+_RECORDED_UNGUARDED_DOORS = frozenset(_DEBT_LEDGER)
 
 
 def api_client_write_doors():
-    """``({扉: ガード済みか}, [guard helper 名])`` を構文木から求める。"""
+    """``({扉: ガード済みか}, [guard helper 名])`` を構文木から求める。
+
+    「呼ばれている名前を集める」プリミティブは ``tests/_ast_structural`` の共有物を
+    使う (保守性レビュー PR#785 M-3: 同じ分岐を 3 つの構造ガードが手書きしていた)。
+    ここが持つのは **何を扉と見なし、何をガードと見なすかの述語だけ**。
+
+    扉 = 書き込み verb (``post`` / ``put`` / ``delete`` / ``patch``) を呼ぶか、
+    **生 HTTP を自分で組む** メソッド (共有の輸送路を除く)。後者を入れないと、形を
+    変えた書き込みが覆域から静かに外れる (AX-1 の実害)。
+    ガード済み = ``guard_prod*`` を直接呼ぶか、それを呼ぶ ``_guard*`` helper を経由する。
+    """
     tree = ast.parse(open(os.path.join(_LIB, "api_client.py"), encoding="utf-8").read())
     cls = next(n for n in ast.walk(tree)
                if isinstance(n, ast.ClassDef) and n.name == "ApiClient")
-    methods = {fn.name: _called_names(fn) for fn in cls.body
-               if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    methods = {name: astx.called_names(fn)
+               for name, fn in astx.functions_of(cls).items()}
     helpers = {n for n, c in methods.items()
                if n.startswith("_guard") and any(x.startswith("guard_prod") for x in c)}
 
@@ -226,8 +255,18 @@ def api_client_write_doors():
         return any(x.startswith("guard_prod") for x in c) or bool(c & helpers)
 
     doors = {n: guarded(c) for n, c in methods.items()
-             if (c & _WRITE_VERBS) and not n.startswith("_guard")}
+             if ((c & _WRITE_VERBS) or (c & _RAW_HTTP_MARKERS))
+             and n not in _RAW_TRANSPORT and not n.startswith("_guard")}
     return doors, sorted(helpers)
+
+
+def raw_http_methods():
+    """生 HTTP を自分で組む ``ApiClient`` メソッドの集合 (輸送路も含む)。"""
+    tree = ast.parse(open(os.path.join(_LIB, "api_client.py"), encoding="utf-8").read())
+    cls = next(n for n in ast.walk(tree)
+               if isinstance(n, ast.ClassDef) and n.name == "ApiClient")
+    return {name for name, fn in astx.functions_of(cls).items()
+            if astx.called_names(fn) & _RAW_HTTP_MARKERS}
 
 
 def test_record_decision_is_wired_to_the_guard():
@@ -275,11 +314,197 @@ def test_the_ratchet_actually_fails_on_a_new_door():
     assert new == ["brand_new_write"], new
 
 
+def test_every_raw_http_method_is_a_door_or_the_declared_transport():
+    """生 HTTP を自分で組むメソッドは、扉か宣言済みの輸送路のどちらかであること。
+
+    PR#785 独立 AX レビュー AX-1 の回帰ピン。初版は ``len(doors) >= 40`` しか言って
+    いなかったので、verb 名を使わない扉 (``upload_document_image``) が覆域から静かに
+    外れていても緑だった。「十分な数が見えている」は「見落ちが無い」を意味しない。
+    """
+    doors, _ = api_client_write_doors()
+    unaccounted = sorted(raw_http_methods() - set(doors) - _RAW_TRANSPORT)
+    assert not unaccounted, (
+        "生 HTTP で書き込むメソッドが扉として数えられていません (覆域の外に居るので"
+        "ラチェットが見ません): " + repr(unaccounted) + "。扉なら検出器の述語に入れ、"
+        "共有の輸送路なら _RAW_TRANSPORT に理由付きで宣言してください。")
+
+
+def test_the_raw_http_door_found_by_the_review_is_accounted_for():
+    # 具体の回帰ピン: この扉が「存在しない」扱いに戻ったら落ちる。
+    doors, _ = api_client_write_doors()
+    assert "upload_document_image" in doors, (
+        "upload_document_image が扉として見えていません (AX-1 の退行)")
+    assert "upload_document_image" in _RECORDED_UNGUARDED_DOORS, (
+        "upload_document_image が負債台帳に載っていません — 未ガードの本番書き込み扉を"
+        "台帳からも落とすと、誰も見ない状態に戻ります")
+
+
+def test_the_transport_is_not_counted_as_a_door():
+    # 廊下にガードを置くと読み取りまで止まるので、扉として数えてはならない。
+    doors, _ = api_client_write_doors()
+    for name in _RAW_TRANSPORT:
+        assert name not in doors, name
+
+
+def test_the_raw_http_guard_actually_fails_on_an_unaccounted_door(tmp_path):
+    # test-the-test: 生 HTTP で書くが verb を呼ばないメソッドを合成し、検出器が
+    # それを扉として拾うことを確かめる (初版が見落とした形そのもの)。
+    src = (
+        "import urllib.request\n"
+        "\n"
+        "class ApiClient:\n"
+        "    def upload_something(self, pid, body):\n"
+        "        req = urllib.request.Request(self._base_url, data=body, method='POST')\n"
+        "        with urllib.request.urlopen(req) as r:\n"
+        "            return r.read()\n"
+    )
+    p = tmp_path / "fake_client.py"
+    p.write_text(src, encoding="utf-8")
+    cls = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.ClassDef))
+    names = {n: astx.called_names(fn) for n, fn in astx.functions_of(cls).items()}
+    raw = {n for n, c in names.items() if c & _RAW_HTTP_MARKERS}
+    verbs = {n for n, c in names.items() if c & _WRITE_VERBS}
+    assert raw == {"upload_something"}, raw
+    assert verbs == set(), (
+        "この合成例は verb を呼ばない形でなければ回帰ピンにならない: " + repr(verbs))
+
+
+# --- 負債台帳の形が腐らないようにする (AX-4) ---------------------------------
+
+def test_debt_ledger_entries_carry_a_triage_state():
+    for name, row in sorted(_DEBT_LEDGER.items()):
+        assert row.get("triage") in _LEDGER_TRIAGE_VALUES, (
+            name + " の triage が " + repr(sorted(_LEDGER_TRIAGE_VALUES))
+            + " のいずれでもありません: " + repr(row))
+
+
+def test_exempt_entries_state_why():
+    # 「ガード不要」と判断した扉は理由を持たなければならない。理由の無い免除は
+    # 「書き忘れ」と区別できず、次の読み手が判断を再導出するしかなくなる。
+    missing = sorted(n for n, r in _DEBT_LEDGER.items()
+                     if r.get("triage") == "exempt" and not (r.get("reason") or "").strip())
+    assert not missing, (
+        "ガード不要と宣言した扉に理由がありません: " + repr(missing))
+
+
+def test_pending_entries_name_the_task_that_will_triage_them():
+    # 未仕分けの項目が担当 task を持たないと、台帳が「置き場所」になって誰も戻らない。
+    orphan = sorted(n for n, r in _DEBT_LEDGER.items()
+                    if r.get("triage") == "pending" and not (r.get("owner_task") or "").strip())
+    assert not orphan, (
+        "未仕分けの扉に担当 task がありません: " + repr(orphan))
+
+
 def test_the_guard_detection_is_not_vacuous():
     # 検出器が「全部ガード済み」や「扉ゼロ」を返して無条件に緑になる形を防ぐ。
     doors, helpers = api_client_write_doors()
     assert len(doors) >= 40, "扉の検出が少なすぎます: " + repr(len(doors))
+    # 「十分な数が見えている」は「見落ちが無い」を意味しない (AX-1)。形の違う扉が
+    # 覆域から外れていないことは test_every_raw_http_method_is_a_door_... が見る。
+    assert raw_http_methods(), "生 HTTP の検出が空です (印の綴り違いの疑い)"
     guarded = {n for n, ok in doors.items() if ok}
     assert {"post_bus_event", "create_project", "record_decision"} <= guarded, (
         "既知のガード済み扉を検出できていません: " + repr(sorted(guarded)))
     assert "_guard_bus_write" in helpers and "_guard_decision_write" in helpers
+
+
+# ---------------------------------------------------------------------------
+# 4. 同じ出来事が経路によって別の診断にならない (PR#785 独立 AX レビュー AX-2)
+# ---------------------------------------------------------------------------
+#
+# 絞り所 ``record_decision`` に至る経路は 2 系統ある: 監査の副作用として呼ぶ
+# best-effort 経路 (共有の受け口を通る) と、記録そのものが目的の前景コマンド
+# ``beacon decision record``。ガードが拒否したという **同じ出来事** が、前者では
+# 「ガードが働いた」、後者では「Error: failed to record decision」になっていた。
+# 読み手 (人でも AI でも) は後者を endpoint の障害と受け取り、再試行や調査に向かう。
+# 分類は例外の型で 1 回だけ決める。
+#
+# 責務の違いは残す: 前景コマンドは記録できなかったなら非ゼロで落ちるのが正しい
+# (飲むのは副作用経路だけ)。揃えるのは「何が起きたか」の説明。
+
+def _cmd_decision_record_excepts():
+    """``cmd_decision_record`` の except 節が捕まえる型の名前 (出現順)。"""
+    tree = ast.parse(open(os.path.join(_LIB, "cmd_decision.py"), encoding="utf-8").read())
+    fn = astx.function_named(tree, "cmd_decision_record")
+    assert fn is not None, "cmd_decision_record が見つかりません"
+    out = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Try):
+            for h in node.handlers:
+                t = h.type
+                if t is None:
+                    out.append("bare")
+                elif isinstance(t, ast.Name):
+                    out.append(t.id)
+                else:
+                    out.append(getattr(t, "attr", "?"))
+    return out
+
+
+def test_foreground_record_command_classifies_a_guard_refusal():
+    # 前景コマンドが ProdWriteBlocked を名前で見分けていること (型で分類する)。
+    src = open(os.path.join(_LIB, "cmd_decision.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    fn = astx.function_named(tree, "cmd_decision_record")
+    called = astx.called_names(fn)
+    assert "ProdWriteBlocked" in {
+        getattr(n, "attr", None) or getattr(n, "id", None)
+        for node in ast.walk(fn) if isinstance(node, ast.Attribute)
+        for n in [node]
+    } | called, (
+        "cmd_decision_record が ProdWriteBlocked を見分けていません — ガード拒否が"
+        "「Error: failed」として報告され、読み手を存在しない障害の捜索に送り出します")
+
+
+def test_foreground_record_command_does_not_call_a_guard_refusal_a_failure(capsys):
+    # 実挙動: ガード拒否のとき stderr が「失敗」ではなく「ガード」と言い、次の一手を示す。
+    import cmd_decision
+
+    class _Refusing:
+        def record_decision(self, project_id, decision):
+            raise cloud_write_guard.ProdWriteBlocked(
+                "refusing to append a decision to the production cloud ...")
+
+    saved_cloud = cmd_decision._is_cloud_mode
+    saved_client = cmd_decision._get_api_client
+    env_keys = ("BEACON_DECISION_WHAT", "BEACON_DECISION_RATIONALE",
+                "BEACON_DECISION_KIND", "BEACON_DECISION_EVIDENCE", "BEACON_JSON")
+    saved_env = {k: os.environ.get(k) for k in env_keys}
+    try:
+        cmd_decision._is_cloud_mode = lambda: True
+        cmd_decision._get_api_client = lambda: (_Refusing(), {"project_id": "p1"})
+        os.environ["BEACON_DECISION_WHAT"] = "何かを決めた"
+        os.environ["BEACON_DECISION_RATIONALE"] = "理由"
+        # 一級の判断記録は根拠の link が必須 (この経路の既存契約)。
+        os.environ["BEACON_DECISION_EVIDENCE"] = "commit:abc1234"
+        os.environ.pop("BEACON_JSON", None)
+        with pytest.raises(SystemExit) as ex:
+            cmd_decision.cmd_decision_record()
+        assert ex.value.code == 1, "記録できなかったので非ゼロで落ちるのが正しい"
+        err = capsys.readouterr().err
+        assert "Refused:" in err, err
+        assert "ガード" in err, err
+        assert "Error: failed to record decision" not in err, (
+            "ガード拒否を『失敗』と呼んでいます (AX-2 の退行): " + err)
+    finally:
+        cmd_decision._is_cloud_mode = saved_cloud
+        cmd_decision._get_api_client = saved_client
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_the_specific_branch_precedes_the_broad_one():
+    # ProdWriteBlocked は RuntimeError の下なので、広い except が先に在ると
+    # 特定の分岐が死んだコードになる。順序が load-bearing であることを固定する。
+    order = _cmd_decision_record_excepts()
+    assert "Exception" in order, order
+    # ProdWriteBlocked は except 節ではなく isinstance で分類しているので、
+    # 広い except の **中** で先に判定していることを本文で確かめる。
+    src = open(os.path.join(_LIB, "cmd_decision.py"), encoding="utf-8").read()
+    i_check = src.index("ProdWriteBlocked")
+    i_generic = src.index('"Error: failed to record decision')
+    assert i_check < i_generic, (
+        "汎用の失敗メッセージがガード判定より先に出ています (特定の分岐が死にます)")

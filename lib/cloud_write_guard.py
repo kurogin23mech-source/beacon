@@ -84,6 +84,18 @@ def is_prod_api_url(url: str) -> bool:
 # author enabling it for one write path knows it unlocks all of them.
 _PROD_TEST_WRITE_HATCH = "BEACON_ALLOW_PROD_TEST_WRITE"
 
+# 「この抜け道は何を解錠するか」の文言 (ms-166 e-6637 の保守性レビュー M-1)。
+# 以前は 3 つの拒否文言に手書きで写していたため、3 つ目のガード (判断記録) を足した
+# 瞬間に先の 2 つが「project AND bus」のまま古くなった。守る対象が増えても文言が
+# 揃うように 1 箇所から作る — 新しいガードを足す人はここに 1 語足すだけでよい。
+_HATCH_SCOPE = "project, bus AND decision"
+
+
+def _hatch_note() -> str:
+    """全ガードの拒否文言が共有する「抜け道とその射程」の 1 文。"""
+    return (f"set {_PROD_TEST_WRITE_HATCH}=1 (this shared hatch unlocks ALL "
+            f"prod test writes — {_HATCH_SCOPE} — for the process)")
+
 
 def _prod_test_write_blocked(base_url: str) -> bool:
     """True when a prod write from a test context must be refused — the single
@@ -130,8 +142,7 @@ def guard_prod_project_write(base_url: str) -> None:
         "cloud_write_guard: refusing to write a project to the production "
         f"cloud ({base_url}) from a test context. Tests must use local mode "
         "or a sandbox/staging cloud. If this test genuinely must hit prod, "
-        "set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch unlocks ALL "
-        "prod test writes — project AND bus — for the process) AND wrap "
+        f"{_hatch_note()} AND wrap "
         "creation in cloud_write_guard.disposable_project(...) so a crash "
         "can't leak it."
     )
@@ -172,8 +183,7 @@ def guard_prod_bus_write(base_url: str) -> None:
         "ApiClient a local/sandbox base_url. Unlike a prod project write, a bus "
         "write has no disposable_project teardown counterpart (bus events are "
         "server-side, not leaked directory residue). If this test genuinely must "
-        "hit the prod bus, set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch "
-        "unlocks ALL prod test writes — project AND bus — for the process)."
+        f"hit the prod bus, {_hatch_note()}."
     )
 
 
@@ -189,10 +199,13 @@ def guard_prod_decision_write(base_url: str) -> None:
     to check what an AI decided — was mostly fiction.
 
     Why the guard belongs HERE and not in the callers: ``record_decision`` is the
-    single door every writer passes through. ``lib/`` alone holds 11 call sites
-    across 7 files, and a caller-layer fix leaves 8 of them (plus every future
-    path) open — the same "one door guarded, the others are bypass doors" shape
-    that e-5194 found for the bus and e-5216 then closed at the choke point.
+    single door every writer passes through, so guarding it covers **every** call
+    site in ``lib/`` (spread over 7 modules today) plus every future one. A
+    caller-layer fix would leave all the others open — the same "one door guarded,
+    the others are bypass doors" shape that e-5194 found for the bus and e-5216
+    then closed at the choke point. (No count is quoted here on purpose: the
+    number drifts, and a stale number offered as the justification is worse than
+    none. ``tests/test_decision_write_guard_e6637`` pins the structural facts.)
 
     No-op outside a test context (normal CLI / autonomous use is unaffected) and
     no-op for non-prod targets (local mode, staging, a sandbox cloud). The escape
@@ -209,11 +222,12 @@ def guard_prod_decision_write(base_url: str) -> None:
         "append-only — a test row cannot be deleted afterwards. Fake cloud mode "
         "the canonical way: use the ``fake_cloud_config`` fixture (it points "
         "BEACON_PROJECT_FILE at a tmp cloud.json so _get_cloud_config_path "
-        "resolves non-prod in EVERY module), force local mode, or give the "
-        "ApiClient a local/sandbox base_url. If this test genuinely must write to "
-        "the live stream, set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch "
-        "unlocks ALL prod test writes — project, bus AND decision — for the "
-        "process); there is no teardown that can remove the row afterwards."
+        "resolves non-prod in EVERY module), force local mode with the "
+        "``isolated_project`` fixture (a tmp .beacon with no cloud.json, so "
+        "_is_cloud_mode() is False — this is what the decision-arm tests use), or "
+        "give the ApiClient a local/sandbox base_url. If this test genuinely must write to "
+        f"the live stream, {_hatch_note()}; there is no teardown that can "
+        "remove the row afterwards."
     )
 
 def _default_cleanup(client, project_id: str) -> None:

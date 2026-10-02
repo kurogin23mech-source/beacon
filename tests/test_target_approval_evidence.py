@@ -126,11 +126,9 @@ def test_approve_refused_without_independent_evidence(monkeypatch, isolated_proj
 
 
 def test_approve_proceeds_with_independent_evidence(monkeypatch, isolated_project):
-    # ms-166 e-6637: ``isolated_project`` forces local mode. ``cmd_target_approve``
-    # records a completion verdict on the decision arm, and _wire patches only
-    # load/save — so without this the approve wrote a fake ``ms-T`` completion to the
-    # **production** append-only stream on every suite run (one of the residue shapes
-    # measured at ~90 of a session's 100 decisions).
+    # ``isolated_project`` keeps this hermetic: ``cmd_target_approve`` records a
+    # completion verdict on the decision arm and ``_wire`` patches only load/save,
+    # so without it the approve reaches the cloud (ms-166 e-6637).
     data = _data(_pending_entry(with_evidence=True))
     _wire(monkeypatch, data)
     commands.cmd_target_approve()  # no SystemExit

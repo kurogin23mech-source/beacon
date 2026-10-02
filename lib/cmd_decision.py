@@ -152,6 +152,25 @@ def cmd_decision_record():
     except SystemExit:
         raise
     except Exception as exc:
+        # ms-166 e-6637 (独立 AX レビュー PR#785 AX-1 系の指摘): 同じ出来事が経路に
+        # よって別の診断になってはならない。record_decision の絞り所には
+        # prod-test-write ガードが居て、テスト文脈から本番に書こうとすると
+        # ProdWriteBlocked を投げる。共有の受け口 (best_effort_decision_write) は
+        # これを「ガードが働いた」と報告するのに、この前景コマンドは同じ例外を
+        # 「Error: failed to record decision」で包んでいた — 読み手は endpoint の
+        # 障害だと受け取って再試行や調査に向かう。分類は例外の型で 1 回決める。
+        #
+        # ここでは **飲まない**: このコマンドは記録することが目的なので、記録できな
+        # かったなら非ゼロで落ちるのが正しい (best-effort の副作用経路とは責務が違う)。
+        # 変えるのは「何が起きたか」の説明と次の一手だけ。
+        import cloud_write_guard as _cwg
+        if isinstance(exc, _cwg.ProdWriteBlocked):
+            print(f"Refused: {exc}", file=sys.stderr)
+            print("Hint: これは失敗ではなくガードです。テストから本番の判断記録に"
+                  "書こうとしています (追記専用なので消せません)。テストを隔離する"
+                  "か、本当に本番へ書くなら抜け道を明示してください。",
+                  file=sys.stderr)
+            sys.exit(1)
         print(f"Error: failed to record decision: {exc}", file=sys.stderr)
         sys.exit(1)
 

@@ -48,6 +48,7 @@ sys.path.insert(0, _LIB)
 import cmd_pr            # noqa: E402
 import cmd_target        # noqa: E402
 import cmd_task          # noqa: E402
+import _ast_structural as astx  # noqa: E402  (tests/ の共有プリミティブ)
 import commands_shared   # noqa: E402
 
 
@@ -83,16 +84,14 @@ def _is_record_decision_call(node: ast.AST) -> bool:
 
 
 def _with_item_names(node: ast.With) -> set:
-    out = set()
-    for item in node.items:
-        ctx = item.context_expr
-        if isinstance(ctx, ast.Call):
-            f = ctx.func
-            if isinstance(f, ast.Name):
-                out.add(f.id)
-            elif isinstance(f, ast.Attribute):
-                out.add(f.attr)
-    return out
+    """``with A(), B():`` の文脈マネージャ名の集合。
+
+    呼び出し名の取り出しは ``tests/_ast_structural`` の共有プリミティブに委譲する
+    (保守性レビュー PR#785 M-3: 同じ分岐を 3 つの構造ガードが手書きしていた)。
+    ``with`` の items だけを見る部分がここ固有。
+    """
+    return {astx.callee_name(item.context_expr) for item in node.items
+            if isinstance(item.context_expr, ast.Call)} - {""}
 
 
 def unguarded_decision_writes(tree: ast.AST) -> list:
