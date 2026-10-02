@@ -71,8 +71,20 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMMANDS = os.path.join(REPO, "lib", "commands.py")
 
 
-def test_cli_full_surface_no_longer_rejected():
+def test_cli_full_surface_no_longer_rejected(tmp_path):
+    # ms-166 e-6621: the probe runs the real CLI with cwd=REPO (it inspects the
+    # actual command surface, so the cwd has to be the repo) and the CLI
+    # materialises its SQLite store on the way — which created .beacon/project.db
+    # in the repository. Invisible where that file already exists; in a clean
+    # checkout, which is what CI gets, the test CREATES it. The surface being
+    # inspected does not depend on whose project sits at the cwd, so pointing the
+    # store elsewhere changes nothing about what is measured.
+    store = tmp_path / ".beacon"
+    store.mkdir()
+    (store / "project.json").write_text(
+        json.dumps({"name": "surface-probe", "milestones": []}), encoding="utf-8")
     env = dict(os.environ)
+    env.setdefault("BEACON_PROJECT_FILE", str(store / "project.json"))
     env.update({"BEACON_REVIEW_TYPE": "ax", "BEACON_MODE": "full-surface"})
     p = subprocess.run([sys.executable, COMMANDS, "review_context"],
                        capture_output=True, text=True, env=env, cwd=REPO, timeout=120)
