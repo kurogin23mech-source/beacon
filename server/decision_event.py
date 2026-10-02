@@ -55,6 +55,13 @@ KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
         # ms-166 e-6599: 判断 (gate judgement) = 対象を次のどの状態へ倒すか の決定。
         # 完遂 (completion-verdict) とは別族 — advance / retry は完遂ではない。
         "gate-judgement",
+        # ms-166 e-6756: 採否 (disposition) = 達成主張を通す前に、未着手の重要タスクを
+        # どう処分したか (done / superseded / blocks-attainment) の判定。
+        # ``cmd_target._record_disposition_decision`` が e-5651 から書いていたのに、
+        # 「新経路を足したらここに文書化する」という上の規律が守られておらず、本番に
+        # 1000 件中 86 件あるのに既知 kind として載っていなかった (= 捕獲台帳の被覆
+        # 検査が disposition を素通りし、配線が外れても checker が緑のままだった)。
+        "disposition",
     }
 )
 

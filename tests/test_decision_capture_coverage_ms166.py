@@ -26,6 +26,7 @@ import ast
 import glob
 import importlib.util
 import os
+import textwrap
 
 # sys.path (lib / scripts / tests) is centralized in tests/conftest.py (ms-142 e-5144).
 import capability_ledger as cl  # noqa: E402
@@ -36,6 +37,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 import decision_event as de  # noqa: E402
 
 _REPO = os.path.join(os.path.dirname(__file__), "..")
+_LIB_DIR = os.path.join(_REPO, "lib")
+_SERVER_DIR = os.path.join(_REPO, "server")
 _CHK_PATH = os.path.join(_REPO, "scripts", "check-capability-scope.py")
 _spec = importlib.util.spec_from_file_location("check_capability_scope", _CHK_PATH)
 chk = importlib.util.module_from_spec(_spec)
@@ -174,3 +177,238 @@ def test_no_stale_decision_capture_gap():
     assert not stale, (
         "KNOWN_DECISION_CAPTURE_GAP lists a kind that is no longer an unwired gap "
         f"(producer got wired — drop the row): {stale}")
+
+
+# ---------------------------------------------------------------------------
+# 本番に現れる全種別が台帳に載っているか (ms-166 e-6756)
+# ---------------------------------------------------------------------------
+#
+# 上の 2 方向 SSOT guard は「語彙 (KNOWN_DECISION_KINDS) と台帳」の一致を見るが、
+# **どちらにも載らずに書かれている kind** は両方を素通りする。実際 disposition は
+# e-5651 から達成ゲートが書いていたのに、語彙にも台帳にも無く、本番 1000 件中 86 件
+# あるのに「配線が外れても checker が緑」の状態だった。
+#
+# ここでは真値源をコード側に取り、**decision 書き込み地点の kind リテラルを機械で
+# 列挙**して台帳と突き合わせる。本番データのサンプリングではなくコード由来にするのは、
+# テストが本番を読みに行かないため (= ms-166 が別途塞いでいる汚染経路を増やさない) と、
+# 新しい writer を足した瞬間に手元で赤くなるため。
+#
+# 射程の限界 (正直に書く — ここを曖昧にすると偽の安全になる):
+# kind が実行時に決まる経路はリテラルが無いので列挙できない。該当するのは
+#   * ``beacon decision record`` の ``BEACON_DECISION_KIND`` (任意文字列)
+#   * ``decision_event_from_halt`` の resumed フラグによる halt / resume の切替
+# 前者が triage の出所で、DECISION_CAPTURE_ADHOC_KINDS に宣言して射程外であることを
+# 明示する。後者は両 kind が既に台帳に在る。
+
+_DECISION_WRITERS = frozenset({"record_decision", "build_decision_event",
+                               "append_decision_event"})
+
+
+def _callee_name(call: ast.Call) -> str:
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
+
+
+def _kind_literal_of_dict(d: ast.Dict):
+    for k, v in zip(d.keys, d.values):
+        if (isinstance(k, ast.Constant) and k.value == "kind"
+                and isinstance(v, ast.Constant) and isinstance(v.value, str)):
+            return v.value
+    return None
+
+
+def _dict_assigned_to(scope: ast.AST, name: str):
+    """同一スコープで ``name`` に代入された辞書リテラル (``payload = {...}`` の解決)。"""
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if (isinstance(t, ast.Name) and t.id == name
+                        and isinstance(node.value, ast.Dict)):
+                    return node.value
+    return None
+
+
+def _kinds_written_in(path: str) -> dict:
+    """``path`` の decision 書き込み地点で使われている kind リテラルを ``{kind: {site}}`` で返す。
+
+    走査するのは **書き込み呼び出しの引数だけ**。関数まるごとを走査すると、巨大な
+    router factory に同居する無関係な ``"kind"`` (bus event / target kind 等) を
+    7 件拾って偽陽性になることを実測したため。
+    """
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    found: dict = {}
+    base = os.path.basename(path)
+    scopes = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module))]
+    for scope in scopes:
+        label = getattr(scope, "name", "<module>")
+        for call in [n for n in ast.walk(scope) if isinstance(n, ast.Call)]:
+            if _callee_name(call) not in _DECISION_WRITERS:
+                continue
+            seen = []
+            payloads = list(call.args) + [kw.value for kw in call.keywords
+                                          if kw.arg in ("data", "payload", "decision")]
+            for a in payloads:
+                if isinstance(a, ast.Dict):
+                    seen.append(_kind_literal_of_dict(a))
+                elif isinstance(a, ast.Name):
+                    d = _dict_assigned_to(scope, a.id)
+                    if d is not None:
+                        seen.append(_kind_literal_of_dict(d))
+            for kw in call.keywords:
+                if (kw.arg == "kind" and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, str)):
+                    seen.append(kw.value.value)
+            for k in seen:
+                if k:
+                    found.setdefault(k, set()).add(f"{base}:{label}")
+    return found
+
+
+def _kind_constants_in(path: str) -> dict:
+    """decision モジュールの module-level ``*_KIND = "..."`` 定数。
+
+    対象を decision モジュールに限るのは、``*_KIND`` を全ファイルで走査すると bus
+    channel や target kind の定数 (``ROOT_TARGET_KIND`` / ``WELCOME_TICK_KIND`` 等) を
+    拾って偽陽性になるため。
+    """
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    found: dict = {}
+    base = os.path.basename(path)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if (isinstance(t, ast.Name) and t.id.endswith("_KIND")
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                found.setdefault(node.value.value, set()).add(f"{base}:{t.id}")
+    return found
+
+
+def _declared_kinds() -> set:
+    return (set(de.KNOWN_DECISION_KINDS)
+            | set(cl.DECISION_CAPTURE_PRODUCERS)
+            | set(cl.DECISION_CAPTURE_BOUNDARY)
+            | set(cl.DECISION_CAPTURE_DERIVED_KINDS)
+            | set(cl.DECISION_CAPTURE_ADHOC_KINDS))
+
+
+def kinds_written_in_code() -> dict:
+    """lib/ + server/ の decision 書き込みで使われる kind リテラルを全列挙する。"""
+    out: dict = {}
+    for root in (_LIB_DIR, _SERVER_DIR):
+        for name in sorted(os.listdir(root)):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(root, name)
+            src = open(path, encoding="utf-8").read()
+            if any(w in src for w in _DECISION_WRITERS):
+                for k, sites in _kinds_written_in(path).items():
+                    out.setdefault(k, set()).update(sites)
+            if name.startswith("decision_") or name == "decision_event.py":
+                for k, sites in _kind_constants_in(path).items():
+                    out.setdefault(k, set()).update(sites)
+    return out
+
+
+def test_every_kind_written_in_code_is_declared_in_the_ledger():
+    declared = _declared_kinds()
+    written = kinds_written_in_code()
+    undeclared = {k: sorted(v) for k, v in written.items() if k not in declared}
+    assert not undeclared, (
+        "decision を書いているのに語彙にも台帳にも載っていない kind があります "
+        f"(ms-166 e-6756 — 被覆検査が素通りし、配線が外れても気づけない): {undeclared}。"
+        "専用 seam があるなら KNOWN_DECISION_KINDS に文書化して "
+        "DECISION_CAPTURE_PRODUCERS に producer を足す。seam に届かない会話判断なら "
+        "DECISION_CAPTURE_BOUNDARY、既存成果物からの導出なら "
+        "DECISION_CAPTURE_DERIVED_KINDS、実行時に名付けられるなら "
+        "DECISION_CAPTURE_ADHOC_KINDS に理由付きで宣言してください。")
+
+
+def test_the_written_kind_extractor_actually_finds_a_new_kind(tmp_path):
+    # test-the-test: 台帳に無い kind を書く writer を合成して、抽出器が拾うことを確かめる。
+    # 「0 件だから緑」なのか「抽出器が何も見ていないから緑」なのかを区別する。
+    src = textwrap.dedent('''
+        def _record_something():
+            client.record_decision(project_id, {
+                "kind": "brand-new-judgement",
+                "decision": "x",
+            })
+    ''')
+    p = tmp_path / "cmd_new.py"
+    p.write_text(src, encoding="utf-8")
+    found = _kinds_written_in(str(p))
+    assert "brand-new-judgement" in found, f"抽出器が新しい kind を見逃しました: {found}"
+    assert "brand-new-judgement" not in _declared_kinds()
+
+
+def test_the_written_kind_extractor_resolves_a_payload_variable(tmp_path):
+    # payload を変数に組んでから渡す形 (cmd_task.py の実際の形) も拾えること。
+    src = textwrap.dedent('''
+        def _record_something():
+            payload = {"kind": "via-variable", "decision": "x"}
+            client.record_decision(project_id, payload)
+    ''')
+    p = tmp_path / "cmd_var.py"
+    p.write_text(src, encoding="utf-8")
+    assert "via-variable" in _kinds_written_in(str(p))
+
+
+def test_the_written_kind_extractor_ignores_unrelated_kind_keys(tmp_path):
+    # 偽陽性側も測る: decision 書き込みと無関係な "kind" を同じ関数に置いても拾わない。
+    # (巨大な router factory で実際に 7 件拾った病理。厳しすぎる guard は無視される。)
+    src = textwrap.dedent('''
+        def make_router():
+            bus.publish({"kind": "trek-progress-check", "to": "x"})
+            arms = {"kind": "root"}
+            client.record_decision(project_id, {"kind": "task-done"})
+            return arms
+    ''')
+    p = tmp_path / "routers_x.py"
+    p.write_text(src, encoding="utf-8")
+    found = _kinds_written_in(str(p))
+    assert set(found) == {"task-done"}, f"無関係な kind を拾っています: {sorted(found)}"
+
+
+def test_extractor_sees_the_real_tree_and_is_not_vacuous():
+    # 実コードから複数 kind が実際に取れていること (= 走査対象の解決に失敗して
+    # 空集合を返し、上の guard が無条件に緑になる形を防ぐ)。
+    written = kinds_written_in_code()
+    assert len(written) >= 6, f"実コードからの抽出が少なすぎます: {sorted(written)}"
+    for expected in ("task-done", "disposition", "review-adjudication", "pr-intent"):
+        assert expected in written, f"{expected} を抽出できていません: {sorted(written)}"
+
+
+# --- 実行時生成 kind の宣言セットが腐らないようにする -----------------------
+
+def test_decision_capture_adhoc_kinds_have_no_producer():
+    # 専用 seam を後から作ったなら ADHOC からは外す (二重登録は射程の嘘になる)。
+    both = sorted(set(cl.DECISION_CAPTURE_ADHOC_KINDS) & set(cl.DECISION_CAPTURE_PRODUCERS))
+    assert not both, (
+        "DECISION_CAPTURE_ADHOC_KINDS と DECISION_CAPTURE_PRODUCERS に同じ kind が "
+        f"居ます (seam ができたなら ADHOC から外してください): {both}")
+
+
+def test_decision_capture_adhoc_kinds_are_outside_vocabulary():
+    # 語彙に昇格したなら ADHOC の例外は不要になる (pr-intent の derived guard と同じ規律)。
+    leaked = sorted(k for k in cl.DECISION_CAPTURE_ADHOC_KINDS
+                    if k in de.KNOWN_DECISION_KINDS)
+    assert not leaked, (
+        "DECISION_CAPTURE_ADHOC_KINDS の kind が KNOWN_DECISION_KINDS に入りました "
+        f"(専用 seam を作ったなら producer 行へ移してください): {leaked}")
+
+
+def test_adhoc_kinds_declare_their_writer_and_provenance():
+    # 「載せない理由が台帳に明記されている」を機械で確かめる (e-6756 の受入条件)。
+    # 宣言セットは在るのに、なぜ producer を持てないのかが書かれていなければ、
+    # 次の読み手は「書き忘れ」と区別できない。
+    src = open(os.path.join(_LIB_DIR, "capability_ledger.py"), encoding="utf-8").read()
+    anchor = src.index("DECISION_CAPTURE_ADHOC_KINDS")
+    block = src[max(0, anchor - 1800):anchor]
+    assert "cmd_decision_record" in block, (
+        "ADHOC セットの直前に書き手 (cmd_decision_record) が明記されていません")
+    assert "BEACON_DECISION_KIND" in block, (
+        "ADHOC セットの直前に、kind が実行時に名付けられる経路が明記されていません")
+    for kind in cl.DECISION_CAPTURE_ADHOC_KINDS:
+        assert kind in block, f"ADHOC の {kind} に由来の注記がありません"
