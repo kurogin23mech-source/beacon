@@ -292,6 +292,53 @@ def _relocate_to_project_root(command: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _add_send_flags(parser, *, with_channel: bool) -> None:
+    """Declare the `bus send` flag surface on ``parser`` (ms-160 e-6674).
+
+    ``beacon dm send`` is the canonical DM verb and delegates to the bus-send
+    HANDLER with channel forced to dm. In bin/beacon that delegation is an
+    ``exec ... bus send --channel dm "$@"``, so the two verbs physically cannot
+    disagree about which flags exist. This shim reused the handler but
+    hand-copied the parser, and the copy drifted: ms-110's
+    ``--recipient-confirmed`` and ms-54's ``--to-user`` reached ``bus send``
+    and never reached ``dm send`` — leaving the verb the Skill calls canonical
+    unable to send a cross-user DM, which is the breakage this task is about.
+
+    Declaring the surface ONCE and calling it from both parsers restores the
+    property bash gets from exec: a flag added here exists on both verbs, with
+    no one needing to remember the second site.
+    """
+    if with_channel:
+        parser.add_argument("--channel", default="")
+    parser.add_argument("--payload", default="")
+    parser.add_argument("--sender", default="")
+    parser.add_argument("--delivery", default="")
+    parser.add_argument("--in-reply-to", dest="in_reply_to", default="")
+    parser.add_argument("--project", dest="bus_project_id", default="")
+    # ms-73 / e-1763 + ms-75 / e-1858: `--to` is the cross-user DM target and is
+    # repeatable (one send addressing several session ids); `--to-trek` expands
+    # a trek's members into one send each. `--action` is the Tier-1 envelope's
+    # authorized action (repeatable, comma-joined server-side, e-1290), and
+    # `--no-envelope` opts out of envelope issuance (debug / legacy).
+    parser.add_argument("--to", dest="bus_to", action="append", default=[])
+    parser.add_argument("--to-trek", dest="bus_to_trek", default="")
+    parser.add_argument("--action", dest="bus_action", action="append", default=[])
+    # ms-120 / e-3901: explicit human-approved override of the armed auto-reply
+    # gate, so an armed session is not fail-closed with no way to send a one-off.
+    parser.add_argument("--manual", dest="bus_manual", action="store_true")
+    # ms-110 e-3443: the "a human checked this address" claim. The server
+    # REFUSES a cross-user DM that lacks it, so its absence is a closed door,
+    # not a missing convenience.
+    parser.add_argument("--recipient-confirmed", dest="bus_recipient_confirmed",
+                        action="store_true")
+    # ms-54 e-2934: user-scoped (time-shifted) address — delivered when the
+    # recipient next starts a session rather than now. The only route when no
+    # session is live.
+    parser.add_argument("--to-user", dest="bus_to_user", default="")
+    parser.add_argument("--no-envelope", dest="no_envelope", action="store_true")
+    parser.add_argument("--json", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level argparse tree for Phase-1 commands.
 
@@ -1163,6 +1210,11 @@ def build_parser() -> argparse.ArgumentParser:
     # refused on one frontend and accepted on the other.
     p_note.add_argument("--yes", "-y", "--confirm", dest="assume_yes",
                         action="store_true")
+    # NOT --all: every other --all in this CLI widens a READ. Reusing it
+    # to widen a DESTRUCTIVE scope teaches an agent the wrong reflex
+    # (AX review, PR #782).
+    p_note.add_argument("--include-other-sessions", dest="note_all",
+                        action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- decision (ms-154 e-5594: log-time decision backstop の記録口) ----
@@ -1930,40 +1982,11 @@ def build_parser() -> argparse.ArgumentParser:
     bus_sub = p_bus.add_subparsers(dest="bus_cmd", metavar="<subcmd>")
 
     p_bus_send = bus_sub.add_parser("send", add_help=False)
-    p_bus_send.add_argument("--channel", default="")
-    p_bus_send.add_argument("--payload", default="")
-    p_bus_send.add_argument("--sender", default="")
-    p_bus_send.add_argument("--delivery", default="")
-    p_bus_send.add_argument("--in-reply-to", dest="in_reply_to", default="")
-    p_bus_send.add_argument("--project", dest="bus_project_id", default="")
-    # ms-73 / e-1763: DM-routing + envelope-issue flags. `--to <recipient>`
-    # is the cross-user DM target (bash: BEACON_BUS_RECIPIENT_SESSION).
-    # `--action <name>` is the Tier-1 envelope authorized action; bash
-    # accepts repeated flags and comma-joins them server-side (e-1290).
-    # `--no-envelope` opts out of the envelope issuance path (debug /
-    # legacy). Without these flags Windows pipx users could not send
-    # authorized cross-user DMs at all (W1 in ms-73 SPEC).
-    # ms-75 / e-1858: ``--to`` becomes repeatable so a single send can
-    # address multiple session ids. The legacy single-value form keeps
-    # working (= bash dispatcher still passes BEACON_BUS_RECIPIENT_SESSION
-    # as comma-joined when given multiple). ``--to-trek <trek-id>`` expands
-    # the trek's joined members into one send per member (= cheap fan-out,
-    # built atop the existing single-send path so envelope / budget gates
-    # apply per recipient).
-    p_bus_send.add_argument("--to", dest="bus_to", action="append", default=[])
-    p_bus_send.add_argument("--to-trek", dest="bus_to_trek", default="")
-    p_bus_send.add_argument("--action", dest="bus_action",
-                             action="append", default=[])
-    # ms-120 / e-3901: explicit human-approved manual override of the armed
-    # auto-reply gate. Mirror of bin/beacon so Windows pipx users get the same
-    # escape hatch (without it, an armed Windows session would be gated with no
-    # way to send a one-off — fail-closed but stuck).
-    p_bus_send.add_argument("--manual", dest="bus_manual", action="store_true")
-    p_bus_send.add_argument("--no-envelope", dest="no_envelope",
-                             action="store_true")
-    p_bus_send.add_argument("--json", action="store_true")
+    p_bus_send.add_argument("--help", "-h", action="store_true", dest="show_help")
+    _add_send_flags(p_bus_send, with_channel=True)
 
     p_bus_listen = bus_sub.add_parser("listen", add_help=False)
+    p_bus_listen.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_bus_listen.add_argument("--recipient", default="")
     p_bus_listen.add_argument("--channel", default="")
     p_bus_listen.add_argument("--interval", default="")
@@ -1972,6 +1995,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_listen.add_argument("--project", dest="bus_project_id", default="")
 
     p_bus_receive = bus_sub.add_parser("receive", add_help=False)
+    p_bus_receive.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_bus_receive.add_argument("--recipient", default="")
     p_bus_receive.add_argument("--channel", default="")
     p_bus_receive.add_argument("--interval", default="")
@@ -1980,6 +2004,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_receive.add_argument("--project", dest="bus_project_id", default="")
 
     p_bus_ack = bus_sub.add_parser("ack", add_help=False)
+    p_bus_ack.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_bus_ack.add_argument("--recipient", default="")
     p_bus_ack.add_argument("--last-seen-at", dest="last_seen_at", default="")
     p_bus_ack.add_argument("--project", dest="bus_project_id", default="")
@@ -1993,6 +2018,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Senders use this to localize where a DM stalled — "did it reach the
     # bridge? did the AI see it?" — without scraping bus logs.
     p_bus_status = bus_sub.add_parser("status", add_help=False)
+    p_bus_status.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_bus_status.add_argument("event_id", nargs="?", default="")
     p_bus_status.add_argument("--project", dest="bus_project_id", default="")
     p_bus_status.add_argument("--json", action="store_true")
@@ -2000,12 +2026,14 @@ def build_parser() -> argparse.ArgumentParser:
     # ms-160 e-6349: 送信前に「人間の宛先確認が要るか」を判定に問い合わせる。
     # 判定軸は「宛先が別ユーザーか」で、プロジェクトが同じかは関係しない。
     p_bus_cc = bus_sub.add_parser("consent-check", add_help=False)
+    p_bus_cc.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_bus_cc.add_argument("--to", dest="cc_to", default="")
     p_bus_cc.add_argument("--channel", dest="cc_channel", default="")
     p_bus_cc.add_argument("--in-reply-to", dest="cc_in_reply_to", default="")
     p_bus_cc.add_argument("--json", action="store_true")
 
     p_bus_dir = bus_sub.add_parser("directory", aliases=["dir"], add_help=False)
+    p_bus_dir.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_bus_dir.add_argument("--user", default="")
     p_bus_dir.add_argument("--machine", default="")
     p_bus_dir.add_argument("--agent", default="")
@@ -2019,6 +2047,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_dir.add_argument("--json", action="store_true")
 
     p_bus_budget = bus_sub.add_parser("budget", add_help=False)
+    p_bus_budget.add_argument("--help", "-h", action="store_true", dest="show_help")
     bus_budget_sub = p_bus_budget.add_subparsers(dest="bus_budget_cmd", metavar="<subcmd>")
     p_bus_budget_grant = bus_budget_sub.add_parser("grant", add_help=False)
     p_bus_budget_grant.add_argument("--turns", "-n", dest="turns", default="")
@@ -2039,6 +2068,7 @@ def build_parser() -> argparse.ArgumentParser:
     dm_sub = p_dm.add_subparsers(dest="dm_cmd", metavar="<subcmd>")
 
     p_dm_respond = dm_sub.add_parser("respond", add_help=False)
+    p_dm_respond.add_argument("--help", "-h", action="store_true", dest="show_help")
     # respond accepts approve|deny + event_id in either positional order;
     # we capture them as raw positionals and let the handler sort it out
     # (same pattern bin/beacon uses).
@@ -2052,30 +2082,23 @@ def build_parser() -> argparse.ArgumentParser:
     # bus-send handler with channel forced to dm (see _handle_dm), so the flag
     # surface mirrors `bus send` (minus --channel, which is implicit).
     p_dm_send = dm_sub.add_parser("send", add_help=False)
-    p_dm_send.add_argument("--payload", default="")
-    p_dm_send.add_argument("--sender", default="")
-    p_dm_send.add_argument("--delivery", default="")
-    p_dm_send.add_argument("--in-reply-to", dest="in_reply_to", default="")
-    p_dm_send.add_argument("--project", dest="bus_project_id", default="")
-    p_dm_send.add_argument("--to", dest="bus_to", action="append", default=[])
-    p_dm_send.add_argument("--to-trek", dest="bus_to_trek", default="")
-    p_dm_send.add_argument("--action", dest="bus_action",
-                            action="append", default=[])
-    p_dm_send.add_argument("--manual", dest="bus_manual", action="store_true")
-    p_dm_send.add_argument("--no-envelope", dest="no_envelope",
-                            action="store_true")
-    p_dm_send.add_argument("--json", action="store_true")
+    p_dm_send.add_argument("--help", "-h", action="store_true", dest="show_help")
+    # Same declaration as `bus send` (minus --channel, which is implicit). Not a
+    # copy: see _add_send_flags for why the copy drifted and what that cost.
+    _add_send_flags(p_dm_send, with_channel=False)
 
     # ms-120 / e-3899: `dm audit` is the canonical read verb (was `dm log`,
     # which collided with the write-verb `beacon log`). `dm log` stays as a
     # deprecated alias — identical args, a nudge printed in _handle_dm.
     p_dm_audit = dm_sub.add_parser("audit", add_help=False)
+    p_dm_audit.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_dm_audit.add_argument("project_id", nargs="?", default="")
     p_dm_audit.add_argument("--limit", default="")
     p_dm_audit.add_argument("--project", dest="dm_project_id", default="")
     p_dm_audit.add_argument("--json", action="store_true")
 
     p_dm_log = dm_sub.add_parser("log", add_help=False)
+    p_dm_log.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_dm_log.add_argument("project_id", nargs="?", default="")
     p_dm_log.add_argument("--limit", default="")
     p_dm_log.add_argument("--project", dest="dm_project_id", default="")
@@ -2083,12 +2106,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ms-141 / e-4966: sender-side "DMs I sent" audit (complement of dm audit).
     p_dm_sent = dm_sub.add_parser("sent", add_help=False)
+    p_dm_sent.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_dm_sent.add_argument("--limit", default="")
     p_dm_sent.add_argument("--project", dest="dm_project_id", default="")
     p_dm_sent.add_argument("--json", action="store_true")
 
     # ms-169 e-6238 (B): explicit fetch of a withheld cross-user DM body.
     p_dm_show = dm_sub.add_parser("show", add_help=False)
+    p_dm_show.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_dm_show.add_argument("dm_event_id", nargs="?", default="")
     p_dm_show.add_argument("--json", action="store_true")
 
@@ -3962,7 +3987,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear --yes   (-y / --confirm も可)\n"
+            "       beacon note clear --yes [--include-other-sessions]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
@@ -3978,9 +4003,11 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
     if sub == "clear":
         # ms-178 e-6654: pass the confirmation through; the python side
         # refuses without it (the cloud notes are shared project-wide).
+        # ms-160 e-6714: --all opts out of the this-session-only default.
         return _run_commands_py(
             root, "note_clear",
-            {"BEACON_NOTE_CLEAR_YES": "1" if args.assume_yes else ""},
+            {"BEACON_NOTE_CLEAR_YES": "1" if args.assume_yes else "",
+             "BEACON_NOTE_CLEAR_ALL": "1" if getattr(args, "note_all", False) else ""},
         )
     if sub == "restore":
         # ms-178 e-6656: recover from the backups clear left. Additive and
@@ -3999,7 +4026,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
-            "       beacon note clear --yes   (-y / --confirm も可)\n"
+            "       beacon note clear --yes [--include-other-sessions]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
@@ -5923,9 +5950,11 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help or args.bus_cmd is None:
         print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
-              "[--sender <id>] [--to <recipient> ...] [--to-trek <trek-id>] "
-              "[--delivery <mode>] [--in-reply-to <event_id>] "
-              "[--action <name> ...] [--no-envelope] [--project <id>]")
+              "[--sender <id>] [--to <recipient> ...] [--to-user <user-id>] "
+              "[--to-trek <trek-id>] [--delivery <mode>] "
+              "[--in-reply-to <event_id>] [--action <name> ...] "
+              "[--manual] [--recipient-confirmed] [--no-envelope] "
+              "[--project <id>]")
         print("       beacon bus listen    [--recipient <id>] [--channel <ch>] "
               "[--interval <sec>] [--auto-ack] [--once] [--project <id>]")
         print("       beacon bus receive   [--recipient <id>] [--channel <ch>] "
@@ -5976,6 +6005,7 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             bus_to_list = [bus_to_raw] if bus_to_raw else []
         else:
             bus_to_list = [r for r in bus_to_raw if r]
+        bus_to_user = (getattr(args, "bus_to_user", "") or "").strip()
         bus_to_trek = (getattr(args, "bus_to_trek", "") or "").strip()
         if bus_to_trek:
             extras = _expand_trek_recipients(root, bus_to_trek)
@@ -5983,6 +6013,14 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
                 # _expand_trek_recipients already printed an error.
                 return 1
             bus_to_list.extend(extras)
+        # ms-54 e-2934 / ms-160 e-6674: --to and --to-user are mutually
+        # exclusive. Same rule, same exit code and wording as bin/beacon — a
+        # shim that accepts a combination the other frontend rejects is the
+        # drift this task exists to close.
+        if bus_to_user and (bus_to_list or bus_to_trek):
+            print("Error: --to と --to-user は相互排他です "
+                  "(どちらか片方のみ指定してください)。", file=sys.stderr)
+            return 2
         # Deduplicate while preserving order; treat the sender's own
         # session as harmless (= same-user broadcast within their own
         # treks). Self-filtering is up to the caller's policy.
@@ -6009,6 +6047,10 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
             # ms-120 / e-3901: armed-gate manual override (parity with bin/beacon).
             "BEACON_BUS_MANUAL": "1" if getattr(args, "bus_manual", False) else "",
+            # ms-160 e-6674: parity with bin/beacon's cross-user DM flags.
+            "BEACON_BUS_RECIPIENT_CONFIRMED":
+                "1" if getattr(args, "bus_recipient_confirmed", False) else "",
+            "BEACON_BUS_RECIPIENT_USER": bus_to_user,
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
