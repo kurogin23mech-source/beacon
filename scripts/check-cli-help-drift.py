@@ -441,6 +441,16 @@ REQUIRED_FLAG_PARITY: dict[str, set[str]] = {
     # test_fork_cleanup_preserves_notes_e6702.py::test_force_flag_parity_across_frontends
     # — which drives --force through BOTH frontends' argv rather than injecting
     # the env var, so a broken parse on either side fails CI.
+    #
+    # ms-160 #778 (maintainability): `bus send --recipient-confirmed` /
+    # `--to-user` are the same shape again (case arm inside a while loop, not a
+    # cmd_<verb>() function). Pinned by
+    # test_bus_send_cross_user_parity_e6674.py::test_both_frontends_agree_on_the_cross_user_flags,
+    # which starts both frontends on the same argv and compares the env they
+    # hand commands.py. Listed here because this comment is the de-facto index
+    # of "parity this guard cannot see, and where it is covered instead" — an
+    # index that silently omits a case sends the next auditor looking in the
+    # wrong place.
 }
 
 
