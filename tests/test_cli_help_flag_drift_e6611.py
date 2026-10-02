@@ -113,34 +113,15 @@ def test_every_registry_command_path_resolves_to_some_front():
     assert mod.collect_help_flag_drift()["unresolved"] == []
 
 
-def test_e6611_reported_case_is_detected_not_merely_absent():
-    """The reported ``doc add --title`` is a flag the guard really catches.
-
-    The registry FIX for this row belongs to open PR #680, so this branch leaves
-    the line alone and suppresses it via ALLOW_ADVERTISED_FLAG (editing the same
-    line here would collide with that PR). What must hold is that the drift is
-    *known*, not that it is gone: remove the suppression and the guard names it.
-
-    Nothing here needs updating when #680 merges —
-    ``test_allowlist_has_no_stale_entries`` turns red the moment the registry row
-    is fixed, which is what forces the allowlist row to be deleted. That red is
-    the intended handoff signal, not a surprise.
-    """
-    mod = _load_checker()
-    assert "--title" in mod.ALLOW_ADVERTISED_FLAG.get(("doc", "add"), set()), (
-        "either `beacon doc add --title` is fixed in the registry — then delete "
-        "its ALLOW_ADVERTISED_FLAG row and this test — or the suppression is "
-        "missing and the guard is not covering the reported case"
-    )
-    # With the suppression lifted, the guard must actually name it.
-    original = dict(mod.ALLOW_ADVERTISED_FLAG)
-    try:
-        mod.ALLOW_ADVERTISED_FLAG.pop(("doc", "add"))
-        report = mod.collect_help_flag_drift()
-        assert "beacon doc add --title" in report["ghost_flags"]
-    finally:
-        mod.ALLOW_ADVERTISED_FLAG.clear()
-        mod.ALLOW_ADVERTISED_FLAG.update(original)
+# ``test_e6611_reported_case_is_detected_not_merely_absent`` was here. It pinned
+# that the *then-unfixed* ``beacon doc add --title`` drift was KNOWN (suppressed in
+# ALLOW_ADVERTISED_FLAG) while the registry fix waited on PR #680. Its own assertion
+# message said to delete it once the registry row was fixed — done 2026-10-02 (#784).
+# Its generic half (= "with the suppression lifted the guard really names it") is
+# covered without the specific case by ``test_ghost_flag_injection_is_detected``
+# (a newly advertised nonexistent flag is reported) and
+# ``test_stale_allowlist_row_is_detected`` (a suppression left behind fails), so
+# removing this test lost no coverage — verified before deleting, not assumed.
 
 
 # ---------------------------------------------------------------------------
