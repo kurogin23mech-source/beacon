@@ -134,9 +134,15 @@ def cmd_decision_record():
     # (記録はあるのに辿れない)。曖昧なときは推測せず空のまま残す。
     import decision_derive as _dd
     derived_target = _dd.resolve_target_from_text(what, rationale)
-    # 明示指定 > 本文からの導出 (独立レビュー AX-3)。明示だけを見る e-6602 の形は
-    # こちらに包含される (related_target が立っていればそれが勝つ)。
-    resolved_target = related_target or derived_target
+    # ms-166 e-6852: **構造的な手がかりが自由文のスクレイピングに勝つ**。
+    # 旧実装は「明示指定 (--related-target) > 本文からの導出」の 2 段しかなく、
+    # ``--related-task`` で作業項目を明示して渡しても対象の決定に一切使われていなかった。
+    # 本文に別の対象 id が 1 件だけ出ているとそちらが確実に勝つので、ms-173 の fork が
+    # ms-173 の判断を「ms-140 についての判断」として記録してしまった。
+    # 最も確実な手がかり (明示的に渡された作業項目の親) が最も弱い手がかりに負けていた。
+    task_parent_target, _task_lookup_error = _work_item_parent_target(
+        related_task, skip=bool(related_target))
+    resolved_target = related_target or task_parent_target or derived_target
     if resolved_target:
         related["target_id"] = resolved_target
     if related:
@@ -180,6 +186,7 @@ def cmd_decision_record():
     # 機械の読み手 から消える。
     _attr_source = "明示指定" if explicit_decided_by else "session 種別から導出"
     _target_source = ("明示指定" if related_target
+                      else "作業項目の親から解決" if task_parent_target
                       else "本文から解決" if derived_target else "")
     _ambiguous = ([] if resolved_target
                   else [t for t in _dd.target_ids_in_text(what, rationale)])
@@ -189,7 +196,12 @@ def cmd_decision_record():
         out["decided_by_source"] = "explicit" if explicit_decided_by else "session-kind"
         out["target_id"] = resolved_target or None
         out["target_id_source"] = ("explicit" if related_target
+                                   else "related-task-parent" if task_parent_target
                                    else "text" if derived_target else None)
+        if _task_lookup_error:
+            # 解けなかったことを黙って本文導出に落とさない (e-6757 と同じ方針):
+            # 「なぜ本文が勝ったか」が読み手に見えないと誤記録を疑えない。
+            out["related_task_lookup_error"] = _task_lookup_error
         if len(_ambiguous) > 1:
             out["target_candidates"] = _ambiguous
         print(json.dumps(out, ensure_ascii=False))
@@ -213,6 +225,31 @@ def cmd_decision_record():
             print(f"  ⚠ 対象を解決できません — 本文に {', '.join(_ambiguous)} が在り"
                   f"どれの判断か決められません (取り違えを避けて空のまま記録しました)。"
                   f"--related-target <id> で直接指定できます")
+
+
+def _work_item_parent_target(related_task: str, *, skip: bool = False):
+    """``--related-task`` で渡された作業項目の親 target を解く (ms-166 e-6852)。
+
+    返り値は ``(target_id, 読めなかった理由)``。理由を返すのは、解けなかったことを
+    黙って本文からの導出に落とすと **「なぜ本文が勝ったか」が読み手に見えない** ため
+    (失敗を無言にしないという e-6757 と同じ方針)。呼び出し側が開示に載せる。
+
+    ``skip=True`` (= ``--related-target`` が明示されていて既に勝ちが決まっている) の
+    ときはプロジェクトを読まない — 結果に影響しない I/O をしないため。
+
+    規則そのもの (どの target がその作業項目を持つか) は純関数
+    ``decision_derive.resolve_target_from_work_item`` が持つ。ここが持つのは
+    プロジェクトの読み込み (I/O) だけ。
+    """
+    if skip or not (related_task or "").strip():
+        return "", ""
+    try:
+        from commands_shared import load_project
+        import decision_derive as _dd
+        data = load_project()
+    except Exception as exc:
+        return "", f"{type(exc).__name__}: {exc}"
+    return _dd.resolve_target_from_work_item(data, related_task), ""
 
 
 def _recognized_decision_kinds() -> frozenset:

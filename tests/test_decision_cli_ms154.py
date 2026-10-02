@@ -115,6 +115,13 @@ def test_record_posts_to_cloud(monkeypatch):
     monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(cmd_decision, "_get_api_client",
                         lambda: (fake, {"project_id": "p1"}))
+    # ms-166 e-6852: --related-task の親 target を解くためにプロジェクトを読むように
+    # なったので、**読む先を固定する**。stub しないと開発者の実プロジェクトを読み、
+    # 結果が手元の状態に左右される (= e-6819 と同じ非 hermetic。実際この stub が無い間、
+    # この test は実リポジトリから e-5591 → ms-154 を解決していた)。
+    import commands_shared as _cs
+    monkeypatch.setattr(_cs, "load_project", lambda *a, **k: {
+        "milestones": [{"id": "ms-154", "entries": [{"id": "e-5591", "type": "task"}]}]})
     cmd_decision.cmd_decision_record()
     assert len(fake.posted) == 1
     pid, rec = fake.posted[0]
@@ -129,7 +136,10 @@ def test_record_posts_to_cloud(monkeypatch):
     assert rec["decided_by"] == "human-delegated"
     assert rec["rationale"] == "new-field would break callers"
     assert rec["evidence"] == ["server/decision_event.py:75", "commit:b2a3927"]
-    assert rec["related"] == {"task_id": "e-5591"}
+    # ms-166 e-6852: 作業項目を明示して渡したら、その親が対象になる。旧挙動は
+    # task_id だけを運び対象を本文から拾っていたので、本文に別の id が 1 件出ていると
+    # そちらが勝った (ms-173 の判断が ms-140 の判断として記録された実害)。
+    assert rec["related"] == {"task_id": "e-5591", "target_id": "ms-154"}
 
 
 def test_record_defaults_kind_to_log_backstop(monkeypatch):

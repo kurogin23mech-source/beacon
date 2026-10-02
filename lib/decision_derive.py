@@ -163,6 +163,71 @@ def resolve_target_from_text(*texts) -> str:
     found = target_ids_in_text(*texts)
     return found[0] if len(found) == 1 else ""
 
+def _arm_contains(items, work_item_id: str, arm: str) -> bool:
+    """``items`` (その arm の入れ子を含む) に ``work_item_id`` の項目が在るか。
+
+    入れ子は同じ arm 名でぶら下がる (dev の entries の下の entries / 営業の活動の下の
+    活動)。arm 名を引数で受けるのは、どの鍵に作業項目が入るかを **宣言から** 受け取る
+    ため — 直に ``"entries"`` と書くと dev の arm 名に結合する (check-capability-scope が
+    この結合を機械で拒否する)。
+    """
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("id") or "").strip() == work_item_id:
+            return True
+        if _arm_contains(item.get(arm), work_item_id, arm):
+            return True
+    return False
+
+
+def resolve_target_from_work_item(data: dict, work_item_id: str) -> str:
+    """明示的に渡された作業項目から、その親 target の id を返す (解けなければ ``""``)。
+
+    ms-166 e-6852。``beacon decision record --related-task <id>`` のように **作業項目を
+    明示して渡しても**、対象 (``related.target_id``) はその親から決まらず、本文に別の
+    対象 id が 1 件だけ出ているとそちらが勝っていた。ms-173 の fork が実際に踏み、
+    ms-173 の判断が「ms-140 についての判断」として記録された。
+
+    **最も確実な構造的手がかり (明示的に渡された作業項目の親) が、最も弱い手がかり
+    (自由文のスクレイピング) に負けていた** のが穴。この関数が前者を担う。
+
+    職種非依存: どの収納 (collection) にどの target class が居て、作業項目がどの arm に
+    入るかは ``occupation.profession_manifest`` の宣言から受け取る。だから milestone でも
+    商談 (opportunity) でも同じ形で解け、arm 名 (``entries`` / ``activities`` …) を
+    この関数が知る必要がない。
+
+    純関数のまま置く (このモジュールの契約): プロジェクトの読み込みは呼び出し側が行い、
+    ``data`` を渡す。解けないとき (= その id を持つ target が無い / data が空) は空文字を
+    返し、呼び出し側が本文からの導出に落ちる。
+    """
+    wid = (work_item_id or "").strip()
+    if not wid or not isinstance(data, dict):
+        return ""
+    import occupation
+    manifest = occupation.profession_manifest(data) or {}
+    for tc in manifest.get("target_classes") or []:
+        collection = (tc.get("collection") or "").strip()
+        if not collection:
+            continue
+        # 作業項目の arm を優先し、宣言されている他の arm も見る (営業の商談は活動と
+        # ナーチャリングで arm が分かれる)。宣言に無い鍵は見ない。
+        arms = []
+        wia = (tc.get("work_item_arm") or {}).get("arm")
+        if wia:
+            arms.append(wia)
+        for arm in tc.get("arms") or ():
+            if arm and arm not in arms:
+                arms.append(arm)
+        for record in data.get(collection) or []:
+            if not isinstance(record, dict):
+                continue
+            for arm in arms:
+                if _arm_contains(record.get(arm), wid, arm):
+                    return (record.get("id") or "").strip()
+    return ""
+
+
 def is_known_target_id(value: str) -> bool:
     """``value`` が台帳にある対象 prefix で始まる id かを返す (純関数)。
 
