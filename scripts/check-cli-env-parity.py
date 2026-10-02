@@ -442,10 +442,6 @@ KNOWN_GAPS: dict = {
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("bus_send", "BEACON_BUS_RATIONALE", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("bus_send", "BEACON_BUS_RECIPIENT_CONFIRMED", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("bus_send", "BEACON_BUS_RECIPIENT_USER", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("cloud_check_project", "BEACON_CLOUD_PROJECT_ID", "bash"):
         "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
     ("cloud_check_project", "BEACON_CLOUD_PROJECT_ID", "python"):
