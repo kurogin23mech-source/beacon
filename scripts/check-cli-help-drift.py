@@ -351,6 +351,12 @@ ALLOW_MISSING_FROM_README: set[str] = {
 
 # Sub-verbs present in bin/beacon's main-case routing but NOT registered as a
 # Python subparser choice (=> `argparse invalid choice` on Windows/pipx).
+# ms-160 e-6715: hand-dispatched sub-verbs (see collect_hand_dispatch_subverb_drift)
+# that are deliberately bash-only. Keep this EMPTY unless there is a real reason —
+# a missing branch here is a silent fall-through to the noun's catch-all, not an
+# error the user can see.
+ALLOW_HAND_DISPATCH_MISSING_FROM_PYTHON: set[str] = set()
+
 ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
     # -- profession-critical rows backfilled by e-4643 have been REMOVED from
     #    this snapshot (acquisition start/done, opportunity describe/desc,
@@ -1613,6 +1619,96 @@ def collect_subverb_drift(
     }
 
 
+# ms-160 e-6715: the blind spot python_sub_verbs() documents.
+#
+# A noun whose Python handler takes a permissive positional (`note <text_or_sub>`)
+# dispatches its sub-verbs by hand — `if sub == "list": ... if sub == "clear": ...`
+# — so it has no argparse `choices` and collect_subverb_drift() skips it entirely.
+# 13 nouns (~60 sub-verbs) are invisible to that check today.
+#
+# Skipping them is worse than it sounds. For a subparser-backed noun a missing
+# sub-verb produces `argparse invalid choice` — loud and harmless. For a
+# hand-dispatched noun the unmatched token falls through to the noun's catch-all,
+# which for `note` means it is SAVED AS A NOTE. `beacon note purge-probes` on the
+# Python frontend silently created a junk note named "purge-probes" and exited 0.
+#
+# So this comparator reads the `sub == "<literal>"` branches straight out of each
+# hand-dispatched handler's AST and holds them to the same parity contract.
+_HAND_DISPATCH_SUB_VARS = ("sub", "subcmd", "sub_cmd")
+
+
+def python_hand_dispatched_sub_verbs(
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+    nouns: "set[str] | None" = None,
+) -> "dict[str, set[str]]":
+    """Map noun -> the sub-verb string literals its `_handle_<noun>` compares against.
+
+    Structural (AST), not a substring scan: a sub-verb named in a docstring or an
+    error message must not count as routed, or the guard goes green on prose.
+    ``nouns`` limits the scan (default: every `_handle_*` found)."""
+    import ast
+    tree = ast.parse(python_dispatch_path.read_text(encoding="utf-8"))
+    out: "dict[str, set[str]]" = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("_handle_"):
+            continue
+        noun = node.name[len("_handle_"):].replace("_", "-")
+        if nouns is not None and noun not in nouns:
+            continue
+        found: "set[str]" = set()
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Compare) or len(inner.ops) != 1:
+                continue
+            if not isinstance(inner.ops[0], (ast.Eq, ast.In)):
+                continue
+            left = inner.left
+            name = left.id if isinstance(left, ast.Name) else (
+                left.attr if isinstance(left, ast.Attribute) else None)
+            if name not in _HAND_DISPATCH_SUB_VARS:
+                continue
+            for cmp_node in inner.comparators:
+                if isinstance(cmp_node, ast.Constant) and isinstance(cmp_node.value, str):
+                    found.add(cmp_node.value)
+                elif isinstance(cmp_node, (ast.Tuple, ast.List, ast.Set)):
+                    for elt in cmp_node.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            found.add(elt.value)
+        if found:
+            out[noun] = found
+    return out
+
+
+def collect_hand_dispatch_subverb_drift(
+    bin_path: Path = BIN_BEACON,
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+) -> dict:
+    """bash inner-case sub-verbs vs hand-written `sub == "..."` branches.
+
+    Covers exactly the nouns collect_subverb_drift() cannot see. Only the
+    bash->python direction is reported: a bash label with no Python branch is
+    the dangerous case (silent fall-through to the noun's catch-all). The
+    reverse (a Python branch with no bash label) is already caught as an
+    `argparse invalid choice`-free path and is left to the existing allowlists."""
+    parser = _load_dispatch_parser(python_dispatch_path)
+    amap = _noun_alias_map(parser)
+    py_subparser = python_sub_verbs(python_dispatch_path, parser=parser)
+    bash = parse_bin_sub_verbs(bin_path, alias_map=amap)
+    hand_nouns = set(bash) - set(py_subparser)
+    py_hand = python_hand_dispatched_sub_verbs(python_dispatch_path, nouns=hand_nouns)
+
+    missing: "set[str]" = set()
+    for noun in sorted(hand_nouns & set(py_hand)):
+        for sub in bash[noun] - py_hand[noun]:
+            missing.add(f"{noun} {sub}")
+    missing -= ALLOW_HAND_DISPATCH_MISSING_FROM_PYTHON
+    return {
+        "ok": not missing,
+        "missing_from_python_hand_dispatch": sorted(missing),
+    }
+
+
 # Use [ \t]* (not \s*) after the colon and (.*) (not (.+)): a family with NO
 # function deps writes an empty `# requires-fn:` line. With \s* + (.+) the
 # regex would let \s* swallow the newline and (.+) grab the NEXT line's text
@@ -1770,6 +1866,10 @@ def collect_drift(
     # ms-133 e-4642: bash ↔ Python sub-verb parity (noun + subcommand).
     subverb_drift = collect_subverb_drift(bin_path, python_dispatch_path)
 
+    # ms-160 e-6715: bash ↔ Python parity for HAND-dispatched sub-verbs (the
+    # nouns subverb_drift structurally cannot see — see the comparator's note).
+    hand_drift = collect_hand_dispatch_subverb_drift(bin_path, python_dispatch_path)
+
     # ms-127 e-4867: family file `# requires-fn/var/cmd:` seam vs reality.
     requires_drift = collect_requires_drift(bin_path)
 
@@ -1784,6 +1884,7 @@ def collect_drift(
             or not dispatch_drift["ok"]
             or not flag_parity["ok"]
             or not subverb_drift["ok"]
+            or not hand_drift["ok"]
             or not requires_drift["ok"]
             or not help_flag_drift["ok"]
         ),
@@ -1810,6 +1911,9 @@ def collect_drift(
         # choices — the noun+subcommand parity that top-level checks miss):
         "missing_from_python_subverbs": subverb_drift["missing_from_python_subverbs"],
         "missing_from_bash_subverbs": subverb_drift["missing_from_bash_subverbs"],
+        # ms-160 e-6715 surface (bash inner-case sub-verbs vs hand-written
+        # `sub == "..."` branches, for nouns with no argparse subparser):
+        "missing_from_python_hand_dispatch": hand_drift["missing_from_python_hand_dispatch"],
         # ms-133 e-6611 surface (help registry vs the parsers): a flag the help
         # advertises that NO front accepts, and allowlist rows that outlived
         # their drift.
@@ -1884,6 +1988,15 @@ def _format_text(report: dict) -> str:
         lines.append("    -> register it via `<noun>_sub.add_parser('<sub>', ...)` in")
         lines.append("       beacon_cli/dispatch.py, OR add it to ALLOW_SUBVERB_MISSING_FROM_PYTHON")
         lines.append("       if the sub-verb is intentionally bash-only for now.")
+    if report.get("missing_from_python_hand_dispatch"):
+        lines.append("  - sub-verb in bin/beacon routing but NOT branched on in the Python handler:")
+        for v in report["missing_from_python_hand_dispatch"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> this noun dispatches sub-verbs by hand, so the token does NOT")
+        lines.append("       raise `invalid choice` — it falls through to the noun's catch-all.")
+        lines.append("       For `note` that means it is SAVED AS A NOTE (observed: ms-160 e-6715).")
+        lines.append("    -> add an `if sub == \"<sub>\":` branch in beacon_cli/dispatch.py's")
+        lines.append("       _handle_<noun>, OR add it to ALLOW_HAND_DISPATCH_MISSING_FROM_PYTHON.")
     if report.get("missing_from_bash_subverbs"):
         lines.append("  - sub-verb registered as a Python subparser choice but missing from bin/beacon:")
         for v in report["missing_from_bash_subverbs"]:

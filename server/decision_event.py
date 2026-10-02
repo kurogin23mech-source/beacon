@@ -62,6 +62,21 @@ KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
 # 「既知 kind の集合」を指す点に注意 (語彙自体は開いている)。
 DECISION_KINDS = KNOWN_DECISION_KINDS
 
+
+# 「決定」ではない kind (ms-166 e-6603)。既定の read から外す。
+#
+# dm-send は ms-90 期に「DM 発信も決定の 1 経路」として同じストリームに束ねられたが、
+# 実データで見ると**判断ではなく通信ログ**である: decided_by が None (= 誰の判断でもない)、
+# related.target_id も None (= どの対象の話かも持たない)。直近 100 件で 3 件、時期に
+# よっては半分を占め、session-start の「最近の決定」が送信ログで埋まって**本物の判断が
+# 読めない** (= ms-166 が塞ぎたい silent 非機能そのもの)。
+#
+# **消すのではなく既定から外すだけ**。`kind=dm-send` を明示すれば従来どおり全件引ける
+# (= データを到達不能にしない。既定を黙って狭めるのは silent scope narrowing で、
+# 「送ったはずの記録が消えた」と読み手を誤らせる)。既定除外は応答の ``excluded_kinds``
+# で開示する。
+NON_DECISION_KINDS: frozenset[str] = frozenset({"dm-send"})
+
 # decided_by (= 誰が決めたか) の一級 enum は decision_vocab.DECIDED_BY が単一ソース
 # (上で import 済、ここから re-export)。旧: この module に重複定義していた (ms-154 e-5652)。
 
@@ -568,9 +583,27 @@ def _row_target_id(row: dict) -> str:
     return str(related.get("target_id") or row.get("target_id") or "")
 
 
+def effective_exclude_kinds(exclude_kinds, kind: str = "") -> frozenset:
+    """実際に適用する除外集合を返す — ``kind`` を明示したらその種別自身は引く。
+
+    なぜ引くか: ``kind=dm-send`` のように「既定除外されている種別を明示して見たい」
+    read を成立させるため (= 消すのではなく既定から外すだけ、という契約)。それ以外の
+    組合せは素直な AND になる。
+
+    **Python 側の窓 (:func:`window_decision_events`) と SQL 生成
+    (:func:`mysql_window_sql`) の両方がこの 1 関数を呼ぶ** (ms-166 e-5986 独立レビュー
+    保守性 M-1)。旧実装は同じ式を 2 箇所に逐語コピーしており、片方だけ直すと
+    「一覧には出るのに SQL では落ちる (逆も)」という、このモジュールが警告している
+    まさにその drift を再生産しうる状態だった。
+    """
+    if not exclude_kinds:
+        return frozenset()
+    return frozenset(exclude_kinds) - ({kind} if kind else frozenset())
+
+
 def window_decision_events(rows, *, kind: str = "", limit: int = 100,
                            since: str = "", session: str = "",
-                           target: str = "") -> list[dict]:
+                           target: str = "", exclude_kinds=None) -> list[dict]:
     """decision_events の read 窓の**単一真実源** (ms-166 e-5970 / ms-164 e-6030).
 
     3 つの store backend (firestore / mysql / dynamodb) は「行の取得」だけを担い、
@@ -588,6 +621,13 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
     ``limit`` 件」を返す (ms-164 e-6030: session-end が『このセッション / この target の
     判断』を件数窓こぼれなく取れる = scale-contract-principle 準拠)。
 
+    ``exclude_kinds`` (ms-166 e-6603) は既定 read から外す kind 集合
+    (:data:`NON_DECISION_KINDS` を渡す想定)。``limit`` の前に適用するので、除外した分
+    だけ本物の判断が窓からこぼれることはない。``kind`` と同時に渡した場合は
+    **AND 合成** で、除外集合から ``kind`` 自身を引いて適用する — つまり
+    「``kind=dm-send`` を明示すれば dm-send は引ける」性質を保ったまま、残りの組合せは
+    素直な AND になる (片方が黙って勝つ優先規則は置かない / 独立レビュー AX-4)。
+
     ``rows`` は各 backend が取得した decision dict の list (``decision_id`` / ``kind``
     / ``created_at`` / ``who`` / ``related`` を持つ)。純関数 — 副作用なし、入力 list は
     変更しない。
@@ -595,6 +635,19 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
     out = list(rows or [])
     if kind:
         out = [r for r in out if (r.get("kind") or "") == kind]
+    if exclude_kinds:
+        # ms-166 e-6603: 既定 read から「決定でない kind」を外す。**limit の前**に絞るのが
+        # 要点 — 後で絞ると「最新 limit 件の中の残り」になって、除外した分だけ本物の判断が
+        # 窓からこぼれる (e-5970 で直した filter-after-truncate と同じ穴を再生産する)。
+        #
+        # ``kind`` と同時に渡されたら **AND 合成** する: 除外集合から ``kind`` 自身を引いて
+        # 適用する (独立レビュー AX-4)。旧実装は elif で ``kind`` 指定時に exclude_kinds を
+        # 丸ごと無視しており、署名からは「両方渡すと片方が黙って勝つ」ことが読めなかった。
+        # ``kind`` 自身を引くので「``kind=dm-send`` を明示したら dm-send が引ける」性質は
+        # 保たれ、それ以外の組合せは素直な AND になる。
+        _ex = effective_exclude_kinds(exclude_kinds, kind)
+        if _ex:
+            out = [r for r in out if (r.get("kind") or "") not in _ex]
     if session:
         out = [r for r in out if _row_session_id(r) == session]
     if target:
@@ -606,6 +659,167 @@ def window_decision_events(rows, *, kind: str = "", limit: int = 100,
         out = out[-limit:]
     return out
 
+# ── read 窓の絞り込み仕様 (ms-166 e-5986) ────────────────────────────────────
+#
+# 窓の意味論は :func:`window_decision_events` が持つが、**MySQL backend は同じ絞り込みを
+# SQL へ押し下げる** 必要がある (append-only の流れは無制限に伸び、全件を Python に読むと
+# 2026-08-20 の本番停止と同型の負荷になる / CORE doc scale-contract-principle)。
+#
+# そこで「どの項目を・どの JSON パスで・どう比べるか」を **この 1 つの仕様表** に置き、
+# Python 述語と SQL 片の両方をここから導く。2 箇所に書くと、片方だけ直したときに
+# 「一覧には出るのに SQL では落ちる (逆も)」という最悪の drift になる — しかも手元の
+# 規模テストは偽カーソルが WHERE を解釈しないので **誤りが緑で通る**。
+#
+# 各項目: (名前, JSON パスの候補列, 比較の種類)
+#   - パス候補が複数なら **先に見つかった非空** を使う (``target`` の related → top-level
+#     fallback がこれ。:func:`_row_target_id` と同じ順序)
+#   - 比較は "eq" (等値) / "gt" (より大きい = since) / "not_in" (除外集合)
+#
+# NULL / 欠損の扱い (SQL 側で明示的に揃える):
+#   JSON に無い / JSON null の項目は Python では ``""`` になる。SQL では
+#   ``JSON_UNQUOTE(JSON_EXTRACT(...))`` が NULL か文字列 ``'null'`` を返すので、
+#   ``NULLIF(..., 'null')`` で潰してから ``COALESCE(..., '')`` で空文字に落とす。
+#   これを忘れると ``NULL NOT IN (...)`` が NULL になり、種別を持たない行が **SQL でだけ
+#   静かに消える**。
+_WINDOW_FILTERS: tuple = (
+    ("kind", ("$.kind",), "eq"),
+    ("session", ("$.who.session_id",), "eq"),
+    ("target", ("$.related.target_id", "$.target_id"), "eq"),
+    ("since", ("$.created_at",), "gt"),
+    ("exclude_kinds", ("$.kind",), "not_in"),
+)
+
+# 並び順の基準 (newest-limit を SQL に寄せるため)。Python 側の sort key と同じ順序。
+_WINDOW_ORDER: tuple = ("$.created_at",)
+
+
+def window_filter_spec() -> tuple:
+    """絞り込み仕様表を返す (公開アクセサ)。SQL 生成側と検査テストが参照する。"""
+    return _WINDOW_FILTERS
+
+
+def _row_value(row: dict, paths) -> str:
+    """``paths`` の候補を順に見て、最初の非空を文字列で返す (無ければ ``""``)。
+
+    ``$.a.b`` 形式の JSON パスを dict 辿りに写す。SQL 側の
+    ``COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '$.a.b')), 'null'), …, '')``
+    と同じ値を返すのが契約。
+    """
+    for path in paths:
+        cur = row
+        for part in path.lstrip("$.").split("."):
+            if not isinstance(cur, dict):
+                cur = None
+                break
+            cur = cur.get(part)
+        if cur:
+            return str(cur)
+    return ""
+
+
+def mysql_window_sql(*, kind: str = "", limit: int = 100, since: str = "",
+                     session: str = "", target: str = "", exclude_kinds=None):
+    """絞り込み仕様表から MySQL の ``WHERE`` / ``ORDER BY`` / ``LIMIT`` を組む。
+
+    返り値は ``(sql_tail, params)``。``sql_tail`` は ``WHERE pk=%s`` に続けて
+    ``AND …`` を並べ、``ORDER BY … DESC`` + ``LIMIT %s`` までを含む断片。
+    **newest-limit を SQL に寄せる**ので、呼び出し側は返ってきた行を昇順に並べ直して
+    :func:`window_decision_events` に通す (意味論の最終判定はそちらが持つ)。
+
+    純関数 — DB に触らない。SQL 文字列はテストで固定されるので、将来の変更が差分に出る。
+    """
+    values = {"kind": kind, "session": session, "target": target,
+              "since": since, "exclude_kinds": exclude_kinds}
+    # 除外集合の算出は窓ヘルパーと同じ 1 関数を通す (保守性 M-1: 式の逐語コピーを廃止)
+    if exclude_kinds:
+        values["exclude_kinds"] = sorted(effective_exclude_kinds(exclude_kinds, kind))
+    clauses: list = []
+    params: list = []
+    for name, paths, op in _WINDOW_FILTERS:
+        value = values.get(name)
+        if not value:
+            continue
+        expr = _mysql_coalesced_expr(paths)
+        if op == "eq":
+            clauses.append(f"{expr} = %s")
+            params.append(value)
+        elif op == "gt":
+            clauses.append(f"{expr} > %s")
+            params.append(value)
+        elif op == "not_in":
+            holes = ", ".join(["%s"] * len(value))
+            clauses.append(f"{expr} NOT IN ({holes})")
+            params.extend(value)
+    tail = "".join(f" AND {c}" for c in clauses)
+    order = ", ".join(f"{_mysql_coalesced_expr((p,))} DESC" for p in _WINDOW_ORDER)
+    tail += f" ORDER BY {order}, sk DESC"
+    if limit and limit > 0:
+        tail += " LIMIT %s"
+        params.append(int(limit))
+    return tail, params
+
+
+def _mysql_coalesced_expr(paths) -> str:
+    """JSON パス候補列を「最初の非空、無ければ空文字」の MySQL 式に写す。
+
+    ``NULLIF(..., 'null')`` で JSON null (= MySQL では文字列 ``'null'``) を潰し、
+    最後に ``COALESCE(..., '')`` で欠損を空文字に落とす。:func:`_row_value` と同じ値を
+    返すのが契約。
+    """
+    inner = ", ".join(
+        f"NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data, '{p}')), 'null')" for p in paths)
+    return f"COALESCE({inner}, '')"
+
+def mysql_window_eval(rows, sql: str, params) -> list:
+    """生成 SQL を **仕様表に基づいて** 評価し、MySQL が返すはずの行を再現する。
+
+    テスト専用の評価器 (ms-166 e-5986)。SQL 文字列を手で parse するのではなく、
+    :func:`mysql_window_sql` が仕様表から組んだ式そのものを ``sql`` の中から探して
+    「どの項目が絞られているか」を復元し、パラメータを同じ順に消費する。手書きの
+    parser を置くと SQL 生成側と評価側が別々に drift するが、この形なら **仕様表が
+    変われば両方が同時に変わる**。
+
+    これで検証できるのは「生成 SQL が仕様表どおりに評価されたら結果はどうなるか」
+    まで。**本物の MySQL が仕様表どおりに評価するかは検証できない** — JSON 欠損の
+    COALESCE / JSON null の NULLIF / ORDER BY DESC の挙動は、デプロイ後に実機で
+    突合する前提 (規模テストの偽カーソルは WHERE を一切解釈しないので、そこでは
+    この次元が測れない)。
+    """
+    out = list(rows or [])
+    idx = 0
+    for name, paths, op in _WINDOW_FILTERS:
+        expr = _mysql_coalesced_expr(paths)
+        if op == "not_in":
+            marker = f"{expr} NOT IN ("
+            if marker not in sql:
+                continue
+            holes = sql.split(marker, 1)[1].split(")", 1)[0].count("%s")
+            excluded = {str(v) for v in params[idx:idx + holes]}  # 生成側が既に kind を引いている
+            idx += holes
+            out = [r for r in out if _row_value(r, paths) not in excluded]
+            continue
+        symbol = "=" if op == "eq" else ">"
+        if f"{expr} {symbol} %s" not in sql:
+            continue
+        value = str(params[idx])
+        idx += 1
+        if op == "eq":
+            out = [r for r in out if _row_value(r, paths) == value]
+        else:
+            out = [r for r in out if _row_value(r, paths) > value]
+    # ORDER BY ... DESC, sk DESC + LIMIT n (= 最新側から n 件)
+    order_expr = _mysql_coalesced_expr(_WINDOW_ORDER)
+    if f"ORDER BY {order_expr} DESC" in sql:
+        out.sort(key=lambda r: (_row_value(r, _WINDOW_ORDER),
+                                str(r.get("decision_id") or "")), reverse=True)
+    if "LIMIT %s" in sql:
+        out = out[:int(params[-1])]
+    return out
+
+# ──────────────────────────────────────────────────────────────────────────
+# 以下は #772 (e-6602 完遂の冪等) 由来。上の read 窓の絞り込み仕様 (e-5986) とは
+# 独立した追記で、名前の衝突も無いため両方を残している (merge 合成)。
+# ──────────────────────────────────────────────────────────────────────────
 
 # ── 完遂 (= target が終端に到達した) decision の冪等規則 (ms-166 e-6602) ──────────
 #

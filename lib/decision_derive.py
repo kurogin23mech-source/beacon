@@ -24,6 +24,10 @@ cloud POST via ``commands_shared.best_effort_decision_write``.
 """
 from __future__ import annotations
 
+import re
+
+import work_model as _wm  # ms-166 e-6603: 対象 prefix 表の単一真実源
+
 DERIVED_PR_INTENT_KIND = "pr-intent"
 
 # Cap on the existing-decision scan the backfill reads to build its dedup set.
@@ -100,3 +104,76 @@ def covered_pr_numbers(existing_decisions) -> set:
             if isinstance(ev, str) and ev.startswith("pr:"):
                 covered.add(ev[len("pr:"):])
     return covered
+
+
+# ── 本文から作業対象 (target) を解決する (ms-166 e-6603) ──────────────────────
+#
+# log-backstop (= commit 時に AI が自己申告する判断記録) は実データで 16/16 すべて
+# ``related.target_id`` が空だった。判断記録が「どの対象の話か」を持たないと、
+# session-start や session-end の「この対象の判断」という引き方 (``decision list
+# --target``) に一件も載らず、記録はあるのに辿れない。
+#
+# 本文 (``--what`` / ``--rationale``) には実際には対象 id が書かれていることが多い
+# (例「opp-3 の成約を…」「ms-166 の掃討で…」)。それを機械で拾って target に解決する。
+#
+# 曖昧なときは **推測しない**: 複数の異なる対象 id が出てきたら空を返す。1 件に絞れた
+# ときだけ解決する。間違った対象に判断を帰属させるのは、帰属が無いより悪い (監査で
+# 「この対象はこう判断された」と誤読される)。
+#
+# 対象 prefix は :func:`work_model.known_target_prefixes` から引く (= ハードコードしない)。
+# 新しい target クラスが台帳に載った瞬間にこの解決も効くようにするため。``e-`` (タスク /
+# エントリ) は target prefix ではないので拾われない。
+# 本文中の対象 id を拾う正規表現。``work_model.known_target_prefixes()`` から組むので、
+# prefix 表に新クラスが増えれば自動で対象になる。``op-`` が ``opp-`` の接頭辞だが
+# リテラルに ``-`` を含むので ``opp-3`` が ``op-`` として誤match することはない (長い方を
+# 先に並べて明示的に優先)。対象 id = prefix + 英数字 1 文字以上で、直前が英数字 /
+# ハイフンなら拾わない (= 別語の一部を切り出さない)。
+#
+# **import 時に即時構築** する (独立レビュー 保守性 M-3)。他テーブルから正規表現を組む
+# 家の流儀は ``deliverable_map._WEDGE_TAG_RE`` と同じこの形で、``lib/`` に遅延 global
+# キャッシュの前例は無い。遅延にすると「最初の呼び出し時点の prefix 表で固定される」
+# stale キャッシュの失敗モードを新設してしまう (循環 import の制約も無い —
+# ``work_model`` は ``work_base`` のみ import する)。
+_TARGET_REF_RE = re.compile(
+    r"(?<![0-9A-Za-z-])("
+    + "|".join(re.escape(p) for p in
+               sorted(_wm.known_target_prefixes(), key=len, reverse=True))
+    + r")([0-9A-Za-z]+)")
+
+
+def target_ids_in_text(*texts) -> list:
+    """``texts`` に現れる対象 id を重複なし・出現順で返す (純関数)。"""
+    found = []
+    pat = _TARGET_REF_RE
+    for text in texts:
+        for m in pat.finditer(str(text or "")):
+            tid = m.group(1) + m.group(2)
+            if tid not in found:
+                found.append(tid)
+    return found
+
+
+def resolve_target_from_text(*texts) -> str:
+    """本文から対象 id を 1 件に解決する。曖昧 (= 0 件 or 2 件以上) なら ``""``。
+
+    「1 件に絞れたときだけ解決する」が肝。複数の対象に触れた判断を片方に帰属させると、
+    監査で「この対象はこう判断された」と誤読される。空で返して、呼び出し側が明示指定を
+    促せるようにする (= 黙って一方に寄せない)。
+    """
+    found = target_ids_in_text(*texts)
+    return found[0] if len(found) == 1 else ""
+
+def is_known_target_id(value: str) -> bool:
+    """``value`` が台帳にある対象 prefix で始まる id かを返す (純関数)。
+
+    ms-166 e-5986 独立レビュー AX-2: 対象を書く経路が 2 つあり、本文からの解決は
+    prefix 表に一致しないものを捨てるのに、**明示指定の旗は一切検証せずそのまま書いて
+    いた**。信頼される側 (明示) の方が緩く、しかも解決より優先されるので、綴り違いや
+    別種の id (``e-123`` 等) を渡すと「成功した」と表示されたまま、二度と
+    ``decision list --target <正しい id>`` で見つからない行が残る — この MS が直して
+    いる「記録はあるのに辿れない」をまさに再生産する。2 経路を同じガードに揃える。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return target_ids_in_text(text) == [text]

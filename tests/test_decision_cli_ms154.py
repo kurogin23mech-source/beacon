@@ -68,6 +68,26 @@ def test_record_requires_evidence(monkeypatch):
     assert e.value.code == 1
 
 
+def test_record_default_attribution_follows_session_kind(monkeypatch):
+    """ms-166 e-6603: 帰属は固定文字列でなく session 種別から導く。
+
+    旧 default ("autonomous-AI" 固定) の意図 — 明示しなければ最も監査が要る側に倒す —
+    は捨てていない: AI セッションでは従来どおり autonomous-AI になる。変わったのは
+    「人間端末から打った判断まで AI 単独決定として記録していた」部分だけ。
+    """
+    import commands_shared as cs
+    for human, expected in ((True, "human-delegated"), (False, "autonomous-AI")):
+        fake = _FakeClient()
+        _set_env(monkeypatch, BEACON_DECISION_WHAT="決めた",
+                 BEACON_DECISION_EVIDENCE="commit:abc1234")
+        monkeypatch.setattr(cs, "_session_kind_is_human", lambda h=human: h)
+        monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
+        monkeypatch.setattr(cmd_decision, "_get_api_client",
+                            lambda: (fake, {"project_id": "p1"}))
+        cmd_decision.cmd_decision_record()
+        assert fake.posted[0][1]["decided_by"] == expected, human
+
+
 def test_record_rejects_bad_decided_by(monkeypatch):
     _set_env(monkeypatch, BEACON_DECISION_WHAT="x",
              BEACON_DECISION_EVIDENCE="commit:abc",
@@ -101,7 +121,12 @@ def test_record_posts_to_cloud(monkeypatch):
     assert pid == "p1"
     assert rec["kind"] == "log-backstop"
     assert rec["decision"] == "chose the additive schema"
-    assert rec["decided_by"] == "autonomous-AI"  # default
+    # ms-166 e-6603: 既定の帰属は **session 種別から導出** する (旧: "autonomous-AI" の
+    # 固定文字列)。conftest がテストハーネスを人間駆動として宣言しているので、ここでは
+    # human-delegated になる。固定文字列を pin し直すと「人間端末の判断を AI 単独決定と
+    # して記録する」旧挙動に戻してしまうので、**導出そのもの**を下の専用テストで両方向に
+    # 固定している (tests/test_decision_attribution_and_noise_e6603.py も同じ規律)。
+    assert rec["decided_by"] == "human-delegated"
     assert rec["rationale"] == "new-field would break callers"
     assert rec["evidence"] == ["server/decision_event.py:75", "commit:b2a3927"]
     assert rec["related"] == {"task_id": "e-5591"}

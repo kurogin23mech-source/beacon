@@ -1222,8 +1222,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_decision.add_argument("--decided-by", dest="decided_by", default="")
     p_decision.add_argument("--evidence", action="append", default=[])
     p_decision.add_argument("--related-task", dest="related_task", default="")
-    # ms-166 e-6602 (独立レビュー AX-1): 書き側で related.target_id を立てる口。無いと
-    # completion-verdict をこの経路から記録できず、冪等 reject の開示が到達不能になる。
+    # 対象 (related.target_id) を明示指定する口。2 つの機能が独立に同じ旗を必要とした
+    # ので 1 本に畳んでいる (ms-166 e-6602 + e-6603):
+    #   - e-6602 (完遂の冪等): 冪等判定が「対象×種別×結論」を鍵にするので、この経路から
+    #     completion-verdict を記録するには対象を立てられる必要がある。無いと冪等 reject の
+    #     開示が構造的に到達不能だった。
+    #   - e-6603 (帰属・対象の機械決定): 読み側の `decision list --target` と対になる書き側。
+    #     本文からの導出 (decision_derive.resolve_target_from_text) に対して **明示指定を
+    #     優先** させるために要る (曖昧なときの解消手段)。
     p_decision.add_argument("--related-target", dest="related_target", default="")
     p_decision.add_argument("--limit", default="")
     # ms-164 e-6030: filter `decision list` to one session's / one worked-Target's
@@ -3978,6 +3984,7 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
             "       beacon note list [--json]\n"
             "       beacon note clear --yes   (-y / --confirm も可)\n"
             "       beacon note restore\n"
+            "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 0
@@ -3999,12 +4006,22 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
         # ms-178 e-6656: recover from the backups clear left. Additive and
         # idempotent, so it needs no confirmation flag.
         return _run_commands_py(root, "note_restore", {})
+    if sub == "purge-probes":
+        # ms-160 e-6715: remove the notes an unguarded AX surface audit wrote.
+        # Without this branch the token falls through to the free-text arm
+        # below and is SAVED AS A NOTE named "purge-probes" — the very defect
+        # e-6715 exists to close, reproduced on this frontend.
+        return _run_commands_py(
+            root, "note_purge_probes",
+            {"BEACON_NOTE_PURGE_CONFIRM": "1" if args.assume_yes else ""},
+        )
     if not sub:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
             "       beacon note list [--json]\n"
             "       beacon note clear --yes   (-y / --confirm も可)\n"
             "       beacon note restore\n"
+            "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
         )
         return 1
@@ -4018,7 +4035,9 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
 
 _DECISION_USAGE = (
     "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]\n"
-    "                              [--kind log-backstop] [--decided-by autonomous-AI]\n"
+    "                              [--kind log-backstop] [--decided-by <enum>]\n"
+    "                              (--decided-by 省略時はセッション種別から導出:\n"
+    "                               人間端末なら human-delegated、それ以外は autonomous-AI)\n"
     "                              [--related-task e-XXX] [--related-target ms-XX] [--json]\n"
     "       beacon decision list [--kind <kind>] [--session <sid>] [--target <id>] [--limit N] [--json]\n"
     "  --evidence は複数回指定可。decided_by を立てる一級決定は evidence 必須。\n"

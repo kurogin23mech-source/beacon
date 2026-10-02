@@ -20,6 +20,16 @@ import re
 
 _LIB_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# The bogus token the AX full-surface audit passes to each command group to
+# sample its usage / error surface (``commands._collect_surface_snapshot``).
+# Defined here, next to the rest of the CLI-surface vocabulary, because two
+# unrelated places must agree on the exact string: the collector that emits it,
+# and ``beacon note purge-probes`` that cleans up the notes an older,
+# unguarded collector already wrote (ms-160 e-6715). A second spelling of this
+# constant would mean the cleanup silently skips the garbage it exists to find.
+SURFACE_PROBE_SENTINEL = "__ax_surface_probe__"
+
+
 # dispatch keys that exist but are not user-facing subcommands (no map / ledger
 # obligation). Keep in this one place — both readers exclude the same set.
 CLI_INTERNAL = {

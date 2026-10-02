@@ -17,6 +17,8 @@ truncate の **後** に掛けていた。その結果:
 import os
 import sys
 
+import json
+
 import pytest
 
 THIS = os.path.dirname(__file__)
@@ -69,8 +71,39 @@ def ddb_stream():
 
 @pytest.fixture
 def mysql_stream(monkeypatch):
+    """mysql backend の読み取りを偽 DB に差し替える。
+
+    ms-166 e-5986 で mysql は絞り込み・並び・件数制限を **SQL へ押し下げた** ので、
+    旧実装のように ``_query`` を差し替えるだけでは窓の契約を測れない (押し下げた部分が
+    評価されず、最古 limit 件が返ってしまう = e-5970 が直した穴の形)。偽カーソルは
+    生成 SQL を **仕様表に基づいて** 評価する (``decision_event.mysql_window_eval``)。
+
+    検証できるのは「生成 SQL が仕様表どおりに評価されたら結果はどうなるか」まで。
+    本物の MySQL が仕様表どおりに評価するかはデプロイ後に実機で突合する。
+    """
     events = list(_events())
-    monkeypatch.setattr(mc, "_query", lambda entity, pk: list(events))
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, sql, params=()):
+            rows = decision_event.mysql_window_eval(events, sql, list(params[1:]))
+            self._rows = [{"sk": r.get("decision_id", ""),
+                           "data": json.dumps(r, ensure_ascii=False)}
+                          for r in rows]
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr(mc, "_conn", lambda: _Conn())
 
 
 # --- window_decision_events (単一真実源、3 backend 共通) --------------------
