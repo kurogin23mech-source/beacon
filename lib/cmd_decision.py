@@ -58,19 +58,47 @@ def cmd_decision_record():
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip() or "log-backstop"
     what = os.environ.get("BEACON_DECISION_WHAT", "").strip()
     rationale = os.environ.get("BEACON_DECISION_RATIONALE", "").strip()
-    decided_by = os.environ.get("BEACON_DECISION_DECIDED_BY", "").strip() or "autonomous-AI"
+    # ms-166 e-6603 (2): 帰属を **session-kind から機械決定** する。旧実装は既定が
+    # "autonomous-AI" の固定文字列で、人間端末から打った判断まで「人間未確認の AI 単独
+    # 決定」として残っていた (実データで帰属が逆)。導出は commands_shared の
+    # decided_by_for_review (= 人間端末なら human-delegated、そうでなければ
+    # autonomous-AI) を再利用する — 同じ写像を 2 つ目のコピーとして書かない。
+    # --decided-by の明示指定は従来どおり勝つ (= 呼び出し側が判断主体を知っている場合)。
+    #
+    # 「明示指定だったか」は **1 回だけ** 読んで保持する (独立レビュー 保守性 M-2)。
+    # 後段の開示表示で同じ env を再読みすると、読み方を変えたとき表示だけ食い違う。
+    from commands_shared import decided_by_for_review
+    explicit_decided_by = os.environ.get("BEACON_DECISION_DECIDED_BY", "").strip()
+    decided_by = explicit_decided_by or decided_by_for_review()
     evidence = _split_evidence(os.environ.get("BEACON_DECISION_EVIDENCE", ""))
     related_task = os.environ.get("BEACON_DECISION_RELATED_TASK", "").strip()
-    # ms-166 e-6602 (独立レビュー AX-1): target を立てる口が無いと completion-verdict を
-    # この経路から記録できず、下の「既に記録済み」表示が構造的に到達不能になる
-    # (完遂の冪等判定は related.target_id を鍵に含むため)。読み側の
-    # `beacon decision list --target` と対になる書き側の口。
+    # 対象 (related.target_id) を **明示指定** する口。読み側の
+    # `beacon decision list --target` と対になる書き側で、2 つの機能が独立に同じ旗を
+    # 必要とした (ms-166 e-6602 + e-6603):
+    #   - e-6602 (完遂の冪等): 冪等判定が related.target_id を鍵に含むので、この経路から
+    #     completion-verdict を記録するには対象を立てられる必要がある。無いと下の
+    #     「既に記録済み」表示が構造的に到達不能だった。
+    #   - e-6603 (帰属・対象の機械決定): 本文からの導出に対して明示指定を優先させるため。
+    #     無いと「本文の言い回しを変える」以外に曖昧を解消する手段が無かった。
     related_target = os.environ.get("BEACON_DECISION_RELATED_TARGET", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not what:
         print("Error: --what (the decision made) is required", file=sys.stderr)
         sys.exit(1)
+    # ms-166 e-5986 独立レビュー AX-2: 明示指定の対象も本文解決と同じ prefix 表で検証する。
+    # 検証しないと綴り違いや別種の id が「成功」表示のまま書き込まれ、`decision list
+    # --target <正しい id>` で二度と見つからない行が残る (= 記録はあるのに辿れない)。
+    if related_target:
+        import decision_derive as _dd_check
+        if not _dd_check.is_known_target_id(related_target):
+            import work_model as _wm_check
+            print(f"Error: --related-target {related_target!r} は対象 id に見えません "
+                  f"(対象 id は {', '.join(_wm_check.known_target_prefixes())} "
+                  f"のいずれかで始まります。例: ms-166 / opp-3)。"
+                  f"タスクに紐づけたいなら --related-task を使ってください",
+                  file=sys.stderr)
+            sys.exit(1)
     if decided_by not in _DECIDED_BY:
         print(f"Error: --decided-by must be one of {sorted(_DECIDED_BY)}",
               file=sys.stderr)
@@ -98,8 +126,16 @@ def cmd_decision_record():
     related = {}
     if related_task:
         related["task_id"] = related_task
-    if related_target:
-        related["target_id"] = related_target
+    # ms-166 e-6603 (1): 本文に書かれている対象 id を target に解決する。これが無いと
+    # 判断記録が「どの対象の話か」を持たず、`decision list --target` に一件も載らない
+    # (記録はあるのに辿れない)。曖昧なときは推測せず空のまま残す。
+    import decision_derive as _dd
+    derived_target = _dd.resolve_target_from_text(what, rationale)
+    # 明示指定 > 本文からの導出 (独立レビュー AX-3)。明示だけを見る e-6602 の形は
+    # こちらに包含される (related_target が立っていればそれが勝つ)。
+    resolved_target = related_target or derived_target
+    if resolved_target:
+        related["target_id"] = resolved_target
     if related:
         payload["related"] = related
 
@@ -116,19 +152,45 @@ def cmd_decision_record():
         print(f"Error: failed to record decision: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # 機械が決めた帰属と対象を開示する。**text と json で同じ情報を出す**
+    # (独立レビュー AX-2): --json は自動化経路が「何が記録されたか」を確認する正規手段
+    # なので、人間向け print にだけ開示を実装すると、この修正が足した情報そのものが
+    # 機械の読み手 から消える。
+    _attr_source = "明示指定" if explicit_decided_by else "session 種別から導出"
+    _target_source = ("明示指定" if related_target
+                      else "本文から解決" if derived_target else "")
+    _ambiguous = ([] if resolved_target
+                  else [t for t in _dd.target_ids_in_text(what, rationale)])
     if json_mode:
-        print(json.dumps(result, ensure_ascii=False))
+        out = dict(result) if isinstance(result, dict) else {"result": result}
+        out["decided_by"] = decided_by
+        out["decided_by_source"] = "explicit" if explicit_decided_by else "session-kind"
+        out["target_id"] = resolved_target or None
+        out["target_id_source"] = ("explicit" if related_target
+                                   else "text" if derived_target else None)
+        if len(_ambiguous) > 1:
+            out["target_candidates"] = _ambiguous
+        print(json.dumps(out, ensure_ascii=False))
     else:
         did = result.get("decision_id", "?") if isinstance(result, dict) else "?"
-        # ms-166 e-6602: 完遂 decision は同じ target×verdict で二度書かれない
-        # (store 層の冪等 reject)。その時 "recorded" と出すと「自分の記録が載った」
-        # と誤解させるので、既存行に畳まれたことを明示する。
+        # 2 つの開示は **排他ではない** (ms-166 e-6602 + e-6603)。「明示または導出で対象が
+        # 決まった上で、同じ対象×結論が既に在るので既存行に畳まれた」という状態があり得る
+        # ので、追記されたかどうか (e-6602) と、帰属・対象がどう決まったか (e-6603) を
+        # 両方出す。片方だけにすると、畳まれた時に対象が見えない / 新規記録の時に
+        # 追記の有無が見えない、のどちらかが欠ける。
         if isinstance(result, dict) and result.get("deduplicated"):
             print(f"Decision already recorded [{did}]: {kind} — {what[:60]}")
             print("  この target の同じ判定は既に記録済みのため、追記しませんでした "
                   "(完遂の記録は 1 度だけ残ります)")
         else:
             print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
+        print(f"  帰属: {decided_by} ({_attr_source})")
+        if resolved_target:
+            print(f"  対象: {resolved_target} ({_target_source})")
+        elif len(_ambiguous) > 1:
+            print(f"  ⚠ 対象を解決できません — 本文に {', '.join(_ambiguous)} が在り"
+                  f"どれの判断か決められません (取り違えを避けて空のまま記録しました)。"
+                  f"--related-target <id> で直接指定できます")
 
 
 def cmd_decision_list():
@@ -183,8 +245,17 @@ def cmd_decision_list():
     if json_mode:
         print(json.dumps(result, ensure_ascii=False))
         return
+    # 既定で外した kind (独立レビュー AX-1): この開示は **0 件のときこそ要る**。
+    # 旧実装は `if not rows: print("(決定なし)"); return` が開示より手前にあり、
+    # 「全部が除外されて 0 件」と「そもそも判断記録が無い」が同じ文言に潰れていた。
+    # 前者を後者と読むと「このプロジェクトには判断記録が無い」と誤って結論する。
+    _ex = result.get("excluded_kinds") or [] if isinstance(result, dict) else []
+    _ex_note = (f"  (既定では {', '.join(_ex)} を除いています — 通信ログであって判断では"
+                f"ないため。見るときは --kind {_ex[0]})") if _ex else ""
     if not rows:
         print("(決定なし)")
+        if _ex_note:
+            print(_ex_note)
         return
     for r in rows:
         did = r.get("decision_id", "?")
@@ -197,6 +268,8 @@ def cmd_decision_list():
             print(f"      なぜ: {r['rationale']}")
         if ev:
             print(f"      根拠: {', '.join(ev)}")
+    if _ex_note:
+        print(_ex_note)
 
 
 def cmd_decision_derive():

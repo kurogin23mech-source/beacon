@@ -2505,7 +2505,8 @@ EOF
                 ;;
             *)
                 echo "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]"
-                echo "                              [--kind log-backstop] [--decided-by autonomous-AI] [--related-task e-XXX] [--related-target ms-XX] [--json]"
+                echo "                              [--kind log-backstop] [--decided-by <enum>] [--related-task e-XXX] [--related-target ms-XX] [--json]"
+                echo "                              (--decided-by 省略時はセッション種別から導出: 人間端末なら human-delegated、それ以外は autonomous-AI)"
                 echo "       beacon decision list [--kind <kind>] [--session <sid>] [--target <id>] [--limit N] [--json]  (--session/--target は『このセッション/この作業対象で下した判断』に絞る; ms-164 e-6030)"
                 echo "       beacon decision derive [--apply] [--json]  (既存 PR の intent から decision を導出; 現状 PR intent のみ対応; dry-run 既定、--apply で書込; ms-166 e-5972)"
                 echo ""

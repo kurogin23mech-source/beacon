@@ -2423,7 +2423,7 @@ def append_decision_event(project_id: str, data: dict) -> str:
 
 def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "", session: str = "",
-                         target: str = "") -> list[dict]:
+                         target: str = "", exclude_kinds=None) -> list[dict]:
     """Fetch ``projects/{pid}/decision_events`` and window them (ms-166 e-5970 /
     ms-164 e-6030).
 
@@ -2437,4 +2437,4 @@ def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
     from decision_event import window_decision_events
     return window_decision_events(_fetch_decision_rows(project_id), kind=kind,
                                   limit=limit, since=since, session=session,
-                                  target=target)
+                                  target=target, exclude_kinds=exclude_kinds)

@@ -660,7 +660,7 @@ def test_list_decisions_reads_stream(monkeypatch):
     # signature carries them too.
     monkeypatch.setattr(_store_router_module, "list_decision_events",
                         lambda pid, kind="", limit=100, since="", session="",
-                        target="": list(rows))
+                        target="", exclude_kinds=None: list(rows))
     r = client.get(f"/api/projects/{PROJECT_ID}/decisions")
     assert r.status_code == 200
     body = r.json()
@@ -676,7 +676,8 @@ def test_list_decisions_filters_by_kind(monkeypatch):
     # ms-166 e-5970: the kind filter is the STORE's responsibility now (applied before
     # the limit window), not a route-level post-filter. The route must PASS kind through;
     # the mock mirrors the real store by filtering on it.
-    def _fake(pid, kind="", limit=100, since="", session="", target=""):
+    def _fake(pid, kind="", limit=100, since="", session="", target="",
+              exclude_kinds=None):
         return [r for r in rows if not kind or r.get("kind") == kind]
     monkeypatch.setattr(_store_router_module, "list_decision_events", _fake)
     r = client.get(f"/api/projects/{PROJECT_ID}/decisions?kind=task-done")
@@ -691,7 +692,8 @@ def test_list_decisions_forwards_session_and_target(monkeypatch):
     # filter is applied BEFORE the limit window (session-end reconciliation).
     seen = {}
 
-    def _fake(pid, kind="", limit=100, since="", session="", target=""):
+    def _fake(pid, kind="", limit=100, since="", session="", target="",
+              exclude_kinds=None):
         seen["session"] = session
         seen["target"] = target
         return []
@@ -700,6 +702,44 @@ def test_list_decisions_forwards_session_and_target(monkeypatch):
         f"/api/projects/{PROJECT_ID}/decisions?session=sv-abc&target=ms-9")
     assert r.status_code == 200
     assert seen == {"session": "sv-abc", "target": "ms-9"}
+
+
+def test_list_decisions_excludes_non_decision_kinds_by_default(monkeypatch):
+    # ms-166 e-6603: 既定 read から通信ログ (dm-send) を外し、外した事実を応答に出す。
+    # route は exclude_kinds を **store に渡す** 責務 (後で絞ると limit 窓から判断が
+    # こぼれるので、route 側 post-filter にしてはならない)。
+    seen = {}
+
+    def _fake(pid, kind="", limit=100, since="", session="", target="",
+              exclude_kinds=None):
+        seen["kind"] = kind
+        seen["exclude_kinds"] = (sorted(exclude_kinds) if exclude_kinds else None)
+        return []
+    monkeypatch.setattr(_store_router_module, "list_decision_events", _fake)
+
+    r = client.get(f"/api/projects/{PROJECT_ID}/decisions")
+    assert r.status_code == 200
+    assert seen["exclude_kinds"] == ["dm-send"]
+    assert r.json()["excluded_kinds"] == ["dm-send"]
+
+
+def test_list_decisions_explicit_kind_disables_the_default_exclusion(monkeypatch):
+    # 消すのではなく既定から外すだけ: kind を明示すれば従来どおり引ける。
+    seen = {}
+
+    def _fake(pid, kind="", limit=100, since="", session="", target="",
+              exclude_kinds=None):
+        seen["kind"] = kind
+        seen["exclude_kinds"] = exclude_kinds
+        return []
+    monkeypatch.setattr(_store_router_module, "list_decision_events", _fake)
+
+    r = client.get(f"/api/projects/{PROJECT_ID}/decisions?kind=dm-send")
+    assert r.status_code == 200
+    assert seen["kind"] == "dm-send"
+    assert seen["exclude_kinds"] is None
+    # 除外していないので開示も空 (= 嘘の注記を出さない)。
+    assert r.json()["excluded_kinds"] == []
 
 
 def test_list_decisions_unknown_project_404():
