@@ -18,41 +18,28 @@ last_active)」は **正確な履歴記述** (e-1318 以前の経路の説明) �
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
-
-import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
-#: 現在の書き手を説明するコード。履歴記述を持つ bus.mjs は意図的に除く (上記参照)。
-GUARDED = ("server/app.py", "lib/bus_liveness.py", "lib/session.py")
-
-
-def _lines(rel):
-    return (REPO / rel).read_text(encoding="utf-8").splitlines()
-
 
 class TestNoPostToolUseMisattribution:
-    @pytest.mark.parametrize("rel", GUARDED)
-    def test_no_line_claims_the_hook_writes_the_heartbeat(self, rel):
-        """「PostToolUse hook 由来の last_heartbeat_at」と読める行が無いこと。
+    """誤記の再発防止は **禁止語リストではなく正典への参照** で担保する。
 
-        訂正を述べる文 (= 「PostToolUse hook ではない」「hook 由来と書いていたが誤り」)
-        は許す。禁じるのは **主張として** 書かれている形。
-        """
-        bad = []
-        for n, line in enumerate(_lines(rel), 1):
-            if "PostToolUse" not in line:
-                continue
-            if re.search(r"ではない|誤り|訂正|not\b.*PostToolUse|previous", line):
-                continue   # 訂正・履歴の記述は対象外
-            # heartbeat の書き手を語っている行か (同行 or 近傍で判定するのは脆いので同行のみ)
-            if "heartbeat" in line.lower():
-                bad.append(f"{rel}:{n}: {line.strip()}")
-        assert not bad, (
-            "心拍の書き手を PostToolUse hook と主張する行が残っている "
-            "(e-6776 の誤診を再生産する):\n" + "\n".join(bad))
+    ms-173 独立レビュー 保守性 M-1: 初版はここに「3 ファイルの全行を走査し、1 行に
+    PostToolUse と heartbeat が同時に出たら (訂正語を含まない限り) 落とす」という
+    **散文に対する正規表現ガード** を置いていた。独立レビューはこれを、通過条件が
+    「何を言っていいか」という曖昧な自然言語規則になっており、同じ 3 ファイルに
+    『本当に正しい PostToolUse と heartbeat 両方の説明』を書いた次の AI が自分の変更と
+    無関係に落ちる — と指摘した (medium)。採用して撤去し、下の
+    :meth:`test_the_canonical_writer_is_documented_in_one_place` (= 書き手の事実を
+    ``lib/session._cloud_mint_cache_hit`` の docstring 1 箇所に閉じ、他ファイルは
+    そこを参照しているかだけを見る構造チェック) に一本化した。
+
+    こちらの形の方が強い理由: 誤記が再発しうるのは「書き手の事実が散在して drift する」
+    ときで、正典への参照が在れば次の書き手はそこを読む。散文の語の共起を禁じても、
+    別の言い方で同じ誤記は書ける (= 緩いガードの偽の安全)。
+    """
 
     def test_the_canonical_writer_is_documented_in_one_place(self):
         """書き手の正典が 1 箇所にあり、そこを指していること。"""

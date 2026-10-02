@@ -111,11 +111,11 @@ class TestStampReachability:
         monkeypatch.setattr(_app.db, "get_bus_cursor", lambda pid, rid: {})
         monkeypatch.setattr(_app.db, "list_bus_events", lambda pid, **k: [])
         s = self._live_session(now)
-        _app._stamp_session_liveness(s, "proj", now)
+        draining = _app._stamp_session_liveness(s, "proj", now)
         # live union UNCHANGED (SPEC 方針 c): a healthy poll keeps it live.
         assert s["live"] is True
         # ms-173 / e-6777: バックログが無い = 消化の証拠が無い ⇒ 不明 (健全と言わない)。
-        assert s["draining"] is None
+        assert draining is None
         # **ここが本質**: 不明でも reachable は True のまま = 配信は一切変わらない。
         # 指標の嘘だけを消し、受信者を誤って落とすリスクは負わない。
         assert s["reachable"] is True    # live AND not-False ⇒ reachable
@@ -130,9 +130,9 @@ class TestStampReachability:
              "created_at": old, "payload": {"recipient_session_id": "sv-fork"}},
         ])
         s = self._live_session(now)
-        _app._stamp_session_liveness(s, "proj", now)
+        draining = _app._stamp_session_liveness(s, "proj", now)
         assert s["live"] is True          # still LIVE (transport intact)
-        assert s["draining"] is False     # but not consuming (wedged)
+        assert draining is False     # but not consuming (wedged)
         assert s["reachable"] is False    # ⇒ not reachable for the strict send
 
     def test_not_live_skips_scan_and_is_unreachable(self, _app, monkeypatch):
@@ -148,9 +148,9 @@ class TestStampReachability:
         s = {"session_id": "sv-dead",
              "last_poll_at": _iso(now - datetime.timedelta(hours=1)),
              "poll_interval_ms": 5000}
-        _app._stamp_session_liveness(s, "proj", now)
+        draining = _app._stamp_session_liveness(s, "proj", now)
         assert s["live"] is False
-        assert s["draining"] is None       # skipped (cost bound)
+        assert draining is None       # skipped (cost bound)
         assert s["reachable"] is False
         assert calls["n"] == 0             # no store scan for a not-live session
 
@@ -402,9 +402,9 @@ class TestStaleCursorDoesNotFakeAWedge:
             self._dm(old, delivered_by="sv-main"),
         ])
         s = self._live_session(now)
-        _app._stamp_session_liveness(s, "proj", now)
+        draining = _app._stamp_session_liveness(s, "proj", now)
         assert s["live"] is True
-        assert s["draining"] is None, "配信済なのに未消化のバックログと数えている"
+        assert draining is None, "配信済なのに未消化のバックログと数えている"
         assert s["reachable"] is True, "配信できているセッションを到達不能と判定した"
 
     def test_undelivered_dm_is_still_a_wedge(self, _app, monkeypatch):
@@ -417,9 +417,9 @@ class TestStaleCursorDoesNotFakeAWedge:
             self._dm(old),  # receipt なし = bridge が一度も取っていない
         ])
         s = self._live_session(now)
-        _app._stamp_session_liveness(s, "proj", now)
+        draining = _app._stamp_session_liveness(s, "proj", now)
         assert s["live"] is True
-        assert s["draining"] is False
+        assert draining is False
         assert s["reachable"] is False
 
     def test_receipt_by_another_session_does_not_clear_my_backlog(self, _app,
@@ -435,8 +435,8 @@ class TestStaleCursorDoesNotFakeAWedge:
              "delivered_at": old, "delivered_by": "sv-someone-else"},
         ])
         s = self._live_session(now)
-        _app._stamp_session_liveness(s, "proj", now)
-        assert s["draining"] is False
+        draining = _app._stamp_session_liveness(s, "proj", now)
+        assert draining is False
         assert s["reachable"] is False
 
     def test_oldest_unconsumed_wins_over_a_newer_delivered_one(self, _app,
@@ -452,5 +452,73 @@ class TestStaleCursorDoesNotFakeAWedge:
             self._dm(stuck),
         ])
         s = self._live_session(now)
-        _app._stamp_session_liveness(s, "proj", now)
-        assert s["draining"] is False, "未消化の最古を飛ばして健全と判定した"
+        draining = _app._stamp_session_liveness(s, "proj", now)
+        assert draining is False, "未消化の最古を飛ばして健全と判定した"
+
+
+class TestTriStateIsNotPublished:
+    """ms-173 独立レビュー AX-2: 3 値の ``draining`` を公開 API の行に乗せない。
+
+    None (= 消化の証拠が無い) は e-6777 以降 **多数派** の値になった (バックログが
+    無いセッションが大半)。それを行に平文で乗せると、`if row.get("draining"):` の
+    ような truthy 判定で None が False に畳まれ、健全な多数派が「未消化」に誤分類
+    される = e-6777 で内部的に直した逆転を、ラッパーの外側で再生産する。
+
+    だから外に出すのはラッパー済みの ``reachable`` だけにし、3 値は内部の送信経路に
+    戻り値で渡す。この契約をテストで固定する (= 将来 stamp に戻したら落ちる)。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _app(self, monkeypatch):
+        import app as app_module
+        monkeypatch.setattr(app_module.redis_client, "ws_session_live",
+                            lambda pid, sid: None)
+        return app_module
+
+    def _stamped(self, _app, monkeypatch, now, events):
+        monkeypatch.setattr(_app.db, "get_bus_cursor", lambda pid, rid: {})
+        monkeypatch.setattr(_app.db, "list_bus_events", lambda pid, **k: events)
+        row = {"session_id": "sv-pub",
+               "last_poll_at": _iso(now - datetime.timedelta(seconds=3)),
+               "last_active": _iso(now - datetime.timedelta(seconds=3)),
+               "poll_interval_ms": 5000}
+        draining = _app._stamp_session_liveness(row, "proj", now)
+        return row, draining
+
+    def test_row_carries_reachable_but_not_draining(self, _app, monkeypatch):
+        now = _now()
+        row, draining = self._stamped(_app, monkeypatch, now, [])
+        assert "reachable" in row, "送信判定に使う reachable は公開する"
+        assert "draining" not in row, (
+            "3 値の draining が公開 API の行に乗っている — truthy 判定で None が "
+            "False に畳まれ、健全な多数派が『未消化』に誤分類される")
+        assert draining is None, "内部 caller には戻り値で 3 値が届くこと"
+
+    def test_wedge_still_reaches_the_send_path_through_the_return_value(
+            self, _app, monkeypatch):
+        """公開をやめても **送信経路の wedge 検出は落ちない** こと (= 隠さない)。"""
+        now = _now()
+        old = _iso(now - datetime.timedelta(seconds=600))
+        row, draining = self._stamped(_app, monkeypatch, now, [
+            {"event_id": "w1", "channel": "dm", "sender_session_id": "sv-peer",
+             "created_at": old, "payload": {"recipient_session_id": "sv-pub"}},
+        ])
+        assert draining is False
+        assert row["reachable"] is False
+        assert bus_liveness.classify_send_delivery(row["live"], draining) \
+            == bus_liveness.SEND_WEDGED
+
+    def test_the_stamp_function_still_fills_the_rest_of_the_row(
+            self, _app, monkeypatch):
+        """戻り値を足した改修で **関数の残りが飛ばされていない** こと。
+
+        draining を返す形にしたとき、``return`` を関数の途中に置くと state /
+        activity / user_id の stamp が丸ごと落ちる (実際に一度やった)。公開面の
+        要素が揃っていることで、早期 return の再発を捕まえる。
+        """
+        now = _now()
+        row, _ = self._stamped(_app, monkeypatch, now, [])
+        for key in ("poll_health", "bridge", "ws_live", "live", "reachable",
+                    "heartbeat_fresh", "state", "activity", "activity_kind",
+                    "user_id"):
+            assert key in row, f"stamp が {key} を埋めていない (早期 return の疑い)"

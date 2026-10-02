@@ -1898,6 +1898,8 @@ _RUNNING_DECL_STALE_AGE_S = int(
 # 捕まえる。逆転させると、bridge が黙る前に server が not-live にしてしまい、健全な
 # セッションを誤って落とす。片方だけ変えないこと (語彙が LIVENESS/STALL と ZOMBIE/AGE で
 # 分かれており、名前からは関連に気づけないため明記する)。
+# この順序は **テストで機械的に固定されている**: tests/test_liveness_threshold_pair_ordering.py
+# (独立レビュー AX-1: 保護がコメントだけでは構造的な歯止めにならない、の再提起を受けて追加)。
 #
 # AX-3: 閾値が不正 (0 以下) ならガードは何もしない = fail-open。健全な行を設定ミスで
 # 黙らせないための向きだが、黙って無効化されると「設定したのに何も起きない」になる。
@@ -1972,9 +1974,16 @@ def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
     return ""
 
 
-def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
-    """Stamp poll_health / bridge / ws_live / live / draining / reachable onto a
-    session row in place (ms-101 / e-3010, ms-165 / e-5965).
+def _stamp_session_liveness(session: dict, project_id: str,
+                            now_dt) -> Optional[bool]:
+    """Stamp poll_health / bridge / ws_live / live / reachable onto a session row
+    in place, and RETURN the internal ``draining`` 3-value (ms-101 / e-3010,
+    ms-165 / e-5965, ms-173 独立レビュー AX-2).
+
+    ``draining`` (None = 消化の証拠が無い / True = 消化を観測 / False = 確定的な
+    wedge) は **行に stamp しない**: 3 値を公開 API に平文で乗せると truthy 判定で
+    None が False に畳まれる。内部の送信経路だけがこの戻り値を読み、外へ出るのは
+    ラッパー済みの ``reachable`` だけ。
 
     従来 directory の「この session は今 DM を受け取れるか」の signal は
     ``poll_health.healthy`` だった。これは ``last_poll_at`` (= 最後にポーリング
@@ -2084,7 +2093,14 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
                 oldest, now_dt, _ATTENTIVE_HEARTBEAT_MAX_AGE_S)
         except Exception:  # pragma: no cover - defensive; fail-open to unknown
             draining = None
-    session["draining"] = draining
+    # ms-173 独立レビュー AX-2: ``draining`` は **行に stamp せず戻り値で返す**。
+    # 公開 API (= GET /sessions / `bus directory --json`) の行に 3 値 (None/True/
+    # False) が平文で乗ると、`if row.get("draining"):` のような truthy 判定で
+    # None が False に畳まれ、**健全な多数派 (= バックログ無し) が「未消化」に
+    # 誤分類** される。それは e-6777 で内部的に直した「受信しないことが報酬」の
+    # 逆転を、ラッパーの外側で再生産することになる。外に出すのはラッパー済みの
+    # ``reachable`` だけにし、3 値を解釈する責務を server の内側に閉じる
+    # (consumer は実測で 0 件だったので互換の破れは無い)。
     session["reachable"] = bus_liveness.is_reachable(session["live"], draining)
 
     # ms-159 (e-6245): project the canonical work-unit `state` + `state_since`
@@ -2167,6 +2183,9 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # (方針3: model is multi-user, default view is self). Best-effort: the actor's
     # user_id when present, else its email (the identity sid_to_uid keys on).
     session["user_id"] = (actor.get("user_id") or actor.get("email") or "")
+    # AX-2: 3 値の ``draining`` は行に乗せず、ここで内部 caller に返す
+    # (公開されるのはラッパー済みの ``reachable`` だけ)。
+    return draining
 
 
 def _classify_recipient_send_delivery(project_id: str, recipient_sid: str,
@@ -2189,9 +2208,8 @@ def _classify_recipient_send_delivery(project_id: str, recipient_sid: str,
                 if s.get("session_id") == recipient_sid), None)
     if row is None:
         return None
-    _stamp_session_liveness(row, project_id, now_dt)
-    return bus_liveness.classify_send_delivery(
-        row.get("live"), row.get("draining"))
+    draining = _stamp_session_liveness(row, project_id, now_dt)
+    return bus_liveness.classify_send_delivery(row.get("live"), draining)
 
 
 # ---------------------------------------------------------------------------

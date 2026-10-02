@@ -191,9 +191,11 @@ def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[b
     いない** もの、または backlog が無いときは falsy。ms-173 / e-6799 まで、この
     入力は「recipient の cursor を越えていない最古」だった = 実配信経路ではなく
     inbox-hook (人の打鍵) の進み具合を測っていた。取得の判定は
-    :func:`delivered_to_recipient` が所管し、cursor は scan の起点にしか使わない。 The threshold reuses the attentiveness window (a healthy
-    bridge drains in seconds; a backlog older than the human-attention window is
-    a wedge, not in-flight latency) — no new constant, per SPEC 方針 a.
+    :func:`delivered_to_recipient` が所管し、cursor は scan の起点にしか使わない。
+
+    ``window_seconds`` reuses the attentiveness window (a healthy receive path
+    fetches in seconds; a backlog older than the human-attention window is a
+    wedge, not in-flight latency) — no new constant, per SPEC 方針 a.
     """
     if not oldest_unread_created_at:
         # e-6777: バックログが無い = 消化の証拠が無い → 不明。健全 (True) と言わない。
