@@ -237,11 +237,19 @@ def _record_task_done_decision(entry_id: str, reason: str) -> None:
       the commit hash /beacon-log knows at log time). Empty is honest: it surfaces a
       done with no physical backing rather than fabricating a self-reference (e-5650).
 
-    cloud-only (the decision stream is server-side). Best-effort: offline / not-logged-in
-    / server error are all swallowed so decision recording never breaks ``task done``.
+    cloud-only (the decision stream is server-side).
+
+    失敗契約 (ms-166 e-6757): 書き込み失敗は **WARNING で可視化して飲む** — 単一真実源は
+    ``commands_shared.best_effort_decision_write``。``task done`` のフローは絶対に壊さない
+    が、失敗を無言にはしない。最も監査が要る「AI 自身の done 判断」が endpoint 障害で
+    記録されなかったとき、旧 ``except BaseException: pass`` では気づく手段が無かった。
+    ``KeyboardInterrupt`` (利用者の中断) は受け口が catch しないので伝播する。
     """
-    try:
-        from commands_shared import _is_cloud_mode, _get_api_client
+    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
+                                 _get_api_client)
+    with best_effort_decision_write(
+            f"task-done for task={entry_id or '?'}",
+            recovery_hint="the task is already done — do not re-run task done"):
         if not _is_cloud_mode():
             return
         decided_by = os.environ.get("BEACON_DECIDED_BY", "").strip() or "autonomous-AI"
@@ -260,10 +268,6 @@ def _record_task_done_decision(entry_id: str, reason: str) -> None:
             "related": {"task_id": entry_id},
         }
         client.record_decision(project_id, payload)
-    except BaseException:
-        # best-effort: _get_api_client may sys.exit (SystemExit) on missing creds;
-        # swallow everything so decision recording never breaks the done flow.
-        pass
 
 
 def cmd_task_done():

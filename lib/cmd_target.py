@@ -459,10 +459,21 @@ def _record_disposition_decision(target_id, task_id, verdict, reason, source):
     That adjudication is a decision — who judged, with what verdict and why —
     but the CLI path applies it via a whole-project PUT and it never reached the
     decision stream (AC3 'findings採否' が prompt 層格下げ, per the ms-154 review).
-    We record it here on the primary path. best-effort, cloud-only.
+    We record it here on the primary path. cloud-only.
+
+    失敗契約 (ms-166 e-6757): 書き込み失敗は **WARNING で可視化して飲む** —
+    単一真実源は ``commands_shared.best_effort_decision_write``。旧
+    ``except BaseException: pass`` は endpoint 障害も拒否も無言で飲んでいたため、
+    採否 (disposition) は適用されたのに監査 arm に痕跡が残らず、しかも誰も気づけ
+    なかった (完遂側で e-5978 が塞いだのと同型の病理が、採否側に残っていた)。
+    ``KeyboardInterrupt`` (利用者の中断) は受け口が catch しないので伝播する。
     """
-    try:
-        from commands_shared import _is_cloud_mode, _get_api_client
+    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
+                                 _get_api_client)
+    with best_effort_decision_write(
+            f"disposition for task={task_id or '?'} target={target_id or '?'} "
+            f"verdict={verdict}",
+            recovery_hint="the disposition itself is applied — do not re-apply"):
         if not _is_cloud_mode():
             return
         client, config = _get_api_client()
@@ -478,8 +489,6 @@ def _record_disposition_decision(target_id, task_id, verdict, reason, source):
             "evidence": [f"source:{source}"] if source else [],
             "related": {"task_id": task_id, "target_id": target_id},
         })
-    except BaseException:
-        pass
 
 
 def cmd_target_attach_disposition():

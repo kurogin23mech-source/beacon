@@ -587,8 +587,12 @@ def _record_review_decision(entry_id: str, verdict: str, rationale: str,
 
     review 採否 (approve / re-work / reject) は CLI 側の判断で server の書き込み口
     (= POST /api/projects/{id}/decisions) を通して統一 decision stream に載せる。
-    cloud mode 専用 (= decision stream は server 側)。承認フローを絶対に壊さない:
-    offline / 未ログイン / server error は全て握りつぶす (= flag not gate)。
+    cloud mode 専用 (= decision stream は server 側)。承認フローを絶対に壊さない
+    (= flag not gate) が、失敗は無言にしない。失敗契約 (ms-166 e-6757) の単一真実源は
+    ``commands_shared.best_effort_decision_write``: 通常の失敗と SystemExit は WARNING で
+    可視化して飲み、``KeyboardInterrupt`` (利用者の中断) は伝播する。旧
+    ``except BaseException: pass`` では、採否は PR に適用されたのに監査 arm には残らない、
+    という食い違いが無言で起きていた。
 
     ``verdict`` は ``approve`` / ``re-work`` / ``reject``。``decided_by`` は誰が採否を
     決めたか (default ``autonomous-AI`` = 独立レビューは AI judge verdict が主で最も監査
@@ -597,8 +601,11 @@ def _record_review_decision(entry_id: str, verdict: str, rationale: str,
     PR 自身への参照 (``pr:<id>``) は ``related.task_id`` が運ぶので自己参照は積まない。
     who は server が token から stamp する。
     """
-    try:
-        from commands_shared import _is_cloud_mode, _get_api_client
+    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
+                                 _get_api_client)
+    with best_effort_decision_write(
+            f"review-adjudication for PR entry={entry_id or '?'} verdict={verdict}",
+            recovery_hint="the adjudication itself is applied — do not re-adjudicate"):
         if not _is_cloud_mode():
             return
         client, config = _get_api_client()
@@ -613,11 +620,6 @@ def _record_review_decision(entry_id: str, verdict: str, rationale: str,
             "evidence": [ln for ln in (evidence or []) if ln],
             "related": {"task_id": entry_id},
         })
-    except BaseException:
-        # best-effort: _get_api_client may sys.exit (SystemExit) when creds are
-        # missing; swallow everything so decision recording never breaks the
-        # approve / reject / request-changes flow.
-        pass
 
 
 def _derive_pr_intent_decision(pr_number, title: str, intent: str) -> None:
