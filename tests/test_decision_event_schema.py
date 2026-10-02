@@ -223,6 +223,9 @@ def test_backend_exposes_decision_event_functions(mod_name):
     assert "kind" in params and params["kind"].default == ""
     assert "limit" in params and params["limit"].default == 100
     assert "since" in params and params["since"].default == ""
+    # ms-166 e-6603: `exclude_kinds` (= 既定 read から外す kind) も 3 backend 共通。
+    # 1 つ落ちると backend 切替で通信ログが既定 read に復活する (手元緑 / 本番だけ違う)。
+    assert "exclude_kinds" in params and params["exclude_kinds"].default is None
 
 
 # ---------------------------------------------------------------------------

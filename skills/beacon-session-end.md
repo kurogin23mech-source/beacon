@@ -383,7 +383,10 @@ beacon decision record \
 ```
 
 - `--evidence` は必須 (= 一級の判断は根拠を link する)。裏付けが本当に無い判断は加筆しない (= phantom を作らない)。
-- target 帰属は `--related-task` (task 経由) か、サーバが認証・session context から補う `who` で決まる。誤帰属を訂正する superseding の場合は `--evidence` に元 `decision_id` を含める。
+- `--related-task` は `related.task_id` を立てるだけで **対象 (`related.target_id`) は立たない**。`who` は「誰が記録したか」で対象ではない (ms-166 e-6603 で実測: この種別は 16/16 すべて対象が空で、`decision list --target` に一件も載らなかった)。対象は次の 2 経路で決まる:
+  - **`--related-target <id>` で明示指定** (推奨)。`ms-166` / `opp-3` のような対象 id。これが本文からの解決より優先される。
+  - 本文 (`--what` / `--rationale`) に対象 id が 1 つだけ現れていれば**自動で解決**される。2 つ以上あると取り違えを避けて空のまま残り、候補が表示される (その場合は明示指定する)。
+- 誤帰属を訂正する superseding では、`--evidence` に元 `decision_id` を含めたうえで **`--related-target` で正しい対象を明示する** (訂正したい誤帰属そのものが「対象が空」である場合が多く、ここが本命の用途)。
 
 ### Step 4.7e: レポートへの反映
 

@@ -10,8 +10,11 @@ name: Test (pytest)
 #   - pyproject.toml declares pytest under [project.optional-dependencies] dev,
 #     so `pip install -e .[dev]` is the canonical install path (mirrors what a
 #     developer does locally).
-#   - tests/ has ~210 files and no conftest.py — pytest auto-discovers the test_*
-#     pattern from the repo root.
+#   - tests/ has ~700 files. pytest auto-discovers the test_* pattern from the
+#     repo root, and tests/conftest.py holds what the whole suite shares: the
+#     sys.path setup, the human-session / test-mode env declarations, and the
+#     autouse guards that keep a test from writing the repo's own .beacon/
+#     (ms-166 e-6621 — that leak is what made parallel runs safe to turn on).
 #   - Python 3.11 matches the lint-docs.yml setup so a single Python version is
 #     used across all CI workflows (avoids 3.9-only regression noise).
 #   - This workflow runs independently of GitHub branch protection — even
@@ -35,7 +38,10 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # ms-166 e-6811: headroom above the measured parallel runtime, not a target.
+    # The ceiling used to be the same 15 minutes the serial suite took, so growth
+    # showed up as a cancelled job rather than a slow one.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -78,6 +84,16 @@ jobs:
           python -m pip install pyyaml httpx
 
       - name: Run pytest
+        # ms-166 e-6811: still SERIAL on purpose. `-n auto` takes this from ~13min
+        # to ~5min and was tried here first, but the suite is not parallel-safe
+        # yet: the whole suite under `-n auto` produced 5 failures + 18 errors
+        # that do NOT reproduce when the same files run alone, serially or in
+        # parallel (measured 2026-10-01). That is cross-file shared state, and
+        # turning it on would trade a legible timeout for flakes that change
+        # identity every run — strictly worse, because a flake teaches people to
+        # re-run instead of to look. e-6816 holds the parallel-safety work;
+        # flip this line only once that lands. xdist is in the dev extra so the
+        # investigation (and local runs) can use it meanwhile.
         run: pytest tests/ -q
 
   frontend-drift:

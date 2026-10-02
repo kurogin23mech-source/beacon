@@ -7,7 +7,9 @@ a mechanically-collected diff (artifact) — never the implementer's session
 narrative. These tests pin that shape so a future refactor cannot silently
 smuggle implementer context back into the judge's input.
 """
+import json
 import os
+import tempfile
 import sys
 
 import pytest
@@ -100,8 +102,25 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMMANDS = os.path.join(REPO, "lib", "commands.py")
 
 
+# ms-166 e-6621: these probes run the real CLI with cwd=REPO (they inspect the
+# actual command surface, so the cwd has to be the repo), and the CLI opens its
+# local store on the way — which created .beacon/project.db in the repository.
+# On a developer's machine that file already exists so nothing looked wrong; on a
+# clean checkout, which is what CI gets, the test CREATES it. The surface probe
+# should not depend on, or alter, whoever's project happens to be at the cwd
+# anyway (same reasoning as ms-160 e-6715, where this probe was writing real
+# session notes). One tmp project file for the whole module keeps the inspection
+# honest without changing what it inspects.
+_STORE_TMP = tempfile.mkdtemp(prefix="review-ctx-store-")
+_STORE_PROJECT = os.path.join(_STORE_TMP, ".beacon", "project.json")
+os.makedirs(os.path.dirname(_STORE_PROJECT), exist_ok=True)
+with open(_STORE_PROJECT, "w", encoding="utf-8") as _f:
+    json.dump({"name": "review-context-probe", "milestones": []}, _f)
+
+
 def _run_review_context(env_extra):
     env = dict(os.environ)
+    env.setdefault("BEACON_PROJECT_FILE", _STORE_PROJECT)
     env.update(env_extra)
     return subprocess.run(
         [sys.executable, COMMANDS, "review_context"],
