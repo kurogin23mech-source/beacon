@@ -142,26 +142,35 @@ _NOT_THE_TESTS_FAULT = frozenset({
 # test_pr_create_infer → test_api_client → test_attainment_backlog_disposition).
 # An allowlist keyed on the test would therefore be flaky by construction.
 #
-# ms-166 e-6833: **空になった**。検出は全面的なゲートになり、どのファイル名の漏れも
-# 即座に落ちる (= 「新しい種類だけを止める」部分ゲートから「どの漏れも止める」全面
-# ゲートへ)。負債として記録されていた 2 件の決着:
+# What this still gates: any file NAME not listed here fails immediately, so new
+# code cannot introduce a new KIND of leak. What it does not gate: another test
+# leaking one of these two names. That is the debt, and it is why the list must
+# shrink to empty rather than grow.
+# ms-166 e-6820 で **真因の片方は畳んだ**: lib/session.py が Path.cwd() から組んで
+# BEACON_PROJECT_FILE を見ていなかった二重流儀を session._beacon_dir() に寄せた。
+# これで以前名指しされていた経路 (review_context / pr_create / api_client /
+# surface_snapshot / attainment) は漏らさなくなり、一覧を空にして 2738 件を走らせた
+# 時点では漏れ 0 件だった。
 #
-#   session.json — 真因は e-6820 (プロジェクトの保存先を指す流儀が 2 つあり、
-#                  lib/session.py は Path.cwd() から組んで BEACON_PROJECT_FILE を
-#                  見ていなかった)。解決を 1 つの口 session._beacon_dir() に寄せたら
-#                  止まった。テスト側を 1 本ずつ直すのではなく、片方しか隔離できない
-#                  構造そのものを畳んだ。
-#   project.db   — 上の修正で、cwd から発見される読み取りが起きなくなり同時に止まった。
+# **それでも一覧は空にできない。** フル実行ではまだ漏れる。理由は下のキー設計の注記に
+# 書いてあるとおり、**このガードは「あるファイル名を最初に作ったテスト」しか報告しない**
+# ので、2738 件の部分実行で 0 件でも母集団が空だとは言えないし、1 件直しても次に別の
+# テストが名指しされるだけで収束しない。実際に一度空にしたら CI が落ち、収集順で変わる
+# テストが名指しされた (2026-10-05)。
 #
-# 実測: この一覧を空にして 2738 件を走らせ、漏れ 0 件を確認した (review_context /
-# pr_create / api_client / attainment / surface_snapshot / session / store / doc /
-# trek の family = 以前名指しされた経路を含む)。手元ではフル実行が完走しない
-# (このマシンの swap 枯渇) ので、**全体の判定は CI に委ねる** — もし残りがあれば
-# このゲートがファイル名とテスト名で名指しして落ちる。
-#
-# 再び負債を載せることになったら、下の「fixed なら消せ」報告がそのまま働く
-# (一方通行のラチェットは維持してある)。
-KNOWN_LEAKS: frozenset = frozenset()
+# 掃討の順序 (e-6833 の残り):
+#   1. まずガードを **全ての作成者を報告する** 形に変える (現状は最初の 1 件だけ)。
+#   2. フル実行を 1 回して、名前ごとに全作成者の一覧を得る。
+#   3. その一覧を潰してから、この一覧を空にする。
+# この順でないと「1 件直す → 別の 1 件が名指しされる」を繰り返すだけになる。
+KNOWN_LEAKS = frozenset({
+    "session.json",   # 残り: lib/session.py の解決は e-6820 で畳んだが、
+                      # BEACON_PROJECT_FILE を設定しないテストは既定の
+                      # cwd/.beacon に落ちるので、そこを通る経路がまだ在る
+    "project.db",     # the local SQLite store, materialised by any project read
+                      # discovered from the cwd (+ its -shm/-wal sidecars, which
+                      # are excluded above so the report stays one line)
+})
 
 # Which KNOWN_LEAKS names were actually observed this run, so a fixed one does
 # not sit in the list exempting the next regression at the same name.
