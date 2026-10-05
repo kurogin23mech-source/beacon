@@ -213,6 +213,17 @@ class ApiClient:
         import cloud_write_guard
         cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
 
+    def _guard_read(self) -> None:
+        """Refuse a READ from a test context targeting prod (ms-166 e-6819).
+
+        Same shape as the sibling write helpers — the decision and its deferred
+        import live in one place. Called from the GET leg of :meth:`_request`,
+        the single hallway all ~36 read verbs pass through, so no reader can be
+        forgotten. No-op off test context / non-prod.
+        """
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_read(self._guard_base_url())
+
     def _guard_decision_write(self) -> None:
         """Refuse a decision-stream WRITE from a test context targeting prod.
 
@@ -231,6 +242,12 @@ class ApiClient:
         # the circuit. Kept ahead of URL / body assembly so an already-
         # tripped breaker never even builds a request object.
         _circuit_check_and_raise()
+        # ms-166 e-6819: 読み取りの唯一の廊下。テスト文脈から本番を読むと、結果が
+        # そのときの本番の状態に左右されて再現しないので断る。書き込みは各扉で既に
+        # 守られているので、ここで問うのは GET だけ (廊下で全部を断つと書き込みの
+        # 診断文言が読み取りのものに置き換わってしまう)。
+        if (method or "").upper() == "GET":
+            self._guard_read()
 
         url = f"{self._base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None

@@ -230,6 +230,44 @@ def guard_prod_decision_write(base_url: str) -> None:
         "remove the row afterwards."
     )
 
+def guard_prod_read(base_url: str) -> None:
+    """Raise if a test context is about to READ from production.
+
+    ms-166 e-6819. A test that reads the live cloud is not destructive, but its
+    result depends on **whatever production happens to hold right now** — so it
+    passes or fails for reasons that have nothing to do with the change under
+    test, and it cannot be reproduced. (Observed while fixing e-6852: two unit
+    tests were resolving a work item's parent out of the developer's real
+    project, and one of them only passed because that project happened to
+    contain the id they used.)
+
+    Why the guard sits on the shared transport rather than on each reader: the
+    client exposes ~36 read verbs. Guarding them one at a time is the "one door
+    guarded, the others are bypass doors" shape that e-5194 found for the bus and
+    e-6637 found for decisions. ``_request`` is the single hallway every read
+    passes through, so the GET leg of it is the one place to ask the question.
+
+    No-op outside a test context (normal CLI / autonomous use is unaffected) and
+    no-op for non-prod targets. The escape hatch is the SAME shared one as the
+    write guards (``BEACON_ALLOW_PROD_TEST_WRITE=1``) — deliberately, because a
+    test that opts into touching prod at all should make that one declaration
+    rather than collect a flag per verb.
+    """
+    if not _prod_test_write_blocked(base_url):
+        return
+    raise ProdWriteBlocked(
+        "cloud_write_guard: refusing to READ from the production cloud "
+        f"({base_url}) from a test context. A test whose result depends on live "
+        "production state is not reproducible — it passes or fails for reasons "
+        "unrelated to the change under test. Point the test at fixture data "
+        "instead: stub the reader (``monkeypatch.setattr(commands_shared, "
+        "'load_project', ...)``), use the ``fake_cloud_config`` fixture, force "
+        "local mode with ``isolated_project``, or give the ApiClient a "
+        f"local/sandbox base_url. If this test genuinely must read prod, "
+        f"{_hatch_note()}."
+    )
+
+
 def _default_cleanup(client, project_id: str) -> None:
     """Best-effort archive of a disposable project via the envelope path.
 
