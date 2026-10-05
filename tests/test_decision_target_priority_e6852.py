@@ -25,10 +25,10 @@
 
 ## 職種非依存
 
-規則は ``decision_derive.resolve_target_from_work_item`` が持ち、
-``occupation.iter_target_records`` を歩くので milestone / operation / 商談
-(opportunity) のどれでも同じ形で解ける。作業項目がどの target class の下に居るかで
-分岐しない。
+規則は ``decision_derive.resolve_target_from_work_item`` が持ち、1 層目の走査は
+``occupation.iter_work_items`` (職種非依存の work-item spine) に委ねる。だから
+milestone / operation / 商談 (opportunity) のどれでも同じ形で解け、作業項目がどの
+target class の下に居るかで分岐しない。入れ子の層だけが同モジュール側の担当。
 """
 from __future__ import annotations
 
@@ -111,12 +111,27 @@ def test_a_non_dict_project_does_not_raise():
 
 
 def test_the_rule_is_pure():
-    # このモジュールの契約 (I/O なし) を保つ: data を渡される側で、読み込みはしない。
+    """このモジュールの契約 (I/O なし) を保つ: data を渡される側で、読み込みはしない。
+
+    判定は AST で行う (保守性レビュー PR#785 M-7)。初版は ``inspect.getsource`` の
+    substring 検索だったが、同じ PR の ``tests/_ast_structural`` が「substring は
+    docstring / コメントの言及で素通りする」と明記して 3 つの構造ガードを AST に
+    揃えている。自分が力説した基準を自分の検査で破っていた。
+    """
+    import ast
     import inspect
+    import _ast_structural as astx
     src = inspect.getsource(decision_derive.resolve_target_from_work_item)
-    # occupation の宣言 (manifest) を読むのは I/O ではない — 純データの引き当て。
-    for forbidden in ("load_project", "open(", "_get_api_client", "requests"):  # noqa
-        assert forbidden not in src, forbidden
+    fn = astx.function_named(ast.parse(src.strip()), "resolve_target_from_work_item")
+    assert fn is not None
+    called = astx.called_names(fn)
+    for forbidden in ("load_project", "open", "read_text", "_get_api_client",
+                      "get", "post", "urlopen"):
+        if forbidden == "get":
+            continue   # dict.get は I/O ではない
+        assert forbidden not in called, (
+            f"純関数が I/O らしい呼び出しをしています: {forbidden} / "
+            f"呼ばれている: {sorted(called)}")
 
 
 # --- CLI の優先順位 ---------------------------------------------------------

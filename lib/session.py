@@ -61,7 +61,15 @@ _CLOUD_JSON_RELATIVE = Path(".beacon") / "cloud.json"
 _BRIDGES_DIR_RELATIVE = Path(".beacon") / "bridges"
 
 def _beacon_dir() -> Path:
-    """``.beacon/`` の場所を解決する **唯一の口** (ms-166 e-6820)。
+    """``.beacon/`` の場所を解決する口 — **このモジュールの家族について** (ms-166 e-6820)。
+
+    射程を正直に書く (保守性レビュー PR#785 M-4): 一本化したのは session.json /
+    cloud.json / bridge の claim / bridges/ / Codex の受信ループ、つまり **この
+    モジュールが持つ家族だけ**。``lib/agent.py`` は ``.beacon/agent.json`` を
+    ``Path.cwd()`` から独立に組んでおり、ここは通らない (あちらは「agent の識別は
+    checkout ごと」という理由でそう書かれている)。構造ガードもこのファイルしか
+    走査しない。「.beacon 配下のパス解決が 1 関数に一本化された」と読むのは誤り —
+    同型の扉が agent.py に残っている。
 
     この repo は「プロジェクトの保存先はどこか」に 2 通りで答えていた:
 
@@ -111,11 +119,16 @@ _LOCAL_ONLY_FIELDS = ("cloud_synced_at",)
 
 
 def _session_json_path() -> Path:
-    """Resolve .beacon/session.json against CWD.
+    """``.beacon/session.json`` の場所を返す。
 
-    The bin/beacon wrapper cd's to the project root before dispatch
-    (find_beacon_root), so CWD == project root for all sub-commands.
-    Mirrors lib/agent._agent_json_path for consistency.
+    解決は :func:`_beacon_dir` に委ねる (ms-166 e-6820): ``BEACON_PROJECT_FILE`` が
+    設定されていればその親、無ければ ``Path.cwd()``。
+
+    **``lib/agent.py`` の ``_agent_json_path`` とは意図的に異なる** (保守性レビュー
+    PR#785 M-3)。あちらは「agent の識別は checkout ごと」という理由で cwd を使うと
+    自分の docstring で明言している。こちらはパスの解決なので環境変数を優先する。
+    以前この docstring は「CWD に対して解決する / agent.py と揃えてある」と書いて
+    いたが、e-6820 の変更でどちらも事実でなくなった。
     """
     return _beacon_dir() / _SESSION_JSON_RELATIVE.name
 
