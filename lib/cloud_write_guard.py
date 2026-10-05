@@ -91,6 +91,24 @@ _PROD_TEST_WRITE_HATCH = "BEACON_ALLOW_PROD_TEST_WRITE"
 _HATCH_SCOPE = "project, bus AND decision"
 
 
+def _isolation_options_note() -> str:
+    """「どう隔離すればよいか」の案内 — 全ガードの拒否文言が共有する 1 文。
+
+    ms-166 e-6819 の保守性レビュー M-6: 推奨する手段 (fixture 2 つと非本番の base_url) を
+    bus / decision / read の文言にそれぞれ手で書き直していた。``_hatch_note`` で学んだ
+    教訓 (3 つ目のガードを足した瞬間に先の 2 つが古くなる) が、もう一段大きいこの重複には
+    適用されていなかった。fixture 名が変わったときに 1 箇所で直るようにする。
+
+    各ガードに固有の事情 (追記専用で消せない / 結果が再現しない 等) は呼び出し側が
+    前後に足す。ここが持つのは **どの隔離手段があるか** だけ。
+    """
+    return ("use the ``fake_cloud_config`` fixture (it points BEACON_PROJECT_FILE at a "
+            "tmp cloud.json so _get_cloud_config_path resolves non-prod in EVERY "
+            "module), force local mode with the ``isolated_project`` fixture (a tmp "
+            ".beacon with no cloud.json, so _is_cloud_mode() is False), or give the "
+            "ApiClient a local/sandbox base_url")
+
+
 def _hatch_note() -> str:
     """全ガードの拒否文言が共有する「抜け道とその射程」の 1 文。"""
     return (f"set {_PROD_TEST_WRITE_HATCH}=1 (this shared hatch unlocks ALL "
@@ -177,10 +195,7 @@ def guard_prod_bus_write(base_url: str) -> None:
     raise ProdWriteBlocked(
         "cloud_write_guard: refusing to post a bus event to the production "
         f"cloud ({base_url}) from a test context. Fake cloud mode the canonical "
-        "way: use the ``fake_cloud_config`` fixture (it points BEACON_PROJECT_FILE "
-        "at a tmp cloud.json so _get_cloud_config_path resolves non-prod in EVERY "
-        "module — no per-namespace monkeypatch, see tests/conftest.py), or give the "
-        "ApiClient a local/sandbox base_url. Unlike a prod project write, a bus "
+        f"way: {_isolation_options_note()}. Unlike a prod project write, a bus "
         "write has no disposable_project teardown counterpart (bus events are "
         "server-side, not leaked directory residue). If this test genuinely must "
         f"hit the prod bus, {_hatch_note()}."
@@ -220,12 +235,7 @@ def guard_prod_decision_write(base_url: str) -> None:
         "cloud_write_guard: refusing to append a decision to the production "
         f"cloud ({base_url}) from a test context. The decision stream is "
         "append-only — a test row cannot be deleted afterwards. Fake cloud mode "
-        "the canonical way: use the ``fake_cloud_config`` fixture (it points "
-        "BEACON_PROJECT_FILE at a tmp cloud.json so _get_cloud_config_path "
-        "resolves non-prod in EVERY module), force local mode with the "
-        "``isolated_project`` fixture (a tmp .beacon with no cloud.json, so "
-        "_is_cloud_mode() is False — this is what the decision-arm tests use), or "
-        "give the ApiClient a local/sandbox base_url. If this test genuinely must write to "
+        f"the canonical way: {_isolation_options_note()}. If this test genuinely must write to "
         f"the live stream, {_hatch_note()}; there is no teardown that can "
         "remove the row afterwards."
     )
@@ -261,9 +271,8 @@ def guard_prod_read(base_url: str) -> None:
         "production state is not reproducible — it passes or fails for reasons "
         "unrelated to the change under test. Point the test at fixture data "
         "instead: stub the reader (``monkeypatch.setattr(commands_shared, "
-        "'load_project', ...)``), use the ``fake_cloud_config`` fixture, force "
-        "local mode with ``isolated_project``, or give the ApiClient a "
-        f"local/sandbox base_url. If this test genuinely must read prod, "
+        f"'load_project', ...)``), or {_isolation_options_note()}. "
+        "If this test genuinely must read prod, "
         f"{_hatch_note()}."
     )
 

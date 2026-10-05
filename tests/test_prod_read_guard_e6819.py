@@ -158,3 +158,79 @@ def test_only_the_get_leg_is_guarded_for_reads():
         "診断文言が置き換わります")
     assert "GET" in src[src.index("def _request"):src.index("def _request") + 1200], (
         "GET の脚で限定していることが読めません")
+
+
+# ---------------------------------------------------------------------------
+# 5. 拒否文言の共有部分が 1 箇所から来ていること (保守性レビュー PR#785 M-6)
+# ---------------------------------------------------------------------------
+#
+# 「どう隔離すればよいか」の案内 (fixture 2 つ + 非本番の base_url) を各ガードが手書きして
+# いたため、3 つ目のガードを足した瞬間に先の 2 つが古くなる形だった。_hatch_note で
+# 学んだ教訓がもう一段大きいこの重複には適用されていなかった。1 箇所から作る。
+
+_ISOLATION_MECHANISMS = ("fake_cloud_config", "isolated_project", "local/sandbox")
+
+
+def _refusal_messages() -> dict:
+    """各ガードの拒否文言を ``{関数名: 文言}`` で集める (本番 × テスト文脈で発火させる)。"""
+    saved = os.environ.get("BEACON_TEST_MODE")
+    hatch = os.environ.pop("BEACON_ALLOW_PROD_TEST_WRITE", None)
+    os.environ["BEACON_TEST_MODE"] = "1"
+    out = {}
+    try:
+        for name in ("guard_prod_bus_write", "guard_prod_decision_write",
+                     "guard_prod_read"):
+            fn = getattr(cloud_write_guard, name)
+            try:
+                fn("https://beacon-ai.dev")
+            except cloud_write_guard.ProdWriteBlocked as exc:
+                out[name] = str(exc)
+    finally:
+        if saved is None:
+            os.environ.pop("BEACON_TEST_MODE", None)
+        else:
+            os.environ["BEACON_TEST_MODE"] = saved
+        if hatch is not None:
+            os.environ["BEACON_ALLOW_PROD_TEST_WRITE"] = hatch
+    return out
+
+
+def test_every_guard_offers_the_same_isolation_mechanisms():
+    msgs = _refusal_messages()
+    assert len(msgs) == 3, sorted(msgs)
+    for name, msg in sorted(msgs.items()):
+        for mechanism in _ISOLATION_MECHANISMS:
+            assert mechanism in msg, (
+                name + " の拒否文言に隔離手段 " + mechanism + " が出てきません — "
+                "案内を手書きで分岐させると、次に手段が増減したとき 1 箇所だけ古くなります")
+
+
+def test_the_shared_guidance_comes_from_one_place():
+    """案内文が共有ヘルパから来ていること (手書きのコピーに戻っていないこと)。
+
+    文字列一致ではなく **ヘルパを呼んでいるか** を構文木で見る (同じ PR の
+    tests/_ast_structural が「substring は docstring の言及で素通りする」と明記)。
+    """
+    tree = ast.parse(open(os.path.join(_LIB, "cloud_write_guard.py"),
+                          encoding="utf-8").read())
+    for name in ("guard_prod_bus_write", "guard_prod_decision_write",
+                 "guard_prod_read"):
+        fn = astx.function_named(tree, name)
+        assert fn is not None, name
+        called = astx.called_names(fn)
+        assert "_isolation_options_note" in called, (
+            name + " が共有の案内ヘルパを呼んでいません — 手書きに戻っています。"
+            "呼ばれている: " + repr(sorted(called)))
+
+
+def test_the_sharing_guard_fails_when_a_guard_hand_rolls_the_guidance():
+    # test-the-test: ヘルパを呼ばず案内を手書きしたガードを合成して、検出が拾うことを確かめる。
+    src = (
+        "def guard_prod_something(base_url):\n"
+        "    raise ProdWriteBlocked(\n"
+        '        "use the ``fake_cloud_config`` fixture or ``isolated_project``"\n'
+        "    )\n"
+    )
+    fn = astx.function_named(ast.parse(src), "guard_prod_something")
+    assert "_isolation_options_note" not in astx.called_names(fn), (
+        "guard が緩い: 文言に fixture 名が出ているだけで通ってしまう")
