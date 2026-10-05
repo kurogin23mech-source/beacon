@@ -82,12 +82,13 @@ dev = [
     # out of time" became a question you had to open the log to answer. Splitting
     # across workers took the same subset from 96-102s to 30s locally.
     #
-    # NOT yet used in CI — why, and the measurements, live in ONE place:
-    # .github/workflows/test.yml beside the `Run pytest` step. Keeping the numbers
-    # in both files would mean e-6816 has to remember to update two prose comments
-    # when it flips the switch, and the one nobody edits becomes a lie (independent
-    # maintainability review of PR #780). Shipped in the dev extra so the
-    # investigation, and local runs of a subset, can use it today.
+    # USED IN CI since e-6816, with the worker count pinned. The chosen number,
+    # why it is pinned rather than `-n auto`, and every measurement behind both
+    # decisions live in ONE place: .github/workflows/test.yml beside the
+    # `Run pytest` step. Keeping the numbers in both files would mean whoever
+    # changes the worker count has to remember to update two prose comments, and
+    # the one nobody edits becomes a lie (independent maintainability review of
+    # PR #780) — so this entry deliberately states no numbers.
     "pytest-xdist>=3.5",
     "ruff>=0.4",
 ]

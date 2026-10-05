@@ -84,17 +84,40 @@ jobs:
           python -m pip install pyyaml httpx
 
       - name: Run pytest
-        # ms-166 e-6811: still SERIAL on purpose. `-n auto` takes this from ~13min
-        # to ~5min and was tried here first, but the suite is not parallel-safe
-        # yet: the whole suite under `-n auto` produced 5 failures + 18 errors
-        # that do NOT reproduce when the same files run alone, serially or in
-        # parallel (measured 2026-10-01). That is cross-file shared state, and
-        # turning it on would trade a legible timeout for flakes that change
-        # identity every run — strictly worse, because a flake teaches people to
-        # re-run instead of to look. e-6816 holds the parallel-safety work;
-        # flip this line only once that lands. xdist is in the dev extra so the
-        # investigation (and local runs) can use it meanwhile.
-        run: pytest tests/ -q
+        # ms-166 e-6816: PARALLEL, with the worker count PINNED. ~13min -> ~5min.
+        #
+        # History. e-6811 left this serial because the suite under `-n auto`
+        # produced 5 failures + 18 errors that did not reproduce when the same
+        # files ran alone (measured 2026-10-01) — cross-file shared state, and
+        # turning it on then would have traded a legible timeout for flakes that
+        # change identity every run (a flake teaches people to re-run instead of
+        # to look). e-6816 did that work; what it found and fixed:
+        #
+        #   * the repo-.beacon leak guard excused transients by FILE NAME, so a
+        #     second atomic writer blamed tests that touch nothing (2c05e3ad)
+        #   * a stderr comparison picked up a gRPC fork-handler line written in
+        #     the child between fork and exec (c200b0a3)
+        #   * a readyz test had been green for 37 days off a leaked orphan
+        #     server holding its fixed port, its own server never binding, plus
+        #     a read of a file a BACKGROUND process writes (902c6bbc)
+        #
+        # Why `-n 4` and not `-n auto`. Measured 2026-10-05 on a 10-core laptop:
+        #
+        #   -n 4,    2 runs (fixed order + random order):  10141 passed, 0 failed
+        #   -n auto (= 10 workers), 3 runs: ONE failure each run, a DIFFERENT
+        #     test every time. Two of the three were the same root cause and it
+        #     is not ours: `git push` itself died, SIGTRAP once and SIGABRT once,
+        #     with empty stdout/stderr. Apple git aborting under heavy concurrent
+        #     use, not suite state — each test passes alone.
+        #
+        # So `-n auto` ties the condition to the runner's core count: today's
+        # 2-4-core runner behaves like -n 4, a bigger one starts crashing git and
+        # the failure names a different innocent test every run. Pinning keeps CI
+        # reproducible against the number this was actually measured at, which is
+        # the same property the three fixes above were about. Raise it only with
+        # a measurement at the new number, and keep the measurements in THIS
+        # comment (pyproject.toml deliberately holds none — see its xdist entry).
+        run: pytest tests/ -n 4 -q
 
   frontend-drift:
     # ms-160 e-5808: make the Web/Tauri frontend-drift guard a hard CI stop.
