@@ -62,12 +62,60 @@ def stub_tree(tmp_path):
     return tmp_path
 
 
-def _run_bash(stub_tree, argv):
+def _run_bash(stub_tree, argv, *, _noise_before_exec=None):
+    """bash フロントを走らせ、**beacon 自身が書いた** stderr だけを返す。
+
+    素の ``capture_output=True`` だと、beacon の出力ではない行が混ざる。混ざる経路は
+    「fork してから exec するまでの隙に、子プロセスの中で第三者が fd 2 へ書く」形:
+
+        bash  : 'I1005 15:24:48.603009 67430876 ev_poll_posix.cc:593] FD from fork
+                 parent still in poll list: fd(23, generation: 1)
+                 Error: --to と --to-user は相互排他です (...)'
+        python: 'Error: --to と --to-user は相互排他です (...)'
+
+    これは 2026-10-05 に ``-n 4`` で実測した失敗 (e-6816)。``ev_poll_posix.cc`` は
+    gRPC の C コアで、同じ worker プロセスに同居した別のテストが gRPC を初期化して
+    いると、``subprocess`` の fork 時に gRPC の fork ハンドラが子の中で走って fd 2 に
+    INFO 行を書く。直列の収集順ではこのファイルが gRPC を使うファイルより先に走るので
+    初期化されておらず、再現しない = 順序依存の潜在欠陥を並列実行が露出させた形。
+
+    直し方の軸: **「誰が書いたか」を当てにいかない。** gRPC の環境変数で黙らせる案は
+    却下した。(1) その 1 つのライブラリにしか効かず、次に fd 2 へ書く誰か (別の C
+    ライブラリ、シェルの起動ファイル) で同じことが起きる。(2) ノイズを手元で再現
+    できていないので、効いたかどうかを確かめられない (= 確かめずにガードを置くのが
+    一番危ない)。
+
+    代わりに、**子が exec した後で自分の stderr を張り替える**。exec 前に書かれた
+    ノイズは元の fd 2 (= ここで捨てる側) に残り、張り替え先のファイルには beacon が
+    自分で書いた分だけが入る。誰が書いたかに依らず、「プログラム自身の出力」という
+    境界で切れる。
+
+    ``_noise_before_exec`` はこの境界を留めるための試験専用の口 (= 本番経路は None)。
+    exec 前に fd 2 へ書く第三者を忠実に再現する — ``preexec_fn`` は fork 後 exec 前に
+    子の中で走るので、gRPC の fork ハンドラと同じ位置に立てる。
+    """
     env = dict(os.environ)
     env.pop("BEACON_PROJECT_FILE", None)
-    return subprocess.run(["bash", str(stub_tree / "bin" / "beacon"), *argv],
-                          capture_output=True, text=True,
-                          cwd=str(stub_tree), env=env)
+    own_err = stub_tree / "frontend-own.stderr"
+    preexec = None
+    if _noise_before_exec is not None:
+        payload = _noise_before_exec.encode()
+
+        def preexec():  # pragma: no cover - 子プロセス側で走る
+            os.write(2, payload)
+
+    proc = subprocess.run(
+        # $0=bash / $1=張り替え先 / $2=beacon / $3.. = argv。shift してから exec する
+        # ので、beacon は「自分の stderr がファイルに向いた」状態で始まる。
+        ["bash", "-c", 'exec 2>"$1"; shift; exec bash "$@"', "bash",
+         str(own_err), str(stub_tree / "bin" / "beacon"), *argv],
+        capture_output=True, text=True, cwd=str(stub_tree), env=env,
+        preexec_fn=preexec)
+    # 捨てる側 (proc.stderr) には exec 前のノイズが入る。beacon の出力ではないので
+    # 比較には使わない。
+    return subprocess.CompletedProcess(
+        proc.args, proc.returncode, proc.stdout,
+        own_err.read_text(encoding="utf-8") if own_err.exists() else "")
 
 
 def _run_python(stub_tree, argv):
@@ -275,3 +323,51 @@ def test_fanout_states_the_empty_recipient_user(stub_tree):
     for e in seen:
         assert e.get("BEACON_BUS_RECIPIENT_USER", "") == "", (
             "呼び出し元の古い値が漏れています: " + repr(e.get("BEACON_BUS_RECIPIENT_USER")))
+
+
+# --- 比較の境界は「プログラム自身の出力」 (e-6816 / 2026-10-05) ------------------
+
+@pytest.mark.skipif(os.name != "posix",
+                    reason="preexec_fn (fork 後 exec 前に子で走る口) は POSIX のみ")
+def test_the_bash_capture_excludes_noise_written_before_exec(stub_tree):
+    """exec 前に第三者が fd 2 へ書いた行を、beacon の出力と混ぜない。
+
+    実測した混入 (``-n 4``、2026-10-05): 同じ worker に gRPC を初期化するテストが
+    同居していると、fork 時に gRPC の fork ハンドラが子の中で fd 2 へ INFO 行を
+    書き、それが bash フロントの stderr として捕まって完全一致比較が壊れる。
+    beacon は 1 文字も変わっていないのに拒否文が食い違って見える。
+
+    ここでは同じ位置 (fork 後 exec 前) に ``preexec_fn`` でノイズを立て、
+    **ノイズは入らず拒否文は入る** ことを両側から留める。片側だけだと、
+    stderr を丸ごと捨てる実装でも緑になってしまう。
+    """
+    noise = ("I1005 15:24:48.603009 67430876 ev_poll_posix.cc:593] "
+             "FD from fork parent still in poll list: fd(23, generation: 1)\n")
+    argv = ["bus", "send", "--channel", "dm", "--to", "sv-1",
+            "--to-user", "uid-9", "--payload", "{}"]
+    proc = _run_bash(stub_tree, argv, _noise_before_exec=noise)
+    assert "ev_poll_posix" not in proc.stderr, (
+        "exec 前のノイズが beacon の出力として捕まっている:\n" + repr(proc.stderr))
+    assert "相互排他" in proc.stderr, (
+        "ノイズを除くついでに beacon 自身の出力まで落としている:\n"
+        + repr(proc.stderr))
+    assert proc.returncode == 2, proc.stdout
+
+
+@pytest.mark.skipif(os.name != "posix", reason="preexec_fn は POSIX のみ")
+def test_the_two_frontends_still_agree_when_the_child_is_noisy(stub_tree):
+    """ノイズが立っていても両フロントの拒否文の一致判定が成立すること。
+
+    上の試験は「ノイズが入らない」ことを見る。こちらは **この file が塞ぐと宣言して
+    いる drift 検出が、ノイズの有無に関わらず働く** ことを見る (= 本来の目的が
+    ノイズ耐性と引き換えに失われていない)。
+    """
+    noise = "I1005 ev_poll_posix.cc:593] FD from fork parent still in poll list\n"
+    argv = ["bus", "send", "--channel", "dm", "--to", "sv-1",
+            "--to-user", "uid-9", "--payload", "{}"]
+    proc = _run_bash(stub_tree, argv, _noise_before_exec=noise)
+    _rc, cap = _run_python(stub_tree, argv)
+    assert proc.stderr.strip() == cap["stderr"].strip(), (
+        "ノイズ下で両フロントの一致判定が壊れている:\n"
+        "  bash  : " + repr(proc.stderr.strip()) + "\n"
+        "  python: " + repr(cap["stderr"].strip()))
