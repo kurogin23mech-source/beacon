@@ -163,6 +163,103 @@ def resolve_target_from_text(*texts) -> str:
     found = target_ids_in_text(*texts)
     return found[0] if len(found) == 1 else ""
 
+def _arm_contains(items, work_item_id: str, arm: str) -> bool:
+    """``items`` (同じ arm 名でぶら下がる入れ子を含む) に ``work_item_id`` が在るか。
+
+    入れ子だけを担う補助。1 層目の走査は ``occupation.iter_work_items`` が持つ
+    (下の ``resolve_target_from_work_item`` の注記参照)。
+    """
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("id") or "").strip() == work_item_id:
+            return True
+        if _arm_contains(item.get(arm), work_item_id, arm):
+            return True
+    return False
+
+
+def resolve_target_from_work_item(data: dict, work_item_id: str) -> str:
+    """明示的に渡された作業項目から、その親 target の id を返す (解けなければ ``""``)。
+
+    ms-166 e-6852。``beacon decision record --related-task <id>`` のように **作業項目を
+    明示して渡しても**、対象 (``related.target_id``) はその親から決まらず、本文に別の
+    対象 id が 1 件だけ出ているとそちらが勝っていた。ms-173 の fork が実際に踏み、
+    ms-173 の判断が「ms-140 についての判断」として記録された。
+
+    **最も確実な構造的手がかり (明示的に渡された作業項目の親) が、最も弱い手がかり
+    (自由文のスクレイピング) に負けていた** のが穴。この関数が前者を担う。
+
+    1 層目の走査は ``occupation.iter_work_items`` に委ねる (保守性レビュー PR#785 M-1)。
+    初版は ``profession_manifest`` を自分で展開して歩いたが、同じ宣言を読む職種非依存の
+    walk が既に在り、しかも **dev の ``entries`` を ``type == "task"`` に絞るフィルタ**を
+    持っていた。自前実装はそれを欠いていたので、作業項目でない項目 (commit 等) の id を
+    ``--related-task`` に渡されると誤った親を返しうる。知識を 2 箇所に持たず、既存の
+    spine に乗る。
+
+    入れ子だけはここが担う: ``iter_work_items`` は 1 層目を yield するので、同じ
+    ``(target, arm)`` の組で下へ降りる。**入れ子の層には型フィルタが効かない** —
+    1 層目で絞られた作業項目の子であれば、その項目がどの型でも親 target は同じなので
+    対象の答えは変わらないが、型による選別を期待してはいけない。
+
+    純関数のまま置く (このモジュールの契約): プロジェクトの読み込みは呼び出し側が行い、
+    ``data`` を渡す。解けないときは空文字を返し、呼び出し側が本文からの導出に落ちる。
+    """
+    wid = (work_item_id or "").strip()
+    if not wid or not isinstance(data, dict):
+        return ""
+    import occupation
+    nested = []
+    for item, target, arm in occupation.iter_work_items(data):
+        if not isinstance(item, dict) or not isinstance(target, dict):
+            continue
+        if (item.get("id") or "").strip() == wid:
+            return (target.get("id") or "").strip()
+        nested.append((item, target, arm))
+    for item, target, arm in nested:
+        if _arm_contains(item.get(arm), wid, arm):
+            return (target.get("id") or "").strip()
+    return ""
+
+
+def work_item_id_exists(data: dict, work_item_id: str) -> bool:
+    """``work_item_id`` が **型を問わず** どこかの target の宣言 arm に在るか。
+
+    ms-166 e-6819 の独立 AX レビュー AX-3。``resolve_target_from_work_item`` は
+    ``occupation.iter_work_items`` 経由で **作業項目の型に絞って** 探す (dev の
+    ``entries`` は commit / PR / incident も共有する)。だから「存在しない id」と
+    「実在するが作業項目ではない id」が **どちらも空文字** になり、呼び出し側が区別
+    できなかった。PR の id を誤って ``--related-task`` に渡した人は、何の開示もなく
+    本文スクレイピングへ静かに縮退する。
+
+    この関数は型で絞らずに走査するので、上の解決が空だったときに 2 つを切り分けられる。
+    判定にだけ使い、対象の決定には使わない (作業項目でないものの親を対象にはしない)。
+    """
+    wid = (work_item_id or "").strip()
+    if not wid or not isinstance(data, dict):
+        return False
+    import occupation
+    manifest = occupation.profession_manifest(data) or {}
+    for tc in manifest.get("target_classes") or []:
+        collection = (tc.get("collection") or "").strip()
+        if not collection:
+            continue
+        arms = []
+        wia = (tc.get("work_item_arm") or {}).get("arm")
+        if wia:
+            arms.append(wia)
+        for arm in tc.get("arms") or ():
+            if arm and arm not in arms:
+                arms.append(arm)
+        for record in data.get(collection) or []:
+            if not isinstance(record, dict):
+                continue
+            for arm in arms:
+                if _arm_contains(record.get(arm), wid, arm):
+                    return True
+    return False
+
+
 def is_known_target_id(value: str) -> bool:
     """``value`` が台帳にある対象 prefix で始まる id かを返す (純関数)。
 

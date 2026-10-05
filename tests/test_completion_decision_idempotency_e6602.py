@@ -45,6 +45,7 @@ import pytest
 _SERVER = os.path.join(os.path.dirname(__file__), "..", "server")
 sys.path.insert(0, _SERVER)
 
+import _ast_structural as astx  # noqa: E402  (tests/ の共有プリミティブ)
 import decision_event as de  # noqa: E402
 
 
@@ -202,22 +203,15 @@ _RULE = "find_duplicate_completion"
 def _called_names(tree: ast.AST, func_name: str) -> set[str]:
     """``func_name`` の本体から呼ばれている関数名を構造抽出する。
 
-    substring 検索 (``"..." in source``) にしないのは、docstring / コメントに名前が
-    出ているだけで素通りする false-pass を防ぐため (= guard が drift で赤くならない
-    のが最悪の失敗)。実際の ``ast.Call`` のみを数える。
+    実体は ``tests/_ast_structural`` の共有プリミティブ (保守性レビュー PR#785 M-3:
+    同じ ``ast.Name`` / ``ast.Attribute`` の分岐を ms-166 の 3 つの構造ガードが
+    それぞれ手書きしていた)。この名前は既存の呼び出し元のために残す薄い委譲。
+
+    substring 検索 (``"..." in source``) にしない理由も共有物側に書いてある
+    (docstring / コメントの言及だけで素通りする false-pass を防ぐ = guard が drift で
+    赤くならないのが最悪の失敗)。
     """
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == func_name:
-            out = set()
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Call):
-                    f = sub.func
-                    if isinstance(f, ast.Name):
-                        out.add(f.id)
-                    elif isinstance(f, ast.Attribute):
-                        out.add(f.attr)
-            return out
-    return set()
+    return astx.called_names_in_function(tree, func_name)
 
 
 @pytest.mark.parametrize("mod_name", _BACKENDS)

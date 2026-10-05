@@ -84,6 +84,59 @@ def is_prod_api_url(url: str) -> bool:
 # author enabling it for one write path knows it unlocks all of them.
 _PROD_TEST_WRITE_HATCH = "BEACON_ALLOW_PROD_TEST_WRITE"
 
+# 「この抜け道は何を解錠するか」の文言 (ms-166 e-6637 の保守性レビュー M-1)。
+# 以前は 3 つの拒否文言に手書きで写していたため、3 つ目のガード (判断記録) を足した
+# 瞬間に先の 2 つが「project AND bus」のまま古くなった。守る対象が増えても文言が
+# 揃うように 1 箇所から作る — 新しいガードを足す人はここに 1 語足すだけでよい。
+# M-1 では 3 つの拒否文言に射程を手書きしていたのを「1 箇所から作る」形に直した。
+# ところが **その 1 箇所の中身が手書きの文字列だった** ので、4 つ目のガード (読み取り)
+# を足したときに "project, bus AND decision" のまま古くなり、READ を拒否しているのに
+# 「この抜け道は書き込み 3 種を解錠する」と出た (独立 AX レビュー PR#785 AX-1)。
+# **単一真実源を作っても、その中身が守る対象の集合と照合されていなければ、同じ drift が
+# 中身の側で再発する。**
+#
+# なので射程は **ガードの集合から導く**。新しいガードを足す人はこの表に 1 行足すだけで
+# 全文言が揃い、足し忘れたらテストが落ちる
+# (tests/test_prod_read_guard_e6819.py::test_every_guard_is_named_in_the_hatch_scope)。
+_HATCH_SCOPED_GUARDS = {
+    "guard_prod_project_write": "project",
+    "guard_prod_bus_write": "bus",
+    "guard_prod_decision_write": "decision",
+    "guard_prod_read": "read",
+}
+
+
+def _hatch_scope() -> str:
+    """抜け道が解錠する対象の列挙 — 表から組み立てる (手書きしない)。"""
+    labels = list(dict.fromkeys(_HATCH_SCOPED_GUARDS.values()))
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + " AND " + labels[-1]
+
+
+def _isolation_options_note() -> str:
+    """「どう隔離すればよいか」の案内 — 全ガードの拒否文言が共有する 1 文。
+
+    ms-166 e-6819 の保守性レビュー M-6: 推奨する手段 (fixture 2 つと非本番の base_url) を
+    bus / decision / read の文言にそれぞれ手で書き直していた。``_hatch_note`` で学んだ
+    教訓 (3 つ目のガードを足した瞬間に先の 2 つが古くなる) が、もう一段大きいこの重複には
+    適用されていなかった。fixture 名が変わったときに 1 箇所で直るようにする。
+
+    各ガードに固有の事情 (追記専用で消せない / 結果が再現しない 等) は呼び出し側が
+    前後に足す。ここが持つのは **どの隔離手段があるか** だけ。
+    """
+    return ("use the ``fake_cloud_config`` fixture (it points BEACON_PROJECT_FILE at a "
+            "tmp cloud.json so _get_cloud_config_path resolves non-prod in EVERY "
+            "module), force local mode with the ``isolated_project`` fixture (a tmp "
+            ".beacon with no cloud.json, so _is_cloud_mode() is False), or give the "
+            "ApiClient a local/sandbox base_url")
+
+
+def _hatch_note() -> str:
+    """全ガードの拒否文言が共有する「抜け道とその射程」の 1 文。"""
+    return (f"set {_PROD_TEST_WRITE_HATCH}=1 (this shared hatch unlocks ALL "
+            f"prod test access — {_hatch_scope()} — for the process)")
+
 
 def _prod_test_write_blocked(base_url: str) -> bool:
     """True when a prod write from a test context must be refused — the single
@@ -130,8 +183,7 @@ def guard_prod_project_write(base_url: str) -> None:
         "cloud_write_guard: refusing to write a project to the production "
         f"cloud ({base_url}) from a test context. Tests must use local mode "
         "or a sandbox/staging cloud. If this test genuinely must hit prod, "
-        "set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch unlocks ALL "
-        "prod test writes — project AND bus — for the process) AND wrap "
+        f"{_hatch_note()} AND wrap "
         "creation in cloud_write_guard.disposable_project(...) so a crash "
         "can't leak it."
     )
@@ -166,14 +218,85 @@ def guard_prod_bus_write(base_url: str) -> None:
     raise ProdWriteBlocked(
         "cloud_write_guard: refusing to post a bus event to the production "
         f"cloud ({base_url}) from a test context. Fake cloud mode the canonical "
-        "way: use the ``fake_cloud_config`` fixture (it points BEACON_PROJECT_FILE "
-        "at a tmp cloud.json so _get_cloud_config_path resolves non-prod in EVERY "
-        "module — no per-namespace monkeypatch, see tests/conftest.py), or give the "
-        "ApiClient a local/sandbox base_url. Unlike a prod project write, a bus "
+        f"way: {_isolation_options_note()}. Unlike a prod project write, a bus "
         "write has no disposable_project teardown counterpart (bus events are "
         "server-side, not leaked directory residue). If this test genuinely must "
-        "hit the prod bus, set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch "
-        "unlocks ALL prod test writes — project AND bus — for the process)."
+        f"hit the prod bus, {_hatch_note()}."
+    )
+
+
+def guard_prod_decision_write(base_url: str) -> None:
+    """Raise if a test context is about to append a decision to production.
+
+    ms-166 e-6637. The decision stream (= 誰が何をなぜ決めたかの恒久記録) is
+    **append-only**: there is no delete path, so a row a test writes can never be
+    taken back. That makes it the worst place for test residue — worse than a
+    leaked project (archivable) or a bus event (transient). Measured on the live
+    stream: of one session's 100 decisions, roughly 90 were its own test runs
+    (ms-9 / opp-3 / ms-T and others), so the audit arm — the thing a human reads
+    to check what an AI decided — was mostly fiction.
+
+    Why the guard belongs HERE and not in the callers: ``record_decision`` is the
+    single door every writer passes through, so guarding it covers **every** call
+    site in ``lib/`` (spread over 7 modules today) plus every future one. A
+    caller-layer fix would leave all the others open — the same "one door guarded,
+    the others are bypass doors" shape that e-5194 found for the bus and e-5216
+    then closed at the choke point. (No count is quoted here on purpose: the
+    number drifts, and a stale number offered as the justification is worse than
+    none. ``tests/test_decision_write_guard_e6637`` pins the structural facts.)
+
+    No-op outside a test context (normal CLI / autonomous use is unaffected) and
+    no-op for non-prod targets (local mode, staging, a sandbox cloud). The escape
+    hatch ``BEACON_ALLOW_PROD_TEST_WRITE=1`` lets a test that genuinely must write
+    to the live stream opt in — but note there is **no teardown counterpart** for
+    an append-only stream (unlike ``disposable_project``), so an opted-in test
+    leaves a permanent row.
+    """
+    if not _prod_test_write_blocked(base_url):
+        return
+    raise ProdWriteBlocked(
+        "cloud_write_guard: refusing to append a decision to the production "
+        f"cloud ({base_url}) from a test context. The decision stream is "
+        "append-only — a test row cannot be deleted afterwards. Fake cloud mode "
+        f"the canonical way: {_isolation_options_note()}. If this test genuinely must write to "
+        f"the live stream, {_hatch_note()}; there is no teardown that can "
+        "remove the row afterwards."
+    )
+
+def guard_prod_read(base_url: str) -> None:
+    """Raise if a test context is about to READ from production.
+
+    ms-166 e-6819. A test that reads the live cloud is not destructive, but its
+    result depends on **whatever production happens to hold right now** — so it
+    passes or fails for reasons that have nothing to do with the change under
+    test, and it cannot be reproduced. (Observed while fixing e-6852: two unit
+    tests were resolving a work item's parent out of the developer's real
+    project, and one of them only passed because that project happened to
+    contain the id they used.)
+
+    Why the guard sits on the shared transport rather than on each reader: the
+    client exposes ~36 read verbs. Guarding them one at a time is the "one door
+    guarded, the others are bypass doors" shape that e-5194 found for the bus and
+    e-6637 found for decisions. ``_request`` is the single hallway every read
+    passes through, so the GET leg of it is the one place to ask the question.
+
+    No-op outside a test context (normal CLI / autonomous use is unaffected) and
+    no-op for non-prod targets. The escape hatch is the SAME shared one as the
+    write guards (``BEACON_ALLOW_PROD_TEST_WRITE=1``) — deliberately, because a
+    test that opts into touching prod at all should make that one declaration
+    rather than collect a flag per verb.
+    """
+    if not _prod_test_write_blocked(base_url):
+        return
+    raise ProdWriteBlocked(
+        "cloud_write_guard: refusing to READ from the production cloud "
+        f"({base_url}) from a test context. A test whose result depends on live "
+        "production state is not reproducible — it passes or fails for reasons "
+        "unrelated to the change under test. Point the test at fixture data "
+        "instead: stub the reader (``monkeypatch.setattr(commands_shared, "
+        f"'load_project', ...)``), or {_isolation_options_note()}. "
+        "If this test genuinely must read prod, "
+        f"{_hatch_note()}."
     )
 
 

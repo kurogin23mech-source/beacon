@@ -213,12 +213,41 @@ class ApiClient:
         import cloud_write_guard
         cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
 
+    def _guard_read(self) -> None:
+        """Refuse a READ from a test context targeting prod (ms-166 e-6819).
+
+        Same shape as the sibling write helpers — the decision and its deferred
+        import live in one place. Called from the GET leg of :meth:`_request`,
+        the single hallway all ~36 read verbs pass through, so no reader can be
+        forgotten. No-op off test context / non-prod.
+        """
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_read(self._guard_base_url())
+
+    def _guard_decision_write(self) -> None:
+        """Refuse a decision-stream WRITE from a test context targeting prod.
+
+        ms-166 e-6637. Same shape as :meth:`_guard_bus_write` — the decision is
+        made in ONE place so the next author cannot forget a copied preamble.
+        ``record_decision`` is the only door into the append-only stream, so
+        guarding it here covers every ``lib/`` call site and every future one.
+        No-op off test context / non-prod.
+        """
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_decision_write(self._guard_base_url())
+
     def _request(self, method: str, path: str, body: dict | None = None,
                  *, extra_headers: dict | None = None) -> dict:
         # ms-98 / e-2777: fail fast when a recent 429 storm has opened
         # the circuit. Kept ahead of URL / body assembly so an already-
         # tripped breaker never even builds a request object.
         _circuit_check_and_raise()
+        # ms-166 e-6819: 読み取りの唯一の廊下。テスト文脈から本番を読むと、結果が
+        # そのときの本番の状態に左右されて再現しないので断る。書き込みは各扉で既に
+        # 守られているので、ここで問うのは GET だけ (廊下で全部を断つと書き込みの
+        # 診断文言が読み取りのものに置き換わってしまう)。
+        if (method or "").upper() == "GET":
+            self._guard_read()
 
         url = f"{self._base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -598,7 +627,11 @@ class ApiClient:
         ``decision`` is the record body (kind / decision / rationale /
         decided_by / evidence / options / related). The server stamps ``who``
         from the token + session header, so callers do NOT pass identity here.
+
+        ms-166 e-6637: guarded. The stream is append-only, so a row written from
+        a test context can never be removed — the guard refuses instead.
         """
+        self._guard_decision_write()
         return self.post(f"/api/projects/{project_id}/decisions", decision)
 
     def list_decisions(self, project_id: str, *, kind: str = "",

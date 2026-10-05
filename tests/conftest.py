@@ -146,10 +146,27 @@ _NOT_THE_TESTS_FAULT = frozenset({
 # code cannot introduce a new KIND of leak. What it does not gate: another test
 # leaking one of these two names. That is the debt, and it is why the list must
 # shrink to empty rather than grow.
+# ms-166 e-6820 で **真因の片方は畳んだ**: lib/session.py が Path.cwd() から組んで
+# BEACON_PROJECT_FILE を見ていなかった二重流儀を session._beacon_dir() に寄せた。
+# これで以前名指しされていた経路 (review_context / pr_create / api_client /
+# surface_snapshot / attainment) は漏らさなくなり、一覧を空にして 2738 件を走らせた
+# 時点では漏れ 0 件だった。
+#
+# **それでも一覧は空にできない。** フル実行ではまだ漏れる。理由は下のキー設計の注記に
+# 書いてあるとおり、**このガードは「あるファイル名を最初に作ったテスト」しか報告しない**
+# ので、2738 件の部分実行で 0 件でも母集団が空だとは言えないし、1 件直しても次に別の
+# テストが名指しされるだけで収束しない。実際に一度空にしたら CI が落ち、収集順で変わる
+# テストが名指しされた (2026-10-05)。
+#
+# 掃討の順序 (e-6833 の残り):
+#   1. まずガードを **全ての作成者を報告する** 形に変える (現状は最初の 1 件だけ)。
+#   2. フル実行を 1 回して、名前ごとに全作成者の一覧を得る。
+#   3. その一覧を潰してから、この一覧を空にする。
+# この順でないと「1 件直す → 別の 1 件が名指しされる」を繰り返すだけになる。
 KNOWN_LEAKS = frozenset({
-    "session.json",   # in-process calls that stamp session state (lib/session.py,
-                      # which resolves via Path.cwd() and so ignores
-                      # BEACON_PROJECT_FILE — see e-6820)
+    "session.json",   # 残り: lib/session.py の解決は e-6820 で畳んだが、
+                      # BEACON_PROJECT_FILE を設定しないテストは既定の
+                      # cwd/.beacon に落ちるので、そこを通る経路がまだ在る
     "project.db",     # the local SQLite store, materialised by any project read
                       # discovered from the cwd (+ its -shm/-wal sidecars, which
                       # are excluded above so the report stays one line)

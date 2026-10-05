@@ -94,8 +94,14 @@ def test_does_not_slice_target_ids_out_of_other_words():
 # 2. 帰属の機械決定 (欠陥 2)
 # ---------------------------------------------------------------------------
 
-def _run_record(env: dict, captured: dict):
-    """cmd_decision_record を cloud 偽装で 1 回走らせ、送った payload を captured に残す。"""
+def _run_record(env: dict, captured: dict, project: dict | None = None):
+    """cmd_decision_record を cloud 偽装で 1 回走らせ、送った payload を captured に残す。
+
+    ``project`` は ``--related-task`` の親 target を解くときに読まれるプロジェクト
+    (ms-166 e-6852)。既定は **作業項目を 1 つも持たない空のプロジェクト** — 固定しないと
+    開発者の実プロジェクトを読み、結果が手元の状態に左右される (= e-6819 と同じ非 hermetic)。
+    親が解けない状況が既定なので、このファイルが見たい「本文からの解決」がそのまま効く。
+    """
     import cmd_decision
     importlib.reload(cmd_decision)
 
@@ -116,11 +122,16 @@ def _run_record(env: dict, captured: dict):
     base.update(env)
     old = {k: os.environ.get(k) for k in base}
     os.environ.update(base)
+    import commands_shared as _cs
+    _saved_load = _cs.load_project
     try:
         cmd_decision._is_cloud_mode = lambda: True
         cmd_decision._get_api_client = lambda: (_Client(), {"project_id": "p"})
+        _cs.load_project = lambda *a, **k: (project if project is not None
+                                            else {"milestones": []})
         cmd_decision.cmd_decision_record()
     finally:
+        _cs.load_project = _saved_load
         for k, v in old.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -162,10 +173,24 @@ def test_attribution_derivation_shares_the_single_source():
 
 
 def test_record_attaches_the_resolved_target():
+    # 本文からの解決 (e-6603 の主題)。渡した作業項目 e-1 は既定の空プロジェクトに
+    # 存在しないので親が解けず、本文の opp-3 が使われる — これがこのテストの意図。
     captured = {}
     _run_record({"BEACON_DECISION_WHAT": "opp-3 の成約を決めた",
                  "BEACON_DECISION_RELATED_TASK": "e-1"}, captured)
     assert captured["related"]["target_id"] == "opp-3"
+    assert captured["related"]["task_id"] == "e-1"
+
+
+def test_an_explicit_work_item_outranks_the_text():
+    # ms-166 e-6852: 作業項目の親が解けるなら、本文より構造的な手がかりが勝つ
+    # (e-6603 の射程の穴を塞いだ側の挙動を、この家族のテストでも 1 本 pin しておく)。
+    captured = {}
+    _run_record({"BEACON_DECISION_WHAT": "opp-3 の成約を決めた",
+                 "BEACON_DECISION_RELATED_TASK": "e-1"}, captured,
+                project={"milestones": [{"id": "ms-9",
+                                         "entries": [{"id": "e-1", "type": "task"}]}]})
+    assert captured["related"]["target_id"] == "ms-9"
     assert captured["related"]["task_id"] == "e-1"
 
 
