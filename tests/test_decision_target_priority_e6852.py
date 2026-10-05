@@ -296,3 +296,92 @@ def test_swapping_the_priority_order_breaks_the_regression_pin():
     assert fixed == "ms-173"
     assert swapped == "ms-140", "入れ替えても同じ答えになるなら順位を検査できていない"
     assert fixed != swapped
+
+
+# ---------------------------------------------------------------------------
+# 独立 AX レビュー PR#785 の回帰ピン (AX-2 / AX-3)
+# ---------------------------------------------------------------------------
+
+def _record_text(monkeypatch, project, **env):
+    """テキスト経路 (既定) で 1 回走らせて stdout を返す。"""
+    client = _Client()
+    monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_decision, "_get_api_client",
+                        lambda: (client, {"project_id": "p1"}))
+    monkeypatch.setattr(commands_shared, "load_project", lambda *a, **k: project)
+    for k in _ENV:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BEACON_DECISION_WHAT", "ms-140 の件で方針を決めた")
+    monkeypatch.setenv("BEACON_DECISION_EVIDENCE", "commit:abc1234")
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_decision.cmd_decision_record()
+    return buf.getvalue()
+
+
+def test_a_lookup_failure_is_disclosed_in_the_text_path_too(monkeypatch):
+    """AX-2 の回帰ピン: 開示が --json にしか無いと既定経路で気づけない。
+
+    この開示だけが --json 側にあり、テキスト経路で叩いた人は「作業項目の親を解こうと
+    して失敗し、本文に落ちた」事実を知れなかった。すぐ上のコメントに自分で書いた
+    「text と json で同じ情報を出す」規約を、自分が足した新フィールドが破っていた。
+    """
+    def _boom(*a, **k):
+        raise RuntimeError("store unavailable")
+    client = _Client()
+    monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_decision, "_get_api_client",
+                        lambda: (client, {"project_id": "p1"}))
+    monkeypatch.setattr(commands_shared, "load_project", _boom)
+    for k in _ENV:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BEACON_DECISION_WHAT", "ms-140 の件で方針を決めた")
+    monkeypatch.setenv("BEACON_DECISION_EVIDENCE", "commit:abc1234")
+    monkeypatch.setenv("BEACON_DECISION_RELATED_TASK", "e-6799")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_decision.cmd_decision_record()
+    text = buf.getvalue()
+    assert "作業項目の親を解けませんでした" in text, text
+    assert "store unavailable" in text, text
+    assert "本文からの導出" in text, text
+
+
+def test_an_existing_non_work_item_id_is_distinguished_from_a_missing_one(monkeypatch):
+    """AX-3 の回帰ピン: 型違いと不存在が どちらも空文字では区別できない。
+
+    dev の作業項目 arm (entries) は commit / PR / incident も共有するので、PR の id を
+    誤って --related-task に渡すことは起こる。旧挙動では「存在しない id」と同じ空文字に
+    なり、何の開示もなく本文スクレイピングへ静かに縮退した。
+    """
+    project = {"milestones": [{"id": "ms-173", "entries": [
+        {"id": "e-6799", "type": "task"},
+        {"id": "e-9001", "type": "pr", "description": "ある PR"},
+    ]}, {"id": "ms-140", "entries": []}]}
+
+    # (a) 実在するが作業項目でない id → 理由が「作業項目ではない」と分かる
+    text = _record_text(monkeypatch, project, BEACON_DECISION_RELATED_TASK="e-9001")
+    assert "作業項目 (task / 活動) では ありません" in text.replace("\n", " "), text
+
+    # (b) そもそも存在しない id → 別の理由になる
+    text = _record_text(monkeypatch, project, BEACON_DECISION_RELATED_TASK="e-0000")
+    assert "一致する作業項目がありません" in text, text
+
+    # (c) 正しい作業項目 → 親が対象になり、開示は出ない
+    text = _record_text(monkeypatch, project, BEACON_DECISION_RELATED_TASK="e-6799")
+    assert "ms-173" in text, text
+    assert "解けませんでした" not in text, text
+
+
+def test_the_type_agnostic_existence_check_does_not_decide_the_target():
+    """型を問わない存在チェックは判定にだけ使い、対象の決定には使わないこと。
+
+    作業項目でないものの親を対象にしてしまうと、AX-3 の開示が「区別できる」どころか
+    「誤った対象を付ける」に悪化する。
+    """
+    project = {"milestones": [{"id": "ms-173", "entries": [
+        {"id": "e-9001", "type": "pr"}]}]}
+    assert decision_derive.work_item_id_exists(project, "e-9001") is True
+    assert decision_derive.resolve_target_from_work_item(project, "e-9001") == ""

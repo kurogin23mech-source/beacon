@@ -221,6 +221,13 @@ def cmd_decision_record():
         print(f"  帰属: {decided_by} ({_attr_source})")
         if resolved_target:
             print(f"  対象: {resolved_target} ({_target_source})")
+        if _task_lookup_error:
+            # text と --json で同じ情報を出す (独立 AX レビュー PR#785 AX-2)。
+            # この開示だけが --json 側にしか無く、既定のテキスト経路で叩いた人は
+            # 「作業項目の親を解こうとして失敗し、本文に落ちた」事実に気づけなかった。
+            # **自分がすぐ上のコメントに書いた規約を、自分が足した新フィールドが破っていた。**
+            print(f"  ⚠ 作業項目の親を解けませんでした ({_task_lookup_error}) — "
+                  f"対象は本文からの導出になっています")
         elif len(_ambiguous) > 1:
             print(f"  ⚠ 対象を解決できません — 本文に {', '.join(_ambiguous)} が在り"
                   f"どれの判断か決められません (取り違えを避けて空のまま記録しました)。"
@@ -249,7 +256,18 @@ def _work_item_parent_target(related_task: str, *, skip: bool = False):
         data = load_project()
     except Exception as exc:
         return "", f"{type(exc).__name__}: {exc}"
-    return _dd.resolve_target_from_work_item(data, related_task), ""
+    resolved = _dd.resolve_target_from_work_item(data, related_task)
+    if resolved:
+        return resolved, ""
+    # ms-166 e-6819 独立 AX レビュー AX-3: 「存在しない id」と「実在するが作業項目で
+    # ない id」が どちらも空文字で、呼び出し側が区別できなかった。PR / commit の id を
+    # 誤って渡した人は何の開示もなく本文スクレイピングへ静かに縮退する。型を問わない
+    # 存在チェックで切り分けて、理由を開示経路に乗せる。
+    if _dd.work_item_id_exists(data, related_task):
+        return "", (f"{related_task} は存在しますが作業項目 (task / 活動) では "
+                    f"ありません — 作業項目の id を渡すか、対象を --related-target で "
+                    f"明示してください")
+    return "", f"{related_task} に一致する作業項目がありません"
 
 
 def _recognized_decision_kinds() -> frozenset:

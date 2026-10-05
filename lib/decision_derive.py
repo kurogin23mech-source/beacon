@@ -222,6 +222,44 @@ def resolve_target_from_work_item(data: dict, work_item_id: str) -> str:
     return ""
 
 
+def work_item_id_exists(data: dict, work_item_id: str) -> bool:
+    """``work_item_id`` が **型を問わず** どこかの target の宣言 arm に在るか。
+
+    ms-166 e-6819 の独立 AX レビュー AX-3。``resolve_target_from_work_item`` は
+    ``occupation.iter_work_items`` 経由で **作業項目の型に絞って** 探す (dev の
+    ``entries`` は commit / PR / incident も共有する)。だから「存在しない id」と
+    「実在するが作業項目ではない id」が **どちらも空文字** になり、呼び出し側が区別
+    できなかった。PR の id を誤って ``--related-task`` に渡した人は、何の開示もなく
+    本文スクレイピングへ静かに縮退する。
+
+    この関数は型で絞らずに走査するので、上の解決が空だったときに 2 つを切り分けられる。
+    判定にだけ使い、対象の決定には使わない (作業項目でないものの親を対象にはしない)。
+    """
+    wid = (work_item_id or "").strip()
+    if not wid or not isinstance(data, dict):
+        return False
+    import occupation
+    manifest = occupation.profession_manifest(data) or {}
+    for tc in manifest.get("target_classes") or []:
+        collection = (tc.get("collection") or "").strip()
+        if not collection:
+            continue
+        arms = []
+        wia = (tc.get("work_item_arm") or {}).get("arm")
+        if wia:
+            arms.append(wia)
+        for arm in tc.get("arms") or ():
+            if arm and arm not in arms:
+                arms.append(arm)
+        for record in data.get(collection) or []:
+            if not isinstance(record, dict):
+                continue
+            for arm in arms:
+                if _arm_contains(record.get(arm), wid, arm):
+                    return True
+    return False
+
+
 def is_known_target_id(value: str) -> bool:
     """``value`` が台帳にある対象 prefix で始まる id かを返す (純関数)。
 

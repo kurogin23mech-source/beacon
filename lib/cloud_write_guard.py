@@ -88,7 +88,30 @@ _PROD_TEST_WRITE_HATCH = "BEACON_ALLOW_PROD_TEST_WRITE"
 # 以前は 3 つの拒否文言に手書きで写していたため、3 つ目のガード (判断記録) を足した
 # 瞬間に先の 2 つが「project AND bus」のまま古くなった。守る対象が増えても文言が
 # 揃うように 1 箇所から作る — 新しいガードを足す人はここに 1 語足すだけでよい。
-_HATCH_SCOPE = "project, bus AND decision"
+# M-1 では 3 つの拒否文言に射程を手書きしていたのを「1 箇所から作る」形に直した。
+# ところが **その 1 箇所の中身が手書きの文字列だった** ので、4 つ目のガード (読み取り)
+# を足したときに "project, bus AND decision" のまま古くなり、READ を拒否しているのに
+# 「この抜け道は書き込み 3 種を解錠する」と出た (独立 AX レビュー PR#785 AX-1)。
+# **単一真実源を作っても、その中身が守る対象の集合と照合されていなければ、同じ drift が
+# 中身の側で再発する。**
+#
+# なので射程は **ガードの集合から導く**。新しいガードを足す人はこの表に 1 行足すだけで
+# 全文言が揃い、足し忘れたらテストが落ちる
+# (tests/test_prod_read_guard_e6819.py::test_every_guard_is_named_in_the_hatch_scope)。
+_HATCH_SCOPED_GUARDS = {
+    "guard_prod_project_write": "project",
+    "guard_prod_bus_write": "bus",
+    "guard_prod_decision_write": "decision",
+    "guard_prod_read": "read",
+}
+
+
+def _hatch_scope() -> str:
+    """抜け道が解錠する対象の列挙 — 表から組み立てる (手書きしない)。"""
+    labels = list(dict.fromkeys(_HATCH_SCOPED_GUARDS.values()))
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + " AND " + labels[-1]
 
 
 def _isolation_options_note() -> str:
@@ -112,7 +135,7 @@ def _isolation_options_note() -> str:
 def _hatch_note() -> str:
     """全ガードの拒否文言が共有する「抜け道とその射程」の 1 文。"""
     return (f"set {_PROD_TEST_WRITE_HATCH}=1 (this shared hatch unlocks ALL "
-            f"prod test writes — {_HATCH_SCOPE} — for the process)")
+            f"prod test access — {_hatch_scope()} — for the process)")
 
 
 def _prod_test_write_blocked(base_url: str) -> bool:

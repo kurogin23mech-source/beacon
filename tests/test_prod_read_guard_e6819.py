@@ -234,3 +234,84 @@ def test_the_sharing_guard_fails_when_a_guard_hand_rolls_the_guidance():
     fn = astx.function_named(ast.parse(src), "guard_prod_something")
     assert "_isolation_options_note" not in astx.called_names(fn), (
         "guard が緩い: 文言に fixture 名が出ているだけで通ってしまう")
+
+
+# ---------------------------------------------------------------------------
+# 6. 抜け道の射程がガードの集合と一致していること (独立 AX レビュー PR#785 AX-1)
+# ---------------------------------------------------------------------------
+#
+# M-1 で「射程の文言を 1 箇所から作る」形にしたのに、**その 1 箇所の中身が手書きの
+# 文字列**だったので、4 つ目のガード (読み取り) を足したとき "project, bus AND decision"
+# のまま古くなり、READ を拒否しているのに「書き込み 3 種を解錠する」と出た。
+# 単一真実源を作っても、その中身が守る対象の集合と照合されていなければ、同じ drift が
+# 中身の側で再発する。ここがその照合。
+
+def _declared_guards() -> set:
+    """モジュールに実在する ``guard_prod_*`` 関数名の集合 (構文木から)。"""
+    tree = ast.parse(open(os.path.join(_LIB, "cloud_write_guard.py"),
+                          encoding="utf-8").read())
+    return {n.name for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name.startswith("guard_prod")}
+
+
+def test_every_guard_is_named_in_the_hatch_scope():
+    declared = _declared_guards()
+    scoped = set(cloud_write_guard._HATCH_SCOPED_GUARDS)
+    missing = sorted(declared - scoped)
+    assert not missing, (
+        "抜け道の射程表に載っていないガードがあります — その文言は古くなります "
+        f"(lib/cloud_write_guard._HATCH_SCOPED_GUARDS に足してください): {missing}")
+    ghosts = sorted(scoped - declared)
+    assert not ghosts, (
+        f"射程表に実在しないガードが載っています (改名で腐りました): {ghosts}")
+
+
+def test_the_scope_phrase_is_derived_not_hand_written():
+    # 表から導いていること。手書きの定数に戻ると、ガードを足したとき古くなる。
+    tree = ast.parse(open(os.path.join(_LIB, "cloud_write_guard.py"),
+                          encoding="utf-8").read())
+    fn = astx.function_named(tree, "_hatch_note")
+    assert fn is not None
+    assert "_hatch_scope" in astx.called_names(fn), (
+        "_hatch_note が射程を導出していません — 手書きの文字列に戻っています")
+
+
+def test_every_refusal_names_the_full_scope():
+    # 4 つのガードすべてが同じ (完全な) 射程を言うこと。読み取りを拒否しているのに
+    # 書き込みだけを列挙すると、読み手は「読み取りを解除する別の仕組み」を探しに行く。
+    scope = cloud_write_guard._hatch_scope()
+    saved = os.environ.get("BEACON_TEST_MODE")
+    hatch = os.environ.pop("BEACON_ALLOW_PROD_TEST_WRITE", None)
+    os.environ["BEACON_TEST_MODE"] = "1"
+    try:
+        for name in sorted(_declared_guards()):
+            try:
+                getattr(cloud_write_guard, name)("https://beacon-ai.dev")
+            except cloud_write_guard.ProdWriteBlocked as exc:
+                assert scope in str(exc), (
+                    name + " の拒否文言が完全な射程を言っていません: " + str(exc))
+            else:  # pragma: no cover
+                raise AssertionError(name + " が本番 × テスト文脈で拒否しませんでした")
+    finally:
+        if saved is None:
+            os.environ.pop("BEACON_TEST_MODE", None)
+        else:
+            os.environ["BEACON_TEST_MODE"] = saved
+        if hatch is not None:
+            os.environ["BEACON_ALLOW_PROD_TEST_WRITE"] = hatch
+
+
+def test_the_phrase_does_not_say_writes_only():
+    # 読み取りも同じ抜け道で解錠されるので、「writes」だけを指す語にしない。
+    note = cloud_write_guard._hatch_note()
+    assert "prod test access" in note, note
+    assert "prod test writes" not in note, (
+        "射程に読み取りが含まれるのに『writes』と言っています: " + note)
+
+
+def test_the_scope_guard_fails_when_a_guard_is_forgotten():
+    # test-the-test: 5 つ目のガードを足して表に入れ忘れた状態を合成して、検出が拾うこと。
+    declared = _declared_guards() | {"guard_prod_something_new"}
+    scoped = set(cloud_write_guard._HATCH_SCOPED_GUARDS)
+    assert sorted(declared - scoped) == ["guard_prod_something_new"]
