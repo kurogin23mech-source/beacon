@@ -60,6 +60,35 @@ _CLOUD_JSON_RELATIVE = Path(".beacon") / "cloud.json"
 # was the silent-drift attack surface — cloud.json existence is now sole truth.
 _BRIDGES_DIR_RELATIVE = Path(".beacon") / "bridges"
 
+def _beacon_dir() -> Path:
+    """``.beacon/`` の場所を解決する **唯一の口** (ms-166 e-6820)。
+
+    この repo は「プロジェクトの保存先はどこか」に 2 通りで答えていた:
+
+    * ``commands_shared.get_project_file()`` は ``BEACON_PROJECT_FILE`` を読む
+      — 保存庫 / bus の予算 / 送信記録 / ドキュメントがこちら。
+    * このモジュールは ``Path.cwd()`` から組み、その環境変数を **見ていなかった**
+      — session.json / cloud.json / bridge の claim / bridges/ がこちら。
+
+    だから環境変数だけを設定したテストは、後者の家族を **本物の repo の .beacon/ に
+    書き続けた**。``tests/conftest.py`` の既知の漏れ一覧に session.json が載っていたのが
+    その実害で、``isolated_project`` fixture が「隔離には 2 手要る」と説明していたのも
+    この二重流儀のため。
+
+    規則: ``BEACON_PROJECT_FILE`` が設定されていればその **親ディレクトリ**、無ければ
+    従来どおり ``Path.cwd() / ".beacon"``。既定の挙動 (本番 / 通常の CLI 利用) は
+    変わらない — 変わるのは環境変数を設定した文脈だけで、それがこの修正の目的。
+
+    cwd を **値として** 使う箇所 (worktree の識別 / 作業ディレクトリの申告) はここを
+    通さない。あれはパスの解決ではなく「自分がどこに居るか」の報告なので別物。
+    """
+    override = os.environ.get("BEACON_PROJECT_FILE", "").strip()
+    if override:
+        return Path(override).expanduser().parent
+    return Path.cwd() / ".beacon"
+
+
+
 ENV_FORCE_MINT = "BEACON_FORCE_MINT"
 
 _DEFAULT_FRESHNESS_SECONDS = 3600
@@ -88,7 +117,7 @@ def _session_json_path() -> Path:
     (find_beacon_root), so CWD == project root for all sub-commands.
     Mirrors lib/agent._agent_json_path for consistency.
     """
-    return Path.cwd() / _SESSION_JSON_RELATIVE
+    return _beacon_dir() / _SESSION_JSON_RELATIVE.name
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +210,7 @@ def _is_cloud_mode() -> bool:
     """
     if os.environ.get("BEACON_CLOUD") == "1":
         return True
-    return (Path.cwd() / _CLOUD_JSON_RELATIVE).exists()
+    return (_beacon_dir() / _CLOUD_JSON_RELATIVE.name).exists()
 
 
 def _should_cloud_sync(last_sync_iso: str) -> bool:
@@ -510,7 +539,7 @@ def _get_or_mint_session_via_server_impl() -> dict:
     ``_in_cloud_first_mint`` guard without indenting the entire body by
     another level. Identical semantics to the pre-e-2870 body.
     """
-    cloud_path = Path.cwd() / _CLOUD_JSON_RELATIVE
+    cloud_path = _beacon_dir() / _CLOUD_JSON_RELATIVE.name
     if not cloud_path.exists():
         raise RuntimeError("cloud.json not found (local-mode project?)")
     with cloud_path.open("r", encoding="utf-8") as f:
@@ -816,12 +845,12 @@ _BRIDGE_CLAIM_RELATIVE = Path(".beacon") / "bridge.json"
 
 def _bridge_claim_path() -> Path:
     """Resolve .beacon/bridge.json against CWD (same convention as session.json)."""
-    return Path.cwd() / _BRIDGE_CLAIM_RELATIVE
+    return _beacon_dir() / _BRIDGE_CLAIM_RELATIVE.name
 
 
 def _bridges_dir() -> Path:
     """Resolve .beacon/bridges/ — per-sid bridge claim directory (e-1460)."""
-    return Path.cwd() / _BRIDGES_DIR_RELATIVE
+    return _beacon_dir() / _BRIDGES_DIR_RELATIVE.name
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1160,7 +1189,7 @@ def _codex_session_pointer_path() -> Path:
     the cwd (hooks, the agent's own `beacon bus send`) can discover the stable
     codex- sid without pid math.
     """
-    return Path.cwd() / ".beacon" / "codex" / "receive-loop.session.json"
+    return _beacon_dir() / "codex" / "receive-loop.session.json"
 
 
 def read_codex_session_pointer() -> str:

@@ -344,19 +344,38 @@ def test_a_misspelled_opt_out_marker_cannot_be_silent():
 # --- recorded debt, not a silenced guard (ms-166 e-6621 / e-6833) ------------
 
 
-def test_known_leaks_are_recorded_not_hidden():
-    """The debt must be readable as debt, with each entry explained.
+def test_the_gate_is_fully_closed():
+    """ms-166 e-6833: 負債一覧は空になり、ゲートは全面になった。
 
-    A bare set of filenames is indistinguishable from "we decided these are
-    fine". What makes it debt is that it is named, reasoned, and shrinking.
+    #780 (e-6621) は出血を止めるために 2 件を負債として記録し、「新しい種類だけを
+    止める」部分ゲートで妥協した。e-6833 がその 2 件を決着させた (真因は e-6820 =
+    プロジェクトの保存先を指す流儀が 2 つあり片方しか隔離できなかったこと)。
+    いまは **どのファイル名の漏れも落ちる**。
+
+    空であることを assert するのは、再び部分ゲートに戻ったら気付くため。
     """
     import conftest
-    assert conftest.KNOWN_LEAKS, "an empty list means the gate is fully closed"
+    assert conftest.KNOWN_LEAKS == frozenset(), (
+        "負債一覧に項目が戻っています: " + repr(sorted(conftest.KNOWN_LEAKS))
+        + " — 一時的に認めるなら下のテストが要求する説明と担当 task を添えてください")
+
+
+def test_if_debt_returns_each_entry_must_be_explained():
+    """再び負債を載せるなら、名前・理由・担当 task が揃っていること。
+
+    規律そのものは残す: 名前だけの集合は「これは許容と決めた」と区別がつかない。
+    負債であることの条件は、名前が付き、理由が書かれ、減っていくこと。
+    一覧が空の今は要求が空振りする (= この test は将来のための歯止め)。
+    """
+    import conftest
+    if not conftest.KNOWN_LEAKS:
+        return
     src = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
-    block = src.split("KNOWN_LEAKS = frozenset({", 1)[1].split("})", 1)[0]
     for name in conftest.KNOWN_LEAKS:
-        assert name in block, name
-    assert "e-6833" in src, "the debt must point at the task that burns it down"
+        assert name in src, (
+            name + " が conftest.py の本文で説明されていません (名前だけの免除は"
+            "『許容と決めた』と区別がつきません)")
+    assert "e-68" in src, "負債は、それを burn down する task を指していること"
 
 
 def test_a_new_kind_of_leak_still_fails(tmp_path):
@@ -379,17 +398,25 @@ def test_a_new_kind_of_leak_still_fails(tmp_path):
     assert "brand-new-leak.json" in (r.stdout + r.stderr), r.stdout + r.stderr
 
 
-def test_a_known_leak_does_not_fail(tmp_path):
-    """And the recorded ones do not, which is what lets CI go green today."""
+def test_the_former_debt_now_fails_too(tmp_path):
+    """ms-166 e-6833: かつて免除されていた名前も、いまは落ちる。
+
+    #780 の時点では ``session.json`` を書くテストは **通った** (負債として免除されて
+    いたため)。e-6820 で真因を畳み、e-6833 で一覧を空にしたので、同じことをすると
+    落ちる。これが「部分ゲート → 全面ゲート」の実証で、免除が静かに残っていないことの
+    確認でもある。
+    """
     watch = tmp_path / "watched"
     watch.mkdir()
     body = (
         "import os\n"
         f"WATCH = {str(watch)!r}\n"
-        "def test_known_kind():\n"
+        "def test_former_debt_kind():\n"
         "    open(os.path.join(WATCH, 'session.json'), 'w').write('{}')\n"
     )
-    r = _run_one(body, "test_e6621_probe_knownkind.py", watch)
-    assert r.returncode == 0, (
-        "a recorded leak failed the suite — CI would stay red:\n"
+    r = _run_one(body, "test_e6621_probe_formerdebt.py", watch)
+    assert r.returncode != 0, (
+        "かつて免除されていた名前がまだ素通りします — 免除がどこかに残っています:\n"
         + r.stdout + r.stderr)
+    assert "session.json" in (r.stdout + r.stderr), (
+        "落ちたが、どのファイルが漏れたかを名指ししていません")
