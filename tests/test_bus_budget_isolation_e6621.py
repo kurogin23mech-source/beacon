@@ -393,3 +393,97 @@ def test_a_known_leak_does_not_fail(tmp_path):
     assert r.returncode == 0, (
         "a recorded leak failed the suite — CI would stay red:\n"
         + r.stdout + r.stderr)
+
+
+# --- 覆域の軸は「残ったか」であって「名前」ではない (e-6816 / 2026-10-05) ------
+#
+# 以前は「アトミック書き込みの途中半分」を _NOT_THE_TESTS_FAULT に名前で 1 件ずつ
+# 載せて免除していた (project.json.tmp)。軸がファイル名だったので、同じ機構の別名
+# (session-state.json.tmp) がそのまま素通りし、.beacon/ を一切触らないテストを
+# 名指しした。以下はその軸の入れ替えが、免除すべきものだけを免除し、捕まえるべき
+# ものは捕まえることを両側から留める。
+
+def test_a_file_gone_by_report_time_is_not_reported(tmp_path):
+    """スナップショット時には在り、報告時には消えているファイルを報告しない。
+
+    これが実際に起きた形: after スナップショットと報告の間に、**スイート外の
+    書き手** (開発者自身のセッションのフックがアトミックに session-state.json を
+    書き換える) の .tmp が窓に入る。2026-10-05 に -n 4 で実測、.beacon/ を一切
+    触らない test_plugin_skill_matches_canonical_source が名指しされた。
+
+    判定関数を直接測る (fixture 越しの振る舞いでは測れない)。テスト本体から
+    os.replace しても、after スナップショットは teardown 時なので既に消えており
+    スナップショットがそれを見ない = 空振りのプローブになる。実際にこれを最初に
+    書いて反転テストで空振りだと分かった。報告時に消えているという条件は、
+    「スナップショット後に第三者が消す」ことでしか作れず、時間に依らせずに
+    再現できないため、決定を下す関数の側を留める。
+    """
+    import conftest
+    watch = tmp_path / "watched"
+    watch.mkdir()
+    (watch / "stays.json").write_text("{}", encoding="utf-8")
+    kept = conftest._report_persisting(
+        str(watch), {"stays.json", "session-state.json.tmp"})
+    assert kept == {"stays.json"}, (
+        "消えたファイルを報告対象に残している (名前で免除していた時代の形): "
+        + repr(kept))
+
+
+def test_a_persisting_tmp_file_is_still_reported(tmp_path):
+    """残った .tmp は報告する — 名前での免除が構造的に見逃していた側。
+
+    project.json.tmp は名前で免除されていたので、**本当に置き去りにされた**
+    場合も報告されなかった。軸を永続性に変えると、免除は「消えたもの」だけに
+    かかり、残ったものは名前に関わらず捕まる。つまりこの入れ替えは前より緩く
+    なく、厳しくなっている。
+    """
+    watch = tmp_path / "watched"
+    watch.mkdir()
+    body = (
+        "import os\n"
+        f"WATCH = {str(watch)!r}\n"
+        "def test_leaves_a_tmp():\n"
+        "    open(os.path.join(WATCH, 'project.json.tmp'), 'w').write('{}')\n"
+    )
+    r = _run_one(body, "test_e6621_probe_persisting_tmp.py", watch)
+    assert r.returncode != 0, (
+        "置き去りにされた .tmp を見逃している:\n" + r.stdout + r.stderr)
+    assert "project.json.tmp" in (r.stdout + r.stderr), (
+        "発火したがファイル名を言っていない:\n" + r.stdout + r.stderr)
+
+
+def test_no_transient_is_excused_by_name_any_more():
+    """免除一覧に .tmp 名を戻さない。
+
+    戻すと、その名前だけは「残っていても」免除される状態に逆戻りする
+    (免除の意味が『消えたから無害』ではなく『この名前だから無害』に化ける)。
+    """
+    import conftest
+    offenders = [n for n in conftest._NOT_THE_TESTS_FAULT if n.endswith(".tmp")]
+    assert offenders == [], (
+        "途中半分を名前で免除している: " + repr(offenders) +
+        " — 免除は _report_persisting (残ったかどうか) が所管する")
+
+
+def test_the_guard_actually_routes_through_the_persistence_filter():
+    """判定関数が在るだけでなく、ガードがそれを**通っている**ことを留める。
+
+    上の unit test は _report_persisting の論理を測るが、fixture がそれを呼ぶのを
+    やめても緑のままになる (関数が定義されたまま未使用になるだけ)。実際に反転
+    テストで確認した: 呼び出しを外しても unit test は通った。「足した」と
+    「全域に効く」は別なので、消費側の配線も構造で留める。
+
+    文字列の部分一致ではなく構文木から呼び出し名を抽出する (共有プリミティブ
+    tests/_ast_structural.py)。help 文や docstring に名前が出ているだけで
+    素通りするのが緩い一致の失敗形。
+    """
+    import ast
+
+    from _ast_structural import called_names_in_function
+
+    src = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    called = called_names_in_function(ast.parse(src), "_fail_on_repo_beacon_write")
+    assert "_report_persisting" in called, (
+        "ガードが永続性フィルタを通っていない — 報告は after スナップショットの "
+        "差分そのままになり、窓に入った途中半分で無関係なテストを名指しする。"
+        "実際に呼ばれている名前: " + repr(sorted(called)))

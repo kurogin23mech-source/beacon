@@ -109,15 +109,13 @@ _NOT_THE_TESTS_FAULT = frozenset({
     "triggers",              # the trigger engine fires into this directory
     "bridges",              # per-bridge registration directory
     "fork-notes-backup",     # fork cleanup's snapshot dir (ms-178 e-6702)
-    # Transient half of the cloud cache's atomic write (lib/store_api.py writes
-    # "<cache>.tmp" then renames). A test that calls load_project() without its
-    # own project file fetches from the cloud and refreshes this cache, which is
-    # a legitimate read path, not state the test invented. Serially the rename
-    # completes inside the same test and the name is gone again by teardown; it
-    # only becomes visible under -n auto, where one worker's mid-write lands in
-    # another's before/after window — 29 innocent tests blamed in one run,
-    # measured 2026-10-01 (see e-6816).
-    "project.json.tmp",
+    # NOTE: the transient half of an atomic write ("<name>.tmp", written then
+    # renamed) used to be excused HERE, one name at a time — "project.json.tmp"
+    # sat in this set. That axis was wrong: it exempted the one transient we had
+    # met instead of the property that makes a transient harmless, so the next
+    # atomic writer leaked straight through it. It did, measured below in
+    # _report_persisting. The rule now lives at report time and is keyed on
+    # persistence, which is what the harm model is about.
 })
 
 # NOTE on what this guard does NOT see: it reports files a test CREATES, so a
@@ -211,6 +209,47 @@ def _snapshot_beacon_dir(beacon_dir: str) -> "set[str]":
     return out
 
 
+def _report_persisting(beacon_dir: str, created: "set[str]") -> "set[str]":
+    """Keep only the names that are STILL on disk — the ones actually left behind.
+
+    The guard's harm model is persistence: "a file left there changes how the
+    NEXT run of the suite behaves." A name that was present at the after-snapshot
+    but is gone by the time we report was never left behind, so reporting it
+    cannot be right — whatever it was, the next run will not see it.
+
+    Two writers produce exactly that shape, and both blamed innocent tests:
+
+    * **Atomic writes inside the suite.** ``<name>.tmp`` then ``os.replace``.
+      Serially the rename lands inside the same test and the name is gone by
+      teardown; under ``-n auto`` one worker's mid-write falls in another's
+      before/after window — 29 innocent tests blamed in one run, measured
+      2026-10-01 (lib/store_api.py's cloud cache).
+    * **Writers that are not the suite at all.** A developer's own Claude Code
+      session has ``bin/beacon-state-hook.py`` wired into five hooks; every turn
+      it walks up from the cwd to this repo's ``.beacon/`` and atomically
+      rewrites ``session-state.json``. Measured 2026-10-05: the suite under
+      ``-n 4`` reported ``session-state.json.tmp`` against
+      test_plugin_skill_matches_canonical_source, a test that does not touch
+      ``.beacon/`` at all. CI has no interactive session, so this false alarm
+      fires ONLY on a developer's machine — which is the worst place for it, the
+      one where "run it again" gets learned.
+
+    The previous fix for the first writer named ``project.json.tmp`` in
+    ``_NOT_THE_TESTS_FAULT``. That axis was the file name, so the second writer's
+    ``.tmp`` — a different name, same mechanism — went straight through it. Keying
+    on persistence covers every atomic writer, present and future, without
+    enumerating any of them, and it is strictly STRONGER than the name exclusion
+    it replaces: a ``project.json.tmp`` that genuinely persists is now reported,
+    whereas the name exclusion was permanently blind to it.
+
+    What this deliberately does NOT do: identify the writer. A persisting file
+    created by an outside process is still reported against whichever test
+    straddled it. Persistence is checkable here; authorship is not.
+    """
+    return {name for name in created
+            if os.path.exists(os.path.join(beacon_dir, name))}
+
+
 @pytest.fixture(autouse=True)
 def _fail_on_repo_beacon_write(request):
     """Fail the test that leaves a new file in the real repo ``.beacon/``.
@@ -250,7 +289,8 @@ def _fail_on_repo_beacon_write(request):
         return
     before = _snapshot_beacon_dir(beacon_dir)
     yield
-    created_all = _snapshot_beacon_dir(beacon_dir) - before
+    created_all = _report_persisting(beacon_dir,
+                                     _snapshot_beacon_dir(beacon_dir) - before)
     _OBSERVED_LEAKS.update(created_all & KNOWN_LEAKS)
     created = sorted(created_all - KNOWN_LEAKS)
     if created:
