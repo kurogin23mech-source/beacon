@@ -97,6 +97,11 @@ def _run_bash(stub_tree, argv, *, _noise_before_exec=None):
     env = dict(os.environ)
     env.pop("BEACON_PROJECT_FILE", None)
     own_err = stub_tree / "frontend-own.stderr"
+    # 張り替え先は **環境変数で名前付きに** 渡す。位置引数で渡して shift で数える形
+    # だと、argv の前に要素を足したり並びを変えた次の人が、2 行上のコメントだけが
+    # 守っていた対応関係を静かに壊す (独立保守性レビュー M-2)。名前で参照すれば
+    # 並びに依らない。
+    env["BEACON_TEST_FRONTEND_STDERR"] = str(own_err)
     preexec = None
     if _noise_before_exec is not None:
         payload = _noise_before_exec.encode()
@@ -105,10 +110,10 @@ def _run_bash(stub_tree, argv, *, _noise_before_exec=None):
             os.write(2, payload)
 
     proc = subprocess.run(
-        # $0=bash / $1=張り替え先 / $2=beacon / $3.. = argv。shift してから exec する
-        # ので、beacon は「自分の stderr がファイルに向いた」状態で始まる。
-        ["bash", "-c", 'exec 2>"$1"; shift; exec bash "$@"', "bash",
-         str(own_err), str(stub_tree / "bin" / "beacon"), *argv],
+        # $0 はプレースホルダ、"$@" が beacon とその引数。exec した後に自分の stderr を
+        # 張り替えるので、beacon は「自分の stderr がファイルに向いた」状態で始まる。
+        ["bash", "-c", 'exec 2>"$BEACON_TEST_FRONTEND_STDERR"; exec bash "$@"',
+         "bash", str(stub_tree / "bin" / "beacon"), *argv],
         capture_output=True, text=True, cwd=str(stub_tree), env=env,
         preexec_fn=preexec)
     # 捨てる側 (proc.stderr) には exec 前のノイズが入る。beacon の出力ではないので
@@ -327,8 +332,12 @@ def test_fanout_states_the_empty_recipient_user(stub_tree):
 
 # --- 比較の境界は「プログラム自身の出力」 (e-6816 / 2026-10-05) ------------------
 
-@pytest.mark.skipif(os.name != "posix",
-                    reason="preexec_fn (fork 後 exec 前に子で走る口) は POSIX のみ")
+# 同じ skip 条件の説明を 2 通り書くと、pytest -rs で一覧した読み手が「条件が違うのか」
+# と余計に確認する (独立 AX レビュー、原則1)。1 箇所から作る。
+_POSIX_ONLY = "preexec_fn (fork 後 exec 前に子で走る口) は POSIX のみ"
+
+
+@pytest.mark.skipif(os.name != "posix", reason=_POSIX_ONLY)
 def test_the_bash_capture_excludes_noise_written_before_exec(stub_tree):
     """exec 前に第三者が fd 2 へ書いた行を、beacon の出力と混ぜない。
 
@@ -354,7 +363,7 @@ def test_the_bash_capture_excludes_noise_written_before_exec(stub_tree):
     assert proc.returncode == 2, proc.stdout
 
 
-@pytest.mark.skipif(os.name != "posix", reason="preexec_fn は POSIX のみ")
+@pytest.mark.skipif(os.name != "posix", reason=_POSIX_ONLY)
 def test_the_two_frontends_still_agree_when_the_child_is_noisy(stub_tree):
     """ノイズが立っていても両フロントの拒否文の一致判定が成立すること。
 

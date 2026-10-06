@@ -105,19 +105,39 @@ jobs:
         #
         #   -n 4,    2 runs (fixed order + random order):  10141 passed, 0 failed
         #   -n auto (= 10 workers), 3 runs: ONE failure each run, a DIFFERENT
-        #     test every time. Two of the three were the same root cause and it
-        #     is not ours: `git push` itself died, SIGTRAP once and SIGABRT once,
-        #     with empty stdout/stderr. Apple git aborting under heavy concurrent
-        #     use, not suite state — each test passes alone.
+        #     test every time. All three are accounted for, and only one was ours:
+        #       run 1  test_rollback            `git push` died, SIGTRAP
+        #       run 2  bcodex readyz            OURS — fixed in this PR (902c6bbc)
+        #       run 3  test_vps_pull_deploy     `git push` died, SIGABRT
+        #     The two git deaths had empty stdout/stderr: Apple git aborting under
+        #     heavy concurrent use, not suite state — each test passes alone.
         #
-        # So `-n auto` ties the condition to the runner's core count: today's
-        # 2-4-core runner behaves like -n 4, a bigger one starts crashing git and
-        # the failure names a different innocent test every run. Pinning keeps CI
-        # reproducible against the number this was actually measured at, which is
-        # the same property the three fixes above were about. Raise it only with
-        # a measurement at the new number, and keep the measurements in THIS
-        # comment (pyproject.toml deliberately holds none — see its xdist entry).
-        run: pytest tests/ -n 4 -q
+        # So `-n auto` ties the worker count to the runner, and at 10 workers this
+        # suite starts hitting a git that aborts. Pinning keeps CI reproducible
+        # against the number this was actually measured at, which is the same
+        # property the three fixes above were about. Raise it only with a
+        # measurement at the new number, and keep the measurements in THIS comment
+        # (pyproject.toml deliberately holds none — see its xdist entry).
+        #
+        # The risk a PINNED 4 carries runs the OTHER way, and the run below makes
+        # it visible rather than leaving it to this prose. A bigger runner is fine
+        # (still 4 workers, less contention than measured). A SMALLER one is not:
+        # 4 workers on 2 cores is oversubscription, and the load-sensitive tests
+        # are exactly the ones that then flake — tests/test_local_file_lock_
+        # concurrency.py declares itself "<5s on a typical dev laptop" and it did
+        # fail once at -n 4 while the laptop was busy with other work. The runner's
+        # core count was never measured when 4 was chosen (an assumption about
+        # GitHub's runners, not an observation), so the step prints it every run
+        # and warns when it is below the worker count. An assumption that prints
+        # itself cannot quietly stop being true.
+        run: |
+          cores=$(nproc)
+          echo "runner cores: ${cores} / pytest workers: 4"
+          if [ "${cores}" -lt 4 ]; then
+            echo "::warning::4 pytest workers on ${cores} cores — oversubscribed."\
+                 "Load-sensitive tests may flake; see the comment on this step."
+          fi
+          pytest tests/ -n 4 -q
 
   frontend-drift:
     # ms-160 e-5808: make the Web/Tauri frontend-drift guard a hard CI stop.

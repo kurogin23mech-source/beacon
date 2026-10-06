@@ -19,6 +19,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BCODEX = REPO_ROOT / "bin" / "bcodex"
 
 
+def _read_calls(path) -> list:
+    """argv を 1 行 1 JSON で書き足した記録を読む (fake codex / fake beacon 共通)。
+
+    この式はこのファイル内に 5 箇所コピーされていた (独立保守性レビュー M-1 が 2〜3
+    箇所として指摘、実際に grep したら 5 箇所)。空行の扱い・未作成ファイルの扱い・
+    文字コードを変えたい次の人が 1 箇所だけ直して「直した」と思い込める形だった。
+
+    この PR 自身が「同じ機構の別名が名前ベースの免除を素通りした」という単一真実源
+    違反を直す回なので、同じ型の重複を同じ差分で持ち込むのは筋が通らない。
+
+    ファイル未作成は空の記録として扱う (fixture が作る前に読む経路が 1 つある)。
+    """
+    from pathlib import Path as _Path
+    path = _Path(path)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
 def _make_fake_codex(bin_dir: Path, calls_path: Path) -> None:
     fake = bin_dir / "codex"
     fake.write_text(textwrap.dedent(f"""
@@ -95,11 +115,7 @@ PY
         text=True,
         timeout=10,
     )
-    calls = [
-        json.loads(line)
-        for line in calls_path.read_text().splitlines()
-        if line.strip()
-    ]
+    calls = _read_calls(calls_path)
     return proc, calls, project
 
 
@@ -179,10 +195,7 @@ def test_bcodex_no_websockets_warning_when_present(tmp_path):
 
 
 def _beacon_calls(tmp_path: Path) -> list[list[str]]:
-    p = tmp_path / "beacon_calls.json"
-    if not p.exists():
-        return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    return _read_calls(tmp_path / "beacon_calls.json")
 
 
 def test_bcodex_armed_auto_grants_budget(tmp_path):
@@ -283,7 +296,7 @@ def _await_call(calls_path, predicate, *, timeout=10.0):
     """
     deadline = time.monotonic() + timeout
     while True:
-        calls = [json.loads(l) for l in calls_path.read_text().splitlines() if l.strip()]
+        calls = _read_calls(calls_path)
         if any(predicate(c) for c in calls):
             return calls
         if time.monotonic() >= deadline:
@@ -326,7 +339,7 @@ def _run_readyz(tmp_path, args, *, await_call=None):
     if await_call is not None:
         calls = _await_call(calls_path, await_call)
     else:
-        calls = [json.loads(l) for l in calls_path.read_text().splitlines() if l.strip()]
+        calls = _read_calls(calls_path)
     return proc, calls, project, bound_marker
 
 
@@ -384,7 +397,7 @@ def test_bcodex_readyz_gate_fails_open_when_never_ready(tmp_path):
     env["BEACON_BCODEX_READYZ_TIMEOUT"] = "1"  # 1s cap → fail-open fast
     proc = subprocess.run(["bash", str(BCODEX), "--port", "39986"], cwd=str(project),
                           env=env, capture_output=True, text=True, timeout=20)
-    calls = [json.loads(l) for l in calls_path.read_text().splitlines() if l.strip()]
+    calls = _read_calls(calls_path)
     assert proc.returncode == 0, proc.stderr
     assert any(c[:2] == ["--remote", "ws://127.0.0.1:39986"] for c in calls), calls
     assert "readyz not green" in proc.stderr, proc.stderr
