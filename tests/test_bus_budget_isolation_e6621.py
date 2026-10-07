@@ -487,3 +487,92 @@ def test_the_guard_actually_routes_through_the_persistence_filter():
         "ガードが永続性フィルタを通っていない — 報告は after スナップショットの "
         "差分そのままになり、窓に入った途中半分で無関係なテストを名指しする。"
         "実際に呼ばれている名前: " + repr(sorted(called)))
+
+
+# --- 掃討のための計器: 全作成者を数える (ms-166 e-6833 ステップ1) --------------
+#
+# ガード本体は「置き去りにされたか」を軸にしているので、ある名前を **最初に作った**
+# テストしか報告しない (2 人目以降は before スナップショットに既にその名前が在る)。
+# 一覧 (KNOWN_LEAKS) を空にするには「その名前を作る全員」が要るが、ガードからは
+# 1 人しか見えない。だから 1 件直すたびに別の 1 件が名指しされ、収束しない。
+#
+# conftest の注記が定めた順序: ①全作成者を報告する形に変える ②フル実行で一覧を得る
+# ③潰してから一覧を空にする。ここは①を留める。
+
+def test_the_census_is_off_by_default():
+    """既定では無作用であること。
+
+    更新時刻という軸はガードが意図的に見ていない (開発者自身のセッションが常時
+    書き換えるのでノイズになる)。測定したいときだけ立てる。
+    """
+    import conftest
+    import os as _os
+    assert conftest._CENSUS_ON == (_os.environ.get("BEACON_LEAK_CENSUS") == "1")
+    # 既定の実行で成果物を残さないこと
+    if not conftest._CENSUS_ON:
+        assert not _os.path.exists(
+            _os.path.join(_os.path.dirname(__file__), "_leak_census.json")), (
+            "既定の実行で国勢調査の成果物が残っています")
+
+
+def test_the_census_counts_every_writer_not_just_the_first(tmp_path):
+    """**2 人目以降の作成者も数えること。** これが計器の存在理由。
+
+    ガード本体は 1 人目しか見えない。同じ名前を 2 つのテストが書いたとき、両方が
+    一覧に出ること、かつ書いていないテストが出ないことを実測する。
+    """
+    watch = tmp_path / "watched"
+    watch.mkdir()
+    body = (
+        "import os, time\n"
+        f"WATCH = {str(watch)!r}\n"
+        "def test_writer_one():\n"
+        "    time.sleep(0.01)\n"
+        "    open(os.path.join(WATCH, 'session.json'), 'w').write('{}')\n"
+        "def test_writer_two():\n"
+        "    time.sleep(0.01)\n"
+        "    open(os.path.join(WATCH, 'session.json'), 'w').write('{}')\n"
+        "def test_not_a_writer():\n"
+        "    pass\n"
+    )
+    with _ProbeIn_tests(body, "test_e6833_census_probe.py") as t:
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", str(t), "-q", "-p", "no:cacheprovider"],
+            capture_output=True, text=True, cwd=str(ROOT),
+            env={**os.environ,
+                 "BEACON_LEAK_CENSUS": "1",
+                 "BEACON_TEST_REPO_BEACON_DIR": str(watch),
+                 "PYTHONPATH": os.pathsep.join(
+                     [str(ROOT / "lib"), str(ROOT / "tests")])})
+    out = r.stdout + r.stderr
+    assert "[leak-census]" in out, "国勢調査が走っていません:\n" + out[-800:]
+    census_file = ROOT / "tests" / "_leak_census.json"
+    try:
+        data = json.loads(census_file.read_text(encoding="utf-8"))
+    finally:
+        if census_file.exists():
+            census_file.unlink()
+    writers = data.get("session.json", [])
+    assert len(writers) == 2, (
+        "全作成者を数えていません (1 人目だけだと収束しない): " + repr(data))
+    assert all("writer" in w for w in writers), repr(writers)
+    assert not any("not_a_writer" in w for w in writers), (
+        "書いていないテストを作成者に数えています: " + repr(writers))
+
+
+def test_the_census_does_not_define_a_second_sessionfinish_hook():
+    """同名の hook を 2 つ定義しないこと。
+
+    最初そう書いたが、この conftest には既に ``pytest_sessionfinish`` が在り
+    (後に定義されている方が勝つ)、私の hook は **一度も呼ばれなかった**。
+    pytest は落ちも警告もしないので、書き出されないことに自分で気づくまで
+    分からなかった。同じファイルに同名の hook を足すのは、黙って無効になる形。
+    """
+    import ast
+    src = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    names = [n.name for n in ast.parse(src).body
+             if isinstance(n, ast.FunctionDef) and n.name.startswith("pytest_")]
+    dups = {n for n in names if names.count(n) > 1}
+    assert not dups, (
+        "同名の pytest hook が複数定義されています (後のものが前を黙って無効化します): "
+        + repr(sorted(dups)))

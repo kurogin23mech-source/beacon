@@ -15,6 +15,7 @@ this per-test via explicit env swaps, so the global default never masks them.
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -250,6 +251,60 @@ def _report_persisting(beacon_dir: str, created: "set[str]") -> "set[str]":
             if os.path.exists(os.path.join(beacon_dir, name))}
 
 
+# 掃討のための計器 (ms-166 e-6833 ステップ1)。**ゲートではなく測定。**
+#
+# ガード本体は「置き去りにされたか」を軸にしているので、ある名前を **最初に作った**
+# テストしか報告しない (2 人目以降は before スナップショットに既にその名前が在る)。
+# 一覧を空にするには「その名前を作る全員」が要るが、ガードからは 1 人しか見えない。
+# だから 1 件直すたびに別の 1 件が名指しされ、収束しない。
+#
+# そこで **別の軸の計器** を opt-in で足す: 既知の名前について、ファイルの更新時刻が
+# そのテストの窓に入っていれば「このテストが書いた」と記録する。更新時刻はガードが
+# 意図的に見ていない軸 (開発者自身のセッションが常時書き換えるのでノイズになる) なので、
+# 既定では走らせない。フル実行を 1 回するときだけ BEACON_LEAK_CENSUS=1 で立てる。
+#
+# 使い方:
+#   BEACON_LEAK_CENSUS=1 pytest tests/ -p no:randomly
+#   → 終了時に tests/_leak_census.json へ {名前: [テスト, ...]} を書き出す
+#   → その一覧を潰してから KNOWN_LEAKS を空にする (順序を飛ばすと収束しない)
+_CENSUS_ON = os.environ.get("BEACON_LEAK_CENSUS", "") == "1"
+_CENSUS: "dict" = {}
+
+
+def _census_record(beacon_dir: str, names, window_start: float, test_id: str) -> None:
+    """既知の名前のうち、この窓の中で書かれたものを記録する。"""
+    for name in names:
+        path = os.path.join(beacon_dir, name)
+        try:
+            if os.path.getmtime(path) >= window_start:
+                _CENSUS.setdefault(name, []).append(test_id)
+        except OSError:
+            continue
+
+
+def _census_dump() -> None:
+    """国勢調査の結果を書き出す (opt-in のときだけ)。
+
+    **独立した pytest_sessionfinish として定義しない。** 最初そう書いたが、この
+    conftest には既に pytest_sessionfinish が在り (後に定義されている方が勝つ)、
+    私の hook は一度も呼ばれなかった。pytest は落ちも警告もしないので、
+    「書き出されない」ことに自分で気づくまで分からなかった — 同じファイルに同名の
+    hook を足すのは、黙って無効になる形。既存の hook から呼ぶ。
+    """
+    if not _CENSUS_ON:
+        return
+    out = os.path.join(_TESTS_DIR, "_leak_census.json")
+    try:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump({k: sorted(set(v)) for k, v in sorted(_CENSUS.items())},
+                      f, ensure_ascii=False, indent=1)
+            f.write("\n")
+        print(f"\n[leak-census] {len(_CENSUS)} 名前 / "
+              f"{sum(len(set(v)) for v in _CENSUS.values())} 作成者 → {out}")
+    except OSError as e:
+        print(f"\n[leak-census] 書き出せませんでした: {e}")
+
+
 @pytest.fixture(autouse=True)
 def _fail_on_repo_beacon_write(request):
     """Fail the test that leaves a new file in the real repo ``.beacon/``.
@@ -288,7 +343,13 @@ def _fail_on_repo_beacon_write(request):
         yield
         return
     before = _snapshot_beacon_dir(beacon_dir)
+    _window_start = time.time()
     yield
+    if _CENSUS_ON:
+        # ガードが見る「新規作成」とは別の軸 (更新時刻) で、既知の名前の全作成者を
+        # 数える。ゲートの判定には使わない — あくまで掃討のための測定。
+        _census_record(beacon_dir, KNOWN_LEAKS, _window_start,
+                       request.node.nodeid)
     created_all = _report_persisting(beacon_dir,
                                      _snapshot_beacon_dir(beacon_dir) - before)
     _OBSERVED_LEAKS.update(created_all & KNOWN_LEAKS)
@@ -372,6 +433,9 @@ def pytest_sessionfinish(session, exitstatus):
     ``--deselect`` an unobserved name means "not exercised", not "fixed", and
     crying stale on a subset run would teach people to ignore the message.
     """
+    # 国勢調査は部分実行でも終了コードに依らず書き出す (測定なので、落ちた実行の
+    # 情報も要る)。下の「もう起きない名前」の報告はフル実行かつ成功時だけ。
+    _census_dump()
     opt = session.config.option
     filtered = bool(getattr(opt, "keyword", "") or getattr(opt, "markexpr", "")
                     or getattr(opt, "deselect", None) or getattr(opt, "file_or_dir", None) != ["tests/"])
