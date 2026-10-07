@@ -3422,26 +3422,91 @@ def _remove_binding_from_target_review_due(target_id: str, review_type: str) -> 
 
 
 def _ci_flip_review_gate_success(pr_number: str) -> None:
-    """Best-effort: set the `beacon-review-gate` commit status to success for the
-    PR head (ms-119 e-4073). No-op unless BEACON_REVIEW_GATE_CI=1 (default OFF —
-    the CI gate is opt-in scaffolding). Never raises."""
+    """``beacon-review-gate`` の印を PR head に success で押す (ms-119 e-4073)。
+
+    **押せたか押せなかったかを必ず出力する** (ms-166 e-6873)。旧実装は
+    「best-effort、never raises」で 3 つの経路すべてが無言だった:
+    opt-in の env が立っていない / sha が取れない / script が非 0 で終わる。
+    呼び出し側は「レビュー実施を記録」とだけ表示して終わるので、印が押されたのか
+    どうかを読み手が知る手がかりが無かった。
+
+    実測した本当の病理 (2026-10-06, PR #786) は「押せない」ではなく
+    **「間違った commit に押せてしまう」** だった:
+
+        3e210c29  beacon-review-gate success 04:57:26  ← push 前の review done が押した
+                                                          (= GitHub が知っている古い PR head)
+        d60ca7d8  beacon-review-gate pending 04:58:12  ← push 後に CI が作り直す
+                  beacon-review-gate success 翌日        ← 手で叩いて解消
+
+    ``gh pr view --json headRefOid`` は **GitHub が知っている** PR head を返す。手元に
+    未 push の commit があると、それは古い sha なので、印はそこに付く。commit status は
+    sha 単位なので、その後 push した新しい head は pending のまま残り、「レビューは
+    やったのに取り込めない」状態になる。失敗なら報告できるが、これは成功するので
+    異常として検知されない。
+
+    そこで **押す前に「GitHub が知っている head」と「手元の HEAD」を照合する**。
+    食い違っていたら押さずに断り、先に push することを促す (印を古い sha に付けて
+    しまう方が、押さないより始末が悪い)。
+    """
     if os.environ.get("BEACON_REVIEW_GATE_CI", "") != "1":
+        print("  (ゲートの印は触っていません: BEACON_REVIEW_GATE_CI=1 が無いため。"
+              "この PR がゲート必須なら push 済の head に対して "
+              "BEACON_REVIEW_GATE_CI=1 を付けて再実行してください)", file=sys.stderr)
         return
+    script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "review-gate-ci.py")
     try:
-        sha = subprocess.run(
+        remote_sha = subprocess.run(
             ["gh", "pr", "view", pr_number, "--json", "headRefOid",
              "--jq", ".headRefOid"],
             capture_output=True, text=True, timeout=30).stdout.strip()
-        if not sha:
-            return
-        script = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "scripts", "review-gate-ci.py")
-        subprocess.run(["python3", script, "set", "--state", "success",
-                        "--sha", sha, "--pr", pr_number],
-                       capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
+        local_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"  ⚠ ゲートの印を押せませんでした (sha を取得できない: {e})。"
+              f"手で押す: python3 {script} set --state success "
+              f"--sha <push 済の head> --pr {pr_number}", file=sys.stderr)
         return
+
+    if not remote_sha:
+        print(f"  ⚠ ゲートの印を押せませんでした (GitHub から PR #{pr_number} の head を"
+              f"取得できない)。gh の設定とリポジトリを確認してください。", file=sys.stderr)
+        return
+
+    if local_sha and local_sha != remote_sha:
+        # ここが e-6873 の本体。押さずに断る。
+        print(
+            f"  ⚠ ゲートの印は押していません — 手元の HEAD が push されていません。\n"
+            f"      手元:   {local_sha[:12]}\n"
+            f"      GitHub: {remote_sha[:12]} (= いまの PR head)\n"
+            f"    このまま押すと **GitHub 側の古い sha に** 印が付きます。印は sha 単位な\n"
+            f"    ので、その後 push した head は pending のまま残り「レビューはやったのに\n"
+            f"    取り込めない」状態になります (2026-10-06 に PR #786 で実際に起きた)。\n"
+            f"    先に push してから、この印だけを押し直してください:\n"
+            f"      git push && python3 {script} set --state success "
+            f"--sha \"$(git rev-parse HEAD)\" --pr {pr_number}\n"
+            f"    (`beacon review done` の再実行は採否の記録が二重になるので避けてください)",
+            file=sys.stderr)
+        return
+
+    try:
+        r = subprocess.run(["python3", script, "set", "--state", "success",
+                            "--sha", remote_sha, "--pr", pr_number],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"  ⚠ ゲートの印を押せませんでした ({e})。手で押す: python3 {script} "
+              f"set --state success --sha {remote_sha} --pr {pr_number}", file=sys.stderr)
+        return
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        print(f"  ⚠ ゲートの印を押せませんでした "
+              f"({detail[-1] if detail else f'exit {r.returncode}'})。"
+              f"手で押す: python3 {script} set --state success "
+              f"--sha {remote_sha} --pr {pr_number}", file=sys.stderr)
+        return
+    print(f"  ✓ ゲートの印を success に押しました ({remote_sha[:12]})")
 
 
 def cmd_review_skip():

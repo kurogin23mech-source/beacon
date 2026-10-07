@@ -2018,6 +2018,24 @@ def cmd_bus_directory():
         # to show the sender but only sid/health were printed (e-5813). Both live
         # in the session row's ``intent`` block (written via `beacon session intent`)
         # and are already returned by the directory endpoints — pure display.
+        # ms-166 e-6778: **詰まっている相手を「健全」の顔で出さない。**
+        #
+        # reachable (= live かつ確定的に詰まっていない) は計算されて JSON にも載って
+        # いるのに、人間と AI が宛先を選ぶこの行には出ていなかった。コードの注記は
+        # 「reachable は送信経路だけが strict に読む追加フィールド」と書いているが、
+        # 選ぶ画面に届いていないので、手順どおり進めると詰まっている相手に気づかず
+        # 送り込む。配線はあるが実際に効いていない形 (2026-10-01 実測、生の JSON を
+        # 目視した報告者だけが気づけた)。
+        #
+        # 倒し方は **見せて選ばせる**。--healthy の filter に織り込んで候補から落とす
+        # 案は採らない — 候補が黙って消えると「なぜ出てこないのか」が分からず、
+        # 無言で落とすという同じ型の害になる (ms-178 が fork 一覧で採った方針と同じ)。
+        #
+        # 出すのは reachable が **False のときだけ**。契約 (bus_liveness.is_reachable)
+        # では None は「詰まっているか不明」で live 扱いなので、そこに印を付けると
+        # 待ち行列が空なだけの idle な相手まで警告だらけになる。
+        reach_tag = ("  ⚠詰まり(受信が進んでいない: 送っても読まれない恐れ)"
+                     if s.get("reachable") is False else "")
         intent = s.get("intent") if isinstance(s.get("intent"), dict) else {}
         attn_tag = "  ⚠ATTN(判断待ち)" if intent.get("attention_required") else ""
         focus_txt = str(intent.get("text") or "").strip().replace("\n", " ")
@@ -2027,6 +2045,7 @@ def cmd_bus_directory():
         pname = s.get("project_name", "") or pid
         if pname and not cwd_only and not explicit_project:
             print(f"  [{pname}]  {sid}  {ident}  last_active={last}"
-                  f"{health_tag}{attn_tag}{focus_tag}")
+                  f"{health_tag}{reach_tag}{attn_tag}{focus_tag}")
         else:
-            print(f"  {sid}  {ident}  last_active={last}{health_tag}{attn_tag}{focus_tag}")
+            print(f"  {sid}  {ident}  last_active={last}"
+                  f"{health_tag}{reach_tag}{attn_tag}{focus_tag}")
