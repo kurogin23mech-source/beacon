@@ -1,6 +1,7 @@
 """Beacon API - FastAPI backend for project management."""
 
 from __future__ import annotations
+import idempotency as _idem
 
 import asyncio
 import base64
@@ -2480,7 +2481,9 @@ async def post_bus_event(
                 "event_id": _dup.get("event_id"),
             }
             db.append_bus_audit(project_id, audit_record)
-            return {**_dup, "idempotent_replay": True}
+            # ms-166 e-6728: 共有の整形口を通す (正規名 + 従来名の両方)。
+            return _idem.disclose(dict(_dup), no_op=True,
+                                  legacy="idempotent_replay")
 
     # ms-70 / e-1713: cross-user DM action authorization gate.
     # Resolve sender / receiver user_ids from the project session registry,

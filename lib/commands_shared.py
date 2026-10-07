@@ -39,6 +39,7 @@ import core
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 import occupation  # ms-108 e-3269: 職種 ⊃ target-class 包含ゲート (_gate_target_class)
 import transition_approval as _ta  # ms-127 e-4849 (milestone split)
+import idempotency as _idem
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -3047,7 +3048,7 @@ def record_completion_decision(client, project_id: str, payload: dict, *,
     """
     with best_effort_completion_decision(target_id, verdict):
         result = client.record_decision(project_id, payload) or {}
-        if isinstance(result, dict) and result.get("deduplicated"):
+        if _idem.was_no_op(result):
             logging.getLogger(__name__).warning(
                 "completion-verdict for target=%s verdict=%s was NOT appended — "
                 "同じ対象・同じ結論の完遂判定が既に記録済みです (既存 %s に畳まれ、"

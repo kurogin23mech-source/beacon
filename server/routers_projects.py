@@ -87,6 +87,7 @@ import phantom_done_evidence as phantom_done_mod
 import invitations as invitations_mod  # ms-127 e-4871 PR2: token-based invites
 import datetime
 import decision_event as decision_event_mod  # ms-90 / e-3246: decision-event 記録
+import idempotency as _idem
 
 # Structured-audit logger (name-based singleton — same object app.py binds).
 # _check_phantom_done_evidence emits its phantom-done warning here.
@@ -1715,11 +1716,14 @@ def make_router(
         # ``deduplicated`` は **常に載せる** (独立レビュー AX-3): true の時だけ生やすと
         # 「キーが無い = false」と「この版の API にそのフィールドが無い」を呼び出し側が
         # 区別できず、`"deduplicated" in result` で判定するコードが常に false に倒れる。
-        return {
+        # ms-166 e-6728: 開示は共有の整形口を通す (正規名 idempotent_no_op + 従来名
+        # deduplicated の両方が載る = 既存の読み手を壊さない)。常時掲載の原則は
+        # disclose 側が持つ。
+        return _idem.disclose({
             "decision_id": decision_id,
             "kind": rec["kind"],
-            "deduplicated": bool(decision_id and decision_id != rec.get("decision_id")),
-        }
+        }, no_op=bool(decision_id and decision_id != rec.get("decision_id")),
+            legacy="deduplicated")
 
     @router.get("/api/projects/{project_id}/decisions")
     def list_decisions(project_id: str,
