@@ -907,8 +907,8 @@ def cmd_session_fork_cleanup():
     A guard living in a Skill prompt is a request; a guard living here is a
     constraint (CORE doc architecture-tool-skill-separation).
     """
-    import datetime
     import subprocess
+    import fork_cleanup as _fork_cleanup
     import session as _session
 
     json_out = os.environ.get("BEACON_JSON", "") == "1"
@@ -934,132 +934,21 @@ def cmd_session_fork_cleanup():
         sys.exit(1)
 
     branch = record.get("child_branch") or ""
-    # Two kinds of refusal, kept in SEPARATE lists on purpose (AX review PR#770):
-    #   blockers      — risks a human may knowingly accept, so --force overrides.
-    #   hard_blockers — "we physically cannot preserve the data", which --force
-    #                   must NOT override. Previously everything shared one list,
-    #                   so --force sailed past the backup-failure gate while the
-    #                   code comment, the help entry and the Skill all promised it
-    #                   could not. Documentation asserting a guarantee the code
-    #                   does not provide is worse than no guarantee: the operator
-    #                   reaches for --force precisely when recovery matters.
-    blockers = []
-    hard_blockers = []
+    # ms-166 e-6793: ゲートの判定は lib/fork_cleanup に出した。ここは **配線だけ**
+    # (事実を集める → 判定させる → 結果に従って消す)。判定を 1 関数に同居させて
+    # いたので、「未取り込みのときの文言を 1 語直す」程度の変更でも実 git 操作を
+    # 伴う統合テスト以外に検証手段が無かった (PR #770 の独立保守性レビュー)。
+    facts = _fork_cleanup.collect_git_facts(
+        repo_root, record["worktree_path"], branch)
+    verdict = _fork_cleanup.evaluate(
+        record, force=force, idle_threshold=idle_threshold, facts=facts,
+        backup=_fork_cleanup.make_notes_backup(repo_root), branch=branch)
+    blockers = verdict["blockers"]
+    hard_blockers = verdict["hard_blockers"]
+    backup_path = verdict["backup_path"]
+    n_notes = record.get("unpromoted_notes") or 0
 
-    # --- gate 1: the branch's work must already be in main -------------------
-    # Removing an unmerged fork discards commits.
-    if not branch:
-        # AX review PR#770: this used to be `if branch:` — a fork.json with no
-        # child_branch skipped the merge check entirely, so the very risk this
-        # verb exists to prevent slipped through on missing metadata. Unknown is
-        # refused here for the same reason it is in gate 2.
-        blockers.append(
-            "この fork に紐づく branch 情報が読めません (fork.json の "
-            "child_branch が空)。安全に取り込み確認ができないため削除しません")
-    else:
-        # `--is-ancestor` exits 1 for "not an ancestor" and 128 for "cannot
-        # compare" (no origin remote, origin/main missing, never fetched).
-        # Reporting both as "not merged yet" sends the operator into a wait-for-
-        # merge loop that can never succeed (AX review PR#770).
-        ref = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
-                              "origin/main"],
-                             cwd=repo_root, capture_output=True, text=True)
-        if ref.returncode != 0:
-            blockers.append(
-                "origin/main が見つかりません (git fetch 済みか、origin remote が "
-                "あるかを確認してください)。取り込み確認ができないため削除しません")
-        else:
-            merged = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", branch, "origin/main"],
-                cwd=repo_root, capture_output=True, text=True)
-            if merged.returncode == 1:
-                blockers.append(
-                    f"branch '{branch}' はまだ origin/main に取り込まれていません "
-                    f"(取り込み前に消すとコミットが失われます)")
-            elif merged.returncode != 0:
-                blockers.append(
-                    f"branch '{branch}' の取り込み確認に失敗しました "
-                    f"({(merged.stderr or '').strip() or f'git exit {merged.returncode}'})。"
-                    f"確認できないため削除しません")
-
-    # --- gate 1b: uncommitted work inside the worktree -----------------------
-    # Independent AX review of PR #770 (AX-2, high): gate 1 asks git whether the
-    # BRANCH is merged, and `git merge-base --is-ancestor` only sees committed
-    # history. Work that was never committed is invisible to it. The removal step
-    # then discovered the problem the worst possible way: plain
-    # `git worktree remove` fails with exit 128 ("contains modified or untracked
-    # files, use --force to delete it") and the code retried with --force on ANY
-    # failure, so an operator who passed --force for the *unmerged branch* reason
-    # silently also got their uncommitted work deleted. git's own error text
-    # recommends exactly that destructive retry, which is how the caller is led
-    # into it. Reproduced on a real repo 2026-10-01.
-    #
-    # So discover it HERE, as a gate, and name the files. --force may still
-    # override it (losing one's own WIP is a risk a human can knowingly accept —
-    # unlike the notes snapshot, which stays a hard_blocker), but it has to be an
-    # INFORMED choice: the refusal lists what would be destroyed first.
-    dirty = subprocess.run(["git", "status", "--porcelain"],
-                           cwd=record["worktree_path"], capture_output=True,
-                           text=True)
-    if dirty.returncode != 0:
-        blockers.append(
-            f"このフォークに未コミットの変更が残っているかを確認できませんでした "
-            f"({(dirty.stderr or '').strip() or f'git exit {dirty.returncode}'})。"
-            f"確認できないため削除しません")
-    elif dirty.stdout.strip():
-        names = [ln[3:].strip() for ln in dirty.stdout.splitlines() if ln[3:].strip()]
-        shown = "、".join(names[:5]) + ("ほか" if len(names) > 5 else "")
-        blockers.append(
-            f"このフォークに未コミットの変更が {len(names)} 件あります ({shown})。"
-            f"削除すると失われます (git の履歴に入っていないので取り込み確認では"
-            f"検出できません)")
-
-    # --- gate 2: is someone still working in there? --------------------------
-    idle = record.get("idle_seconds")
-    if idle is None:
-        blockers.append(
-            "このフォークで作業中のセッションが居るかを判定できません "
-            "(.beacon/session.json の活動記録が読めません)。"
-            "『判定できない』は『空いている』ではありません")
-    elif idle < idle_threshold:
-        blockers.append(
-            f"{idle/60:.0f} 分前まで作業されています "
-            f"(セッション {record.get('own_session_id') or '(不明)'}、"
-            f"作業中とみなす閾値 {idle_threshold/60:.0f} 分)。"
-            f"作業中のフォークを消すと、そのセッションの足元が外れます")
-
-    # --- gate 3: unpromoted notes must be preserved BEFORE any deletion ------
-    # Same ordering guarantee as `note clear` (ms-178 e-6656): no backup ⇒ no
-    # delete. The snapshot lands in the PARENT repo, outside the worktree that is
-    # about to disappear — a backup inside the deleted directory is not a backup.
-    # These go in hard_blockers: preserving the data is not the operator's risk
-    # to accept, so --force does not reach them.
-    n_notes = record.get("unpromoted_notes")
-    backup_path = ""
-    if n_notes is None:
-        # Maintainability review PR#770: the count used to collapse "file absent"
-        # and "file unreadable" into 0, so a transient I/O error made the backup
-        # step be skipped entirely and the notes deleted. Unreadable is not empty.
-        hard_blockers.append(
-            f"引き継ぎメモの件数を読めませんでした ({record.get('notes_path')})。"
-            f"0 件と確定できないため削除しません")
-        n_notes = 0
-    elif n_notes:
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        safe_branch = (branch or "fork").replace("/", "-")
-        backup_dir = os.path.join(repo_root, ".beacon", "fork-notes-backup")
-        backup_path = os.path.join(backup_dir, f"{safe_branch}-{stamp}.jsonl")
-        try:
-            os.makedirs(backup_dir, exist_ok=True)
-            import shutil
-            shutil.copyfile(record["notes_path"], backup_path)
-        except OSError as exc:
-            hard_blockers.append(
-                f"引き継ぎメモ {n_notes} 件の退避に失敗しました ({exc})。"
-                f"退避が取れないので削除しません (--force でも上書きできません)")
-            backup_path = ""
-
-    refusals = hard_blockers + ([] if force else blockers)
+    refusals = verdict["refusals"]
     if refusals:
         if json_out:
             print(json.dumps({"removed": False, "blockers": refusals,
