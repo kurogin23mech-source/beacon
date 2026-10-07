@@ -56,6 +56,23 @@ def test_identify_pr_takes_a_url_and_a_bare_number():
     assert core.identify_pr("772") == (772, None)
 
 
+def test_canonical_url_is_normalised_to_the_minimal_form():
+    """末尾付きの URL を最小形に揃えること (独立 AX レビュー AX-4)。
+
+    canonical という名前は「同じ PR なら同じ文字列になる」ことを約束している。
+    入力をそのまま返すと ".../pull/12/files" と ".../pull/12" が別の文字列として
+    canonical を名乗り、将来この値を文字列比較で同一性判定に使う人が約束を信じて
+    誤判定する (今の重複検出は整数の番号で行っているので実害は出ていない)。
+
+    最初に書いた試験は ".../pull/12" (= 既に最小形) しか渡しておらず、**正規化を
+    外しても緑のまま**だった (mutation テストで気づいた)。末尾の付いた形を渡す。
+    """
+    base = "https://github.com/o/r/pull/12"
+    for suffix in ("/files", "/commits", "?diff=split", "#issuecomment-1", "/"):
+        n, url = core.identify_pr(base + suffix)
+        assert (n, url) == (12, base), (suffix, n, url)
+
+
 def test_identify_pr_refuses_what_it_cannot_identify():
     for junk in ("", "abc", "0", "-3", "not-a-pr",
                  "https://github.com/o/r/pull/12x"):
@@ -221,7 +238,7 @@ def test_sync_does_not_resurrect_a_duplicate_someone_cancelled():
     assert not any(a["action"] in ("merge", "close") and a["entry_id"] == "e-884"
                    for a in actions), (
         "重複として捨てられた記録を自動で動かそうとしている: " + repr(actions))
-    assert any(a["action"] == "blocked-by-duplicate" and a["entry_id"] == "e-884"
+    assert any(a["action"] == "blocked_by_duplicate" and a["entry_id"] == "e-884"
                for a in actions), "止めたことを報告していない: " + repr(actions)
     core.apply_pr_sync(data, actions)
     assert data["milestones"][0]["entries"][1]["status"] == "cancelled", (
@@ -240,7 +257,7 @@ def test_a_record_outside_the_fetched_window_is_not_called_missing():
     gh = [{"number": 700, "state": "MERGED", "url": "https://github.com/o/r/pull/700"}]
     actions = core.plan_pr_sync(data, gh, fetched_floor=700)
     kinds = {a["action"] for a in actions}
-    assert "out-of-window" in kinds, repr(actions)
+    assert "out_of_window" in kinds, repr(actions)
     assert "unmatched" not in kinds, (
         "窓の外を「見つからない」と報告している: " + repr(actions))
     buf = io.StringIO()
@@ -274,3 +291,71 @@ def test_long_listings_are_capped_but_counts_stay_exact():
     listed = [ln for ln in out.splitlines() if ln.startswith("  [e-")]
     assert len(listed) <= 10, (
         f"列挙を打ち切っていない ({len(listed)} 行出ている):\n" + out)
+
+
+# --- 7. 種別のカタログが consumer に行き渡っているか (独立保守性レビュー M-3) ---
+#
+# producer (plan_pr_sync) が出しうる種別の一覧と、2 つの consumer
+# (apply_pr_sync / cmd_pr._print_pr_sync_plan) が知っている種別が食い違うと、
+# **この課題が直した「無言で飛ばして嘘の整合を出す」欠陥が、種別のカタログという
+# 1 段上の階層で再発する**。9 番目の種別を足した人が consumer を更新し忘れたら
+# 落ちること。
+
+def test_every_action_kind_is_known_to_the_printer():
+    """表示側が全種別を分類していること。
+
+    知らない種別は by_kind のどのバケツにも入らず、既存バケツが全部空なら
+    「整合しています」が出てしまう (= 嘘の異常なし)。
+    """
+    import inspect
+    src = inspect.getsource(cmd_pr._print_pr_sync_plan)
+    shown = {k for k in core.PR_SYNC_ACTION_KINDS if f'"{k}"' in src}
+    silent = set(cmd_pr._SILENT_ACTION_KINDS)
+    missing = sorted(core.PR_SYNC_ACTION_KINDS - shown - silent)
+    assert not missing, (
+        "表示側が知らない action 種別があります — 既存バケツが空なら「整合しています」"
+        "が出て、その種別の記録が黙って落ちます。出すか、意図して出さないなら "
+        "cmd_pr._SILENT_ACTION_KINDS に理由付きで足してください: " + repr(missing))
+    # 意図して出さない種別が、実在する種別であること (改名で腐らせない)
+    assert silent <= core.PR_SYNC_ACTION_KINDS, sorted(silent - core.PR_SYNC_ACTION_KINDS)
+
+
+def test_an_unknown_action_kind_is_not_silently_absorbed_by_apply():
+    """適用側が未知の種別を黙って "skipped" に数えないこと。"""
+    import pytest as _pytest
+    data = _data(_entry("e-1", "https://github.com/o/r/pull/9", 9))
+    bogus = [{"entry_id": "e-1", "pr_number": 9, "action": "teleport",
+              "from_status": "in_review", "to_status": "done", "reason": "x"}]
+    summary = core.apply_pr_sync(data, bogus)
+    assert summary["errors"], (
+        "未知の種別が黙って飲まれています (summary=" + repr(summary) + ")")
+    assert "teleport" in str(summary["errors"]), summary["errors"]
+    assert summary["skipped"] == 0, (
+        "未知の種別を skipped に数えています: " + repr(summary))
+
+
+def test_the_builder_refuses_a_kind_outside_the_catalog():
+    """builder が一覧外の種別を拒否すること (producer 側の入口)。"""
+    import pytest as _pytest
+    with _pytest.raises(ValueError) as ei:
+        core._pr_sync_action("teleport", entry_id="e-1", pr_number=1,
+                             from_status="a", to_status="b", reason="x")
+    assert "PR_SYNC_ACTION_KINDS" in str(ei.value)
+
+
+def test_actionable_tells_a_consumer_what_to_do_without_the_catalog():
+    """`--json` を読む外部の消費者が、種別を知らずに「何かすべきか」を判別できること。
+
+    旧呼び出し側は `action != "skip"` を「実行対象」と読んでいた。報告だけの種別が
+    増えた今それを踏むと、unreadable / duplicate まで「やるべき遷移」として拾う。
+    """
+    data = _data(_entry("e-1", "772"), _entry("e-2", "not-a-pr"))
+    gh = [{"number": 772, "state": "MERGED",
+           "url": "https://github.com/o/r/pull/772"}]
+    actions = core.plan_pr_sync(data, gh, fetched_floor=1)
+    for a in actions:
+        assert "actionable" in a, "actionable が無い種別があります: " + repr(a)
+        assert a["actionable"] == (a["action"] in core.PR_SYNC_TRANSITION_KINDS), a
+    # 報告だけの種別が「やるべき遷移」に数えられないこと
+    assert [a["action"] for a in actions if a["actionable"]] == ["merge"], (
+        [a["action"] for a in actions if a["actionable"]])

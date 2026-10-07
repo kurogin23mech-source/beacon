@@ -967,6 +967,15 @@ def cmd_pr_merge():
     else:
         print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
 
+# 表示側が **意図して出さない** 種別 (ms-166 e-6871 の独立保守性レビュー M-3)。
+#
+# "skip" は「見た上で遷移不要」なので列挙に出す意味がない。だがそれを「たまたま
+# コードに名前が出てこない」状態で済ませると、知らない種別が落ちているのと区別が
+# つかない。意図を名前で残し、網羅性テストが
+# 「出す種別 ∪ 意図して出さない種別 == 全種別」を機械で確かめる。
+_SILENT_ACTION_KINDS = frozenset({"skip"})
+
+
 def _print_pr_sync_plan(actions: list) -> None:
     """突合の計画を出す。**見ていないものを「異常なし」と言わない。**
 
@@ -985,8 +994,8 @@ def _print_pr_sync_plan(actions: list) -> None:
     moves = by_kind.get("merge", []) + by_kind.get("close", [])
     unreadable = by_kind.get("unreadable", [])
     unmatched = by_kind.get("unmatched", [])
-    outside = by_kind.get("out-of-window", [])
-    blocked = by_kind.get("blocked-by-duplicate", [])
+    outside = by_kind.get("out_of_window", [])
+    blocked = by_kind.get("blocked_by_duplicate", [])
     dups = by_kind.get("duplicate", [])
     repairs = [a for a in (actions or []) if a.get("needs_repair")]
 

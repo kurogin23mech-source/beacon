@@ -103,9 +103,9 @@ _HATCH_SCOPED_GUARDS = {
     "guard_prod_bus_write": "bus",
     "guard_prod_decision_write": "decision",
     # ms-166 e-6854: 廊下の受け止め (= 上の 3 つで覆われない全ての書き込み)。
-    # ラベルは "any other write" — 「書き込み全般」と書くと、上の 3 つが独立に
-    # 存在する理由 (固有の診断を持つこと) が読み手から消える。
-    "guard_prod_write": "any other write",
+    # ラベルは兄弟と同じく 1 語に揃える (独立 AX レビュー AX-5: 3 語の句が 1 つだけ
+    # 混ざると列挙が不自然になり、次にガードを足す人がどちらの書式に倣うか迷う)。
+    "guard_prod_write": "writes",
     "guard_prod_read": "read",
 }
 
