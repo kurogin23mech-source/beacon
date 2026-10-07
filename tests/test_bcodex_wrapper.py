@@ -11,11 +11,32 @@ import json
 import os
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BCODEX = REPO_ROOT / "bin" / "bcodex"
+
+
+def _read_calls(path) -> list:
+    """argv を 1 行 1 JSON で書き足した記録を読む (fake codex / fake beacon 共通)。
+
+    この式はこのファイル内に 5 箇所コピーされていた (独立保守性レビュー M-1 が 2〜3
+    箇所として指摘、実際に grep したら 5 箇所)。空行の扱い・未作成ファイルの扱い・
+    文字コードを変えたい次の人が 1 箇所だけ直して「直した」と思い込める形だった。
+
+    この PR 自身が「同じ機構の別名が名前ベースの免除を素通りした」という単一真実源
+    違反を直す回なので、同じ型の重複を同じ差分で持ち込むのは筋が通らない。
+
+    ファイル未作成は空の記録として扱う (fixture が作る前に読む経路が 1 つある)。
+    """
+    from pathlib import Path as _Path
+    path = _Path(path)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
 
 
 def _make_fake_codex(bin_dir: Path, calls_path: Path) -> None:
@@ -94,11 +115,7 @@ PY
         text=True,
         timeout=10,
     )
-    calls = [
-        json.loads(line)
-        for line in calls_path.read_text().splitlines()
-        if line.strip()
-    ]
+    calls = _read_calls(calls_path)
     return proc, calls, project
 
 
@@ -178,10 +195,7 @@ def test_bcodex_no_websockets_warning_when_present(tmp_path):
 
 
 def _beacon_calls(tmp_path: Path) -> list[list[str]]:
-    p = tmp_path / "beacon_calls.json"
-    if not p.exists():
-        return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    return _read_calls(tmp_path / "beacon_calls.json")
 
 
 def test_bcodex_armed_auto_grants_budget(tmp_path):
@@ -237,7 +251,11 @@ PY
             # args: app-server --listen ws://127.0.0.1:PORT
             url="${{3:-}}"
             port="${{url##*:}}"
-            python3 - "$port" <<'PY'
+            # exec: bash をサーバーに置き換える。exec しないとサーバーは bash の
+            # 孫になり、bcodex の cleanup (kill "$APP_PID" = 直接の子だけ) では
+            # 死なず、launchd に引き取られて港を掴んだまま残る。実測: 2026-08-29
+            # の実行が残した個体が 37 日間 39987 を LISTEN し続けていた (e-6816)。
+            exec python3 - "$port" "$BOUND_MARKER" <<'PY'
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 port = int(sys.argv[1])
@@ -247,7 +265,13 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code); self.end_headers()
     def log_message(self, *a):
         pass
-HTTPServer(("127.0.0.1", port), H).serve_forever()
+srv = HTTPServer(("127.0.0.1", port), H)
+# bind できて初めて印を置く。居残りが港を握っていると HTTPServer() が例外に
+# なるのでこの行に到達せず、印が無いことでテストが赤くなる。印を見ないと、
+# 居残りが /readyz に 200 を返すせいで「自分のサーバーは立っていないのに緑」
+# という偽の緑が成立する (= この MS が掃討している silent 非機能そのもの)。
+open(sys.argv[2], "w").write(str(port))
+srv.serve_forever()
 PY
         fi
         exit 0
@@ -255,7 +279,32 @@ PY
     fake.chmod(0o755)
 
 
-def _run_readyz(tmp_path, args):
+def _await_call(calls_path, predicate, *, timeout=10.0):
+    """background で走る fake が書き足す行を待つ。
+
+    bcodex は app-server を `&` で背景に投げ、前景では `codex --remote` を起動する。
+    fake は自分の argv を 1 行ずつファイルに書き足すが、**背景側の書き込みは
+    subprocess.run が返るのと同期していない**。負荷が高いと前景の --remote 行だけが
+    在る状態でテストがファイルを読み、app-server 行が無いと言って落ちる。
+
+    実測 (2026-10-05, -n auto = 10 worker): calls が [['--remote', ...]] だけになり
+    test_bcodex_waits_for_readyz_then_launches が落ちた。-n 4 では出ない負荷依存 (e-6816)。
+
+    待つのは「無限に待つ」ではなく期限付き。期限切れでもその時点の calls を返すので、
+    呼び出し側の assert が「何が入っていたか」を添えて落ちる (= 待ちを足したことで
+    失敗が無言のハングに化けない)。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        calls = _read_calls(calls_path)
+        if any(predicate(c) for c in calls):
+            return calls
+        if time.monotonic() >= deadline:
+            return calls
+        time.sleep(0.05)
+
+
+def _run_readyz(tmp_path, args, *, await_call=None):
     project = tmp_path / "project"
     (project / ".beacon").mkdir(parents=True)
     (project / ".beacon" / "cloud.json").write_text("{}", encoding="utf-8")
@@ -282,20 +331,39 @@ def _run_readyz(tmp_path, args):
     env["BEACON_BIN"] = str(beacon_bin)
     env["HOME"] = str(tmp_path / "home")
     env["BEACON_BCODEX_READYZ_TIMEOUT"] = "10"  # gate ON
+    # fake は bind に成功して初めてこの印を置く (置けなければテストが赤くなる)。
+    bound_marker = tmp_path / "server-bound"
+    env["BOUND_MARKER"] = str(bound_marker)
     proc = subprocess.run(["bash", str(BCODEX)] + args, cwd=str(project),
                           env=env, capture_output=True, text=True, timeout=20)
-    calls = [json.loads(l) for l in calls_path.read_text().splitlines() if l.strip()]
-    return proc, calls, project
+    if await_call is not None:
+        calls = _await_call(calls_path, await_call)
+    else:
+        calls = _read_calls(calls_path)
+    return proc, calls, project, bound_marker
 
 
 def test_bcodex_waits_for_readyz_then_launches(tmp_path):
     """With the gate ON and readyz served, bcodex reaches the --remote launch
-    (it neither hangs nor skips) and prints no readyz-timeout warning."""
-    proc, calls, project = _run_readyz(tmp_path, ["--port", "39987"])
+    (it neither hangs nor skips) and prints no readyz-timeout warning.
+
+    ``await_call`` で app-server 行の到着を待つ理由は _await_call の docstring に。
+    ``bound_marker`` を見る理由は「自分のサーバーが本当に bind したか」を確かめる
+    ため — 港に居残りが居ると /readyz に 200 が返ってしまい、自分のサーバーが
+    立っていなくても緑になる (e-6816)。
+    """
+    proc, calls, project, bound = _run_readyz(
+        tmp_path, ["--port", "39987"],
+        await_call=lambda c: c[:2] == ["app-server", "--listen"])
     assert proc.returncode == 0, proc.stderr
     assert ["app-server", "--listen", "ws://127.0.0.1:39987"] in calls
     assert any(c[:2] == ["--remote", "ws://127.0.0.1:39987"] for c in calls), calls
     assert "readyz not green" not in proc.stderr, proc.stderr
+    assert bound.exists(), (
+        "このテスト自身の readyz サーバーが 39987 に bind できていない。"
+        "港を別のプロセスが握っている (過去の実行が残した居残り等) 可能性が高い。"
+        "居残りも /readyz に 200 を返すので、この印を見ないと緑になってしまう。"
+        "確認: lsof -nP -iTCP:39987")
 
 
 def test_bcodex_readyz_gate_fails_open_when_never_ready(tmp_path):
@@ -329,7 +397,7 @@ def test_bcodex_readyz_gate_fails_open_when_never_ready(tmp_path):
     env["BEACON_BCODEX_READYZ_TIMEOUT"] = "1"  # 1s cap → fail-open fast
     proc = subprocess.run(["bash", str(BCODEX), "--port", "39986"], cwd=str(project),
                           env=env, capture_output=True, text=True, timeout=20)
-    calls = [json.loads(l) for l in calls_path.read_text().splitlines() if l.strip()]
+    calls = _read_calls(calls_path)
     assert proc.returncode == 0, proc.stderr
     assert any(c[:2] == ["--remote", "ws://127.0.0.1:39986"] for c in calls), calls
     assert "readyz not green" in proc.stderr, proc.stderr
