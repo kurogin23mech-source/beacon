@@ -300,7 +300,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon acquisition attack-list-reply-record <doc-id> <acc-id> [--message-id <id>] [--url <link>] [--summary <s>] [--json]` | Record a detected reply: inbound 証跡 + row 連絡済→返信あり + notify (detection-only) / 返信検知を記録 (ms-132) |
 | `beacon acquisition attack-list-promote <doc-id> <acc-id> [--title <商談名>] [--json]` | Promote a 返信あり/アポ prospect to an Opportunity + Account phase 未接触→リード / リード転換 (ms-132) |
 | `beacon opportunity phase-prob <phase> <n>` | Set a phase win probability (成約率 0-100) / フェーズの成約率を設定 |
-| `beacon sales target <user> <amount> \| list` | Set/list a member's sales quota (目標売上) + weighted pipeline / メンバーの目標売上を設定・一覧 |
+| `beacon sales target <user> <amount>` | Set a member's sales quota (目標売上); empty amount clears / メンバーの目標売上を設定（金額を空にすると解除） |
+| `beacon sales target list [--json]` | List members' quota with their weighted pipeline (見込み売上) / 目標売上と見込み売上を一覧 |
 | `beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] \| --clear` | Set the 遷移日 (judgement date) for the current phase / 現フェーズの遷移日（判定予定日）を設定 |
 | `beacon opportunity anchor <opp-id> <work-item-id>` | Bind a meeting or activity (mtg-/act-) as the 発火源 of the open 前進ゲート / 開いた前進ゲートの発火源に面談・活動を結ぶ |
 | `beacon opportunity judge <opp-id> advance\|retry\|terminal [<date\|terminal-phase>] [--note <text>]` | Judge a reached 遷移日 (3-way, human-confirmed) / 到達した遷移日を判定（次へ/やり直し/決着） |
