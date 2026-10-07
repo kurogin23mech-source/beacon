@@ -2746,7 +2746,7 @@ def identify_pr(ref: str) -> tuple:
     return (None, None)
 
 
-def plan_pr_sync(data: dict, gh_prs: list) -> list:
+def plan_pr_sync(data: dict, gh_prs: list, *, fetched_floor: int | None = None) -> list:
     """ms-61 / e-2005 — produce a plan of PR-entry transitions needed to
     align beacon state with GitHub state.
 
@@ -2833,15 +2833,24 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
                 if not canonical and gh_url:
                     canonical = gh_url
                 if not gh_state:
-                    # これも黙らない。GitHub 側に見つからない記録 (消された / 別リポジトリ /
-                    # 権限が無い) は、揃っているのではなく「照合できていない」。
+                    # これも黙らない。ただし **「取得した範囲の外」と「本当に見つから
+                    # ない」を分ける。** gh pr list は新しい順に N 件しか返さないので、
+                    # 窓の外になった古い記録を「GitHub に無い」と報告すると偽警報に
+                    # なる (実測 2026-10-07: 562 件が窓の外なだけで警告された。この課題で
+                    # 入れた報告自身が、読まれなくなるほど騒ぐ側に倒れていた = 直した
+                    # 欠陥の裏返し)。範囲外は数えるだけ、本当に不明なものだけ警告する。
+                    _out_of_window = (fetched_floor is not None
+                                      and pr_num < fetched_floor)
                     actions.append({
                         "entry_id": e.get("id", ""),
                         "pr_number": pr_num,
-                        "action": "unmatched",
+                        "action": ("out-of-window" if _out_of_window else "unmatched"),
                         "from_status": e.get("status", ""),
                         "to_status": e.get("status", ""),
-                        "reason": "GitHub 側にこの PR が見つからない (消された / 別リポジトリ / 権限)",
+                        "reason": (
+                            f"照合した範囲の外 (取得できた最小 PR#{fetched_floor} より古い)"
+                            if _out_of_window else
+                            "GitHub 側にこの PR が見つからない (消された / 別リポジトリ / 権限)"),
                         "needs_repair": needs_repair,
                         "canonical_url": canonical,
                     })
@@ -2918,8 +2927,10 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
     # 同じ PR 番号を指す記録が 2 つ以上あれば報告する。登録時に既存を検出できて
     # いないので、片方が古い状態のまま残り「並列で open な PR が 2 件ある」という
     # 誤報の種にもなる (実測: e-6748 done / e-6751 in_review が両方 PR 775)。
+    duplicated_ids: set = set()
     for num, ids in sorted(seen_numbers.items()):
         if len(ids) > 1:
+            duplicated_ids |= set(ids)
             actions.append({
                 "entry_id": ids[0],
                 "pr_number": num,
@@ -2929,6 +2940,31 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
                 "reason": f"同じ PR#{num} を指す記録が {len(ids)} 件: {', '.join(ids)}",
                 "duplicate_entry_ids": ids,
             })
+
+    # **二重登録の組に入っている記録は自動で状態を動かさない。**
+    #
+    # 突合の規則は「GitHub が MERGED なら done に進める」だが、この規則は重複を
+    # 知らない。同じ PR を指す記録が 2 件あって、片方を人が意図的に cancelled に
+    # していた場合 (= 重複として捨てた)、突合はそれを done に戻してしまい、1 つの PR に
+    # done が 2 件並ぶ。
+    #
+    # 実測 (2026-10-07, ms-166 e-6871): 状態を変える対象 69 件のうち 18 件が重複の組に
+    # 入っており、そのうち 2 件 (e-884 PR#16 / e-6228 PR#732) は cancelled → done
+    # だった。e-884 は e-805 (done) の重複として捨てられたもの。
+    #
+    # 「GitHub に合わせる」は、人が下した判断を上書きする理由にならない。どちらを
+    # 残すかが決まるまで動かさず、決める必要があることを表に出す。
+    for act in actions:
+        if (act.get("action") in ("merge", "close")
+                and act.get("entry_id") in duplicated_ids):
+            act["blocked_reason"] = (
+                f"同じ PR#{act.get('pr_number')} を指す記録が複数あるため自動では"
+                f"動かさない (元の状態: {act.get('from_status')})。"
+                "どれを残すかを決めてから揃える")
+            act["intended_action"] = act["action"]
+            act["intended_to_status"] = act.get("to_status")
+            act["action"] = "blocked-by-duplicate"
+            act["to_status"] = act.get("from_status")
 
     return actions
 
@@ -2940,15 +2976,18 @@ def apply_pr_sync(data: dict, actions: list) -> dict:
     ``{"merged": n, "closed": n, "skipped": n, "errors": [...]}``.
     """
     summary = {"merged": 0, "closed": 0, "skipped": 0, "repaired": 0,
-               "unreadable": 0, "unmatched": 0, "duplicate": 0, "errors": []}
+               "unreadable": 0, "unmatched": 0, "duplicate": 0,
+               "out-of-window": 0, "blocked-by-duplicate": 0, "errors": []}
     for act in actions or []:
         eid = act.get("entry_id", "")
         a = act.get("action", "")
         # 報告だけの種別は数えて終わる (勝手に直さない — unreadable はどの PR か
         # 分からないので直せず、duplicate はどちらを残すかが人の判断)。
-        if a in ("unreadable", "unmatched", "duplicate"):
+        if a in ("unreadable", "unmatched", "duplicate", "out-of-window",
+                 "blocked-by-duplicate"):
             summary[a] += 1
-            if a == "unmatched" and eid and act.get("needs_repair"):
+            if (a in ("unmatched", "out-of-window", "blocked-by-duplicate")
+                    and eid and act.get("needs_repair")):
                 # 照合はできなかったが、記録の形だけは揃えられる (番号は判明している)。
                 if _repair_pr_identity(data, eid, act):
                     summary["repaired"] += 1

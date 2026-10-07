@@ -195,3 +195,82 @@ def test_two_entries_pointing_at_the_same_pr_are_reported():
     with redirect_stdout(buf):
         cmd_pr._print_pr_sync_plan(actions)
     assert "同じ PR を指す記録が複数" in buf.getvalue(), buf.getvalue()
+
+
+# --- 6. 突合は人が下した判断を上書きしない (2026-10-07 実データで発見) -------
+
+def test_sync_does_not_resurrect_a_duplicate_someone_cancelled():
+    """重複として捨てられた記録を「GitHub が MERGED だから」で done に戻さない。
+
+    突合の規則は「GitHub が MERGED なら done」だが、この規則は重複を知らない。
+    同じ PR を指す記録が 2 件あり片方を人が意図的に cancelled にしていた場合
+    (= 重複として捨てた)、素直に規則を当てると 1 つの PR に done が 2 件並ぶ。
+
+    実測 (2026-10-07): 状態を変える対象 69 件のうち 18 件が重複の組に入っており、
+    うち 2 件 (e-884 PR#16 / e-6228 PR#732) は cancelled → done だった。
+    e-884 は e-805 (done) の重複として捨てられたもの。
+
+    「GitHub に合わせる」は、人が下した判断を上書きする理由にならない。
+    """
+    data = _data(
+        _entry("e-805", "https://github.com/o/r/pull/16", 16, status="done"),
+        _entry("e-884", "https://github.com/o/r/pull/16", 16, status="cancelled"),
+    )
+    gh = [{"number": 16, "state": "MERGED", "url": "https://github.com/o/r/pull/16"}]
+    actions = core.plan_pr_sync(data, gh, fetched_floor=1)
+    assert not any(a["action"] in ("merge", "close") and a["entry_id"] == "e-884"
+                   for a in actions), (
+        "重複として捨てられた記録を自動で動かそうとしている: " + repr(actions))
+    assert any(a["action"] == "blocked-by-duplicate" and a["entry_id"] == "e-884"
+               for a in actions), "止めたことを報告していない: " + repr(actions)
+    core.apply_pr_sync(data, actions)
+    assert data["milestones"][0]["entries"][1]["status"] == "cancelled", (
+        "人が cancelled にした記録が done に戻された")
+
+
+def test_a_record_outside_the_fetched_window_is_not_called_missing():
+    """取得範囲の外にある記録を「GitHub に無い」と警告しない。
+
+    gh pr list は新しい順に N 件しか返さない。窓の外になった古い記録を
+    「見つからない」と報告すると偽警報になる — 実測 2026-10-07 に limit=100 で
+    562 件が誤って警告された (この課題で入れた報告自身が、読まれなくなるほど
+    騒ぐ側に倒れていた = 直した欠陥の裏返し)。
+    """
+    data = _data(_entry("e-old", "https://github.com/o/r/pull/2", 2))
+    gh = [{"number": 700, "state": "MERGED", "url": "https://github.com/o/r/pull/700"}]
+    actions = core.plan_pr_sync(data, gh, fetched_floor=700)
+    kinds = {a["action"] for a in actions}
+    assert "out-of-window" in kinds, repr(actions)
+    assert "unmatched" not in kinds, (
+        "窓の外を「見つからない」と報告している: " + repr(actions))
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_pr._print_pr_sync_plan(actions)
+    out = buf.getvalue()
+    assert "⚠" not in out, "事実の報告に警告記号を付けている:\n" + out
+    assert "範囲の外" in out, out
+
+
+def test_long_listings_are_capped_but_counts_stay_exact():
+    """件数は正確に、列挙は読める量で打ち切る。
+
+    歴史的な負債は 50 組・69 件という規模で出る。毎回全部並べると読み手は報告自体を
+    読まなくなり、「緑を信じる」のと同じ害に戻る。
+    """
+    entries = [_entry(f"e-{i}", f"https://github.com/o/r/pull/{i}", i)
+               for i in range(100, 130)]
+    data = _data(*entries)
+    gh = [{"number": i, "state": "MERGED",
+           "url": f"https://github.com/o/r/pull/{i}"} for i in range(100, 130)]
+    actions = core.plan_pr_sync(data, gh, fetched_floor=100)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_pr._print_pr_sync_plan(actions)
+    out = buf.getvalue()
+    assert "(30 件)" in out, "件数が正確でない:\n" + out
+    assert "他 20 件" in out, "残りの件数を言っていない:\n" + out
+    # **行数を数える。** 「他 20 件」の有無だけを見る検査は、打ち切りを外しても
+    # その行は出るので素通りする (最初にそう書いて mutation テストで気づいた)。
+    listed = [ln for ln in out.splitlines() if ln.startswith("  [e-")]
+    assert len(listed) <= 10, (
+        f"列挙を打ち切っていない ({len(listed)} 行出ている):\n" + out)

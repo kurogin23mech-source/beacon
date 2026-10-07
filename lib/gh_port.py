@@ -78,7 +78,12 @@ class SubprocessGhAdapter:
 
     def pr_list_all(self) -> list:
         result = subprocess.run(
-            ["gh", "pr", "list", "--state", "all", "--limit", "100",
+            # limit は 100 では足りない。突合の対象は beacon に記録された全 PR で、
+            # このリポジトリは既に 780 件を超えている。100 件 (= 最新のみ) だと窓の外に
+            # なった記録が「GitHub に無い」と誤報される (実測 2026-10-07: 562 件が
+            # 偽警報、ms-166 e-6871)。窓が足りない場合の扱いは plan_pr_sync 側が
+            # fetched_floor で表現するので、ここは「十分広く取る」だけを担う。
+            ["gh", "pr", "list", "--state", "all", "--limit", "1000",
              "--json", "number,state,url,mergedAt,title"],
             capture_output=True, text=True, timeout=15,
         )

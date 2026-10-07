@@ -985,39 +985,64 @@ def _print_pr_sync_plan(actions: list) -> None:
     moves = by_kind.get("merge", []) + by_kind.get("close", [])
     unreadable = by_kind.get("unreadable", [])
     unmatched = by_kind.get("unmatched", [])
+    outside = by_kind.get("out-of-window", [])
+    blocked = by_kind.get("blocked-by-duplicate", [])
     dups = by_kind.get("duplicate", [])
     repairs = [a for a in (actions or []) if a.get("needs_repair")]
 
-    if not (moves or unreadable or unmatched or dups or repairs):
+    def _lines(rows: list, render, cap: int = 10) -> None:
+        """件数は正確に、列挙は読める量で打ち切る。
+
+        歴史的な負債は 50 組・69 件という規模で出る。毎回全部並べると読み手は
+        報告自体を読まなくなり、「緑を信じる」のと同じ害に戻る (この課題が直した
+        欠陥の裏返し)。**件数は必ず正確に出し**、列挙だけを打ち切って残りの件数を
+        言う。
+        """
+        for a in rows[:cap]:
+            print(render(a))
+        if len(rows) > cap:
+            print(f"  … 他 {len(rows) - cap} 件")
+
+    if not (moves or unreadable or unmatched or dups or repairs or blocked):
+        tail = (f"、照合した範囲の外 {len(outside)} 件" if outside else "")
         print("beacon の PR 記録は GitHub と整合しています "
-              f"(照合した記録 {len(actions or [])} 件、判別できなかった記録 0 件)。")
+              f"(照合した記録 {len(actions or []) - len(outside)} 件、"
+              f"判別できなかった記録 0 件{tail})。")
         return
 
     if moves:
         print(f"状態を揃える記録 ({len(moves)} 件):")
-        for a in moves:
-            print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
-                  f"{a['from_status']} → {a['to_status']} ({a['reason']})")
+        _lines(moves, lambda a: (f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                                 f"{a['from_status']} → {a['to_status']} ({a['reason']})"))
     if repairs:
         print(f"識別の形を揃える記録 ({len(repairs)} 件 — 裸の番号 / 整数キー欠落):")
-        for a in repairs:
-            print(f"  [{a['entry_id']}] PR#{a['pr_number']}"
-                  + (f" → {a['canonical_url']}" if a.get("canonical_url") else ""))
+        _lines(repairs, lambda a: (f"  [{a['entry_id']}] PR#{a['pr_number']}"
+                                   + (f" → {a['canonical_url']}"
+                                      if a.get("canonical_url") else "")))
     if unreadable:
         print(f"⚠ どの PR か判別できない記録 ({len(unreadable)} 件) "
               "— 突合はこれらを見ていません:")
-        for a in unreadable:
-            print(f"  [{a['entry_id']}] {a['reason']}")
+        _lines(unreadable, lambda a: f"  [{a['entry_id']}] {a['reason']}")
     if unmatched:
         print(f"⚠ GitHub 側に見つからない記録 ({len(unmatched)} 件) "
               "— 整合ではなく照合できていない状態です:")
-        for a in unmatched:
-            print(f"  [{a['entry_id']}] PR#{a['pr_number']}: {a['reason']}")
+        _lines(unmatched,
+               lambda a: f"  [{a['entry_id']}] PR#{a['pr_number']}: {a['reason']}")
+    if outside:
+        # 警告ではない (⚠ を付けない)。取得範囲を広げれば照合できる、ただの事実。
+        print(f"照合した範囲の外にある記録: {len(outside)} 件 "
+              "(取得件数を増やせば照合できます)")
+    if blocked:
+        print(f"⚠ 二重登録のため自動では動かさなかった記録 ({len(blocked)} 件) "
+              "— 人が下した判断 (重複として捨てた等) を上書きしないため:")
+        _lines(blocked, lambda a: (f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                                   f"{a['from_status']} のまま "
+                                   f"(本来は {a.get('intended_to_status')} に揃う)"))
     if dups:
         print(f"⚠ 同じ PR を指す記録が複数ある ({len(dups)} 組) "
               "— どちらを残すかは人の判断です:")
-        for a in dups:
-            print(f"  PR#{a['pr_number']}: {', '.join(a.get('duplicate_entry_ids', []))}")
+        _lines(dups, lambda a: (f"  PR#{a['pr_number']}: "
+                                f"{', '.join(a.get('duplicate_entry_ids', []))}"))
 
 
 def _fetch_gh_pr_list_all() -> list:
@@ -1060,7 +1085,11 @@ def cmd_pr_sync():
         return
 
     data = load_project()
-    actions = core.plan_pr_sync(data, gh_prs)
+    # 取得できた最小 PR 番号を渡す。これより古い記録は「GitHub に無い」ではなく
+    # 「照合した範囲の外」— 混ぜると偽警報になる (ms-166 e-6871)。
+    _nums = [r.get("number") for r in gh_prs if isinstance(r.get("number"), int)]
+    actions = core.plan_pr_sync(data, gh_prs,
+                                fetched_floor=(min(_nums) if _nums else None))
 
     # Sort actions so non-skip transitions surface first.
     actions_sorted = sorted(
