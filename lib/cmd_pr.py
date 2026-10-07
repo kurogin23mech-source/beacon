@@ -131,6 +131,35 @@ def cmd_pr_add():
 
     # Fetch PR title, body, and commits from GitHub (before intent prompt so body can prefill)
     gh_info = _fetch_gh_pr_info(url)
+
+    # **保存する前に識別の形を揃える。** gh は URL でも裸の番号でも受けるので、人も AI も
+    # `beacon pr add 772` と打つ。旧実装はそれをそのまま meta.url に入れ、PR 番号の抽出は
+    # URL の形を要求していたため pr_number も None になった。結果、後段の突合がその記録を
+    # 識別できず無言で飛ばし、`beacon pr sync` が「すべて整合」と嘘の異常なしを返した
+    # (実測 2026-10-06: e-6725 / e-6751。ms-166 e-6871)。
+    #
+    # 識別できる値 (= gh が返した canonical な URL) に置き換えてから進む。gh が答えて
+    # くれなかった場合は **保存しない** — 読めない値を黙って保存する経路を残さない。
+    _num, _canonical = core.identify_pr(url)
+    if _canonical is None:
+        gh_url = (gh_info or {}).get("url", "")
+        if gh_url and core.identify_pr(gh_url)[0] is not None:
+            print(f"Note: PR の指定 {url!r} を GitHub が言う URL に揃えました: {gh_url}",
+                  file=sys.stderr)
+            url = gh_url
+        else:
+            print(
+                f"Error: {url!r} がどの PR を指すか決められません。\n"
+                "  PR の URL を渡してください (例: "
+                "https://github.com/<owner>/<repo>/pull/123)。\n"
+                "  裸の番号でも、その番号が GitHub 上で引ける場所 (対象リポジトリの中) で\n"
+                "  実行すれば URL に揃えます。いまは gh から URL を取得できませんでした\n"
+                "  (gh 未設定 / リポジトリ外 / その番号の PR が無い)。\n"
+                "  読めない値をそのまま記録すると、後の突合がこの記録を識別できず\n"
+                "  『すべて整合』と誤って報告します (ms-166 e-6871)。",
+                file=sys.stderr)
+            sys.exit(1)
+
     title = gh_info.get("title", "")
     pr_body = gh_info.get("body", "") or ""
     commits = gh_info.get("commits", [])
@@ -938,6 +967,59 @@ def cmd_pr_merge():
     else:
         print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
 
+def _print_pr_sync_plan(actions: list) -> None:
+    """突合の計画を出す。**見ていないものを「異常なし」と言わない。**
+
+    旧実装は「状態遷移が要る記録」が 0 件なら無条件に
+    "All beacon PR entries are already aligned with GitHub." と出していた。だが
+    plan は識別できなかった記録を無言で落としていたので、**1 件も見ていなくても
+    この行が出た** (実測 2026-10-06: url='772'/'775' の記録 2 件が MERGED を
+    in_review のまま持っていたのに「すべて整合」が出た。ms-166 e-6871)。
+
+    何も言わないより悪い — 読み手は緑を信じて次に進む。整合を名乗れるのは、
+    状態遷移も・判別できない記録も・照合できない記録も・二重登録も 0 件のときだけ。
+    """
+    by_kind: dict = {}
+    for a in actions or []:
+        by_kind.setdefault(a.get("action", ""), []).append(a)
+    moves = by_kind.get("merge", []) + by_kind.get("close", [])
+    unreadable = by_kind.get("unreadable", [])
+    unmatched = by_kind.get("unmatched", [])
+    dups = by_kind.get("duplicate", [])
+    repairs = [a for a in (actions or []) if a.get("needs_repair")]
+
+    if not (moves or unreadable or unmatched or dups or repairs):
+        print("beacon の PR 記録は GitHub と整合しています "
+              f"(照合した記録 {len(actions or [])} 件、判別できなかった記録 0 件)。")
+        return
+
+    if moves:
+        print(f"状態を揃える記録 ({len(moves)} 件):")
+        for a in moves:
+            print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                  f"{a['from_status']} → {a['to_status']} ({a['reason']})")
+    if repairs:
+        print(f"識別の形を揃える記録 ({len(repairs)} 件 — 裸の番号 / 整数キー欠落):")
+        for a in repairs:
+            print(f"  [{a['entry_id']}] PR#{a['pr_number']}"
+                  + (f" → {a['canonical_url']}" if a.get("canonical_url") else ""))
+    if unreadable:
+        print(f"⚠ どの PR か判別できない記録 ({len(unreadable)} 件) "
+              "— 突合はこれらを見ていません:")
+        for a in unreadable:
+            print(f"  [{a['entry_id']}] {a['reason']}")
+    if unmatched:
+        print(f"⚠ GitHub 側に見つからない記録 ({len(unmatched)} 件) "
+              "— 整合ではなく照合できていない状態です:")
+        for a in unmatched:
+            print(f"  [{a['entry_id']}] PR#{a['pr_number']}: {a['reason']}")
+    if dups:
+        print(f"⚠ 同じ PR を指す記録が複数ある ({len(dups)} 組) "
+              "— どちらを残すかは人の判断です:")
+        for a in dups:
+            print(f"  PR#{a['pr_number']}: {', '.join(a.get('duplicate_entry_ids', []))}")
+
+
 def _fetch_gh_pr_list_all() -> list:
     """ms-61 / e-2005 — query `gh pr list --state all` and return a list
     of dicts with at least `number`, `state`, `url`, `mergedAt`.
@@ -990,15 +1072,7 @@ def cmd_pr_sync():
             print(json.dumps({"dry_run": True, "actions": actions_sorted},
                              ensure_ascii=False))
         else:
-            actionable = [a for a in actions_sorted if a.get("action") != "skip"]
-            if not actionable:
-                print("All beacon PR entries are already aligned with GitHub.")
-            else:
-                print(f"PR sync plan (dry-run, {len(actionable)} actionable):")
-                for a in actionable:
-                    print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
-                          f"{a['from_status']} → {a['to_status']} "
-                          f"({a['action']}; {a['reason']})")
+            _print_pr_sync_plan(actions_sorted)
         return
 
     summary = core.apply_pr_sync(data, actions_sorted)

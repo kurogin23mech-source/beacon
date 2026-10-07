@@ -66,7 +66,10 @@ class SubprocessGhAdapter:
 
     def pr_view(self, url: str) -> dict:
         result = subprocess.run(
-            ["gh", "pr", "view", url, "--json", "title,body,commits"],
+            # url も聞く: gh は URL でも裸の番号でも受けるので、番号で呼ばれたとき
+            # 「どのリポジトリの何番か」を知っているのは gh だけ。これを聞かないと
+            # 呼び出し側がリポジトリ名を推測するしかなくなる (ms-166 e-6871)。
+            ["gh", "pr", "view", url, "--json", "title,body,commits,url"],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:

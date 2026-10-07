@@ -2149,10 +2149,12 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
     eid = next_entry_id(data)
     eid_num = int(eid.split("-")[1])
 
-    pr_number = None
-    m = _re.search(r'/pull/(\d+)', url)
-    if m:
-        pr_number = int(m.group(1))
+    # 識別は identify_pr に一本化する (ここに自前の正規表現を置くと、canonical 側と
+    # 端の形で食い違う: 旧 r'/pull/(\d+)' は末尾を固定していないので
+    # ".../pull/12x" から 12 を取るが、canonical は取らない。ms-166 e-6871)。
+    pr_number, canonical_url = identify_pr(url)
+    if canonical_url:
+        url = canonical_url
 
     # Prefer explicit title; fall back to "PR#{n}" so URL stays only in meta
     description = title or (f"PR#{pr_number}" if pr_number else url)
@@ -2704,6 +2706,46 @@ def _extract_pr_number_from_url(url: str) -> int | None:
     return None
 
 
+def identify_pr(ref: str) -> tuple:
+    """「この文字列はどの PR か」を 1 箇所で決める (= PR の識別の単一真実源)。
+
+    返り値は ``(pr_number, canonical_url_or_None)``。番号が決まらなければ
+    ``(None, None)``。
+
+    受ける形は 2 つ:
+
+    * PR の URL (``https://github.com/o/r/pull/12``) → 番号を取り、URL はそのまま
+      canonical として返す。
+    * **裸の番号** (``"772"``) → 番号は取れるが、どのリポジトリの 772 かはこの関数
+      には分からないので canonical_url は None。呼び出し側が補う (gh が知っている
+      正式な URL を聞く等)。
+
+    なぜ裸の番号を受けるのか: ``gh pr view`` が URL でも番号でも受けるので、人も AI も
+    ``beacon pr add 772`` と打つ。これを「読めない値」として保存してしまうと、後段の
+    突合がその記録を識別できず、無言で飛ばす (実測: e-6725 / e-6751 が url='772'/'775'
+    かつ pr_number=None で保存され、`beacon pr sync` が『すべて整合』と嘘の異常なしを
+    返した。ms-166 e-6871)。受ける形をここで 1 つに畳み、**保存する前に正規化する**。
+
+    PR を指す経路が ``meta.pr_number`` と ``meta.url`` の 2 つあるのは冗長化の意図
+    だったが、**両方が同じ未解析の入力から導かれていた**ので実は冗長ではなかった
+    (片方が読めないときもう片方も空になる)。識別をここに集めることで、その依存を
+    1 箇所に閉じる。
+    """
+    if not ref:
+        return (None, None)
+    ref = str(ref).strip()
+    n = _extract_pr_number_from_url(ref)
+    if n is not None:
+        return (n, ref)
+    if ref.isdigit():
+        try:
+            n = int(ref)
+        except (TypeError, ValueError):
+            return (None, None)
+        return ((n, None) if n > 0 else (None, None))
+    return (None, None)
+
+
 def plan_pr_sync(data: dict, gh_prs: list) -> list:
     """ms-61 / e-2005 — produce a plan of PR-entry transitions needed to
     align beacon state with GitHub state.
@@ -2741,22 +2783,70 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
         num = row.get("number")
         if not isinstance(num, int):
             continue
-        gh_by_number[num] = (row.get("state") or "").upper()
+        # state だけでなく **GitHub が言う URL** も持つ。裸の番号で登録された記録を
+        # canonical な URL に揃えるとき、リポジトリ名を推測する必要がなくなる
+        # (gh pr list は url を返しているので、既に手元にある、ms-166 e-6871)。
+        gh_by_number[num] = ((row.get("state") or "").upper(), row.get("url") or "")
 
     actions: list = []
+    # 同じ PR 番号が 2 つ以上の記録に入っている状態を検出するための台帳。
+    # 実測: e-6748 (done) と e-6751 (in_review) が両方 PR 775 を指していた。
+    # 登録時に既存を検出できておらず、片方が古い状態で残り続ける (ms-166 e-6871)。
+    seen_numbers: dict = {}
 
     def _walk(entries: list):
         for e in entries or []:
             if isinstance(e, dict) and e.get("type") == "pr":
                 meta = e.get("meta") or {}
+                raw_url = meta.get("url", "")
                 pr_num = meta.get("pr_number")
-                if not isinstance(pr_num, int):
-                    pr_num = _extract_pr_number_from_url(meta.get("url", ""))
+                canonical = None
+                if not isinstance(pr_num, int) or pr_num <= 0:
+                    pr_num, canonical = identify_pr(raw_url)
                 if not pr_num:
-                    continue  # un-numbered (= local-only) PR entry, skip
-                gh_state = gh_by_number.get(pr_num)
+                    # **飛ばすが黙らない。** 旧実装はここで continue だけして、
+                    # 飛ばした件数も ID も報告しなかった。コメントは
+                    # 「un-numbered (= local-only) PR entry」= ローカル専用の記録だと
+                    # 仮定していたが、実際には PR 番号そのものが URL の形で入って
+                    # いないだけの記録があり (url='772')、それを識別できずに飛ばした
+                    # 結果 `beacon pr sync` が「すべて整合」と嘘の異常なしを返した
+                    # (ms-166 e-6871)。識別できない記録は action として表に出す。
+                    actions.append({
+                        "entry_id": e.get("id", ""),
+                        "pr_number": 0,
+                        "action": "unreadable",
+                        "from_status": e.get("status", ""),
+                        "to_status": e.get("status", ""),
+                        "reason": f"どの PR か判別できない (url={raw_url!r}, pr_number={meta.get('pr_number')!r})",
+                    })
+                    _walk(e.get("entries", []))
+                    continue
+                # 識別はできたが保存されている形が canonical でない (裸の番号 / 整数キー
+                # 欠落) 記録は、揃え直す対象として出す。放置すると次の突合でも同じ
+                # 推測をやり直すことになる。
+                needs_repair = (not isinstance(meta.get("pr_number"), int)
+                                or _extract_pr_number_from_url(raw_url) is None)
+                seen_numbers.setdefault(pr_num, []).append(e.get("id", ""))
+                gh_row = gh_by_number.get(pr_num)
+                gh_state, gh_url = gh_row if gh_row else ("", "")
+                # canonical が未判明なら GitHub が言う URL を採る (推測ではなく実値)。
+                if not canonical and gh_url:
+                    canonical = gh_url
                 if not gh_state:
-                    continue  # GitHub doesn't know this PR (= deleted? not visible?), skip
+                    # これも黙らない。GitHub 側に見つからない記録 (消された / 別リポジトリ /
+                    # 権限が無い) は、揃っているのではなく「照合できていない」。
+                    actions.append({
+                        "entry_id": e.get("id", ""),
+                        "pr_number": pr_num,
+                        "action": "unmatched",
+                        "from_status": e.get("status", ""),
+                        "to_status": e.get("status", ""),
+                        "reason": "GitHub 側にこの PR が見つからない (消された / 別リポジトリ / 権限)",
+                        "needs_repair": needs_repair,
+                        "canonical_url": canonical,
+                    })
+                    _walk(e.get("entries", []))
+                    continue
                 cur_status = e.get("status", "")
                 if gh_state == "MERGED":
                     if cur_status in ("done",) or meta.get("pr_status") == "merged":
@@ -2767,6 +2857,8 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
                             "from_status": cur_status,
                             "to_status": cur_status,
                             "reason": "already merged in beacon",
+                            "needs_repair": needs_repair,
+                            "canonical_url": canonical,
                         })
                     else:
                         actions.append({
@@ -2776,6 +2868,8 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
                             "from_status": cur_status,
                             "to_status": "done",
                             "reason": "GitHub MERGED but beacon not yet",
+                            "needs_repair": needs_repair,
+                            "canonical_url": canonical,
                         })
                 elif gh_state == "CLOSED":
                     if cur_status in ("cancelled",) or meta.get("pr_status") == "closed":
@@ -2786,6 +2880,8 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
                             "from_status": cur_status,
                             "to_status": cur_status,
                             "reason": "already closed in beacon",
+                            "needs_repair": needs_repair,
+                            "canonical_url": canonical,
                         })
                     else:
                         actions.append({
@@ -2796,13 +2892,43 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
                             "to_status": "cancelled",
                             "reason": "GitHub CLOSED but beacon not yet",
                         })
-                # GitHub OPEN → no action; this is the steady state.
+                else:
+                    # GitHub OPEN。遷移は不要だが **action を出す**。旧実装はここで
+                    # 何も出さなかったので、「遷移が不要」と「そもそも見ていない」が
+                    # 区別できず、件数を数えても意味を持たなかった (見た記録 1 件でも
+                    # len(actions) == 0 になる)。整合を名乗るには「何件見たか」が
+                    # 言えないといけない (ms-166 e-6871)。
+                    actions.append({
+                        "entry_id": e.get("id", ""),
+                        "pr_number": pr_num,
+                        "action": "skip",
+                        "from_status": cur_status,
+                        "to_status": cur_status,
+                        "reason": "GitHub 上はまだ open",
+                        "needs_repair": needs_repair,
+                        "canonical_url": canonical,
+                    })
             if isinstance(e, dict):
                 _walk(e.get("entries", []))
 
     for ms in data.get("milestones", []):
         if isinstance(ms, dict):
             _walk(ms.get("entries", []))
+
+    # 同じ PR 番号を指す記録が 2 つ以上あれば報告する。登録時に既存を検出できて
+    # いないので、片方が古い状態のまま残り「並列で open な PR が 2 件ある」という
+    # 誤報の種にもなる (実測: e-6748 done / e-6751 in_review が両方 PR 775)。
+    for num, ids in sorted(seen_numbers.items()):
+        if len(ids) > 1:
+            actions.append({
+                "entry_id": ids[0],
+                "pr_number": num,
+                "action": "duplicate",
+                "from_status": "",
+                "to_status": "",
+                "reason": f"同じ PR#{num} を指す記録が {len(ids)} 件: {', '.join(ids)}",
+                "duplicate_entry_ids": ids,
+            })
 
     return actions
 
@@ -2813,11 +2939,29 @@ def apply_pr_sync(data: dict, actions: list) -> dict:
     Mutates `data` in place. Returns a summary dict
     ``{"merged": n, "closed": n, "skipped": n, "errors": [...]}``.
     """
-    summary = {"merged": 0, "closed": 0, "skipped": 0, "errors": []}
+    summary = {"merged": 0, "closed": 0, "skipped": 0, "repaired": 0,
+               "unreadable": 0, "unmatched": 0, "duplicate": 0, "errors": []}
     for act in actions or []:
         eid = act.get("entry_id", "")
         a = act.get("action", "")
-        if a == "skip" or not eid:
+        # 報告だけの種別は数えて終わる (勝手に直さない — unreadable はどの PR か
+        # 分からないので直せず、duplicate はどちらを残すかが人の判断)。
+        if a in ("unreadable", "unmatched", "duplicate"):
+            summary[a] += 1
+            if a == "unmatched" and eid and act.get("needs_repair"):
+                # 照合はできなかったが、記録の形だけは揃えられる (番号は判明している)。
+                if _repair_pr_identity(data, eid, act):
+                    summary["repaired"] += 1
+            continue
+        if not eid:
+            summary["skipped"] += 1
+            continue
+        # 識別の形が canonical でない記録は、状態遷移の前に形を揃える。放置すると
+        # 次の突合でも同じ推測をやり直し、`beacon pr sync` が毎回同じ記録を
+        # 「要修復」と言い続ける (ms-166 e-6871)。
+        if act.get("needs_repair") and _repair_pr_identity(data, eid, act):
+            summary["repaired"] += 1
+        if a == "skip":
             summary["skipped"] += 1
             continue
         try:
@@ -2832,6 +2976,38 @@ def apply_pr_sync(data: dict, actions: list) -> dict:
         except ValueError as e:
             summary["errors"].append({"entry_id": eid, "error": str(e)})
     return summary
+
+
+def _repair_pr_identity(data: dict, entry_id: str, act: dict) -> bool:
+    """PR 記録の識別の形を canonical に揃える。揃えたら True。
+
+    直すのは 2 つだけ: ``meta.pr_number`` を整数で埋め、``meta.url`` が PR の URL の
+    形でなければ canonical な URL に置き換える。**判断や状態は触らない** — ここは
+    「同じものを指す別の書き方」を 1 つに寄せるだけの操作。
+
+    canonical な URL が分からない場合 (= 裸の番号で登録され、GitHub 側の URL を
+    聞けていない) は ``meta.url`` を変えず、整数キーだけ埋める。番号が入れば後段の
+    突合は識別できるので、それ以上の推測 (リポジトリ名の捏造) はしない。
+    """
+    pr_num = act.get("pr_number")
+    if not isinstance(pr_num, int) or pr_num <= 0:
+        return False
+    # 探索は既存の find_entry に寄せる。自分で 2 つ目の walk を書くのは、この課題が
+    # 直している重複そのもの (find_entry は operations 配下も見るので範囲も広い)。
+    hit = find_entry(data, entry_id)
+    if not hit:
+        return False
+    entry = hit[2]
+    meta = entry.setdefault("meta", {})
+    changed = False
+    if not isinstance(meta.get("pr_number"), int) or meta.get("pr_number") != pr_num:
+        meta["pr_number"] = pr_num
+        changed = True
+    canonical = act.get("canonical_url")
+    if canonical and _extract_pr_number_from_url(meta.get("url", "")) is None:
+        meta["url"] = canonical
+        changed = True
+    return changed
 
 
 # ---------------------------------------------------------------------------
