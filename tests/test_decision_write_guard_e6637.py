@@ -209,6 +209,15 @@ _RAW_HTTP_MARKERS = frozenset({"Request", "urlopen"})
 # それは扉なので doors に入る (下の guard がそれを機械で確かめる)。
 _RAW_TRANSPORT = frozenset({"_request"})
 
+# 輸送路が **書き込みを** 守っていると数えてよい呼び出し名 (ms-166 e-6854)。
+#
+# 初版は「輸送路が何らかのガードを呼んでいるか」で判定していた。_request には
+# 読み取り用の _guard_read が在るので、**書き込みの受け止めを丸ごと外しても
+# 「輸送路はガード済み」と判定され、62 の扉が覆われているまま緑になった**
+# (mutation テストで発覚)。覆域の軸が「ガードが本体のどこかに在るか」= 表層で、
+# 「書き込み脚が守られているか」= 意味ではなかった。
+_WRITE_GUARD_NAMES = frozenset({"_guard_write", "guard_prod_write"})
+
 # 負債台帳の各項目に要る鍵と、許す triage の値。
 _LEDGER_TRIAGE_VALUES = frozenset({"pending", "exempt"})
 
@@ -254,7 +263,32 @@ def api_client_write_doors():
     def guarded(c):
         return any(x.startswith("guard_prod") for x in c) or bool(c & helpers)
 
-    doors = {n: guarded(c) for n, c in methods.items()
+    # ms-166 e-6854: **廊下経由のガードを覆域に数える。**
+    #
+    # 初版はメソッド自身の本体がガードを呼ぶかだけを見ていた。そのため共有の輸送路
+    # (_request) の非 GET 脚に受け止めを置いても、62 の扉は「未ガード」と数えられ
+    # 続けた — 実際には守られているのに台帳を空にできない状態。覆域の軸が
+    # 「どこに書いてあるか」で、「実際に通るか」ではなかった。
+    #
+    # 輸送路が守られているなら、そこを通る扉は守られている。ただし **生 HTTP を
+    # 自分で組む扉は輸送路を通らない** ので、この恩恵を受けない (自分でガードを
+    # 呼ぶ必要がある)。この区別を落とすと、形を変えた扉が廊下の覆域に紛れて
+    # 素通りする (AX-1 が指摘したのと同じ形)。
+    transport_guarded = {n for n in _RAW_TRANSPORT
+                         if methods.get(n, set()) & _WRITE_GUARD_NAMES}
+    # 薄い verb ラッパ (post / put / …) は輸送路を呼ぶだけなので、そこを通る扉も
+    # 同じ恩恵を受ける。名前で決め打ちせず「輸送路を呼んでいるか」で求める。
+    routes_to_transport = {n for n, c in methods.items()
+                           if c & _RAW_TRANSPORT} | set(_RAW_TRANSPORT)
+
+    def covered(name, c):
+        if guarded(c):
+            return True
+        if c & _RAW_HTTP_MARKERS:
+            return False      # 輸送路を通らない扉は自分で守るしかない
+        return bool(transport_guarded) and bool(c & routes_to_transport)
+
+    doors = {n: covered(n, c) for n, c in methods.items()
              if ((c & _WRITE_VERBS) or (c & _RAW_HTTP_MARKERS))
              and n not in _RAW_TRANSPORT and not n.startswith("_guard")}
     return doors, sorted(helpers)
@@ -330,13 +364,25 @@ def test_every_raw_http_method_is_a_door_or_the_declared_transport():
 
 
 def test_the_raw_http_door_found_by_the_review_is_accounted_for():
-    # 具体の回帰ピン: この扉が「存在しない」扱いに戻ったら落ちる。
+    """生 HTTP の扉が「説明されていない」状態に戻ったら落ちる。
+
+    この試験は当初「upload_document_image が負債台帳に載っていること」を固定していた。
+    それは **その時点の状態** (未ガードで台帳に記録済) であって不変条件ではない。
+    e-6854 でこの扉を実際にガードしたら、台帳から外すのが正しい状態なのに、この
+    試験が「台帳に載っていない」と言って落ちた。
+
+    試験名が言っているのは accounted_for = **説明されていること**。守られているか、
+    理由付きで免除されているか、どちらかであればよい。「見えていない」が唯一の
+    不正な状態 (AX-1 が見つけたのはまさにそれ: 扉として一度も数えられていなかった)。
+    """
     doors, _ = api_client_write_doors()
     assert "upload_document_image" in doors, (
         "upload_document_image が扉として見えていません (AX-1 の退行)")
-    assert "upload_document_image" in _RECORDED_UNGUARDED_DOORS, (
-        "upload_document_image が負債台帳に載っていません — 未ガードの本番書き込み扉を"
-        "台帳からも落とすと、誰も見ない状態に戻ります")
+    accounted = (doors["upload_document_image"]
+                 or "upload_document_image" in _RECORDED_UNGUARDED_DOORS)
+    assert accounted, (
+        "upload_document_image が守られてもおらず台帳にも載っていません — "
+        "未ガードの本番書き込み扉を台帳からも落とすと、誰も見ない状態に戻ります")
 
 
 def test_the_transport_is_not_counted_as_a_door():
@@ -508,3 +554,70 @@ def test_the_specific_branch_precedes_the_broad_one():
     i_generic = src.index('"Error: failed to record decision')
     assert i_check < i_generic, (
         "汎用の失敗メッセージがガード判定より先に出ています (特定の分岐が死にます)")
+
+
+# --- 廊下の受け止めを「振る舞い」で留める (ms-166 e-6854) --------------------
+#
+# 構文木の検査は覆域を数えるのに要るが、それだけだと軸を間違えたときに気づけない。
+# 実際に間違えた: 初版は「輸送路が何らかのガードを呼ぶか」で判定していたので、
+# 書き込みの受け止めを丸ごと外しても緑のままだった (読み取り用のガードが残って
+# いたため)。**実際に書いてみて断られるか** を測るのが、軸の取り違えに強い。
+
+def _prod_client():
+    """本番 URL を向いた ApiClient (テスト文脈 = conftest が BEACON_TEST_MODE を立てる)。"""
+    import api_client
+    return api_client.ApiClient("https://beacon-ai.dev")
+
+
+def test_a_door_with_no_guard_of_its_own_is_still_refused_by_the_corridor():
+    """固有のガードを持たない扉が、廊下の受け止めで断られること。
+
+    add_note は 53 件の負債側に居たメソッドの 1 つで、自分ではガードを呼ばない。
+    ここが断られるなら、同じ形の扉 (= 共有の輸送路を通る書き込み) は全部断られる。
+    """
+    import cloud_write_guard
+    import pytest as _pytest
+    with _pytest.raises(cloud_write_guard.ProdWriteBlocked) as ei:
+        _prod_client().add_note("p-test", "テストからの書き込み")
+    assert "beacon-ai.dev" in str(ei.value)
+
+
+def test_the_raw_multipart_door_is_refused_too():
+    """共有の輸送路を通らない扉 (multipart を自分で組む) も断られること。
+
+    廊下に受け止めを置いてもここは素通りするので、個別にガードを呼んでいる。
+    """
+    import cloud_write_guard
+    import pytest as _pytest
+    with _pytest.raises(cloud_write_guard.ProdWriteBlocked):
+        # 存在しないパスを渡しても、ファイルを読む前に断られる
+        _prod_client().upload_document_image("p-test", "/nonexistent/a.png")
+
+
+def test_reading_prod_is_refused_with_the_read_wording_not_the_write_one():
+    """読み取りは読み取りの文言で断られること (診断が入れ替わらない)。
+
+    廊下で全部を同じ文言で断ると、書き込みの診断が読み取りのものに置き換わる
+    (あるいは逆)。脚ごとに別のガードを置いている理由がこれ。
+    """
+    import cloud_write_guard
+    import pytest as _pytest
+    with _pytest.raises(cloud_write_guard.ProdWriteBlocked) as ei:
+        _prod_client().get_project("p-test")
+    assert "read" in str(ei.value).lower() or "読" in str(ei.value)
+
+
+def test_the_specific_guards_still_own_their_wording():
+    """固有のガードを持つ扉は、その固有の診断で断られること (受け止めが勝たない)。
+
+    判断記録は追記専用で取り消せない、という情報は汎用の文言には無い。背景の
+    説明が受け止めの一般論に置き換わると、著者は「なぜここが特別なのか」を
+    失う。
+    """
+    import cloud_write_guard
+    import pytest as _pytest
+    with _pytest.raises(cloud_write_guard.ProdWriteBlocked) as ei:
+        _prod_client().record_decision("p-test", {"what": "x"})
+    assert "append-only" in str(ei.value), (
+        "判断記録の固有の診断 (追記専用) が汎用の文言に置き換わっています: "
+        + str(ei.value))

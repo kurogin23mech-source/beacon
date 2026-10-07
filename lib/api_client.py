@@ -236,6 +236,18 @@ class ApiClient:
         import cloud_write_guard
         cloud_write_guard.guard_prod_decision_write(self._guard_base_url())
 
+    def _guard_write(self, method: str = "", path: str = "") -> None:
+        """ANY write to prod from a test context is refused (ms-166 e-6854).
+
+        Same shape as the sibling ``_guard_*`` helpers: the判定 lives in one place
+        so a call site is a single line. This is the **backstop** — the specific
+        guards (project / bus / decision) fire earlier inside their own methods,
+        so their richer wording is what the author sees for those doors.
+        """
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_write(
+            self._guard_base_url(), method=method, path=path)
+
     def _request(self, method: str, path: str, body: dict | None = None,
                  *, extra_headers: dict | None = None) -> dict:
         # ms-98 / e-2777: fail fast when a recent 429 storm has opened
@@ -248,6 +260,14 @@ class ApiClient:
         # 診断文言が読み取りのものに置き換わってしまう)。
         if (method or "").upper() == "GET":
             self._guard_read()
+        else:
+            # ms-166 e-6854: 書き込みの受け止め。以前ここには「書き込みは各扉で既に
+            # 守られているので GET だけ問う」と書いてあったが、**実測では 61 の書き込み
+            # メソッドのうち守られていたのは 8 件だった** — コメントが前提として
+            # 述べていたことが成り立っていなかった。扉を 1 つずつ塞ぐのを 4 回
+            # (e-4029 / e-5194 / e-5216 / e-6637) やったので、5 回目は廊下で閉じる。
+            # 固有のガードは各扉の中で先に発火するので、診断文言はそちらが勝つ。
+            self._guard_write(method, path)
 
         url = f"{self._base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -474,6 +494,12 @@ class ApiClient:
         # ms-98 / e-2777: honor the shared circuit state so image
         # uploads don't sneak past the fail-fast during a 429 storm.
         _circuit_check_and_raise()
+        # ms-166 e-6854: この扉は multipart を自分で組むので共有の輸送路 (_request) を
+        # 通らない。廊下に受け止めを置いても here は素通りするため個別に通す。
+        # **ファイルを読む前に** 断る (断る予定の仕事はしない)。
+        # (この扉は PR #785 の独立 AX レビュー AX-1 が「verb 名だけ見る検出器が
+        # 形を変えた扉を一度も見ていなかった」と指摘した当のメソッド。)
+        self._guard_write("POST", "/documents/images")
 
         import os as _os
         import mimetypes as _mt
