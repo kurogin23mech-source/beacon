@@ -435,9 +435,20 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     written before the work happened and stays frozen at done-time, so without
     an outcome a finished item still reads as its own prediction. Optional on
     purpose — it carries additional information and is NOT part of the
-    audit-entry gate (that gate is ``reason``, enforced identically for every
-    work-item class by ``commands_shared._require_reason_or_skip``). Requiring
-    it for one occupation only would be exactly the branch this task removes.
+    audit-entry gate (that gate is ``reason``). Requiring it for one occupation
+    only would be exactly the branch this task removes.
+
+    Which verbs the reason gate covers, measured (ms-166 e-6600): ``task done``,
+    ``milestone done / wait / observe``, ``activity done / cancel`` route through
+    ``commands_shared._require_reason_or_skip``. ``task cancel`` /
+    ``opportunity contract cancel`` / ``communication cancel`` /
+    ``meeting cancel`` do NOT — they read ``BEACON_REASON`` directly and accept
+    its absence. So the gate is **not** yet enforced across every terminal
+    transition, and a new terminal verb does not inherit it: the gate lives in
+    each CLI handler, not in this primitive or in
+    ``occupation.set_entry_state``. Moving it onto the shared seam (so the
+    coverage becomes a property of the code instead of a list) is task e-6893.
+    Do not read this parameter's presence as proof the gate is universal.
     """
     item["status"] = DONE_STATUS
     item[DONE_AT] = at or work_base.now_iso()

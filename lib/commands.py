@@ -9674,8 +9674,10 @@ def _print_phase_fold(fold) -> None:
         print(f"  ▸ 要判断 {d.get('id')}: {d.get('description')}")
         print(f"      {d.get('reason')}")
     if pending:
-        print("      → done: beacon activity done <id> / "
-              "cancel: beacon activity cancel <id> --reason <理由>")
+        print("      → done:   beacon opportunity activity done <id> "
+              "--reason <理由> [--outcome <結果>]")
+        print("      → cancel: beacon opportunity activity cancel <id> "
+              "--reason <理由>")
 
 
 def cmd_opportunity_judge():
@@ -9847,8 +9849,9 @@ def cmd_opportunity_due():
         print("準備活動の期日 — 到達/超過:")
         for a in acts:
             print(_fmt_act(a))
-        print("  → 実施済みなら beacon opportunity activity done <act-id> / "
-              "やめたなら cancel / 期日を延ばすなら update --deadline")
+        print("  → 実施済みなら beacon opportunity activity done <act-id> "
+              "--reason <理由> / やめたなら cancel <act-id> --reason <理由> / "
+              "期日を延ばすなら update --deadline")
 
 
 def cmd_deadline_due():

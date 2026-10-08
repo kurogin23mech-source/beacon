@@ -90,7 +90,9 @@ beacon watch list --awaiting --json  # 返信待ち
    `beacon opportunity activity done <act-id> --reason "<なぜ完了と判断したか>" [--outcome "<何が得られたか>"]`、
    やめたなら `cancel <act-id> --reason "<なぜやめたか>"`、期日を延ばすなら `update --deadline` で
    盤面から外す (催促を止める栓)。
-   **`done` / `cancel` は理由が必須** (ms-166 e-6600、開発の `task done` と同じ規則)。理由を
+   **`done` / `cancel` は理由が必須** (ms-166 e-6600)。`done` は開発の `task done` と同じ
+   関門を共有する。`cancel` 側は開発の `task cancel` にはまだ関門が無いので、「開発と同じ」
+   ではなく「活動の取消だけに掛かっている」規則 (関門を全終端遷移に広げるのは e-6893)。理由を
    書かないと決めた場合だけ `--acknowledge` を使う。`--outcome` は任意だが、活動の説明文は
    計画時のまま凍結されるので、「何が得られたか」を残すと後から読む人 (非開発者を含む) が
    予定と結果を区別できる。
