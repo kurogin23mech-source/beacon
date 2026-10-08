@@ -1,6 +1,8 @@
 """Firestore client wrapper for Beacon API."""
 
 from __future__ import annotations
+
+import _libpath  # noqa: F401 — puts lib/ on sys.path (store_router imports us without app.py)
 import idempotency as _idem
 
 import logging
