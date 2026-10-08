@@ -56,10 +56,9 @@ echo "→ copying server/ and lib/"
 #   lib/core.py
 #   lib/...
 #
-# server/ をサブディレクトリのまま残す理由: app.py の sys.path 操作
-# `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))`
-# が `server/../lib = lib/` を解決する前提で書かれているため、この
-# 相対関係を保つ。Lambda 側の handler 設定は `server.lambda_handler.handler`。
+# server/ をサブディレクトリのまま残す理由: server/_libpath.py (= lib/ への道を
+# 知る唯一の持ち主) が `server/../lib = lib/` を解決する前提で書かれているため、
+# この相対関係を保つ。Lambda 側の handler 設定は `server.lambda_handler.handler`。
 mkdir -p "$STAGE_DIR/server" "$STAGE_DIR/lib"
 cp -R server/. "$STAGE_DIR/server/"
 cp -R lib/. "$STAGE_DIR/lib/"

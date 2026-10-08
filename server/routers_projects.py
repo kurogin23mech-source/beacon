@@ -55,6 +55,7 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import bus_liveness  # ms-173 e-6775: state と state_detail の対の不変条件
+import _libpath  # noqa: F401 — lib/ を sys.path に載せる (所有者: server/_libpath.py)
 import core
 import inspect  # ms-157 e-5749: derive add_work_item's reserved kwargs from source
 import occupation  # ms-157 e-5749: target-class 横断の generic target 投影
@@ -3542,10 +3543,6 @@ def make_collab_router(
         the design contract. This endpoint delegates to lib/search.search_project
         so the CLI, server, and Skills all share the same logic.
         """
-        import sys as _sys, os as _os
-        _LIB = _os.path.join(_os.path.dirname(__file__), "..", "lib")
-        if _LIB not in _sys.path:
-            _sys.path.insert(0, _LIB)
         import search as _search  # noqa: PLC0415
 
         data = _load(project_id, user)

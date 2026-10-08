@@ -110,3 +110,25 @@ def test_libpath_is_idempotent_and_points_at_lib() -> None:
     count, lib_dir = result.stdout.split(maxsplit=1)
     assert count == "1", f"sys.path に lib/ が {count} 回入っている (重複挿入)"
     assert os.path.isdir(lib_dir.strip()), f"_libpath.LIB_DIR が実在しない: {lib_dir!r}"
+
+
+def test_lib_path_single_owner_guard_passes() -> None:
+    """lib/ への道を知る箇所が server/_libpath.py だけであることを機械で確かめる。
+
+    CI では scripts/ci-strict-drift-guards.sh が同じスクリプトを呼ぶ (lint-docs は
+    pytest を持たないので、ガード本体は pytest 非依存の素のスクリプトに置いてある)。
+    ここはその結果を手元の pytest からも見えるようにする窓。
+
+    経緯: _libpath.py の docstring が自分を「唯一の持ち主」と名乗った時点では、
+    routers_projects.py の検索ハンドラの中に 3 つ目のコピーが残っていた
+    (2026-10-08 の独立レビュー 2 体が揃って指摘)。名乗りは守らないので機械で数える。
+    """
+    script = os.path.join(REPO_ROOT, "scripts", "check-lib-path-single-owner.py")
+    result = subprocess.run(
+        [sys.executable, script, "--strict"], capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    assert result.returncode == 0, (
+        "lib/ を sys.path に載せる箇所が server/_libpath.py の外にあります。\n"
+        + result.stdout
+        + result.stderr
+    )
