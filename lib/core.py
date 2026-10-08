@@ -7,6 +7,8 @@ between the CLI (commands.py) and the API (server/app.py).
 
 from __future__ import annotations
 
+import functools as _functools
+
 import datetime as _dt
 import re
 
@@ -1318,6 +1320,11 @@ def task_add(data: dict, ms_id: str, description: str, *,
              allow_untriaged: bool = False) -> str:
     """Add an entry to a milestone. Returns the new entry id.
 
+    ``outcome`` (ms-166 e-6600): optional record of WHAT CAME OF the task, the
+    sibling of ``reason`` (WHY it is being closed). Carried here so the field
+    lives on the work-item class rather than on one occupation — a dev task and
+    a sales activity close with the same two pieces of information or neither.
+
     ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
     "display_name"}`` dict attached to ``meta.author`` — the *human*
     identity that created the task on the server side. Distinct from
@@ -1385,7 +1392,7 @@ def task_add(data: dict, ms_id: str, description: str, *,
 
 
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
-              author: dict | None = None) -> tuple[dict, dict]:
+              outcome: str = "", author: dict | None = None) -> tuple[dict, dict]:
     """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
     containing milestone first, the entry second (review finding #5: stated
     explicitly since the close now delegates to ``occupation.set_entry_state``,
@@ -1410,7 +1417,7 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     import occupation
     ms, entry = occupation.set_entry_state(
         data, entry_id, "done", at=date or _now_iso(),
-        actor=_get_actor(), reason=reason)
+        actor=_get_actor(), reason=reason, outcome=outcome)
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
     author_clean = _clean_author(author)
@@ -2149,10 +2156,12 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
     eid = next_entry_id(data)
     eid_num = int(eid.split("-")[1])
 
-    pr_number = None
-    m = _re.search(r'/pull/(\d+)', url)
-    if m:
-        pr_number = int(m.group(1))
+    # 識別は identify_pr に一本化する (ここに自前の正規表現を置くと、canonical 側と
+    # 端の形で食い違う: 旧 r'/pull/(\d+)' は末尾を固定していないので
+    # ".../pull/12x" から 12 を取るが、canonical は取らない。ms-166 e-6871)。
+    pr_number, canonical_url = identify_pr(url)
+    if canonical_url:
+        url = canonical_url
 
     # Prefer explicit title; fall back to "PR#{n}" so URL stays only in meta
     description = title or (f"PR#{pr_number}" if pr_number else url)
@@ -2704,7 +2713,123 @@ def _extract_pr_number_from_url(url: str) -> int | None:
     return None
 
 
-def plan_pr_sync(data: dict, gh_prs: list) -> list:
+def identify_pr(ref: str) -> tuple:
+    """「この文字列はどの PR か」を 1 箇所で決める (= PR の識別の単一真実源)。
+
+    返り値は ``(pr_number, canonical_url_or_None)``。番号が決まらなければ
+    ``(None, None)``。
+
+    受ける形は 2 つ:
+
+    * PR の URL (``https://github.com/o/r/pull/12``) → 番号を取り、URL はそのまま
+      canonical として返す。
+    * **裸の番号** (``"772"``) → 番号は取れるが、どのリポジトリの 772 かはこの関数
+      には分からないので canonical_url は None。呼び出し側が補う (gh が知っている
+      正式な URL を聞く等)。
+
+    なぜ裸の番号を受けるのか: ``gh pr view`` が URL でも番号でも受けるので、人も AI も
+    ``beacon pr add 772`` と打つ。これを「読めない値」として保存してしまうと、後段の
+    突合がその記録を識別できず、無言で飛ばす (実測: e-6725 / e-6751 が url='772'/'775'
+    かつ pr_number=None で保存され、`beacon pr sync` が『すべて整合』と嘘の異常なしを
+    返した。ms-166 e-6871)。受ける形をここで 1 つに畳み、**保存する前に正規化する**。
+
+    PR を指す経路が ``meta.pr_number`` と ``meta.url`` の 2 つあるのは冗長化の意図
+    だったが、**両方が同じ未解析の入力から導かれていた**ので実は冗長ではなかった
+    (片方が読めないときもう片方も空になる)。識別をここに集めることで、その依存を
+    1 箇所に閉じる。
+    """
+    if not ref:
+        return (None, None)
+    ref = str(ref).strip()
+    n = _extract_pr_number_from_url(ref)
+    if n is not None:
+        # **最小形に正規化する** (独立 AX レビュー AX-4)。入力をそのまま返すと
+        # ".../pull/12/files" と ".../pull/12" が別の文字列として canonical を名乗り、
+        # 「同じ PR なら同じ文字列になる」という名前の約束が成り立たない。
+        # 今の重複検出は整数の番号で行っているので実害は出ていないが、将来この値を
+        # 文字列比較で同一性判定に使う人が約束を信じて誤判定する。
+        import re as _re_c
+        m = _re_c.match(r"(.*?/pull/\d+)", ref)
+        return (n, m.group(1) if m else ref)
+    if ref.isdigit():
+        try:
+            n = int(ref)
+        except (TypeError, ValueError):
+            return (None, None)
+        return ((n, None) if n > 0 else (None, None))
+    return (None, None)
+
+
+# 突合が出しうる action 種別の **唯一の一覧** (ms-166 e-6871 の独立保守性レビュー M-3)。
+#
+# これが無かったとき、producer (plan_pr_sync) と 2 つの consumer (apply_pr_sync /
+# cmd_pr._print_pr_sync_plan) がそれぞれ「自分が知っている種別」を手で持っていた。
+# 9 番目の種別を producer に足した次の人が consumer を更新しないと:
+#   * apply_pr_sync は else 分岐でそれを "skipped" として静かに誤カウントする
+#   * 表示側は既知バケツの空判定なので、その種別が在っても「整合しています」を出す
+# つまり **この課題が直した「無言で飛ばして嘘の整合を出す」欠陥が、種別のカタログ
+# という 1 段上の階層で再発する**。だから一覧を 1 箇所に置き、consumer 側は未知の
+# 種別を黙って飲まずに落ちる (test_every_action_kind_is_known_to_every_consumer)。
+# 遷移を伴う種別 (= 実際に状態を動かすもの)。報告だけの種別と分けて持つのは、
+# `--json` を読む外部の消費者が **種別のカタログを知らなくても** 「何かすべきか」を
+# 答えられるようにするため (独立 AX レビュー AX-3)。旧実装の呼び出し側は
+# `action != "skip"` を「実行対象」と読む形だったので、報告だけの種別が増えた今
+# それを踏むと unreadable / duplicate まで「やるべき遷移」として拾ってしまう。
+# 各 action には ``actionable`` が立つので、消費者はそれだけ見ればよい。
+PR_SYNC_TRANSITION_KINDS = frozenset({"merge", "close"})
+
+PR_SYNC_ACTION_KINDS = frozenset({
+    "merge",                # GitHub は MERGED、beacon は未 done → 進める
+    "close",                # GitHub は CLOSED、beacon は未 cancelled → 取り消す
+    "skip",                 # 見た上で遷移不要 (= 既に揃っている / GitHub はまだ open)
+    "unreadable",           # どの PR か判別できない (識別子が壊れている)
+    "unmatched",            # 取得範囲内なのに GitHub 側に無い (消された / 権限)
+    "out_of_window",        # 取得範囲の外 (= 照合していない。警告ではない)
+    #
+    # 命名: **snake_case に揃える** (独立 AX レビュー AX-2)。同じ記録が持つ status の
+    # 複数語の値 (in_review / in_progress) も、この diff が足した他のキー
+    # (needs_repair / canonical_url / duplicate_entry_ids) もすべて snake_case なので、
+    # action 値だけ kebab-case だと「複数語は snake だろう」と類推した AI が
+    # `== "out_of_window"` と書いて **静かに一致しない** (構文エラーにならない)。
+    "duplicate",            # 同じ PR を指す記録が複数 (組単位の報告)
+    "blocked_by_duplicate", # 二重登録のため自動で動かさなかった
+})
+
+
+def _pr_sync_action(action: str, *, entry_id: str, pr_number, from_status: str,
+                    to_status: str, reason: str, needs_repair=None,
+                    canonical_url=None, **extra) -> dict:
+    """action dict を 1 箇所で組む (= キー集合の単一真実源)。
+
+    独立保守性レビュー M-2: 同じ形の辞書リテラルが 7 箇所に手で複製されていたため、
+    needs_repair / canonical_url を足したときに **"close" の分岐 1 箇所だけ取り残した**。
+    その結果、裸の番号で登録され GitHub 上 CLOSED に揃う記録は、その回の突合で識別の
+    形が直らない (次回 skip 経路に落ちてから初めて直る = 1 周分の沈み)。
+
+    並行するリテラルの一部だけが古くなる、という形そのものを消すために、キーを
+    書ける場所をここ 1 つにする。
+    """
+    if action not in PR_SYNC_ACTION_KINDS:
+        raise ValueError(
+            f"未知の突合 action 種別: {action!r}。"
+            f"PR_SYNC_ACTION_KINDS に足してください (consumer も更新が要ります)")
+    out = {
+        "entry_id": entry_id,
+        # 消費者が種別のカタログを知らずに「何かすべきか」を判別できる 1 ビット。
+        "actionable": action in PR_SYNC_TRANSITION_KINDS,
+        "pr_number": pr_number,
+        "action": action,
+        "from_status": from_status,
+        "to_status": to_status,
+        "reason": reason,
+        "needs_repair": needs_repair,
+        "canonical_url": canonical_url,
+    }
+    out.update(extra)
+    return out
+
+
+def plan_pr_sync(data: dict, gh_prs: list, *, fetched_floor: int | None = None) -> list:
     """ms-61 / e-2005 — produce a plan of PR-entry transitions needed to
     align beacon state with GitHub state.
 
@@ -2718,15 +2843,28 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
             ``number`` (int), ``state`` ("OPEN" / "CLOSED" / "MERGED"),
             and either ``url`` or both number+repo.
 
-    Returns a list of action dicts, each:
-        {"entry_id": str, "pr_number": int, "action": "merge"|"close"|"skip",
-         "from_status": str, "to_status": str, "reason": str}
+    Returns a list of action dicts built by ``_pr_sync_action`` — every entry
+    carries the same keys (``entry_id`` / ``pr_number`` / ``action`` /
+    ``from_status`` / ``to_status`` / ``reason`` / ``needs_repair`` /
+    ``canonical_url``), plus per-kind extras (``duplicate_entry_ids`` on
+    ``duplicate``; ``blocked_reason`` / ``intended_action`` /
+    ``intended_to_status`` on ``blocked-by-duplicate``).
+
+    ``action`` は **``PR_SYNC_ACTION_KINDS`` のいずれか**。種別を足すときはその集合に
+    加える (builder が未知の種別を拒否し、consumer 側の網羅性テストが更新漏れを
+    捕まえる)。この docstring に種別を列挙し直さないのは意図的 — 一覧を 2 箇所に
+    書くと、片方が古くなったときに嘘になる (ms-166 e-6871 の独立保守性レビュー M-1 は
+    まさに「この docstring が 3 種・5 キーのままで実装は 8 種・14 キーだった」という
+    指摘だった)。
 
     Mapping rules:
       - GitHub state=MERGED and beacon entry not yet in
         {done, merged} → action="merge" (= advance to terminal done).
       - GitHub state=CLOSED (not merged) and beacon entry not yet in
         {cancelled, closed} → action="close" (= cancel, no merge).
+      - 識別できない / 取得範囲の外 / GitHub 側に無い / 二重登録 は、遷移ではなく
+        **報告** として出る (黙って落とさない)。各種別の意味は
+        ``PR_SYNC_ACTION_KINDS`` の定義に 1 行ずつ添えてある。
       - Everything else (= already aligned, or GitHub still OPEN) →
         action="skip".
 
@@ -2741,68 +2879,145 @@ def plan_pr_sync(data: dict, gh_prs: list) -> list:
         num = row.get("number")
         if not isinstance(num, int):
             continue
-        gh_by_number[num] = (row.get("state") or "").upper()
+        # state だけでなく **GitHub が言う URL** も持つ。裸の番号で登録された記録を
+        # canonical な URL に揃えるとき、リポジトリ名を推測する必要がなくなる
+        # (gh pr list は url を返しているので、既に手元にある、ms-166 e-6871)。
+        gh_by_number[num] = ((row.get("state") or "").upper(), row.get("url") or "")
 
     actions: list = []
+    # 同じ PR 番号が 2 つ以上の記録に入っている状態を検出するための台帳。
+    # 実測: e-6748 (done) と e-6751 (in_review) が両方 PR 775 を指していた。
+    # 登録時に既存を検出できておらず、片方が古い状態で残り続ける (ms-166 e-6871)。
+    seen_numbers: dict = {}
 
     def _walk(entries: list):
         for e in entries or []:
             if isinstance(e, dict) and e.get("type") == "pr":
                 meta = e.get("meta") or {}
+                raw_url = meta.get("url", "")
                 pr_num = meta.get("pr_number")
-                if not isinstance(pr_num, int):
-                    pr_num = _extract_pr_number_from_url(meta.get("url", ""))
+                canonical = None
+                if not isinstance(pr_num, int) or pr_num <= 0:
+                    pr_num, canonical = identify_pr(raw_url)
                 if not pr_num:
-                    continue  # un-numbered (= local-only) PR entry, skip
-                gh_state = gh_by_number.get(pr_num)
+                    # **飛ばすが黙らない。** 旧実装はここで continue だけして、
+                    # 飛ばした件数も ID も報告しなかった。コメントは
+                    # 「un-numbered (= local-only) PR entry」= ローカル専用の記録だと
+                    # 仮定していたが、実際には PR 番号そのものが URL の形で入って
+                    # いないだけの記録があり (url='772')、それを識別できずに飛ばした
+                    # 結果 `beacon pr sync` が「すべて整合」と嘘の異常なしを返した
+                    # (ms-166 e-6871)。識別できない記録は action として表に出す。
+                    actions.append(_pr_sync_action(
+                        "unreadable", entry_id=e.get("id", ""), pr_number=0, from_status=e.get("status", ""), to_status=e.get("status", ""), reason=f"どの PR か判別できない (url={raw_url!r}, pr_number={meta.get('pr_number')!r})"))
+                    _walk(e.get("entries", []))
+                    continue
+                # 識別はできたが保存されている形が canonical でない (裸の番号 / 整数キー
+                # 欠落) 記録は、揃え直す対象として出す。放置すると次の突合でも同じ
+                # 推測をやり直すことになる。
+                needs_repair = (not isinstance(meta.get("pr_number"), int)
+                                or _extract_pr_number_from_url(raw_url) is None)
+                seen_numbers.setdefault(pr_num, []).append(e.get("id", ""))
+                gh_row = gh_by_number.get(pr_num)
+                gh_state, gh_url = gh_row if gh_row else ("", "")
+                # canonical が未判明なら GitHub が言う URL を採る (推測ではなく実値)。
+                if not canonical and gh_url:
+                    canonical = gh_url
+                # この記録に共通の部分を **1 回だけ** 束ねる。**canonical が確定した
+                # 後に** 作るのが要点 — 先に作ると、この直前で GitHub の URL を採った
+                # 結果が partial に乗らず、裸の番号の URL 正規化が静かに効かなくなる
+                # (実際に先に置いて試験 1 件が落ちた)。
+                #
+                # 独立レビュー (AX-1 / 保守性 M-2、2 体が同じ欠陥を独立に指摘) は
+                # 「needs_repair / canonical_url が close の分岐だけ渡っていない」と
+                # 言った。builder に寄せてキー集合は揃ったが **値** は各分岐が渡す形
+                # だったので close だけ None のまま残り、欠陥が消えなかった
+                # (形の非対称を消しても値の非対称が残る)。
+                #
+                # partial で束ねると、分岐側が書けるのは「その分岐に固有の部分」
+                # (遷移先と理由) だけになり、共通部を渡し忘れる経路が消える。
+                _act = _functools.partial(
+                    _pr_sync_action, entry_id=e.get("id", ""), pr_number=pr_num,
+                    needs_repair=needs_repair, canonical_url=canonical)
                 if not gh_state:
-                    continue  # GitHub doesn't know this PR (= deleted? not visible?), skip
+                    # これも黙らない。ただし **「取得した範囲の外」と「本当に見つから
+                    # ない」を分ける。** gh pr list は新しい順に N 件しか返さないので、
+                    # 窓の外になった古い記録を「GitHub に無い」と報告すると偽警報に
+                    # なる (実測 2026-10-07: 562 件が窓の外なだけで警告された。この課題で
+                    # 入れた報告自身が、読まれなくなるほど騒ぐ側に倒れていた = 直した
+                    # 欠陥の裏返し)。範囲外は数えるだけ、本当に不明なものだけ警告する。
+                    _out_of_window = (fetched_floor is not None
+                                      and pr_num < fetched_floor)
+                    actions.append(_pr_sync_action(
+                        ("out_of_window" if _out_of_window else "unmatched"), entry_id=e.get("id", ""), pr_number=pr_num, from_status=e.get("status", ""), to_status=e.get("status", ""), reason=(
+                            f"照合した範囲の外 (取得できた最小 PR#{fetched_floor} より古い)"
+                            if _out_of_window else
+                            "GitHub 側にこの PR が見つからない (消された / 別リポジトリ / 権限)")))
+                    _walk(e.get("entries", []))
+                    continue
                 cur_status = e.get("status", "")
                 if gh_state == "MERGED":
                     if cur_status in ("done",) or meta.get("pr_status") == "merged":
-                        actions.append({
-                            "entry_id": e.get("id", ""),
-                            "pr_number": pr_num,
-                            "action": "skip",
-                            "from_status": cur_status,
-                            "to_status": cur_status,
-                            "reason": "already merged in beacon",
-                        })
+                        actions.append(_act(
+                            "skip", from_status=cur_status, to_status=cur_status, reason="already merged in beacon"))
                     else:
-                        actions.append({
-                            "entry_id": e.get("id", ""),
-                            "pr_number": pr_num,
-                            "action": "merge",
-                            "from_status": cur_status,
-                            "to_status": "done",
-                            "reason": "GitHub MERGED but beacon not yet",
-                        })
+                        actions.append(_act(
+                            "merge", from_status=cur_status, to_status="done", reason="GitHub MERGED but beacon not yet"))
                 elif gh_state == "CLOSED":
                     if cur_status in ("cancelled",) or meta.get("pr_status") == "closed":
-                        actions.append({
-                            "entry_id": e.get("id", ""),
-                            "pr_number": pr_num,
-                            "action": "skip",
-                            "from_status": cur_status,
-                            "to_status": cur_status,
-                            "reason": "already closed in beacon",
-                        })
+                        actions.append(_act(
+                            "skip", from_status=cur_status, to_status=cur_status, reason="already closed in beacon"))
                     else:
-                        actions.append({
-                            "entry_id": e.get("id", ""),
-                            "pr_number": pr_num,
-                            "action": "close",
-                            "from_status": cur_status,
-                            "to_status": "cancelled",
-                            "reason": "GitHub CLOSED but beacon not yet",
-                        })
-                # GitHub OPEN → no action; this is the steady state.
+                        actions.append(_act(
+                            "close", from_status=cur_status, to_status="cancelled", reason="GitHub CLOSED but beacon not yet"))
+                else:
+                    # GitHub OPEN。遷移は不要だが **action を出す**。旧実装はここで
+                    # 何も出さなかったので、「遷移が不要」と「そもそも見ていない」が
+                    # 区別できず、件数を数えても意味を持たなかった (見た記録 1 件でも
+                    # len(actions) == 0 になる)。整合を名乗るには「何件見たか」が
+                    # 言えないといけない (ms-166 e-6871)。
+                    actions.append(_act(
+                        "skip", from_status=cur_status, to_status=cur_status, reason="GitHub 上はまだ open"))
             if isinstance(e, dict):
                 _walk(e.get("entries", []))
 
     for ms in data.get("milestones", []):
         if isinstance(ms, dict):
             _walk(ms.get("entries", []))
+
+    # 同じ PR 番号を指す記録が 2 つ以上あれば報告する。登録時に既存を検出できて
+    # いないので、片方が古い状態のまま残り「並列で open な PR が 2 件ある」という
+    # 誤報の種にもなる (実測: e-6748 done / e-6751 in_review が両方 PR 775)。
+    duplicated_ids: set = set()
+    for num, ids in sorted(seen_numbers.items()):
+        if len(ids) > 1:
+            duplicated_ids |= set(ids)
+            actions.append(_pr_sync_action(
+                "duplicate", entry_id=ids[0], pr_number=num, from_status="", to_status="", reason=f"同じ PR#{num} を指す記録が {len(ids)} 件: {', '.join(ids)}", duplicate_entry_ids=ids))
+
+    # **二重登録の組に入っている記録は自動で状態を動かさない。**
+    #
+    # 突合の規則は「GitHub が MERGED なら done に進める」だが、この規則は重複を
+    # 知らない。同じ PR を指す記録が 2 件あって、片方を人が意図的に cancelled に
+    # していた場合 (= 重複として捨てた)、突合はそれを done に戻してしまい、1 つの PR に
+    # done が 2 件並ぶ。
+    #
+    # 実測 (2026-10-07, ms-166 e-6871): 状態を変える対象 69 件のうち 18 件が重複の組に
+    # 入っており、そのうち 2 件 (e-884 PR#16 / e-6228 PR#732) は cancelled → done
+    # だった。e-884 は e-805 (done) の重複として捨てられたもの。
+    #
+    # 「GitHub に合わせる」は、人が下した判断を上書きする理由にならない。どちらを
+    # 残すかが決まるまで動かさず、決める必要があることを表に出す。
+    for act in actions:
+        if (act.get("action") in ("merge", "close")
+                and act.get("entry_id") in duplicated_ids):
+            act["blocked_reason"] = (
+                f"同じ PR#{act.get('pr_number')} を指す記録が複数あるため自動では"
+                f"動かさない (元の状態: {act.get('from_status')})。"
+                "どれを残すかを決めてから揃える")
+            act["intended_action"] = act["action"]
+            act["intended_to_status"] = act.get("to_status")
+            act["action"] = "blocked_by_duplicate"
+            act["to_status"] = act.get("from_status")
 
     return actions
 
@@ -2813,11 +3028,32 @@ def apply_pr_sync(data: dict, actions: list) -> dict:
     Mutates `data` in place. Returns a summary dict
     ``{"merged": n, "closed": n, "skipped": n, "errors": [...]}``.
     """
-    summary = {"merged": 0, "closed": 0, "skipped": 0, "errors": []}
+    summary = {"merged": 0, "closed": 0, "skipped": 0, "repaired": 0,
+               "unreadable": 0, "unmatched": 0, "duplicate": 0,
+               "out_of_window": 0, "blocked_by_duplicate": 0, "errors": []}
     for act in actions or []:
         eid = act.get("entry_id", "")
         a = act.get("action", "")
-        if a == "skip" or not eid:
+        # 報告だけの種別は数えて終わる (勝手に直さない — unreadable はどの PR か
+        # 分からないので直せず、duplicate はどちらを残すかが人の判断)。
+        if a in ("unreadable", "unmatched", "duplicate", "out_of_window",
+                 "blocked_by_duplicate"):
+            summary[a] += 1
+            if (a in ("unmatched", "out_of_window", "blocked_by_duplicate")
+                    and eid and act.get("needs_repair")):
+                # 照合はできなかったが、記録の形だけは揃えられる (番号は判明している)。
+                if _repair_pr_identity(data, eid, act):
+                    summary["repaired"] += 1
+            continue
+        if not eid:
+            summary["skipped"] += 1
+            continue
+        # 識別の形が canonical でない記録は、状態遷移の前に形を揃える。放置すると
+        # 次の突合でも同じ推測をやり直し、`beacon pr sync` が毎回同じ記録を
+        # 「要修復」と言い続ける (ms-166 e-6871)。
+        if act.get("needs_repair") and _repair_pr_identity(data, eid, act):
+            summary["repaired"] += 1
+        if a == "skip":
             summary["skipped"] += 1
             continue
         try:
@@ -2828,10 +3064,50 @@ def apply_pr_sync(data: dict, actions: list) -> dict:
                 pr_close(data, eid)
                 summary["closed"] += 1
             else:
-                summary["skipped"] += 1
+                # 未知の種別を黙って "skipped" に数えない (独立保守性レビュー M-3)。
+                # 旧実装はここで飲んでいたので、producer に 9 番目の種別を足した人が
+                # consumer を更新し忘れると、その記録は「見た上で遷移不要」として
+                # 集計され、嘘の整合に寄与した。種別のカタログという 1 段上の階層で
+                # 同じ欠陥が再発する形。
+                raise ValueError(
+                    f"apply_pr_sync が知らない action 種別: {a!r} "
+                    f"(entry {eid})。PR_SYNC_ACTION_KINDS に足したら、"
+                    f"apply_pr_sync と cmd_pr._print_pr_sync_plan の両方を更新してください")
         except ValueError as e:
             summary["errors"].append({"entry_id": eid, "error": str(e)})
     return summary
+
+
+def _repair_pr_identity(data: dict, entry_id: str, act: dict) -> bool:
+    """PR 記録の識別の形を canonical に揃える。揃えたら True。
+
+    直すのは 2 つだけ: ``meta.pr_number`` を整数で埋め、``meta.url`` が PR の URL の
+    形でなければ canonical な URL に置き換える。**判断や状態は触らない** — ここは
+    「同じものを指す別の書き方」を 1 つに寄せるだけの操作。
+
+    canonical な URL が分からない場合 (= 裸の番号で登録され、GitHub 側の URL を
+    聞けていない) は ``meta.url`` を変えず、整数キーだけ埋める。番号が入れば後段の
+    突合は識別できるので、それ以上の推測 (リポジトリ名の捏造) はしない。
+    """
+    pr_num = act.get("pr_number")
+    if not isinstance(pr_num, int) or pr_num <= 0:
+        return False
+    # 探索は既存の find_entry に寄せる。自分で 2 つ目の walk を書くのは、この課題が
+    # 直している重複そのもの (find_entry は operations 配下も見るので範囲も広い)。
+    hit = find_entry(data, entry_id)
+    if not hit:
+        return False
+    entry = hit[2]
+    meta = entry.setdefault("meta", {})
+    changed = False
+    if not isinstance(meta.get("pr_number"), int) or meta.get("pr_number") != pr_num:
+        meta["pr_number"] = pr_num
+        changed = True
+    canonical = act.get("canonical_url")
+    if canonical and _extract_pr_number_from_url(meta.get("url", "")) is None:
+        meta["url"] = canonical
+        changed = True
+    return changed
 
 
 # ---------------------------------------------------------------------------

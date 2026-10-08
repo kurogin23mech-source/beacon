@@ -79,8 +79,16 @@ beacon watch list --awaiting --json  # 返信待ち
    `/beacon-sales-email`、日程なら `/beacon-sales-schedule`。
 5. **期日超過の活動 / ナーチャリング** → `beacon opportunity due --json` の `activities`
    (準備活動の期日超過。done / cancelled は L2 締切エンジンが terminal 扱いで自動除外済み、
-   ms-139 e-4954) を拾って促す。実施済みなら `beacon opportunity activity done <act-id>`、
-   やめたなら `cancel`、期日を延ばすなら `update --deadline` で盤面から外す (催促を止める栓)。
+   ms-139 e-4954) を拾って促す。実施済みなら
+   `beacon opportunity activity done <act-id> --reason "<なぜ完了と判断したか>" [--outcome "<何が得られたか>"]`、
+   やめたなら `cancel <act-id> --reason "<なぜやめたか>"`、期日を延ばすなら `update --deadline` で
+   盤面から外す (催促を止める栓)。
+   **`done` / `cancel` は理由が必須** (ms-166 e-6600)。`done` は開発の `task done` と同じ
+   関門を共有する。`cancel` 側は開発の `task cancel` にはまだ関門が無いので、「開発と同じ」
+   ではなく「活動の取消だけに掛かっている」規則 (関門を全終端遷移に広げるのは e-6893)。理由を
+   書かないと決めた場合だけ `--acknowledge` を使う。`--outcome` は任意だが、活動の説明文は
+   計画時のまま凍結されるので、「何が得られたか」を残すと後から読む人 (非開発者を含む) が
+   予定と結果を区別できる。
 6. 上記どれも無ければ「待ち（相手ボール・予定通り）」。
 
 各商談の現フェーズのゴール（methodology）を添えて、「なぜ今それか」を 1 行で示す。

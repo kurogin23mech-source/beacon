@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import _libpath  # noqa: F401 — puts lib/ on sys.path (store_router imports us without app.py)
+import idempotency as _idem
+
 import logging
 import os
 
@@ -1005,24 +1008,24 @@ def set_bus_event_receipt(project_id: str, event_id: str, stage: str,
         data = snap.to_dict() or {}
         existing_ts = data.get(ts_field)
         if existing_ts:
-            return {
+            # ms-166 e-6728: 開示は共有の整形口を通す (正規名 idempotent_no_op +
+            # 従来名 already_set の両方が載る = 既存の読み手を壊さない)。
+            return _idem.disclose({
                 "event_id": event_id,
                 "stage": stage,
                 "timestamp": existing_ts,
                 "by": data.get(by_field, ""),
-                "already_set": True,
-            }
+            }, no_op=True, legacy="already_set")
         now = datetime.datetime.now(datetime.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ"
         )
         tx.update(ref, {ts_field: now, by_field: recipient_session_id})
-        return {
+        return _idem.disclose({
             "event_id": event_id,
             "stage": stage,
             "timestamp": now,
             "by": recipient_session_id,
-            "already_set": False,
-        }
+        }, no_op=False, legacy="already_set")
 
     return _txn(db.transaction())
 

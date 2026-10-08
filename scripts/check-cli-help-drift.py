@@ -463,29 +463,48 @@ REQUIRED_FLAG_PARITY: dict[str, set[str]] = {
 _TOKEN_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
-def _extract_verb(line: str) -> str | None:
-    """Pull the (subcommand subsubcommand) pair from a help / table line.
+def verb_path(text: str) -> "list[str] | None":
+    """「動詞パスとは何か」の **唯一の定義** (ms-166 e-6792)。
 
-    Returns the verb in canonical form, e.g. ``"milestone add"`` or
-    ``"status"`` or ``""`` for the bare ``beacon`` launch line.
+    ``"beacon session fork cleanup <path>"`` → ``["session", "fork", "cleanup"]``。
+    ``beacon`` 単体 (= 起動行) は ``[]``。``beacon`` で始まらなければ ``None``。
 
-    Stops at the first token that is not a valid lowercase verb token,
-    or that starts with ``<``, ``[``, ``-`` (positional / flag / option).
+    置き場所 (``<id>``) か旗 (``--x``) か省略可 (``[...]``) に当たったところで止まる。
+    そこが引数の始まりで、動詞パスの終わり。
+
+    なぜ 1 つにしたか: このファイルには動詞パスの抽出器が 2 つ併存していた。
+
+      * ``_extract_verb``  — ``parts_in[1:3]`` で **2 トークン上限**。コメントも
+        「at most two verb tokens」と明記。そのため ``session fork cleanup <path>`` /
+        ``session fork <ms-id>`` / ``session fork list`` が **同じ ``session fork`` に
+        潰れ**、3 階層以上の動詞は 2 階層目までしか存在確認されなかった。
+      * ``_registry_path`` — 上限なし (旗の検査 collect_help_flag_drift 用、PR #771)。
+
+    「動詞パスとは何か」に対する答えが 1 ファイル内に 2 つあるのは、このリポジトリが
+    繰り返し潰してきた drift の形そのもの。上限の無い側に寄せた (上限は欠陥であって
+    仕様ではない)。トークンの検査 (_TOKEN_RE) は残す — 散文混じりの行
+    (``beacon log [message]``) を動詞と誤認しないための歯止め。
     """
-    line = line.strip()
-    if not line.startswith("beacon"):
-        return None
-    parts_in = line.split()
-    if not parts_in or parts_in[0] != "beacon":
+    parts = text.strip().split()
+    if not parts or parts[0] != "beacon":
         return None
     out: list[str] = []
-    for tok in parts_in[1:3]:  # at most two verb tokens (subcmd + subsubcmd)
+    for tok in parts[1:]:
         if tok.startswith(("<", "[", "-")):
             break
         if not _TOKEN_RE.match(tok):
             break
         out.append(tok)
-    return " ".join(out)
+    return out
+
+
+def _extract_verb(line: str) -> str | None:
+    """``verb_path`` の文字列版 (既存の呼び出し側が集合比較で使う形)。
+
+    ここに抽出の規則を書かない — 規則は ``verb_path`` が 1 箇所で持つ。
+    """
+    path = verb_path(line)
+    return None if path is None else " ".join(path)
 
 
 def parse_bin_beacon(path: Path = BIN_BEACON) -> set[str]:
@@ -1375,19 +1394,13 @@ def _registry_entries(commands_py: Path = COMMANDS_PY) -> "list[dict]":
 
 
 def _registry_path(command: str) -> "list[str] | None":
-    """``"beacon stop scoped <target>"`` → ``["stop", "scoped"]``.
+    """``"beacon stop scoped <target>"`` → ``["stop", "scoped"]``。
 
-    Stops at the first placeholder (``<id>``) or flag, which is where the verb
-    path ends and arguments begin.
+    動詞パスの規則は ``verb_path`` が持つ (ms-166 e-6792 で 2 つの抽出器を 1 つに
+    寄せた)。ここの差分は **空のパスを None に倒す** ことだけ: 旗の検査は
+    「どの動詞の旗か」を要るので、起動行 (= 動詞なし) は対象外。
     """
-    parts = command.split()
-    if len(parts) < 2 or parts[0] != "beacon":
-        return None
-    path: list[str] = []
-    for token in parts[1:]:
-        if token.startswith("<") or token.startswith("-") or token.startswith("["):
-            break
-        path.append(token)
+    path = verb_path(command)
     return path or None
 
 

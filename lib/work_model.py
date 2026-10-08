@@ -417,7 +417,7 @@ def normalize_ball(value: str) -> str:
 
 
 def mark_done(item: dict, *, at: str = "", actor: str = "",
-              reason: str = "") -> dict:
+              reason: str = "", outcome: str = "") -> dict:
     """Mark a WorkItem done in place and return it.
 
     Sets ``status="done"`` and stamps the canonical ``done_at`` (``at`` falls
@@ -428,14 +428,37 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     completion side effects (a commit resolving a task, a communication closing
     an activity — evidence-close, task e-3560) are NOT done here; this only
     moves the item's own lifecycle to done.
+
+    ``outcome`` (ms-166 e-6600) records WHAT CAME OF the work, as distinct from
+    ``reason`` (WHY this transition is being made). The two answer different
+    questions and a reader needs both: the plan text (``description``) was
+    written before the work happened and stays frozen at done-time, so without
+    an outcome a finished item still reads as its own prediction. Optional on
+    purpose — it carries additional information and is NOT part of the
+    audit-entry gate (that gate is ``reason``). Requiring it for one occupation
+    only would be exactly the branch this task removes.
+
+    Which verbs the reason gate covers, measured (ms-166 e-6600): ``task done``,
+    ``milestone done / wait / observe``, ``activity done / cancel`` route through
+    ``commands_shared._require_reason_or_skip``. ``task cancel`` /
+    ``opportunity contract cancel`` / ``communication cancel`` /
+    ``meeting cancel`` do NOT — they read ``BEACON_REASON`` directly and accept
+    its absence. So the gate is **not** yet enforced across every terminal
+    transition, and a new terminal verb does not inherit it: the gate lives in
+    each CLI handler, not in this primitive or in
+    ``occupation.set_entry_state``. Moving it onto the shared seam (so the
+    coverage becomes a property of the code instead of a list) is task e-6893.
+    Do not read this parameter's presence as proof the gate is universal.
     """
     item["status"] = DONE_STATUS
     item[DONE_AT] = at or work_base.now_iso()
-    if actor or reason:
+    if actor or reason or outcome:
         meta = item.setdefault("meta", {})
         meta["done_by"] = actor or work_base.current_actor()
         if reason:
             meta["done_reason"] = reason
+        if outcome:
+            meta["done_outcome"] = outcome
     return item
 
 

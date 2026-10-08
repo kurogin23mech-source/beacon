@@ -2,11 +2,10 @@
 """server/ vs lib/ module name collision detector (ms-64 e-1618).
 
 なぜこれが要るか:
-  server/app.py の上部で
-
-      sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-
-  によって lib/ ディレクトリが import path 先頭に挿入される。
+  server/_libpath.py (= lib/ への道を知る唯一の持ち主) が lib/ ディレクトリを
+  import path の先頭に挿入する。server/ の各モジュールはこれを import して lib/ を
+  読む (具体的な挿入のしかたは _libpath.py 側が所有する — ここに写すと、
+  片方を直したときにもう片方が古くなる)。
   そのため `import store` のような書き方は **lib/ 配下が先に解決される**。
   つまり server/ に同名の *.py を作っても、lib/ 側に同名ファイルがあれば
   shadow されて壊れる。
@@ -91,7 +90,7 @@ def main() -> int:
         file=sys.stderr,
     )
     print(
-        "  app.py 上部の sys.path.insert で lib/ が先に解決されるため、",
+        "  server/_libpath.py が lib/ を import path の先頭に載せるため、",
         file=sys.stderr,
     )
     print(

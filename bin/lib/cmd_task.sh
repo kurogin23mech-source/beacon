@@ -169,11 +169,14 @@ cmd_task_done() {
     # audit value, not a route-assumed default. --evidence is repeatable.
     local decided_by=""
     local evidence=""
+    # ms-166 e-6600: 何が得られたか (= 計画の文面は done 時点で古くなる)。
+    local outcome=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--progress) progress="${2:-}"; shift 2 ;;
             -r|--reason)   reason="${2:-}";   reason_set=1; shift 2 ;;
+            --outcome)     outcome="${2:-}"; shift 2 ;;
             --decided-by)  decided_by="${2:-}"; shift 2 ;;
             --evidence)    evidence="${evidence:+$evidence$'\n'}${2:-}"; shift 2 ;;
             --acknowledge) acknowledge="1"; shift ;;
@@ -183,7 +186,7 @@ cmd_task_done() {
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task done <entry-id> --reason <text> [-p <progress>] [--decided-by <who>] [--evidence <link>]"
+        echo "Usage: beacon task done <entry-id> --reason <text> [--outcome <text>] [-p <progress>] [--decided-by <who>] [--evidence <link>]"
         exit 1
     fi
     # e-976: forward BEACON_REASON only when --reason was passed so the python
@@ -191,10 +194,12 @@ cmd_task_done() {
     # "operator passed --reason ''" (explicit waiver, accepted but discouraged).
     if [ "$reason_set" = "1" ]; then
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" BEACON_REASON="$reason" \
+            BEACON_OUTCOME="$outcome" \
             BEACON_DECIDED_BY="$decided_by" BEACON_DONE_EVIDENCE="$evidence" \
             BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     else
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" \
+            BEACON_OUTCOME="$outcome" \
             BEACON_DECIDED_BY="$decided_by" BEACON_DONE_EVIDENCE="$evidence" \
             BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     fi

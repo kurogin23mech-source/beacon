@@ -86,4 +86,13 @@ echo "[ci-strict-drift-guards] 成功表示が書き込みより先に出てい�
 # 順序はコメントでは保てないので機械で止める。
 python3 "$ROOT/scripts/check-print-before-save.py"
 
+echo "[ci-strict-drift-guards] lib/ への道の持ち主が 1 つか (ms-166 e-6728)…"
+# server/_libpath.py の docstring は自分を「lib/ への道を知る唯一の持ち主」と名乗る。
+# だが名乗りは守らない。2026-10-08 の独立レビュー 2 体が揃って捕まえたのがこれで、
+# _libpath を作って app.py / firestore_client.py を揃えた直後の時点で、
+# routers_projects.py の検索ハンドラの中に 3 つ目のコピーが関数の中に残っていた。
+# `grep _libpath` では出てこないので、次に lib/ の位置を変える人はそこだけ取り残す。
+# 宣言ではなく構文木で数えて止める。
+python3 "$ROOT/scripts/check-lib-path-single-owner.py" --strict
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."

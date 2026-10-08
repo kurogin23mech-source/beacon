@@ -16,6 +16,7 @@ commands_shared (upward) + leaf modules — acyclic (SPEC 方針4).
 import json
 import os
 import sys
+import idempotency as _idem
 
 from commands_shared import _is_cloud_mode, _get_api_client
 
@@ -212,7 +213,7 @@ def cmd_decision_record():
         # ので、追記されたかどうか (e-6602) と、帰属・対象がどう決まったか (e-6603) を
         # 両方出す。片方だけにすると、畳まれた時に対象が見えない / 新規記録の時に
         # 追記の有無が見えない、のどちらかが欠ける。
-        if isinstance(result, dict) and result.get("deduplicated"):
+        if _idem.was_no_op(result):
             print(f"Decision already recorded [{did}]: {kind} — {what[:60]}")
             print("  この target の同じ判定は既に記録済みのため、追記しませんでした "
                   "(完遂の記録は 1 度だけ残ります)")

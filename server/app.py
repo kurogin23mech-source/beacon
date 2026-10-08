@@ -15,8 +15,10 @@ import time
 import uuid
 from typing import List, Optional
 
-# Add lib/ to path so we can import core
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+# Add lib/ to path so we can import core. server/_libpath owns this so the
+# modules reachable without app.py (store_router → firestore_client) can do
+# the same thing instead of assuming app.py ran first.
+import _libpath  # noqa: F401,E402 — puts lib/ on sys.path
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +29,7 @@ from starlette.responses import Response, JSONResponse
 
 import approved_actions as approved_actions_mod
 import core
+import idempotency as _idem  # ms-166 e-6728: 冪等 no-op 開示の正規名
 import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
 import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効スコープ合成
 import machine_key as machine_key_mod  # ms-151 / e-5474: headless machine 認証の鍵
@@ -2480,7 +2483,9 @@ async def post_bus_event(
                 "event_id": _dup.get("event_id"),
             }
             db.append_bus_audit(project_id, audit_record)
-            return {**_dup, "idempotent_replay": True}
+            # ms-166 e-6728: 共有の整形口を通す (正規名 + 従来名の両方)。
+            return _idem.disclose(dict(_dup), no_op=True,
+                                  legacy="idempotent_replay")
 
     # ms-70 / e-1713: cross-user DM action authorization gate.
     # Resolve sender / receiver user_ids from the project session registry,

@@ -102,6 +102,10 @@ _HATCH_SCOPED_GUARDS = {
     "guard_prod_project_write": "project",
     "guard_prod_bus_write": "bus",
     "guard_prod_decision_write": "decision",
+    # ms-166 e-6854: 廊下の受け止め (= 上の 3 つで覆われない全ての書き込み)。
+    # ラベルは兄弟と同じく 1 語に揃える (独立 AX レビュー AX-5: 3 語の句が 1 つだけ
+    # 混ざると列挙が不自然になり、次にガードを足す人がどちらの書式に倣うか迷う)。
+    "guard_prod_write": "writes",
     "guard_prod_read": "read",
 }
 
@@ -262,6 +266,46 @@ def guard_prod_decision_write(base_url: str) -> None:
         f"the live stream, {_hatch_note()}; there is no teardown that can "
         "remove the row afterwards."
     )
+
+def guard_prod_write(base_url: str, *, method: str = "", path: str = "") -> None:
+    """Raise if a test context is about to WRITE to production — **any** write.
+
+    ms-166 e-6854. The sibling guards above each cover one kind of door
+    (project / bus / decision). That axis was the *kind of payload*, and it left
+    53 of 61 write methods open: documents, notes, retros, sessions, purge,
+    operations, machine keys, organizations, claims, trek — all reachable from a
+    test against the live cloud. This repo closed a door one-at-a-time four times
+    (e-4029 / e-5194 / e-5216 / e-6637); the fifth time, close the corridor.
+
+    Why guarding every write is the right default rather than a per-door
+    judgement: the guard is **inert outside a test context and inert for
+    non-prod targets**, so the production cost of covering a door is zero. A
+    door only needs an exemption if a *test* genuinely must write to the *live*
+    cloud — and that is what the escape hatch is for, per test, in the open.
+    There is no door for which "a test writing to production" is the desired
+    behaviour, which is why the earlier per-door triage never found a reason to
+    leave one open.
+
+    This is a **backstop, not a replacement**: the specific guards fire first
+    (they are called inside their own methods, before the transport is reached),
+    so their richer diagnosis — "the decision stream is append-only", "a leaked
+    project can be archived" — is what the author sees for those doors. This one
+    catches everything else, including doors that do not exist yet.
+
+    ``method`` / ``path`` are carried into the message so the author learns which
+    write was refused without reading a traceback.
+    """
+    if not _prod_test_write_blocked(base_url):
+        return
+    where = f" ({method.upper()} {path})" if (method or path) else ""
+    raise ProdWriteBlocked(
+        f"cloud_write_guard: refusing a write{where} to the production cloud "
+        f"({base_url}) from a test context. Fake cloud mode the canonical way: "
+        f"{_isolation_options_note()}. If this test genuinely must write to the "
+        f"live cloud, {_hatch_note()} — and prefer `disposable_project` so the "
+        "residue is cleaned up even if the test raises."
+    )
+
 
 def guard_prod_read(base_url: str) -> None:
     """Raise if a test context is about to READ from production.

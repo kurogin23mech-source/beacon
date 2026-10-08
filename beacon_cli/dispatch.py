@@ -737,6 +737,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_activity.add_argument("--deadline", default="")
     p_opp_activity.add_argument("--ball", default="")
     p_opp_activity.add_argument("--reason", default="")
+    # ms-166 e-6600: done/cancel の監査記入を dev の task done と同じ規則にする。
+    p_opp_activity.add_argument("--outcome", default="")
+    p_opp_activity.add_argument("--acknowledge", action="store_true")
     p_opp_activity.add_argument("--description", "--desc", dest="description", default="")
 
     # ms-174 e-6434: 契約 (締結の有無を第一級で持つ Opportunity 専用 work-item) の
@@ -974,6 +977,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_done.add_argument("-p", "--progress", default="")
     # e-976: default=None — see p_ms_observe.
     p_task_done.add_argument("-r", "--reason", default=None)
+    p_task_done.add_argument("--outcome", default="")  # ms-166 e-6600
     # ms-154 e-5650: decided_by (who decided) + evidence (real grounds) for the
     # decision-arm record. --evidence is repeatable (action="append").
     p_task_done.add_argument("--decided-by", dest="decided_by", default="")
@@ -2929,16 +2933,25 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             act_id = args.desc  # 2 番目 positional = act-id
             if not act_id:
                 print(f"Usage: beacon opportunity activity {verb} <act-id>"
-                      + (" [--reason <text>]" if verb == "cancel" else "")
+                      + (" (--reason <text> | --acknowledge) [--outcome <text>]"
+                         if verb in ("done", "cancel") else "")
                       + (" [--deadline <date>] [--ball self|counterpart] [--description <text>]"
                          if verb == "update" else ""))
                 return 1
+            # ms-166 e-6600: reason / outcome / acknowledge を両フロントで同じ env に
+            # 写す。gate 本体は commands_shared._require_reason_or_skip が持つので、
+            # ここで「必須かどうか」を判断しない (= 規則の写しを作らない)。
             if verb == "done":
                 return _run_commands_py(root, "activity_done", {
-                    "BEACON_ACT_ID": act_id, "BEACON_ACT_STATUS": "done"})
+                    "BEACON_ACT_ID": act_id, "BEACON_ACT_STATUS": "done",
+                    "BEACON_REASON": args.reason or "",
+                    "BEACON_OUTCOME": args.outcome or "",
+                    "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else ""})
             if verb == "cancel":
                 return _run_commands_py(root, "activity_cancel", {
-                    "BEACON_ACT_ID": act_id, "BEACON_REASON": args.reason or ""})
+                    "BEACON_ACT_ID": act_id, "BEACON_REASON": args.reason or "",
+                    "BEACON_OUTCOME": args.outcome or "",
+                    "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else ""})
             return _run_commands_py(root, "activity_update", {
                 "BEACON_ACT_ID": act_id,
                 "BEACON_ACTIVITY_DEADLINE": args.deadline or "",
@@ -3570,6 +3583,8 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             # ms-154 e-5650: decided_by + evidence for the decision-arm record.
             "BEACON_DECIDED_BY": args.decided_by or "",
             "BEACON_DONE_EVIDENCE": "\n".join(args.evidence or []),
+            # ms-166 e-6600: WHAT CAME OF the task, sibling of --reason.
+            "BEACON_OUTCOME": args.outcome or "",
         }
         if args.reason is not None:
             env["BEACON_REASON"] = args.reason

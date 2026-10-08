@@ -211,9 +211,24 @@ PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" \
 1. claude-code on WORKMACHINE in D:\Projects\beacon (started 2026-07-07T21, pid 222) → dolphin.orca@gmail.com (editor)  [sid=workmachine-…8ff3c173, healthy age 1s]
 2. codex on CFGW5D79LL in /Users/…/beacon (started 2026-07-07T05, pid 68732)  [sid=codex-…65dbdb5e, healthy age 5s]
 3. claude-code on mac-mini in /Users/…/beacon  [sid=6d270a08…, stale age 12m] → (member unknown)
+4. claude-code on mac-mini in /Users/…/other  [sid=aa11…, healthy age 2s]  ⚠詰まり(受信が進んでいない)
 ```
 
 Step 1-send-d のメンバー email / role は従来通りラベル末尾に添える。member 一致は `machine` / actor.email で cross-reference する。
+
+**`reachable` が false の候補には ⚠詰まり を必ず添える (ms-166 e-6778)**。directory の
+row は `reachable` (= live かつ確定的に詰まっていない) を持っているが、`--healthy` の
+filter はこれを見ない。つまり **受信が進んでいない相手が「healthy」の顔で候補に並ぶ**。
+2026-10-01 に実測され、生の JSON を目視した人だけが気づけた — 手順どおり進めると
+詰まっている相手に気づかず送り込む。
+
+候補から黙って落とす形は採らない (候補が消えると「なぜ出てこないのか」が分からず、
+無言で落とすという同じ型の害になる)。**見せて選ばせる**。印が付いた相手を選ぶとき
+は、送っても読まれない恐れがある旨を 1 行添えてユーザーに確認する。
+
+印を付けるのは `reachable` が **false のときだけ**。契約上 `None` は「詰まっているか
+不明」で live 扱いなので、そこに印を付けると待ち行列が空なだけの idle な相手まで
+警告だらけになる。
 
 ユーザーに尋ねる:
 ```
