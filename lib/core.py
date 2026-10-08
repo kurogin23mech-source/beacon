@@ -1320,6 +1320,11 @@ def task_add(data: dict, ms_id: str, description: str, *,
              allow_untriaged: bool = False) -> str:
     """Add an entry to a milestone. Returns the new entry id.
 
+    ``outcome`` (ms-166 e-6600): optional record of WHAT CAME OF the task, the
+    sibling of ``reason`` (WHY it is being closed). Carried here so the field
+    lives on the work-item class rather than on one occupation — a dev task and
+    a sales activity close with the same two pieces of information or neither.
+
     ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
     "display_name"}`` dict attached to ``meta.author`` — the *human*
     identity that created the task on the server side. Distinct from
@@ -1387,7 +1392,7 @@ def task_add(data: dict, ms_id: str, description: str, *,
 
 
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
-              author: dict | None = None) -> tuple[dict, dict]:
+              outcome: str = "", author: dict | None = None) -> tuple[dict, dict]:
     """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
     containing milestone first, the entry second (review finding #5: stated
     explicitly since the close now delegates to ``occupation.set_entry_state``,
@@ -1412,7 +1417,7 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     import occupation
     ms, entry = occupation.set_entry_state(
         data, entry_id, "done", at=date or _now_iso(),
-        actor=_get_actor(), reason=reason)
+        actor=_get_actor(), reason=reason, outcome=outcome)
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
     author_clean = _clean_author(author)

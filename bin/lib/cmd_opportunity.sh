@@ -318,8 +318,8 @@ cmd_opportunity_activity() {
     done
     if [ -z "$opp_id" ] || [ -z "$desc" ]; then
         echo "Usage: beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]"
-        echo "       beacon opportunity activity done   <act-id>"
-        echo "       beacon opportunity activity cancel <act-id> [--reason <text>]"
+        echo "       beacon opportunity activity done   <act-id> (--reason <text> | --acknowledge) [--outcome <text>]"
+        echo "       beacon opportunity activity cancel <act-id> (--reason <text> | --acknowledge) [--outcome <text>]"
         echo "       beacon opportunity activity update <act-id> [--deadline <date>] [--ball self|counterpart] [--description <text>]"
         exit 1
     fi
@@ -329,29 +329,49 @@ cmd_opportunity_activity() {
 }
 
 cmd_opportunity_activity_done() {
-    local act_id="${1:-}"
+    # ms-166 e-6600: 活動を終わらせるときは、dev の `task done` と同じ規則で
+    # 監査記入 (--reason) を要る形にした。--acknowledge は「理由を書かないと
+    # 決めた」を明示する逃げ道 (空文字で黙って通さない)。--outcome は「何が
+    # 得られたか」で、計画の文面は done 時点で古くなるので別に残す。
+    local act_id="" reason="" outcome="" acknowledge=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason)      reason="${2:-}"; shift 2 ;;
+            --outcome)     outcome="${2:-}"; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)           _guard_positional "$1" "Usage: beacon opportunity activity done <act-id> (--reason <text> | --acknowledge) [--outcome <text>]" ;;
+            *)             act_id="$1"; shift ;;
+        esac
+    done
     if [ -z "$act_id" ]; then
-        echo "Usage: beacon opportunity activity done <act-id>"
+        echo "Usage: beacon opportunity activity done <act-id> (--reason <text> | --acknowledge) [--outcome <text>]"
         exit 1
     fi
     BEACON_ACT_ID="$act_id" BEACON_ACT_STATUS="done" \
+        BEACON_REASON="$reason" BEACON_OUTCOME="$outcome" \
+        BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" activity_done
 }
 
 cmd_opportunity_activity_cancel() {
-    local act_id="" reason=""
+    # ms-166 e-6600: 理由を必須にした (以前は未指定でも通り、取消された活動が
+    # 理由なしで並んでいた = 誤起票なのか意図的にやめたのか読み手に分からない)。
+    local act_id="" reason="" outcome="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --reason) reason="${2:-}"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon opportunity activity cancel <act-id> [--reason <text>]" ;;
-            *)        act_id="$1"; shift ;;
+            --reason)      reason="${2:-}"; shift 2 ;;
+            --outcome)     outcome="${2:-}"; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)           _guard_positional "$1" "Usage: beacon opportunity activity cancel <act-id> (--reason <text> | --acknowledge) [--outcome <text>]" ;;
+            *)             act_id="$1"; shift ;;
         esac
     done
     if [ -z "$act_id" ]; then
-        echo "Usage: beacon opportunity activity cancel <act-id> [--reason <text>]"
+        echo "Usage: beacon opportunity activity cancel <act-id> (--reason <text> | --acknowledge) [--outcome <text>]"
         exit 1
     fi
     BEACON_ACT_ID="$act_id" BEACON_REASON="$reason" \
+        BEACON_OUTCOME="$outcome" BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" activity_cancel
 }
 

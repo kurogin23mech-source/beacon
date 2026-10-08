@@ -417,7 +417,7 @@ def normalize_ball(value: str) -> str:
 
 
 def mark_done(item: dict, *, at: str = "", actor: str = "",
-              reason: str = "") -> dict:
+              reason: str = "", outcome: str = "") -> dict:
     """Mark a WorkItem done in place and return it.
 
     Sets ``status="done"`` and stamps the canonical ``done_at`` (``at`` falls
@@ -428,14 +428,26 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     completion side effects (a commit resolving a task, a communication closing
     an activity — evidence-close, task e-3560) are NOT done here; this only
     moves the item's own lifecycle to done.
+
+    ``outcome`` (ms-166 e-6600) records WHAT CAME OF the work, as distinct from
+    ``reason`` (WHY this transition is being made). The two answer different
+    questions and a reader needs both: the plan text (``description``) was
+    written before the work happened and stays frozen at done-time, so without
+    an outcome a finished item still reads as its own prediction. Optional on
+    purpose — it carries additional information and is NOT part of the
+    audit-entry gate (that gate is ``reason``, enforced identically for every
+    work-item class by ``commands_shared._require_reason_or_skip``). Requiring
+    it for one occupation only would be exactly the branch this task removes.
     """
     item["status"] = DONE_STATUS
     item[DONE_AT] = at or work_base.now_iso()
-    if actor or reason:
+    if actor or reason or outcome:
         meta = item.setdefault("meta", {})
         meta["done_by"] = actor or work_base.current_actor()
         if reason:
             meta["done_reason"] = reason
+        if outcome:
+            meta["done_outcome"] = outcome
     return item
 
 

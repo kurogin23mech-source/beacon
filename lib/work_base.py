@@ -97,7 +97,7 @@ CANCELLED_STATUS = "cancelled"
 
 
 def stamp_cancel(record: dict, *, reason: str = "", actor: str = "",
-                 at: str = "") -> dict:
+                 at: str = "", outcome: str = "") -> dict:
     """Soft-cancel a work record in place and return it.
 
     Sets ``status="cancelled"`` and stamps
@@ -111,6 +111,11 @@ def stamp_cancel(record: dict, *, reason: str = "", actor: str = "",
     ``actor`` / ``at`` fall back to ``current_actor()`` / ``now_iso()`` when
     left blank, so callers that don't thread identity still get an audited
     cancel.
+
+    ``outcome`` (ms-166 e-6600) records WHAT CAME OF the record before it was
+    cancelled, as distinct from ``reason`` (WHY it is being cancelled) — the
+    same pair ``work_model.mark_done`` carries, so both terminal transitions
+    speak one vocabulary. Optional; the audit gate is ``reason``.
     """
     record["status"] = CANCELLED_STATUS
     meta = record.setdefault("meta", {})
@@ -118,6 +123,8 @@ def stamp_cancel(record: dict, *, reason: str = "", actor: str = "",
     meta["cancelled_by"] = actor or current_actor()
     if reason:
         meta["cancel_reason"] = reason
+    if outcome:
+        meta["cancel_outcome"] = outcome
     return record
 
 

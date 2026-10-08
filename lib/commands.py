@@ -10200,38 +10200,71 @@ def cmd_sales_reply_watch_op_ensure():
 
 def cmd_activity_done():
     """Internal (Skill-invoked): mark a planned Activity done/todo.
-    Env: BEACON_ACT_ID, BEACON_ACT_STATUS (default 'done'). ms-106 e-3505 — a
-    send records the Communication (fact) and marks the plan it fulfilled done,
-    instead of leaving a lingering todo beside the证跡."""
+    Env: BEACON_ACT_ID, BEACON_ACT_STATUS (default 'done'), BEACON_REASON,
+    BEACON_OUTCOME. ms-106 e-3505 — a send records the Communication (fact) and
+    marks the plan it fulfilled done, instead of leaving a lingering todo beside
+    the证跡.
+
+    ms-166 e-6600: closing an activity now takes an audit entry under the SAME
+    rule a dev task closes under (``_require_reason_or_skip``), not a second
+    sales-only rule. Only the ``done`` transition is gated — ``todo`` is a
+    re-open, not a terminal state, and the dev side gates no such move either.
+    """
     import sales_entities
     act_id = os.environ.get("BEACON_ACT_ID", "")
     status = (os.environ.get("BEACON_ACT_STATUS", "") or "done").strip().lower()
+    # Gate BEFORE load_project so a refused call touches nothing.
+    reason = ""
+    if status == "done":
+        reason = _require_reason_or_skip("activity done")
+    outcome = os.environ.get("BEACON_OUTCOME", "")
     data = load_project()
     try:
         act = sales_entities.activity_set_status(data, act_id, status,
-                                                  at=core._now_iso())
+                                                  at=core._now_iso(),
+                                                  reason=reason,
+                                                  outcome=outcome)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
     print(f"activity {act_id} → {act['status']}")
+    if reason:
+        print(f"  Reason: {reason}")
+    if outcome:
+        print(f"  Outcome: {outcome}")
 
 
 def cmd_activity_cancel():
     """取消 (cancel) a planned Activity — ms-139 e-4950. 誤起票やらないと決めた
     活動を、削除せず監査印つきで cancelled にする。Env: BEACON_ACT_ID,
-    BEACON_REASON."""
+    BEACON_REASON, BEACON_OUTCOME.
+
+    ms-166 e-6600: the reason is now REQUIRED under the shared rule. It used to
+    read BEACON_REASON and accept its absence, so cancelled activities could
+    line up with no stated cause — the reader could not tell a mis-filed plan
+    from one deliberately dropped. ``--acknowledge`` remains the explicit way to
+    cancel without writing a reason, so the waiver is recorded as a choice
+    instead of being inferred from a blank.
+    """
     import sales_entities
     act_id = os.environ.get("BEACON_ACT_ID", "")
-    reason = os.environ.get("BEACON_REASON", "")
+    # Gate BEFORE load_project so a refused call touches nothing.
+    reason = _require_reason_or_skip("activity cancel")
+    outcome = os.environ.get("BEACON_OUTCOME", "")
     data = load_project()
     try:
-        act = sales_entities.activity_cancel(data, act_id, reason=reason)
+        act = sales_entities.activity_cancel(data, act_id, reason=reason,
+                                             outcome=outcome)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
     print(f"activity {act_id} → {act['status']}")
+    if reason:
+        print(f"  Reason: {reason}")
+    if outcome:
+        print(f"  Outcome: {outcome}")
 
 
 def cmd_activity_update():

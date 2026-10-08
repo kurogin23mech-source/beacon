@@ -274,6 +274,7 @@ def cmd_task_done():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
     reason = _require_reason_or_skip("task done")
+    outcome = os.environ.get("BEACON_OUTCOME", "")  # ms-166 e-6600
     import datetime
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -313,7 +314,8 @@ def cmd_task_done():
             if progress:
                 print(f"  Progress: {ms.get('progress', 0)}%")
             return
-    ms, entry = core.task_done(data, entry_id, date=today, reason=reason)
+    ms, entry = core.task_done(data, entry_id, date=today, reason=reason,
+                               outcome=outcome)
     core.update_progress(ms, progress)
     # ms-160 e-6688: the completion lines belong AFTER the write. Observed
     # 2026-09-29: `beacon task done e-5981` printed "Done: [e-5981] ..." on
@@ -324,6 +326,8 @@ def cmd_task_done():
     print(f"Done: [{entry_id}] {entry['description']}")
     if reason:
         print(f"  Reason: {reason}")
+    if outcome:
+        print(f"  Outcome: {outcome}")
     if progress:
         print(f"  Progress: {ms.get('progress', 0)}%")
     # ms-154 e-5650: record the done judgment on the decision arm (the CLI path

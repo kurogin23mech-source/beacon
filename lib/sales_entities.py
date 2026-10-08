@@ -3122,7 +3122,8 @@ _SETTABLE_ACTIVITY_STATUS = {work_model.TODO_STATUS, work_model.DONE_STATUS}
 
 
 def activity_set_status(data: dict, activity_id: str, status: str, *,
-                        at: str = "") -> dict:
+                        at: str = "", reason: str = "",
+                        outcome: str = "") -> dict:
     """Set an Activity's status (todo/done) and return it. Used when a send or
     other Communication *fulfills* a planned Activity (ms-106 e-3505): the plan
     is marked done rather than leaving a lingering todo sitting beside the
@@ -3151,12 +3152,20 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
     # pre-confirmed present, set_entry_state's own ValueErrors propagate un-masked.
     if occupation.find_target_entry(data, activity_id) is None:
         raise ValueError(f"Activity not found: {activity_id}")
+    # ms-166 e-6600: thread reason / outcome into the shared transition. They
+    # used to stop here — set_entry_state already accepted both and passed them
+    # to work_model.mark_done, but this function had no parameters for them, so
+    # a sales activity could only ever close anonymously while a dev task
+    # closing through the SAME seam recorded why and what came of it. The chain
+    # was whole on either side of this call and broken exactly at it.
     _opp, act = occupation.set_entry_state(
-        data, activity_id, status, at=at, actor=work_base.current_actor())
+        data, activity_id, status, at=at, actor=work_base.current_actor(),
+        reason=reason, outcome=outcome)
     return act
 
 
-def activity_cancel(data: dict, activity_id: str, *, reason: str = "") -> dict:
+def activity_cancel(data: dict, activity_id: str, *, reason: str = "",
+                    outcome: str = "") -> dict:
     """Cancel (取消) an Activity and return it — correcting a mis-recorded plan
     without deleting it (data-immutability-principle).
 
@@ -3174,7 +3183,7 @@ def activity_cancel(data: dict, activity_id: str, *, reason: str = "") -> dict:
     _, act = find_activity(data, activity_id)
     if act is None:
         raise ValueError(f"Activity not found: {activity_id}")
-    return work_base.stamp_cancel(act, reason=reason)
+    return work_base.stamp_cancel(act, reason=reason, outcome=outcome)
 
 
 def activity_update(data: dict, activity_id: str, *, description: str = "",
