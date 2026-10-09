@@ -297,6 +297,7 @@ def test_task_done_stamps_done_by_user():
             "email": "carol@example.com",
             "display_name": "Carol",
         },
+        reason="t",
     )
     entry = next(
         e for e in data["milestones"][0]["entries"] if e["id"] == eid

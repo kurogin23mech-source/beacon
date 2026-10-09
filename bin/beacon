@@ -531,8 +531,11 @@ case "${1:-}" in
             attack-list-promote) shift 2; cmd_acquisition_attack_list_promote "$@" ;;
             # ms-120 e-3907 / ms-132 e-4507: named intent verbs for the lifecycle
             # (todo → in_progress → done; observing 除去)。status is read-only。
-            start)    BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="in_progress" python3 "$COMMANDS_PY" acquisition_status ;;
-            done)     BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="done"        python3 "$COMMANDS_PY" acquisition_status ;;
+            # ms-166 e-6893: 旗を解釈する handler に委譲する (旧 inline 形は
+            # --reason / --acknowledge を黙って捨てており、done = 終端遷移に
+            # 監査エントリを渡せなかった)。
+            start)    shift 2; cmd_acquisition_status_intent in_progress "$@" ;;
+            done)     shift 2; cmd_acquisition_status_intent done "$@" ;;
             # ms-132 e-4507: 打ち切りは status でなく削除 (soft-cancel) で表す。
             delete|cancel|rm) shift 2; cmd_acquisition_delete "$@" ;;
             status)

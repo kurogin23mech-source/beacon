@@ -97,8 +97,15 @@ CANCELLED_STATUS = "cancelled"
 
 
 def stamp_cancel(record: dict, *, reason: str = "", actor: str = "",
-                 at: str = "", outcome: str = "") -> dict:
-    """Soft-cancel a work record in place and return it.
+                 at: str = "", outcome: str = "",
+                 acknowledge: bool = False, exempt: str = "",
+                 verb: str = "cancel") -> dict:
+    """Soft-cancel a work record in place and return it — REQUIRES an audit entry.
+
+    Despite every keyword having a default, one of ``reason`` / ``acknowledge`` /
+    ``exempt`` is MANDATORY: with none of them this raises
+    ``terminal_gate.TerminalAuditRequired``. Stated in the first line because the
+    signature alone reads as "all optional" (ms-166 e-6894 保守性レビュー finding #3).
 
     Sets ``status="cancelled"`` and stamps
     ``meta.cancelled_at / cancelled_by / cancel_reason``. The record is never
@@ -116,13 +123,30 @@ def stamp_cancel(record: dict, *, reason: str = "", actor: str = "",
     cancelled, as distinct from ``reason`` (WHY it is being cancelled) — the
     same pair ``work_model.mark_done`` carries, so both terminal transitions
     speak one vocabulary. Optional; the audit gate is ``reason``.
+
+    THE AUDIT GATE LIVES HERE (ms-166 e-6893). ``cancelled`` is a terminal
+    state, so this stamp refuses to run without an audit entry: pass ``reason``,
+    or ``acknowledge=True`` to record a deliberate no-reason, or an ``exempt``
+    key declared in ``terminal_gate.EXEMPT_CALL_SITES``. Before e-6893 the
+    requirement was a list of 6 CLI handlers that happened to call
+    ``commands_shared._require_reason_or_skip``, so ``task cancel`` and the four
+    sales cancels reached ``cancelled`` with ``reason=""`` and nothing said so.
+    ``verb`` only labels the error message. As with ``work_model.mark_done``,
+    this is not the only way to reach ``cancelled`` — hand-written
+    ``rec["status"] = "cancelled"`` writes still exist and are enumerated with a
+    reason each in ``terminal_gate.KNOWN_HANDWRITTEN_TERMINAL`` (a ratchet that
+    fails on a new one). The claim is "every path through this stamp carries an
+    audit entry, and every path that bypasses it is listed", not "there is no
+    bypass".
     """
+    import terminal_gate
+    reason = terminal_gate.require_audit(
+        verb, reason=reason, acknowledge=acknowledge, exempt=exempt)
     record["status"] = CANCELLED_STATUS
     meta = record.setdefault("meta", {})
     meta["cancelled_at"] = at or now_iso()
     meta["cancelled_by"] = actor or current_actor()
-    if reason:
-        meta["cancel_reason"] = reason
+    meta["cancel_reason"] = reason
     if outcome:
         meta["cancel_outcome"] = outcome
     return record

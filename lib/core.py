@@ -1392,7 +1392,8 @@ def task_add(data: dict, ms_id: str, description: str, *,
 
 
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
-              outcome: str = "", author: dict | None = None) -> tuple[dict, dict]:
+              outcome: str = "", acknowledge: bool = False,
+              author: dict | None = None) -> tuple[dict, dict]:
     """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
     containing milestone first, the entry second (review finding #5: stated
     explicitly since the close now delegates to ``occupation.set_entry_state``,
@@ -1402,6 +1403,14 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     "display_name"}`` dict attached to ``meta.done_by_user`` — the
     *human* identity that completed the task on the server side
     (distinct from ``meta.done_by`` which is the local-agent string).
+
+    ``reason`` / ``acknowledge`` (ms-166 e-6893): the audit entry the terminal
+    transition carries, enforced down in ``work_model.mark_done``. Passing
+    neither raises ``terminal_gate.TerminalAuditRequired`` (a ``ValueError``),
+    so a caller that used to close a task with an empty ``why`` — the production
+    ``POST .../entries/{id}/done`` route did exactly that, which also made the
+    decision-arm event it records carry ``rationale=None`` every single time —
+    now has to say why or acknowledge that it won't.
     """
     # ms-143: locate + close through occupation.set_entry_state (manifest-driven),
     # so the verb no longer walks data['milestones'] directly. set_entry_state
@@ -1417,7 +1426,8 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     import occupation
     ms, entry = occupation.set_entry_state(
         data, entry_id, "done", at=date or _now_iso(),
-        actor=_get_actor(), reason=reason, outcome=outcome)
+        actor=_get_actor(), reason=reason, outcome=outcome,
+        acknowledge=acknowledge, verb="task done")
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
     author_clean = _clean_author(author)
@@ -1428,11 +1438,19 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
 
 def task_update(data: dict, entry_id: str, *,
                 description: str = "", status: str = "",
-                detail: str = "", date: str = "",
+                detail: str = "",
                 motivation: str = "", acceptance_criteria: str = "",
                 behavior: str = "", priority: str = "", deadline: str = "",
                 author: dict | None = None) -> tuple[dict, dict]:
     """Update entry fields. Returns (milestone, entry).
+
+    NO ``date`` PARAMETER (ms-166 e-6893). It existed solely to stamp ``done_at``
+    when this path wrote ``status="done"`` directly; now that a terminal status is
+    refused here, keeping the knob would mean accepting an argument that changes
+    nothing. Removed rather than ignored — the callers that passed it
+    (``cmd_task_update`` passed ``date=today`` unconditionally, the production
+    ``PATCH`` route passed ``body.date``) were updated, and the route rejects a
+    non-empty ``date`` instead of swallowing it.
 
     The MS-32 "必要十分フォーマット" fields (motivation / acceptance_criteria /
     behavior) and priority are now updatable here. Empty strings are treated as
@@ -1457,9 +1475,26 @@ def task_update(data: dict, entry_id: str, *,
             raise ValueError(
                 f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}"
             )
+        # ms-166 e-6893: an attribute patch may NOT write a terminal status.
+        # This path wrote entry["status"] directly — bypassing work_model.mark_done
+        # entirely — so `task update --status done` (CLI) and `PATCH /entries/{id}`
+        # with status="done" (production API) closed a task with no reason, no
+        # done_by attribution, and no completion stamps at all. It is the same
+        # separation occupation.set_entry_state already enforces for "cancelled"
+        # ("cancel has its own audit-stamped path"), applied to both terminal
+        # states and on both frontends: a terminal transition is a LIFECYCLE
+        # change that carries an audit entry, not a field edit.
+        import terminal_gate
+        if status in terminal_gate.terminal_statuses():
+            raise ValueError(
+                f"status={status!r} はこの経路からは書けません。終端状態への遷移は"
+                f"監査エントリ (理由) を運ぶ専用の動詞を通してください: "
+                f"done は `beacon task done {entry_id} --reason \"...\"`、"
+                f"cancelled は `beacon task cancel {entry_id} --reason \"...\"` "
+                f"(理由を意図して省くなら --acknowledge)。属性の書き換えと"
+                f"ライフサイクルの遷移は別の責務です (ms-166 e-6893)。"
+            )
         entry["status"] = status
-        if status == work_model.DONE_STATUS and not entry.get("done_at"):
-            entry["done_at"] = date
         changed = True
     if detail:
         entry["detail"] = detail
@@ -1500,18 +1535,27 @@ def task_update(data: dict, entry_id: str, *,
     return ms, entry
 
 
-def task_delete(data: dict, entry_id: str, *, reason: str = "") -> dict:
+def task_delete(data: dict, entry_id: str, *, reason: str = "",
+                acknowledge: bool = False) -> dict:
     """Cancel an entry (soft delete). Returns the entry.
 
     Routes through ``work_base.stamp_cancel`` — the shared cancel vocabulary
     (status=cancelled + reason/actor/timestamp, append-only) that sales
     correction (e-3537) also uses (ms-109 e-3558).
+
+    ``reason`` / ``acknowledge`` (ms-166 e-6893): the audit entry, enforced in
+    ``stamp_cancel``. Before e-6893 this verb reached ``cancelled`` with
+    ``reason=""`` — the development ``task cancel`` had no gate at all, which is
+    why "the same rule as development's task done" was an overstatement that
+    e-6600 had to retract.
     """
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
     _, _, entry, _ = result
-    return work_base.stamp_cancel(entry, reason=reason)
+    return work_base.stamp_cancel(entry, reason=reason,
+                                  acknowledge=acknowledge,
+                                  verb="task cancel")
 
 
 def sweep_trashed_in_project(data: dict, *, days: int = 30,

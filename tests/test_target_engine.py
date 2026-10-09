@@ -346,7 +346,7 @@ def test_complete_unknown_work_item_raises():
     rec = te.create_target(data, CONTRACT, label="c",
                            fields={"counterparty": "X"})
     try:
-        te.complete_work_item(data, CONTRACT, rec["id"], "ctr-1-w9")
+        te.complete_work_item(data, CONTRACT, rec["id"], "ctr-1-w9", reason="t")
         assert False
     except te.TargetEngineError as e:
         assert "WorkItem" in str(e)
@@ -448,7 +448,7 @@ def test_infer_next_move_empty_when_done():
     data = _data()
     rec = te.create_target(data, CONTRACT, label="c",
                            fields={"counterparty": "X"})
-    te.close_target(data, CONTRACT, rec["id"])
+    te.close_target(data, CONTRACT, rec["id"], reason="t")
     assert te.infer_next_move(CONTRACT, rec) == ""
 
 

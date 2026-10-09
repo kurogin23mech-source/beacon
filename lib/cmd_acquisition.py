@@ -38,7 +38,7 @@ from commands_shared import (  # noqa: F401
     _now_iso,
     _today_iso,
     _parse_number,
-    _ACKNOWLEDGED_REASON,
+    _require_reason_or_skip,  # ms-166 e-6893: 終端遷移の共有関門
     _gate_target_class,
     _ai_session_direct_completion_ban_active,
     _self_close_ban_refuse,
@@ -120,10 +120,34 @@ def cmd_acquisition_status():
         _self_close_ban_refuse(
             acq_id, f"marking {acq_id} {status}",
             f"beacon acquisition status {acq_id} {status}")
+    # ms-166 e-6893: 監査エントリの関門は押印層 (work_model.mark_done) が持つので、
+    # ここでは合図を転送するだけにする。CLI で先に関門を張ると、本当の障害
+    # (フェーズが終端でない / 自己完結禁止) より先に「理由を書け」と言ってしまい、
+    # 読み手が実際の原因を取り違える。例外は下の except ValueError が回復可能な
+    # 1 行にして返す。
+    _reason = os.environ.get("BEACON_REASON", "")
+    _ack = os.environ.get("BEACON_ACKNOWLEDGE") == "1"
+    # ms-166 e-6893 (AX レビュー finding #1, high): 非終端の前進 (todo / in_progress)
+    # は終端遷移でないので監査エントリを読まない。旗を受理して黙って捨てると
+    # 「`status done --reason` で理由が残った」経験をそのまま `status in_progress
+    # --reason` に転移した AI が、exit 0 を見て記録されたと誤信する (原則2 =
+    # エラーが出ない≠成功)。受理せず拒否する。終端の集合は上で状態モデルから
+    # 導出済なので、ここに literal "done" を書き足さない。判定は「値が空でないか」では
+    # なくフロントが立てた明示マーカーで行う (env に残った値を「渡された」と誤読しない)。
+    import terminal_gate as _tg
+    if _tg.audit_flag_was_given() and status not in _completion_terminals:
+        print(
+            f"Error: --reason / --acknowledge は終端状態への遷移にだけ意味があります "
+            f"(この状態モデルの終端: {', '.join(sorted(_completion_terminals))})。"
+            f"`{status}` は前進なので監査エントリを読みません — 渡した理由は記録されず"
+            f"黙って捨てられるため、受理せず拒否します。旗を外して再実行してください。",
+            file=sys.stderr)
+        sys.exit(1)
     data = load_project()
     try:
-        sales_entities.acquisition_set_status(data, acq_id, status,
-                                              at=_now_iso())
+        sales_entities.acquisition_set_status(
+            data, acq_id, status, at=_now_iso(),
+            reason=_reason, acknowledge=_ack)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -143,22 +167,21 @@ def cmd_acquisition_delete():
     """Soft-cancel (打ち切り) a 顧客獲得ターゲット — ms-132 e-4507. Discontinuing a
     施策 is expressed as deletion, not a lifecycle status. The record is
     tombstoned (status → cancelled, audit trail kept), never physically removed.
-    Env: BEACON_ACQ_ID, BEACON_CANCEL_REASON.
+    Env: BEACON_ACQ_ID, BEACON_REASON / BEACON_ACKNOWLEDGE (ms-166 e-6894 で
+    理由の env 名を正準 1 名に寄せた。旧 BEACON_CANCEL_REASON は移行用 fallback)。
     """
     import sales_entities
     acq_id = os.environ.get("BEACON_ACQ_ID", "")
-    reason = os.environ.get("BEACON_CANCEL_REASON", "")
-    # e-4507 follow-up (#1 DRY): the acknowledged-no-reason sentinel has ONE
-    # definition (_ACKNOWLEDGED_REASON). Callers signal a deliberate no-reason
-    # waiver with BEACON_ACKNOWLEDGE=1 and let this path stamp the sentinel,
-    # rather than each entrypoint hardcoding the literal string.
-    if not reason and os.environ.get("BEACON_ACKNOWLEDGE") == "1":
-        reason = _ACKNOWLEDGED_REASON
     if not acq_id:
         print("Usage: beacon acquisition delete <acq-id> "
               "(--reason <text> | --acknowledge)",
               file=sys.stderr)
         sys.exit(1)
+    # ms-166 e-6893: this used to re-implement the reason/acknowledge rule inline
+    # (reason or sentinel) — a THIRD copy of the decision, which is how
+    # "--reason + --acknowledge silently drops the reason" (e-6895) got to exist in
+    # more than one place. Route through the single shared gate instead.
+    reason = _require_reason_or_skip("acquisition cancel")
     data = load_project()
     try:
         sales_entities.acquisition_cancel(data, acq_id, reason=reason,

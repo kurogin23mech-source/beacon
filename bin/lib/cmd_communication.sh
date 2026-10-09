@@ -74,9 +74,9 @@ cmd_communication_cancel() {
         echo "Usage: beacon communication cancel <comm-id> --reason <text> | --acknowledge"
         exit 1
     fi
-    _require_audit_reason "communication cancel" "$reason" "$acknowledge"
-    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
-    BEACON_COMM_ID="$comm_id" BEACON_COMM_REASON="$reason" \
+    # ms-166 e-6893/e-6895: 判断は python の 1 箇所。bash は転送のみ。
+    BEACON_COMM_ID="$comm_id" BEACON_REASON="$reason" \
+        BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" communication_cancel
 }
 

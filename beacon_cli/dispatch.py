@@ -477,6 +477,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_account_delete = account_sub.add_parser("delete", add_help=False)
     p_account_delete.add_argument("acc_id", nargs="?", default="")
     p_account_delete.add_argument("--force", action="store_true")
+    # ms-166 e-6893: bash 側は --reason / --acknowledge を受けていたが、こちらは
+    # 旗ごと無く理由なしで顧客を取消していた (両フロントで規則が割れていた形)。
+    p_account_delete.add_argument("--reason", default="")
+    p_account_delete.add_argument("--acknowledge", action="store_true")
 
     # ms-109 e-3562: argparse parity for the account sub-verbs the bash path had
     # but the Windows/pipx path lacked (rename / assign / nurturing).
@@ -614,6 +618,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_status = acq_sub.add_parser("status", add_help=False)
     p_acq_status.add_argument("acq_id", nargs="?", default="")
     p_acq_status.add_argument("status", nargs="?", default="")
+    # ms-166 e-6893: done は終端遷移なので監査エントリが要る。旗が片フロントに
+    # しか無いと Windows / pipx から done に倒せなくなるので両方に足す。
+    p_acq_status.add_argument("--reason", default="")
+    p_acq_status.add_argument("--acknowledge", action="store_true")
     # ms-133 e-4643: named-intent lifecycle verbs (todo → in_progress → done),
     # bash parity. Each sets a fixed status via the acquisition_status engine —
     # mirrors bin/beacon's `start)`/`done)` inner-case (BEACON_ACQ_STATUS
@@ -622,6 +630,14 @@ def build_parser() -> argparse.ArgumentParser:
     for _iv in ("start", "done"):
         _p = acq_sub.add_parser(_iv, add_help=False)
         _p.add_argument("acq_id", nargs="?", default="")
+        # ms-166 e-6893 (AX レビュー finding #1, high): 監査の旗は **終端遷移の動詞
+        # だけ** が受理する。当初は「旗の有無で動詞ごとに形が割れないよう」両方に
+        # 持たせたが、それは `start --reason` を受理して黙って捨てる形 (= 原則2 の
+        # silent no-op) だった。`start` (→ in_progress) は理由を読まないので受理
+        # させない。パーサが受理しないので、プロンプトでの注意書きに頼らない。
+        if _iv == "done":
+            _p.add_argument("--reason", default="")
+            _p.add_argument("--acknowledge", action="store_true")
     # ms-132 e-4507: 打ち切り (soft-cancel)。status でなく削除で中止を表す。
     # account/opportunity delete と同じ監査ゲート: --reason か --acknowledge を要求。
     for _dv in ("delete", "cancel", "rm"):
@@ -753,11 +769,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_contract.add_argument("--ref", default="")
     p_opp_contract.add_argument("--date", default="")
     p_opp_contract.add_argument("--reason", default="")
+    # ms-166 e-6912: `--acknowledge` は **union パーサが受理し、verb ごとの
+    # `_allowed_flags` が明示的に断る** 対象として残す (`sign` の `--gating` と同じ)。
+    # 経緯 (私の誤りを 2 段で直した):
+    # (a) 「誰も使えない旗の宣伝」と読んで削除したが、下の `cancel` 分岐が
+    #     `args.acknowledge` を読むため `contract cancel --reason ...` が
+    #     AttributeError で落ちた (独立 AX レビュー #788 が high で検出)。
+    # (b) 戻して実測すると、削除前は **拒否されず通っていた**: `_flag_set` に
+    #     `--acknowledge` が無いので stray ガードが見ておらず、`cancel` が
+    #     `BEACON_ACKNOWLEDGE=1` を転送し、押印層が免除として受けていた。bash は
+    #     この旗を持たないので、**python フロントだけ理由なしで契約を取消できる**
+    #     認可の非対称だった。安全な側 (bash / README / help と同じ「理由必須」) に
+    #     揃え、下の `_flag_set` に載せて明示的に断る。
+    p_opp_contract.add_argument("--acknowledge", action="store_true")
     p_opp_contract.add_argument("--all", action="store_true")
     p_opp_contract.add_argument("--json", action="store_true")
 
     p_opp_delete = opp_sub.add_parser("delete", add_help=False)
     p_opp_delete.add_argument("opp_id", nargs="?", default="")
+    # ms-166 e-6893: bash 側は --reason / --acknowledge を受けていたが、こちらは
+    # 旗ごと無く理由なしで取消していた (両フロントで規則が割れていた形)。
+    p_opp_delete.add_argument("--reason", default="")
+    p_opp_delete.add_argument("--acknowledge", action="store_true")
 
     # ms-109 e-3562: argparse parity for opportunity sub-verbs missing on the
     # Windows/pipx path (assign / amount / phase-prob / transition-date / judge / due).
@@ -831,6 +864,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_comm_cancel = comm_sub.add_parser("cancel", add_help=False)
     p_comm_cancel.add_argument("comm_id", nargs="?", default="")
     p_comm_cancel.add_argument("--reason", default="")
+    # ms-166 e-6893: 取消も終端遷移なので監査エントリが要る。
+    p_comm_cancel.add_argument("--acknowledge", action="store_true")
 
     p_comm_retarget = comm_sub.add_parser("retarget", add_help=False)
     p_comm_retarget.add_argument("comm_id", nargs="?", default="")
@@ -871,6 +906,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mtg_cancel = mtg_sub.add_parser("cancel", add_help=False)
     p_mtg_cancel.add_argument("mtg_id", nargs="?", default="")
+    # ms-166 e-6893: この旗が片フロントに無かったため、Windows / pipx からは
+    # 理由を付けずに面談を取消すしかなかった (= 記録が「なぜ消えたか」を持てない)。
+    p_mtg_cancel.add_argument("--reason", default="")
+    p_mtg_cancel.add_argument("--acknowledge", action="store_true")
 
     p_mtg_list = mtg_sub.add_parser("list", aliases=["ls"], add_help=False)
     p_mtg_list.add_argument("opp_id", nargs="?", default="")
@@ -978,6 +1017,11 @@ def build_parser() -> argparse.ArgumentParser:
     # e-976: default=None — see p_ms_observe.
     p_task_done.add_argument("-r", "--reason", default=None)
     p_task_done.add_argument("--outcome", default="")  # ms-166 e-6600
+    # ms-166 e-6912: bash は `--acknowledge` を受けるのにこちらは受けず、python
+    # フロント (Windows / pipx) だけ「理由を意図して省く」が argparse の
+    # unrecognized arguments になっていた。関門は 1 つ (terminal_gate) なのに
+    # 旗の入口が片側に無いという非対称で、e-6893 の「両フロントで同じ規則」に反する。
+    p_task_done.add_argument("--acknowledge", action="store_true")
     # ms-154 e-5650: decided_by (who decided) + evidence (real grounds) for the
     # decision-arm record. --evidence is repeatable (action="append").
     p_task_done.add_argument("--decided-by", dest="decided_by", default="")
@@ -1018,6 +1062,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_cancel = task_sub.add_parser("cancel", add_help=False)
     p_task_cancel.add_argument("entry_id", nargs="?", default="")
     p_task_cancel.add_argument("-r", "--reason", default="")
+    # ms-166 e-6893: cancel も終端遷移なので監査エントリが要る (bash と同じ 2 択)。
+    p_task_cancel.add_argument("--acknowledge", action="store_true")
 
     p_task_delete = task_sub.add_parser("delete", add_help=False)
     p_task_delete.add_argument("entry_id", nargs="?", default="")
@@ -1065,6 +1111,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_done.add_argument("ms_id", nargs="?", default="")
     # e-976: default=None — see p_ms_observe.
     p_ms_done.add_argument("-r", "--reason", default=None)
+    # ms-166 e-6912: bash は `--acknowledge` を受けるのにこちらは受けず、python
+    # フロント (Windows / pipx) だけ「理由を意図して省く」が argparse の
+    # unrecognized arguments になっていた。関門は 1 つ (terminal_gate) なのに
+    # 旗の入口が片側に無いという非対称で、e-6893 の「両フロントで同じ規則」に反する。
+    p_ms_done.add_argument("--acknowledge", action="store_true")
 
     p_ms_join = ms_sub.add_parser("join", add_help=False)
     p_ms_join.add_argument("ms_id", nargs="?", default="")
@@ -1075,6 +1126,8 @@ def build_parser() -> argparse.ArgumentParser:
     # e-976: default=None so the env builder can tell --reason omitted
     # ('refuse') apart from --reason "" (explicit waiver).
     p_ms_observe.add_argument("-r", "--reason", default=None)
+    # ms-166 e-6912 — 上の p_task_done と同じ両フロント非対称の修正。
+    p_ms_observe.add_argument("--acknowledge", action="store_true")
 
     p_ms_show = ms_sub.add_parser("show", add_help=False)
     p_ms_show.add_argument("ms_id", nargs="?", default="")
@@ -2595,11 +2648,17 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
         return 1
     if cmd == "delete":
         if not args.acc_id:
-            print("Usage: beacon account delete <acc-id> [--force]")
+            print("Usage: beacon account delete <acc-id> [--force] "
+                  "(--reason <text> | --acknowledge)")
             return 1
+        # ms-166 e-6893: 終端遷移 (取消) は監査エントリを運ぶ。--reason か
+        # --acknowledge のどちらか一方 (両方は e-6895 で拒否)。
         env = {
             "BEACON_ACCOUNT_ID": args.acc_id or "",
             "BEACON_FORCE": "1" if args.force else "",
+            "BEACON_REASON": getattr(args, "reason", "") or "",
+            "BEACON_ACKNOWLEDGE": ("1" if getattr(args, "acknowledge", False)
+                                   else ""),
         }
         return _run_commands_py(root, "account_delete", env)
     if cmd == "rename":
@@ -2735,22 +2794,41 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                                 {"BEACON_JSON": "1" if args.json else ""})
     if cmd == "status":
         if not args.acq_id or not args.status:
+            # ms-166 e-6893 (AX レビュー finding #2, medium): bash 側の Usage は
+            # 新しい旗を明記しているのに、こちらは据え置きでフロント間の自己記述が
+            # 割れていた。旗は終端 (done) にだけ効くので、その条件も書く。
             print("Usage: beacon acquisition status <acq-id> "
-                  "<todo|in_progress|done>")
+                  "<todo|in_progress|done> "
+                  "[(--reason <text> | --acknowledge)  ※done のときのみ]")
             return 1
+        # ms-166 e-6894: 旗が「コマンド行に現れた」ことを値とは別に立てる。argparse は
+        # 既定値と明示指定を区別できるので、ここが唯一それを知っている場所。
+        _given = bool(getattr(args, "reason", "")) or bool(
+            getattr(args, "acknowledge", False))
         env = {"BEACON_ACQ_ID": args.acq_id or "",
-               "BEACON_ACQ_STATUS": args.status or ""}
+               "BEACON_ACQ_STATUS": args.status or "",
+               "BEACON_REASON": getattr(args, "reason", "") or "",
+               "BEACON_ACKNOWLEDGE": ("1" if getattr(args, "acknowledge", False)
+                                      else ""),
+               "BEACON_AUDIT_FLAG_GIVEN": "1" if _given else ""}
         return _run_commands_py(root, "acquisition_status", env)
     if cmd in ("start", "done"):
         # ms-133 e-4643: named-intent lifecycle verbs, bash parity. `start` and
         # `done` set a fixed status through the same acquisition_status engine
         # (bin/beacon maps start→in_progress, done→done).
         if not args.acq_id:
-            print(f"Usage: beacon acquisition {cmd} <acq-id>")
+            _audit = (" (--reason <text> | --acknowledge)" if cmd == "done" else "")
+            print(f"Usage: beacon acquisition {cmd} <acq-id>{_audit}")
             return 1
         fixed_status = "in_progress" if cmd == "start" else "done"
+        _given = bool(getattr(args, "reason", "")) or bool(
+            getattr(args, "acknowledge", False))
         env = {"BEACON_ACQ_ID": args.acq_id or "",
-               "BEACON_ACQ_STATUS": fixed_status}
+               "BEACON_ACQ_STATUS": fixed_status,
+               "BEACON_REASON": getattr(args, "reason", "") or "",
+               "BEACON_ACKNOWLEDGE": ("1" if getattr(args, "acknowledge", False)
+                                      else ""),
+               "BEACON_AUDIT_FLAG_GIVEN": "1" if _given else ""}
         return _run_commands_py(root, "acquisition_status", env)
     if cmd in ("delete", "cancel", "rm"):
         if not args.acq_id:
@@ -2759,18 +2837,13 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
             return 1
         reason = getattr(args, "reason", "") or ""
         acknowledge = getattr(args, "acknowledge", False)
-        # 監査ゲート: account/opportunity delete と同じく reason か acknowledge が要る。
-        if not reason and not acknowledge:
-            print("Error: `acquisition delete` is destructive and requires an "
-                  "audit entry. Pass --reason \"...\" or --acknowledge.",
-                  file=sys.stderr)
-            return 1
-        # e-4507 follow-up (#1 DRY): don't hardcode the acknowledged sentinel —
-        # signal the waiver via BEACON_ACKNOWLEDGE and let commands.py stamp its
-        # single _ACKNOWLEDGED_REASON definition.
+        # ms-166 e-6893/e-6895: フロントは前段チェックをしない。両方の合図を転送し、
+        # python の 1 箇所 (terminal_gate.require_audit) に決めさせる。以前はここが
+        # 「どちらか在れば通す」を独自に見ていたため、--reason と --acknowledge を
+        # 両方渡したときフロントだけが素通りさせ、「両方渡したら拒否」に到達しなかった。
         return _run_commands_py(root, "acquisition_delete",
                                 {"BEACON_ACQ_ID": args.acq_id,
-                                 "BEACON_CANCEL_REASON": reason,
+                                 "BEACON_REASON": reason,
                                  "BEACON_ACKNOWLEDGE": "1" if acknowledge else ""})
     if cmd == "attack-list":
         if not args.acq_id or not args.title:
@@ -2952,6 +3025,20 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
                     "BEACON_ACT_ID": act_id, "BEACON_REASON": args.reason or "",
                     "BEACON_OUTCOME": args.outcome or "",
                     "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else ""})
+            # ms-166 e-6912: update は非終端 (属性の書き換え) なので監査のフラグを
+            # 持たないが、union パーサは受理する。下の env に載らない = 黙って捨てる
+            # ので、追加形と同じ契約で拒否する。
+            _stray = [f for f, on in (("--reason", bool(args.reason)),
+                                      ("--acknowledge", args.acknowledge),
+                                      ("--outcome", bool(args.outcome))) if on]
+            if _stray:
+                print(f"Error: opportunity activity update は {', '.join(_stray)} を"
+                      "受け付けません (属性の書き換えは終端遷移ではないので監査の"
+                      "理由を取りません)。\n"
+                      "  終わらせる / 取り消すなら: beacon opportunity activity "
+                      "done|cancel <act-id> (--reason <text> | --acknowledge)",
+                      file=sys.stderr)
+                return 2
             return _run_commands_py(root, "activity_update", {
                 "BEACON_ACT_ID": act_id,
                 "BEACON_ACTIVITY_DEADLINE": args.deadline or "",
@@ -2963,6 +3050,26 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
                   "[--deadline <date>] [--ball self|counterpart]  "
                   "(also: done|cancel|update <act-id>)")
             return 1
+        # ms-166 e-6912: `activity` は done/cancel/update を第 1 positional で取る union
+        # パーサなので、素の追加形でも終端動詞のフラグ (--reason / --acknowledge /
+        # --outcome) を受理できてしまう。下の env にはそれらを載せないので、渡された
+        # 監査の意思は **黙って捨てられていた** —— 理由を書いた人は exit 0 を見て
+        # 「記録された」と読む。bash は同じ経路を `-?*) _guard_positional` で拒否して
+        # いたため、弱い python 側だけが素通りする非対称になっていた。すぐ下の
+        # `contract` が親レビュー #746 (high) で受けたのと同型の指摘なので、同じ契約
+        # (verb 非対応フラグは Usage つきで拒否) をこちらにも当てる。
+        _stray = [f for f, on in (("--reason", bool(args.reason)),
+                                  ("--acknowledge", args.acknowledge),
+                                  ("--outcome", bool(args.outcome))) if on]
+        if _stray:
+            print(f"Error: opportunity activity の追加形は {', '.join(_stray)} を"
+                  "受け付けません (監査のフラグは終端動詞のもの)。\n"
+                  "  活動を終わらせる: beacon opportunity activity done <act-id> "
+                  "(--reason <text> | --acknowledge) [--outcome <text>]\n"
+                  "  活動を取り消す:   beacon opportunity activity cancel <act-id> "
+                  "(--reason <text> | --acknowledge) [--outcome <text>]",
+                  file=sys.stderr)
+            return 2
         env = {
             "BEACON_OPP_ID": args.opp_id or "",
             "BEACON_ACTIVITY_DESC": args.desc or "",
@@ -2982,6 +3089,10 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "--ref": bool(args.ref),
             "--date": bool(args.date),
             "--reason": bool(args.reason),
+            # ms-166 e-6912: ここに載せていなかったので、どの verb の許可リストにも
+            # 無い `--acknowledge` が stray 判定を素通りしていた (= 受理して
+            # 黙って honor する側に倒れていた)。載せる = 明示的に断る。
+            "--acknowledge": args.acknowledge,
             "--all": args.all,
             "--json": args.json,
         }
@@ -2997,8 +3108,17 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
                       if on and f not in _allowed_flags[verb]]
             if _stray:
                 _ok = ", ".join(sorted(_allowed_flags[verb])) or "なし"
+                # ms-166 e-6912 (独立 AX レビュー #788 medium): 終端動詞は 9 つが
+                # `(--reason | --acknowledge)` の 2 択なので、`contract cancel` だけ
+                # `--acknowledge` が無いのを「不在」から推測させると、呼び手は
+                # 打ち間違いと区別できない。**無い理由を言う**。
+                _why = ""
+                if verb == "cancel" and "--acknowledge" in _stray:
+                    _why = ("\n  契約の取消は理由を省けません (他の終端動詞が持つ "
+                            "--acknowledge の免除経路を、この verb だけ持ちません)。"
+                            "--reason \"<理由>\" を渡してください。")
                 print(f"Error: contract {verb} は {', '.join(_stray)} を受け付けません "
-                      f"(この verb で使えるフラグ: {_ok})。", file=sys.stderr)
+                      f"(この verb で使えるフラグ: {_ok})。{_why}", file=sys.stderr)
                 return 2
         if verb == "add":
             if not args.a1 or not args.a2:
@@ -3036,6 +3156,9 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             if not args.a1:
                 print("Usage: beacon opportunity contract cancel <ctr-id> [--reason <text>]")
                 return 1
+            # BEACON_ACKNOWLEDGE は渡さない: 上の stray ガードが `--acknowledge` を
+            # 断るので到達しないし、渡せば押印層が免除として受けてしまう (bash には
+            # 無い経路なのでフロント間で認可がずれる)。理由は常に --reason が運ぶ。
             return _run_commands_py(root, "opportunity_contract_cancel", {
                 "BEACON_CONTRACT_ID": args.a1,
                 "BEACON_REASON": args.reason or "",
@@ -3047,9 +3170,14 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         return 1
     if cmd == "delete":
         if not args.opp_id:
-            print("Usage: beacon opportunity delete <opp-id>")
+            print("Usage: beacon opportunity delete <opp-id> "
+                  "(--reason <text> | --acknowledge)")
             return 1
-        env = {"BEACON_OPP_ID": args.opp_id or ""}
+        # ms-166 e-6893: 終端遷移 (取消) は監査エントリを運ぶ。--reason か
+        # --acknowledge のどちらか一方 (両方は e-6895 で拒否)。
+        env = {"BEACON_OPP_ID": args.opp_id or "",
+               "BEACON_REASON": args.reason or "",
+               "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else ""}
         return _run_commands_py(root, "opportunity_delete", env)
     if cmd == "assign":
         if not args.opp_id:
@@ -3210,7 +3338,8 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
             return 1
         env = {
             "BEACON_COMM_ID": args.comm_id or "",
-            "BEACON_COMM_REASON": args.reason or "",
+            "BEACON_REASON": args.reason or "",
+            "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else "",
         }
         return _run_commands_py(root, "communication_cancel", env)
     if cmd == "retarget":
@@ -3397,9 +3526,18 @@ def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "meeting_end", {"BEACON_MTG_ID": args.mtg_id or ""})
     if cmd == "cancel":
         if not args.mtg_id:
-            print("Usage: beacon meeting cancel <mtg-id>")
+            # ms-166 e-6893 (AX レビュー finding #2, medium): 旗を足したのに Usage 文を
+            # 直さなかったため、bash 側だけが新しい旗を宣伝する状態になっていた。
+            # Windows / pipx 経路の読み手は引数不足時のこの 1 行しか見ないので、
+            # そこに出ない旗は存在を知る機会が無い。
+            print("Usage: beacon meeting cancel <mtg-id> "
+                  "(--reason <text> | --acknowledge)")
             return 1
-        return _run_commands_py(root, "meeting_cancel", {"BEACON_MTG_ID": args.mtg_id or ""})
+        return _run_commands_py(root, "meeting_cancel", {
+            "BEACON_MTG_ID": args.mtg_id or "",
+            "BEACON_REASON": args.reason or "",
+            "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else "",
+        })
     if cmd in ("list", "ls"):
         # e-3909: <opp-id> optional — omit to list across all opportunities.
         env = {"BEACON_MTG_OPP": args.opp_id or "", "BEACON_JSON": "1" if args.json else ""}
@@ -3572,7 +3710,8 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
 
     if cmd == "done":
         if not args.entry_id:
-            print("Usage: beacon task done <entry-id> --reason <text> [-p <progress>]")
+            print("Usage: beacon task done <entry-id> "
+                  "(--reason <text> | --acknowledge) [-p <progress>] [--outcome <text>]")
             return 1
         # e-976: only inject BEACON_REASON when --reason was passed
         # (parser default=None), so the python gate (_require_reason_or_skip)
@@ -3588,6 +3727,8 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
         }
         if args.reason is not None:
             env["BEACON_REASON"] = args.reason
+        if args.acknowledge:
+            env["BEACON_ACKNOWLEDGE"] = "1"
         return _run_commands_py(root, "task_done", env)
 
     if cmd in ("list", "ls"):
@@ -3645,11 +3786,15 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
 
     if cmd == "cancel":
         if not args.entry_id:
-            print("Usage: beacon task cancel <entry-id> [--reason <text>]")
+            print("Usage: beacon task cancel <entry-id> "
+                  "(--reason <text> | --acknowledge)")
             return 1
         env = {
             "BEACON_ENTRY_ID": args.entry_id,
             "BEACON_REASON": args.reason or "",
+            # ms-166 e-6893: 判断は python の 1 箇所 (terminal_gate.require_audit)。
+            # ここは合図の転送だけ — フロントが先に決めると規則が割れる。
+            "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else "",
         }
         return _run_commands_py(root, "task_cancel", env)
 
@@ -3730,12 +3875,14 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
 
     if cmd in ("done", "close"):
         if not args.ms_id:
-            print("Usage: beacon milestone done <ms-id> --reason <text>")
+            print("Usage: beacon milestone done <ms-id> (--reason <text> | --acknowledge)")
             return 1
         # e-976: BEACON_REASON only when --reason was passed (parser default=None).
         env = {"BEACON_MS_ID": args.ms_id}
         if args.reason is not None:
             env["BEACON_REASON"] = args.reason
+        if args.acknowledge:
+            env["BEACON_ACKNOWLEDGE"] = "1"
         return _run_commands_py(root, "milestone_done", env)
 
     if cmd == "join":
@@ -3750,7 +3897,7 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
 
     if cmd == "observe":
         if not args.ms_id:
-            print("Usage: beacon milestone observe <ms-id> --reason <text>")
+            print("Usage: beacon milestone observe <ms-id> (--reason <text> | --acknowledge)")
             return 1
         # e-976: route to the dedicated milestone_observe handler with the
         # --reason gate. Only forward BEACON_REASON when --reason was
@@ -3760,6 +3907,8 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_MS_ID": args.ms_id}
         if args.reason is not None:
             env["BEACON_REASON"] = args.reason
+        if args.acknowledge:
+            env["BEACON_ACKNOWLEDGE"] = "1"
         return _run_commands_py(root, "milestone_observe", env)
 
     if cmd == "show":

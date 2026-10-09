@@ -35,7 +35,7 @@ def test_set_status_rejects_cancelled_routes_to_cancel():
     # set_status で直接 cancelled にはできない (監査印を伴うため activity_cancel 経由)。
     data, aid = _data_with_activity()
     try:
-        se.activity_set_status(data, aid, "cancelled")
+        se.activity_set_status(data, aid, "cancelled", reason="t")
         assert False, "should have raised"
     except ValueError as e:
         assert "activity_cancel" in str(e)
@@ -43,7 +43,7 @@ def test_set_status_rejects_cancelled_routes_to_cancel():
 
 def test_set_status_still_sets_done_and_todo():
     data, aid = _data_with_activity()
-    se.activity_set_status(data, aid, "done", at="2026-08-09T00:00:00Z")
+    se.activity_set_status(data, aid, "done", at="2026-08-09T00:00:00Z", reason="t")
     act = se.find_activity(data, aid)[1]
     assert act["status"] == "done"
     assert act.get("meta", {}).get("done_by")  # 基底経由で done_by が刻まれる
@@ -146,7 +146,7 @@ def test_overdue_activities_excludes_done_and_cancelled():
                          created_at="2026-08-01T00:00:00Z")
     a2 = se.activity_add(data, "opp-1", "やめた打診", deadline="2026-08-01",
                          created_at="2026-08-01T00:00:00Z")
-    se.activity_set_status(data, a1, "done", at="2026-08-09T00:00:00Z")
+    se.activity_set_status(data, a1, "done", at="2026-08-09T00:00:00Z", reason="t")
     se.activity_cancel(data, a2, reason="不要")
     assert se.overdue_activities(data, "2026-08-20") == []
 

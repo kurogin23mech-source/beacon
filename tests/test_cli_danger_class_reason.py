@@ -75,7 +75,11 @@ def test_meeting_cancel_records_the_reason(proj):
     data = json.loads((proj / ".beacon" / "project.json").read_text("utf-8"))
     mtg = data["opportunities"][0]["meetings"][0]
     assert mtg["status"] != "scheduled"
-    assert mtg.get("cancel_reason") == "client rescheduled"
+    # ms-166 e-6893/e-6894: 理由は共有の押印層が書く meta.cancel_reason に入る。
+    # 以前は top-level m["cancel_reason"] に書いていたが、その鍵を読む consumer は
+    # 1 つも無く (取消の echo / work-item 一覧 / Web 画面はすべて meta.cancel_reason
+    # を読む)、理由は記録されても誰にも見えていなかった。
+    assert (mtg.get("meta") or {}).get("cancel_reason") == "client rescheduled"
 
 
 def test_reason_is_a_universal_alias_in_source():

@@ -198,7 +198,7 @@ def test_set_state_task_done_stamp():
     core.milestone_add(data, "M", priority="high")
     eid = core.task_add(data, "ms-1", "完了対象",
                         priority="high")
-    _ms, entry = core.task_done(data, eid)
+    _ms, entry = core.task_done(data, eid, reason="t")
 
     assert entry["status"] == work_model.DONE_STATUS
     assert entry.get("done_at")
@@ -210,7 +210,7 @@ def test_set_state_activity_done_stamp():
     sales_entities.opportunity_add(data, "O", phase="lead", created_at=FIXED_TS)
     aid = sales_entities.activity_add(data, "opp-1", "完了対象活動",
                                       created_at=FIXED_TS)
-    act = sales_entities.activity_set_status(data, aid, "done", at=FIXED_TS)
+    act = sales_entities.activity_set_status(data, aid, "done", at=FIXED_TS, reason="t")
 
     assert act["status"] == work_model.DONE_STATUS
     assert act.get("done_at")
@@ -223,12 +223,12 @@ def test_set_state_done_stamp_parity_across_professions():
     dev = _dev_project()
     core.milestone_add(dev, "M", priority="high")
     e = core.task_add(dev, "ms-1", "t", priority="high")
-    _ms, task = core.task_done(dev, e)
+    _ms, task = core.task_done(dev, e, reason="t")
 
     sales = _sales_project()
     sales_entities.opportunity_add(sales, "O", phase="lead", created_at=FIXED_TS)
     a = sales_entities.activity_add(sales, "opp-1", "a", created_at=FIXED_TS)
-    act = sales_entities.activity_set_status(sales, a, "done", at=FIXED_TS)
+    act = sales_entities.activity_set_status(sales, a, "done", at=FIXED_TS, reason="t")
 
     assert DONE_STAMP_KEYS <= set(task)
     assert DONE_STAMP_KEYS <= set(act)

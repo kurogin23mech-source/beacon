@@ -417,8 +417,17 @@ def normalize_ball(value: str) -> str:
 
 
 def mark_done(item: dict, *, at: str = "", actor: str = "",
-              reason: str = "", outcome: str = "") -> dict:
-    """Mark a WorkItem done in place and return it.
+              reason: str = "", outcome: str = "",
+              acknowledge: bool = False, exempt: str = "",
+              verb: str = "done") -> dict:
+    """Mark a WorkItem done in place and return it — REQUIRES an audit entry.
+
+    Despite every keyword having a default, one of ``reason`` / ``acknowledge`` /
+    ``exempt`` is MANDATORY: with none of them this raises
+    ``terminal_gate.TerminalAuditRequired``. Python cannot express "exactly one of
+    these three" in a signature, so it is stated here in the first line — a reader
+    who checks only the signature would otherwise read ``mark_done(item)`` as
+    valid (ms-166 e-6894 保守性レビュー finding #3).
 
     Sets ``status="done"`` and stamps the canonical ``done_at`` (``at`` falls
     back to ``work_base.now_iso()``). When ``reason`` or a non-default
@@ -438,27 +447,39 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     audit-entry gate (that gate is ``reason``). Requiring it for one occupation
     only would be exactly the branch this task removes.
 
-    Which verbs the reason gate covers, measured (ms-166 e-6600): ``task done``,
-    ``milestone done / wait / observe``, ``activity done / cancel`` route through
-    ``commands_shared._require_reason_or_skip``. ``task cancel`` /
-    ``opportunity contract cancel`` / ``communication cancel`` /
-    ``meeting cancel`` do NOT — they read ``BEACON_REASON`` directly and accept
-    its absence. So the gate is **not** yet enforced across every terminal
-    transition, and a new terminal verb does not inherit it: the gate lives in
-    each CLI handler, not in this primitive or in
-    ``occupation.set_entry_state``. Moving it onto the shared seam (so the
-    coverage becomes a property of the code instead of a list) is task e-6893.
-    Do not read this parameter's presence as proof the gate is universal.
+    THE AUDIT GATE LIVES HERE (ms-166 e-6893). ``done`` is a terminal state, so
+    this stamp refuses to run without an audit entry: pass ``reason``, or
+    ``acknowledge=True`` to record a deliberate no-reason, or an ``exempt`` key
+    declared in ``terminal_gate.EXEMPT_CALL_SITES``. Until e-6893 the
+    requirement was a hand-written list of 6 CLI handlers that happened to call
+    ``commands_shared._require_reason_or_skip``; the production API's
+    ``POST .../done``, ``task update --status done``, ``task cancel`` and the
+    sales cancels all reached a terminal state with no reason, and a new
+    terminal verb inherited nothing. ``verb`` only labels the error message.
+
+    WHAT THIS DOES **NOT** MEAN (read this before claiming the rule is
+    universal). This primitive is not the only way to reach ``done``: a caller
+    can still write ``rec["status"] = "done"`` by hand, and 10 places in ``lib/``
+    did exactly that — measured, not guessed. They are listed with a reason each
+    in ``terminal_gate.KNOWN_HANDWRITTEN_TERMINAL``, and
+    ``terminal_gate.unregistered_handwritten_terminal_writes`` fails on a NEW one,
+    so the set is a ratchet rather than a claim. So the honest statement is:
+    *every path that stamps through this function carries an audit entry, and
+    every path that does not is enumerated.* The first draft of this docstring
+    said "reaching done without an audit entry means not calling this function" —
+    which was false, and is the same overstatement e-6600 already had to retract
+    once (e-6894).
     """
+    import terminal_gate
+    reason = terminal_gate.require_audit(
+        verb, reason=reason, acknowledge=acknowledge, exempt=exempt)
     item["status"] = DONE_STATUS
     item[DONE_AT] = at or work_base.now_iso()
-    if actor or reason or outcome:
-        meta = item.setdefault("meta", {})
-        meta["done_by"] = actor or work_base.current_actor()
-        if reason:
-            meta["done_reason"] = reason
-        if outcome:
-            meta["done_outcome"] = outcome
+    meta = item.setdefault("meta", {})
+    meta["done_by"] = actor or work_base.current_actor()
+    meta["done_reason"] = reason
+    if outcome:
+        meta["done_outcome"] = outcome
     return item
 
 
@@ -509,7 +530,9 @@ def link_evidence(evidence: dict, work_item_id: str) -> dict:
 
 def close_work_item_with_evidence(work_item: dict, evidence: dict, *,
                                   at: str = "", actor: str = "",
-                                  reason: str = "") -> tuple:
+                                  reason: str = "",
+                                  acknowledge: bool = False,
+                                  outcome: str = "") -> tuple:
     """Close a WorkItem *with* the Evidence that closes it, occupation-agnostic.
 
     Performs the full evidence-close in one call: stamps the evidence's
@@ -530,7 +553,8 @@ def close_work_item_with_evidence(work_item: dict, evidence: dict, *,
     are each wired (task-done-judgment-principle 原則6 — this note keeps the
     docstring honest about what actually runs)."""
     link_evidence(evidence, work_item.get("id", ""))
-    mark_done(work_item, at=at, actor=actor, reason=reason)
+    mark_done(work_item, at=at, actor=actor, reason=reason,
+              acknowledge=acknowledge, outcome=outcome)
     return work_item, evidence
 
 

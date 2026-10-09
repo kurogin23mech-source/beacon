@@ -403,7 +403,7 @@ def test_opportunity_cancel_closes_open_gate():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     assert se.current_gate(data, opp) is not None
-    se.opportunity_cancel(data, opp)
+    se.opportunity_cancel(data, opp, reason="t")
     # the ≤1-open slot is freed — no open gate remains
     assert se.current_gate(data, opp) is None
 
@@ -438,7 +438,7 @@ def test_account_cancel_force_orphans_opportunities():
     data = _fresh()
     acc = se.account_add(data, "Globex")
     opp = se.opportunity_add(data, "Deal", account_id=acc)
-    orphaned = se.account_cancel(data, acc, force=True)
+    orphaned = se.account_cancel(data, acc, force=True, reason="t")
     assert orphaned == [opp]
     assert se.find_account(data, acc)["status"] == se.work_base.CANCELLED_STATUS
     # the deal survives, now account-less (a live deal shouldn't be取消 with it)
@@ -451,8 +451,8 @@ def test_account_cancel_referenced_by_cancelled_opp_allowed():
     data = _fresh()
     acc = se.account_add(data, "Globex")
     opp = se.opportunity_add(data, "Deal", account_id=acc)
-    se.opportunity_cancel(data, opp)
-    orphaned = se.account_cancel(data, acc)  # not refused
+    se.opportunity_cancel(data, opp, reason="t")
+    orphaned = se.account_cancel(data, acc, reason="t")  # not refused
     assert orphaned == []
 
 
@@ -1035,7 +1035,7 @@ def test_acquisition_status_transitions_and_rejects_unknown():
     acq = se.acquisition_add(data, "資料整備")
     se.acquisition_set_status(data, acq, "in_progress")
     assert se.find_acquisition(data, acq)["status"] == "in_progress"
-    se.acquisition_set_status(data, acq, "done", at="T9")
+    se.acquisition_set_status(data, acq, "done", at="T9", reason="t")
     done = se.find_acquisition(data, acq)
     assert done["status"] == "done" and done.get("done_at") == "T9"
     with pytest.raises(ValueError):
@@ -1539,7 +1539,7 @@ def test_opportunity_cancel_keeps_communications():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     se.communication_add(data, opp, "x", direction="inbound")
-    se.opportunity_cancel(data, opp)
+    se.opportunity_cancel(data, opp, reason="t")
     rec = se.find_opportunity(data, opp)
     assert rec is not None
     assert rec["status"] == se.work_base.CANCELLED_STATUS
@@ -1752,7 +1752,7 @@ def test_scan_ended_meetings_idempotent_by_status():
     assert se.scan_ended_meetings(data, now) == []
     # cancelled meetings never surface either
     m2 = se.meeting_schedule(data, opp, "2026-07-20T10:00:00+00:00")
-    se.meeting_cancel(data, m2)
+    se.meeting_cancel(data, m2, reason="先約と重複")
     assert se.scan_ended_meetings(data, now) == []
 
 
@@ -1833,7 +1833,7 @@ def test_activity_set_status_marks_done():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     aid = se.activity_add(data, opp, "初回面談を打診")
-    act = se.activity_set_status(data, aid, "done", at="T1")
+    act = se.activity_set_status(data, aid, "done", at="T1", reason="t")
     assert act["status"] == "done" and act["done_at"] == "T1"
 
 
@@ -1843,7 +1843,7 @@ def test_activity_done_stamps_done_by_via_base():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     aid = se.activity_add(data, opp, "初回面談を打診")
-    act = se.activity_set_status(data, aid, "done", at="T1")
+    act = se.activity_set_status(data, aid, "done", at="T1", reason="t")
     assert act["meta"]["done_by"]  # stamped through the occupation-agnostic base
 
 
@@ -1852,7 +1852,7 @@ def test_activity_set_status_todo_does_not_stamp_done():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     aid = se.activity_add(data, opp, "初回面談を打診")
-    se.activity_set_status(data, aid, "done", at="T1")
+    se.activity_set_status(data, aid, "done", at="T1", reason="t")
     act = se.activity_set_status(data, aid, "todo")
     assert act["status"] == "todo"
 
@@ -2395,7 +2395,7 @@ def test_work_item_completed_meeting_and_activity():
     # activity: complete only when done
     act = se.activity_add(data, oid, "提案書を準備")
     assert se.work_item_completed(data, act, "") is False
-    se.activity_set_status(data, act, "done", at="T2")
+    se.activity_set_status(data, act, "done", at="T2", reason="t")
     assert se.work_item_completed(data, act, "") is True
 
 
@@ -2426,7 +2426,7 @@ def test_gate_judgement_ready_activity_anchor_and_date_fallback():
     se.anchor_gate(data, gid, act, at="T0")
     assert se.get_transition_date(data, oid) == "2026-08-10"   # AC4 date sync
     assert se.gate_judgement_ready(data, oid, "2026-08-11T00:00:00Z") is False
-    se.activity_set_status(data, act, "done", at="T1")
+    se.activity_set_status(data, act, "done", at="T1", reason="t")
     assert se.gate_judgement_ready(data, oid, "2026-08-11T00:00:00Z") is True
     # unanchored gate falls back to 遷移日 due/overdue (縮退 manual)
     oid2 = se.opportunity_add(data, "Deal2", transition_date="2026-08-01")
