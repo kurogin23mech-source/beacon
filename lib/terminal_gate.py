@@ -457,3 +457,94 @@ def unregistered_handwritten_terminal_writes(sources: dict) -> list:
                 continue
             bad.append(hit)
     return bad
+
+
+# ---------------------------------------------------------------------------
+# 結果 (outcome) を運んでいない押印呼び出しの数え上げ (e-6894 の第 3 軸)
+#
+# ``outcome`` (= その仕事から何が出たか) は e-6600 で mark_done / stamp_cancel の
+# 第一級の引数になったが、実測すると渡しているのは 18 箇所中 3 箇所だけ。結果は任意の
+# 項目なので「渡していない = 誤り」ではない。問題は **次の人が真似る見本が 8 割そちら側
+# に在る** こと —— 新しい終端動詞を足す人は既存の呼び出しをパターンとして写すので、
+# 古い形 (結果を落とす形) に誘導される。
+#
+# そこで「なぜ結果を運ばないのか」を 1 行ずつ台帳に書かせる (黙って外さない)。これで
+# 新しい終端動詞は「結果を運ぶ」か「運ばない理由を書く」のどちらかを選ばされる。
+# ---------------------------------------------------------------------------
+
+#: 結果を運ばない押印呼び出しと、その理由。1 関数 1 行 (同じ関数内の複数呼び出しは 1 行)。
+#: 結果を運ぶように直したら **行を消す** (stale 検査が削除を強制する)。
+KNOWN_NO_OUTCOME: dict = {
+    "core.task_delete": (
+        "開発タスクの取消。『何も生まなかった』が既定で、途中まで成果が出た取消を"
+        "書きたい場合の先例は activity_cancel が作ってある (outcome を受ける)。"),
+    "sales_entities.cancel_gate": (
+        "判断の漏斗を取り消す内部操作。判断そのものが成立しなかったので結果が無い。"),
+    "sales_entities.contract_cancel": (
+        "誤起票した契約の取消。契約は締結されなかったので結果が無い。"),
+    "sales_entities.opportunity_cancel": (
+        "商談の取消。決着したときの結果は フェーズと判断の漏斗が持つので、取消側で"
+        "1 行の結果に潰さない。"),
+    "sales_entities.account_cancel": (
+        "顧客の取消。顧客は『成果を生む単位』ではなく相手の identity なので結果の"
+        "次元を持たない。"),
+    "sales_entities.communication_cancel": (
+        "誤って記録した証跡の取消。証跡の中身がそのまま結果に当たるため、別立ての"
+        "1 行を足すと二重になる。"),
+    "sales_entities.meeting_cancel": (
+        "予定の取消。開催されなかったので結果が無い (開催された面談の結果は議事録を"
+        "取り込んだ証跡が持つ)。"),
+    "sales_entities.acquisition_cancel": (
+        "獲得施策の打ち切り。打ち切り時点までの実績はアタックリストの行が持つ。"),
+    "sales_entities.acquisition_set_status": (
+        "獲得施策の完了。成果はアタックリストの実績 (接触数 / 転換数) が持つので、"
+        "1 行の結果に潰すと粒度が落ちる。"),
+    "sales_entities.fold_phase_activities": (
+        "フェーズ折り畳み時の自動 close。結果は close の根拠にした証跡"
+        "(communication) が持つ。"),
+    "target_engine.close_target": (
+        "記述子 target の完遂。target の『生み出した価値』は deliverable arm が別次元"
+        "として持つので、work-item 用の 1 行 outcome とは別。照合結果は "
+        "completion_check の verdict field に入る。"),
+    "target_engine.complete_work_item": (
+        "記述子 target の work-item の完了。結果は記述子が宣言した field に書く形"
+        "(--field) なので、汎用の 1 行 outcome は使わない。"),
+    "target_engine.cancel_work_item": (
+        "記述子 target の work-item の取消。同上 — やらないと決めた理由は reason が"
+        "持ち、結果は存在しない。"),
+}
+
+
+def census_outcome_on_terminal_calls(sources: dict) -> dict:
+    """押印呼び出しを「結果を運ぶ / 運ばない」に分けて返す (e-6894)。
+
+    Returns:
+        ``{"carries": [key, ...], "omits": [key, ...]}`` —— key は
+        ``<module>.<function>``。押印層そのもの (``_STAMP_OWNERS``) は除く。
+    """
+    carries, omits = set(), set()
+    for module, source in sources.items():
+        tree = ast.parse(source)
+        funcs = _function_index(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _called_name(node) not in TERMINAL_STAMP_FUNCTIONS:
+                continue
+            fn = _enclosing_function(funcs, node.lineno)
+            key = f"{module}.{fn}"
+            if key in _STAMP_OWNERS:
+                continue
+            if any(k.arg == "outcome" for k in node.keywords):
+                carries.add(key)
+            else:
+                omits.add(key)
+    # 同じ関数が両方の形で呼んでいる場合は「運ぶ」側に数える (見本としては十分)。
+    omits -= carries
+    return {"carries": sorted(carries), "omits": sorted(omits)}
+
+
+def undeclared_outcome_omissions(sources: dict) -> list:
+    """結果を運ばないのに理由が台帳に無い押印呼び出し (空であるべき集合)。"""
+    omits = census_outcome_on_terminal_calls(sources)["omits"]
+    return [k for k in omits if k not in KNOWN_NO_OUTCOME]

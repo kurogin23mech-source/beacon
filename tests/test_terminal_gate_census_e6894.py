@@ -104,6 +104,42 @@ def test_no_stale_terminal_gate_exemption():
 
 
 # ---------------------------------------------------------------------------
+# 軸3 — 結果 (outcome) を運ばない押印呼び出しに、理由が書かれているか
+#
+# e-6894 の動機の前半: outcome は第一級の引数になったが渡しているのは 18 箇所中 3 箇所
+# だけで、**次の人が真似る見本が 8 割そちら側に在る**。渡していないこと自体は誤りでは
+# ないので、禁止ではなく「なぜ運ばないのか」を 1 行書かせる形で留める。
+# ---------------------------------------------------------------------------
+
+def test_every_outcome_omission_is_declared():
+    bad = tg.undeclared_outcome_omissions(_sources())
+    assert bad == [], (
+        "押印層を呼ぶのに結果 (outcome) を運んでおらず、その理由も台帳に無い呼び出しが"
+        "ある。結果を運ぶように直すか、なぜ運ばないのかを 1 行添えて "
+        "terminal_gate.KNOWN_NO_OUTCOME に登録すること (黙って外さない):\n"
+        + "\n".join(f"  {k}" for k in bad))
+
+
+def test_no_stale_outcome_omission_rows():
+    """結果を運ぶように直した行は台帳から消す (台帳が嘘に腐るのを防ぐ)。"""
+    omits = set(tg.census_outcome_on_terminal_calls(_sources())["omits"])
+    stale = sorted(set(tg.KNOWN_NO_OUTCOME) - omits)
+    assert stale == [], (
+        "KNOWN_NO_OUTCOME に、もう結果を運ばない形ではない (= 直った、または関数名が"
+        f"変わった) 行が残っている: {stale}")
+
+
+def test_at_least_one_call_site_does_carry_an_outcome():
+    """見本が全滅していないこと。
+
+    1 つも運んでいないと「この引数は実際には使われていない」と読まれ、次の人が消す側に
+    倒れる。e-6600 で足した引数が死に引数になるのを防ぐ下限の確認。
+    """
+    assert tg.census_outcome_on_terminal_calls(_sources())["carries"], \
+        "結果を運んでいる押印呼び出しが 1 つも無い (引数が死んでいる)"
+
+
+# ---------------------------------------------------------------------------
 # この留め自身を壊して赤を見る (= test the test)
 #
 # 「0 件だった」は、数え上げが何も見えていないときも 0 件になる。捕まえるべき形ごとに

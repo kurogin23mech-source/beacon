@@ -1597,12 +1597,22 @@ def make_router(
                    reason: str = Query(""),
                    acknowledge: bool = Query(False)):
         # ms-166 e-6893: this route used to call ``core.task_done`` with NO reason,
-        # so the web UI's done button closed a task with an empty ``why`` — and the
-        # decision-arm event recorded just below carried ``rationale=None`` on EVERY
-        # web done, which made the ms-154 e-5592 wiring present but inert. The audit
-        # entry now rides in and the gate in ``work_model.mark_done`` enforces it
-        # (``TerminalAuditRequired`` is a ``ValueError``, so the existing handler
-        # turns it into a 400 with a recoverable message).
+        # so the decision-arm event recorded just below could only ever carry
+        # ``rationale=None`` — the ms-154 e-5592 wiring was present but structurally
+        # inert on this path. The audit entry now rides in and the gate in
+        # ``work_model.mark_done`` enforces it (``TerminalAuditRequired`` is a
+        # ``ValueError``, so the existing handler turns it into a 400 with a
+        # recoverable message).
+        #
+        # SCOPE, MEASURED (do not repeat the overstatement): e-6893's description —
+        # and the first draft of this comment — said "the web UI's done button closed
+        # a task with no reason". That is NOT true. Grepping every frontend asset
+        # (server/static/*.html, desktop/dist, desktop/*.rs) finds NO caller of this
+        # route: the web UI's only mutating endpoints are auth / profile /
+        # invitations / members / treks / archive. So the exposure was API clients
+        # and automation, not a button a person could press. The route was open; it
+        # was not being walked through. e-6893's AC4 ("UI 側の入力欄を併せて直す")
+        # is therefore vacuous — there is no UI input to add.
         # ms-154 e-5649: reject an out-of-vocab decided_by up front (400), before
         # the write — no silent coercion to autonomous-AI (which would corrupt the
         # audit attribution undetectably).
