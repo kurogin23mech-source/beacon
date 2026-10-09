@@ -352,82 +352,128 @@ def test_audit_drift_is_wired_into_the_overall_report():
 #
 # 差分を読むだけでは見えない型: 「属性の参照を足した / 消した」と「パーサの引数を
 # 足した / 消した」が別の hunk に散るので、**パーサを組んで実際に呼ぶ** までわからない。
-# judge の skill_gaps もまさにこれを指摘している。
+#
+# **作業フォルダに依存させない。** 最初の版は cwd に .beacon/project.json が在ることに
+# 依っており、CI (プロジェクト無し) では `_ensure_project` が私のガードより手前で
+# rc=1 を返して 3 件が落ちた。しかも crash の回帰試験だけは rc!=2 を満たして **通って
+# しまった** —— 該当コードに到達しないまま緑になる偽の pass。プロジェクトの在処は
+# `BEACON_PROJECT_FILE` で差し替え、起動は差し替えた受け手で観測する。
 # ---------------------------------------------------------------------------
 
 def _dispatch_module():
     sys.path.insert(0, REPO)
     import importlib
-    mod = importlib.import_module("beacon_cli.dispatch")
-    return mod
+    return importlib.import_module("beacon_cli.dispatch")
 
 
-def _run_opportunity(argv):
-    """``beacon opportunity ...`` を実際に parse → handler まで通し (rc, stderr) を返す。"""
+@pytest.fixture
+def opportunity_cli(tmp_path, monkeypatch):
+    """``beacon opportunity ...`` を parse → handler まで通す (作業フォルダ非依存)。
+
+    返り値は ``run(argv) -> (rc, 出力, 起動記録)``。起動記録は
+    ``_run_commands_py`` に渡された ``(handler 名, env)`` のリストで、**空なら
+    サブプロセス起動まで到達していない** (= 拒否された) ことを意味する。
+    """
     import contextlib
     import io
-    from pathlib import Path
     mod = _dispatch_module()
-    ns = mod.build_parser().parse_args(argv)
-    err, out = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
-        rc = mod._handle_opportunity(Path(REPO), ns)
-    return rc, err.getvalue() + out.getvalue()
+
+    project = tmp_path / "project.json"
+    project.write_text('{"name": "t", "milestones": []}', encoding="utf-8")
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(project))
+
+    launched = []
+
+    def _fake_run(root, subcmd, env=None, **kwargs):
+        launched.append((subcmd, dict(env or {})))
+        return 0
+
+    monkeypatch.setattr(mod, "_run_commands_py", _fake_run)
+
+    def run(argv):
+        ns = mod.build_parser().parse_args(argv)
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            rc = mod._handle_opportunity(tmp_path, ns)
+        return rc, err.getvalue() + out.getvalue(), launched
+
+    return run
 
 
-def test_contract_cancel_with_only_a_reason_does_not_crash():
-    """`--reason` だけの正しい呼び出しが例外で落ちないこと (#788 high の回帰試験)。
+def test_contract_cancel_with_only_a_reason_reaches_the_handler(opportunity_cli):
+    """`--reason` だけの正しい呼び出しが handler まで届くこと (#788 high の回帰試験)。
 
-    存在しない契約 ID を渡すので「見つからない」で終わるのが正しい。ここで
-    AttributeError / TypeError が出たら、パーサの引数と handler の参照がずれている。
+    旗を消していた間はここで AttributeError になり、この動詞が python フロントで
+    不能だった。**起動記録が空でないこと** を確かめるので、プロジェクト不在で手前の
+    関門に弾かれた場合は緑にならない (前の版はそれで偽の pass になった)。
     """
-    rc, text = _run_opportunity(
-        ["opportunity", "contract", "cancel", "ctr-does-not-exist", "--reason", "x"])
-    assert rc != 2, (
-        "`--reason` だけの呼び出しが stray フラグとして拒否された "
-        f"(rc=2)。正しい呼び出しを断ってはならない: {text}")
-    assert "AttributeError" not in text and "Traceback" not in text, (
-        "handler がパーサに無い属性を読んでいる (= この動詞が python フロントで"
-        f"不能になっている):\n{text}")
+    rc, text, launched = opportunity_cli(
+        ["opportunity", "contract", "cancel", "ctr-1", "--reason", "x"])
+    assert launched, (
+        "handler がサブプロセス起動まで到達していない (手前の関門で止まったか例外)。"
+        f"rc={rc} 出力={text}")
+    subcmd, env = launched[0]
+    assert subcmd == "opportunity_contract_cancel", subcmd
+    assert env.get("BEACON_REASON") == "x", env
+    assert "AttributeError" not in text and "Traceback" not in text, text
 
 
-def test_contract_cancel_refuses_the_acknowledge_waiver():
+def test_contract_cancel_does_not_forward_the_waiver_env(opportunity_cli):
+    """取消の起動に ``BEACON_ACKNOWLEDGE`` を載せないこと。
+
+    載せると押印層が免除として受け、bash には無い「理由なし取消」が python だけで
+    通る認可の非対称に戻る (削除前が実際にその状態だった)。
+    """
+    _, _, launched = opportunity_cli(
+        ["opportunity", "contract", "cancel", "ctr-1", "--reason", "x"])
+    assert launched
+    _, env = launched[0]
+    assert "BEACON_ACKNOWLEDGE" not in env, (
+        f"免除の env を転送している (理由必須が崩れる): {env}")
+
+
+def test_contract_cancel_refuses_the_acknowledge_waiver(opportunity_cli):
     """契約の取消に監査の免除経路が **無い** ことを挙動で固定する。
 
     ``AUDIT_SURFACE_EXEMPT["opportunity contract"]`` の免除は「断り続けている」こと
     を前提にしている。実際に免除経路を足したら (= 理由なしで取消できるようにしたら)
     この試験が赤くなり、README / help の記述も直す必要が出る。
-    削除前は `_flag_set` に `--acknowledge` が無かったため stray 判定を素通りし、
-    `BEACON_ACKNOWLEDGE=1` が押印層まで流れて **python だけ理由なし取消が通る**
-    認可の非対称になっていた。
     """
-    rc, text = _run_opportunity(
-        ["opportunity", "contract", "cancel", "ctr-does-not-exist", "--acknowledge"])
-    assert rc == 2, (
-        "`contract cancel --acknowledge` が拒否されていない。免除経路を意図して"
-        f"足したなら、この試験と README / help の記述を一緒に直すこと: rc={rc} {text}")
+    rc, text, launched = opportunity_cli(
+        ["opportunity", "contract", "cancel", "ctr-1", "--acknowledge"])
+    assert rc == 2, f"拒否されていない: rc={rc} {text}"
+    assert not launched, f"拒否したはずなのに起動している: {launched}"
     assert "--acknowledge" in text and "--reason" in text, (
-        f"拒否メッセージが「何が使えないか」と「代わりに何を渡すか」を言っていない:\n{text}")
+        f"拒否文が「何が使えないか」と「代わりに何を渡すか」を言っていない:\n{text}")
 
 
-def test_contract_add_refuses_the_audit_flag_too():
+def test_contract_add_refuses_the_audit_flag_too(opportunity_cli):
     """非終端の verb でも監査の旗を黙って捨てないこと (全 verb で断る)。"""
-    rc, text = _run_opportunity(
-        ["opportunity", "contract", "add", "opp-x", "desc", "--acknowledge"])
-    assert rc == 2, f"`contract add --acknowledge` が黙って受理された: rc={rc} {text}"
+    rc, text, launched = opportunity_cli(
+        ["opportunity", "contract", "add", "opp-1", "desc", "--acknowledge"])
+    assert rc == 2, f"黙って受理された: rc={rc} {text}"
+    assert not launched, launched
 
 
-def test_activity_add_form_refuses_the_audit_flags():
+def test_activity_add_form_refuses_the_audit_flags(opportunity_cli):
     """活動の追加形 (非終端) が監査の旗を受理して捨てないこと。
 
     union パーサが done/cancel 用の旗を追加形にも渡せるため、env に載せない =
     黙って捨てる形になっていた (bash は `_guard_positional` で拒否しており、
     python 側だけが素通りする非対称だった)。
     """
-    for flag in ("--reason", "--acknowledge", "--outcome"):
-        argv = ["opportunity", "activity", "opp-x", "説明"]
-        argv += [flag, "v"] if flag != "--acknowledge" else [flag]
-        rc, text = _run_opportunity(argv)
-        assert rc == 2, (
-            f"`activity <opp> <desc> {flag}` が黙って受理された (旗は捨てられる): "
-            f"rc={rc} {text}")
+    for flag, extra in (("--reason", ["v"]), ("--acknowledge", []),
+                        ("--outcome", ["v"])):
+        rc, text, launched = opportunity_cli(
+            ["opportunity", "activity", "opp-1", "説明", flag] + extra)
+        assert rc == 2, f"`activity <opp> <desc> {flag}` が黙って受理された: rc={rc} {text}"
+        assert not launched, f"{flag}: 拒否したはずなのに起動している: {launched}"
+
+
+def test_activity_add_form_without_audit_flags_still_works(opportunity_cli):
+    """旗を渡さない正しい追加形は通ること (拒否が広すぎないことの確認)。"""
+    rc, text, launched = opportunity_cli(
+        ["opportunity", "activity", "opp-1", "説明", "--ball", "self"])
+    assert rc != 2, f"正しい呼び出しを拒否した: rc={rc} {text}"
+    assert launched, f"handler まで到達していない: rc={rc} {text}"
+    assert launched[0][0] == "opportunity_activity", launched[0]
