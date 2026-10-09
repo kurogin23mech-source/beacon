@@ -1055,10 +1055,28 @@ def cmd_target_work_item():
     item_id = os.environ.get("BEACON_WI_ITEM_ID", "").strip()
     desc_text = os.environ.get("BEACON_WI_DESC", "").strip()
     reason = os.environ.get("BEACON_REASON", "").strip()
+    acknowledge = os.environ.get("BEACON_ACKNOWLEDGE") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if not target_id:
         print("Usage: beacon target work-item <add|done|cancel|list> --class <kind> "
               "<target-id> ...", file=sys.stderr)
+        sys.exit(1)
+    # ms-166 e-6893 (AX レビュー finding #1, high): 監査の旗は終端の動詞 (done /
+    # cancel) にだけ意味がある。add / list で受理して黙って捨てると、`done --reason`
+    # で理由が残った経験をそのまま `add --reason` に転移した AI が exit 0 を見て
+    # 記録されたと誤信する (原則2 = エラーが出ない≠成功)。受理せず拒否する。
+    #
+    # 判定は「値が空でないか」ではなく **フロントが立てた明示マーカー** で行う。
+    # 値の有無から推論すると、shell に BEACON_REASON を export している利用者の
+    # `list` が拒否される (実測で踏んだ)。
+    import terminal_gate as _tg
+    _TERMINAL_WI_ACTIONS = ("done", "cancel")
+    if _tg.audit_flag_was_given() and action not in _TERMINAL_WI_ACTIONS:
+        print(
+            f"Error: --reason / --acknowledge は {' / '.join(_TERMINAL_WI_ACTIONS)} "
+            f"にだけ意味があります。`{action or '(動詞なし)'}` は監査エントリを"
+            f"読まないので、渡した理由は記録されず黙って捨てられます — 受理せず"
+            f"拒否します。旗を外して再実行してください。", file=sys.stderr)
         sys.exit(1)
     data = load_project()
     desc = _resolve_descriptor(data, kind)
@@ -1082,8 +1100,7 @@ def cmd_target_work_item():
             # ms-166 e-6893: work-item の done も終端遷移 → 押印層の関門を通る。
             item = _te.complete_work_item(
                 data, desc, target_id, item_id, actor=_actor_str(),
-                reason=reason,
-                acknowledge=os.environ.get("BEACON_ACKNOWLEDGE") == "1")
+                reason=reason, acknowledge=acknowledge)
             save_project(data, op={"op": "target_work_item_done", "kind": kind,
                                    "target_id": target_id, "item_id": item_id})
             print(f"WorkItem 完了: [{item_id}]")

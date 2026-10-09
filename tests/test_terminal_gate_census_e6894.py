@@ -24,10 +24,20 @@ import terminal_gate as tg  # noqa: E402
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
+#: 数え上げの対象ディレクトリ。**terminal_gate の被覆主張と同じ範囲でなければならない**
+#: (ms-166 e-6894 保守性レビュー finding #1, medium): terminal_gate.py のコメントは
+#: 「lib/ + server/ + scripts/ で 0 件」と書いていたのに、ここは lib/ と server/ しか
+#: 読んでいなかった。scripts/ に押印層を呼ぶコードが足されても緑のまま通る状態で、
+#: このモジュール自身が戒めている「緑のガードが嘘をつく」型そのものだった。主張を
+#: 狭めるのでなく計測を広げた — scripts/ は実際にコードが置かれる場所なので、
+#: 被覆から外す理由が無い。
+CENSUS_DIRS = ("lib", "server", "scripts")
+
+
 def _sources() -> dict:
-    """``{import 名: ソース}`` —— 数え上げの対象 (lib/ と server/)。"""
+    """``{import 名: ソース}`` —— 数え上げの対象 (CENSUS_DIRS)。"""
     out = {}
-    for d in ("lib", "server"):
+    for d in CENSUS_DIRS:
         for path in glob.glob(os.path.join(REPO, d, "*.py")):
             out[os.path.splitext(os.path.basename(path))[0]] = \
                 open(path, encoding="utf-8").read()
@@ -90,6 +100,32 @@ def test_handwritten_terminal_rows_name_real_functions():
             f"台帳のキー '{key}' が指す関数が {mod_name} に無い。rename したなら"
             f"台帳のキーも直すこと (放置すると数え上げが新しい名前を『未登録』として"
             f"赤くし、古いキーは stale として赤くなる)")
+
+
+def test_the_coverage_claim_names_the_same_dirs_the_census_scans():
+    """terminal_gate の被覆主張に出るディレクトリと、実際に走査する範囲を一致させる。
+
+    保守性レビュー finding #1 (medium) の再発防止。コメントを直すだけだと、次に
+    主張を書き換えた人が計測範囲を広げ忘れて同じ嘘が戻る。主張の文に現れる
+    ``<dir>/`` を拾って CENSUS_DIRS と集合比較する。
+    """
+    src = open(os.path.join(REPO, "lib", "terminal_gate.py"), encoding="utf-8").read()
+    marker = "unguarded_terminal_calls`` over "
+    assert marker in src, (
+        "被覆主張の文が見つからない。主張の書き方を変えたなら、この留めの marker も"
+        "一緒に直すこと (= 主張と計測が離れないようにするのがこの留めの役目)")
+    claim_line = src.split(marker, 1)[1].split("returns", 1)[0]
+    claimed = {d for d in CENSUS_DIRS if f"{d}/" in claim_line}
+    unclaimed = sorted(set(CENSUS_DIRS) - claimed)
+    assert unclaimed == [], (
+        f"走査しているのに被覆主張に挙がっていないディレクトリ: {unclaimed} "
+        f"(主張文: {claim_line.strip()!r})")
+    import re
+    mentioned = set(re.findall(r"``([a-z_]+)/``", claim_line))
+    extra = sorted(mentioned - set(CENSUS_DIRS))
+    assert extra == [], (
+        f"被覆主張が、実際には走査していないディレクトリを挙げている: {extra}。"
+        f"主張を狭めるか、CENSUS_DIRS に足して本当に走査すること")
 
 
 def test_no_stale_terminal_gate_exemption():
@@ -287,23 +323,111 @@ class TestEnvAdapter:
         monkeypatch.delenv("BEACON_ACKNOWLEDGE", raising=False)
         assert tg.require_audit_from_env("task done") == "直した"
 
-    def test_reads_an_alternate_reason_variable(self, monkeypatch):
-        """営業の取消 verb は BEACON_CANCEL_REASON / BEACON_COMM_REASON を使う。
+    def test_falls_back_to_a_legacy_reason_variable(self, monkeypatch):
+        """旧名は移行用の fallback として 1 箇所から読む (verb ごとに差し替えない)。
 
-        変数名の不一致を理由に「この verb だけ関門に乗らない」が起きないように、
-        名前だけ差し替えられる形にしてある。
+        AX + 保守性レビューが独立に同じ指摘 (合意度 2/2): 当初は
+        ``reason_env=`` という可変パラメータで 4 つの別名を温存しており、次に
+        終端 verb を足す人が 5 つ目の名前を作る前例になっていた。パラメータを
+        消して「新しい別名を書ける場所」自体を無くした。
         """
         monkeypatch.delenv("BEACON_REASON", raising=False)
-        monkeypatch.setenv("BEACON_CANCEL_REASON", "誤起票")
         monkeypatch.delenv("BEACON_ACKNOWLEDGE", raising=False)
-        assert tg.require_audit_from_env(
-            "account cancel", reason_env="BEACON_CANCEL_REASON") == "誤起票"
+        for legacy in tg.LEGACY_AUDIT_REASON_ENVS:
+            for other in tg.LEGACY_AUDIT_REASON_ENVS:
+                monkeypatch.delenv(other, raising=False)
+            monkeypatch.setenv(legacy, "誤起票")
+            assert tg.require_audit_from_env("account cancel") == "誤起票", legacy
+
+    def test_canonical_name_wins_over_a_legacy_one(self, monkeypatch):
+        monkeypatch.setenv("BEACON_REASON", "正準")
+        monkeypatch.setenv(tg.LEGACY_AUDIT_REASON_ENVS[0], "旧")
+        monkeypatch.delenv("BEACON_ACKNOWLEDGE", raising=False)
+        assert tg.require_audit_from_env("account cancel") == "正準"
+
+    def test_the_gate_takes_no_per_verb_reason_variable(self):
+        """``reason_env`` のような『verb ごとに別名を書ける口』が無いこと。
+
+        これが有ると不一致が関数の正式な形として固定され、機械ガードも生まれにくい
+        (レビュー指摘の核心)。署名で構造的に塞ぐ。
+        """
+        import inspect
+        params = inspect.signature(tg.require_audit_from_env).parameters
+        assert "reason_env" not in params, (
+            "verb ごとに理由の env 名を差し替える口が復活している。"
+            "AUDIT_REASON_ENV 1 名 + LEGACY_AUDIT_REASON_ENVS の移行 fallback に寄せること")
 
     def test_both_env_signals_refuse(self, monkeypatch):
         monkeypatch.setenv("BEACON_REASON", "直した")
         monkeypatch.setenv("BEACON_ACKNOWLEDGE", "1")
         with pytest.raises(ValueError, match="not both"):
             tg.require_audit_from_env("task done")
+
+
+# ---------------------------------------------------------------------------
+# AX レビュー finding #1 (high) の修正 — 非終端の動詞に監査の旗を渡したら拒否する
+#
+# 併せて、その判定が **環境に残っている値** で誤発火しないことも留める。最初の実装は
+# 「BEACON_REASON が空でないか」で推論しており、shell に BEACON_REASON を export して
+# いる利用者の `list` が拒否された (全件実行で実測して気付いた)。値の有無は「旗が
+# 渡されたか」の代わりにならない。
+# ---------------------------------------------------------------------------
+
+class TestAuditFlagOnNonTerminalVerbs:
+    def test_marker_distinguishes_passed_from_ambient(self, monkeypatch):
+        monkeypatch.setenv("BEACON_REASON", "環境に残っている値")
+        monkeypatch.delenv(tg.AUDIT_FLAG_GIVEN_ENV, raising=False)
+        assert tg.audit_flag_was_given() is False, (
+            "環境に値が残っているだけで『旗が渡された』と判定してはいけない")
+        monkeypatch.setenv(tg.AUDIT_FLAG_GIVEN_ENV, "1")
+        assert tg.audit_flag_was_given() is True
+
+    def test_work_item_list_refuses_when_the_flag_is_actually_passed(
+            self, monkeypatch, capsys):
+        import cmd_target
+        monkeypatch.setenv("BEACON_WI_ACTION", "list")
+        monkeypatch.setenv("BEACON_TARGET_ID", "x-1")
+        monkeypatch.setenv("BEACON_REASON", "意味のない理由")
+        monkeypatch.setenv(tg.AUDIT_FLAG_GIVEN_ENV, "1")
+        with pytest.raises(SystemExit) as exc:
+            cmd_target.cmd_target_work_item()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "done / cancel にだけ意味があります" in err, err
+
+    def test_work_item_list_is_unaffected_by_an_ambient_reason(
+            self, monkeypatch):
+        """旗を渡していない list は、環境に BEACON_REASON が在っても通ること。
+
+        ここが赤くなる実装 (値から推論する形) を一度書いてしまい、全件実行で
+        test_target_child_fields_cli_e5344 が落ちて気付いた。
+        """
+        import cmd_target
+        monkeypatch.setenv("BEACON_WI_ACTION", "list")
+        monkeypatch.setenv("BEACON_TARGET_ID", "x-1")
+        monkeypatch.setenv("BEACON_REASON", "前の呼び出しの残り")
+        monkeypatch.delenv(tg.AUDIT_FLAG_GIVEN_ENV, raising=False)
+        # target が無いので別の理由で落ちるのは構わない。拒否文言が出ないことだけ見る。
+        try:
+            cmd_target.cmd_target_work_item()
+        except SystemExit:
+            pass
+        except Exception:
+            pass
+
+    def test_both_frontends_set_the_marker(self):
+        """片フロントだけがマーカーを立てると、そちらだけ拒否が効く (割れ)。"""
+        bash = open(os.path.join(REPO, "bin", "lib", "cmd_target.sh"),
+                    encoding="utf-8").read()
+        bash_acq = open(os.path.join(REPO, "bin", "lib", "cmd_acquisition.sh"),
+                        encoding="utf-8").read()
+        py = open(os.path.join(REPO, "beacon_cli", "dispatch.py"),
+                  encoding="utf-8").read()
+        for name, src in (("cmd_target.sh", bash), ("cmd_acquisition.sh", bash_acq),
+                          ("dispatch.py", py)):
+            assert tg.AUDIT_FLAG_GIVEN_ENV in src, (
+                f"{name} が {tg.AUDIT_FLAG_GIVEN_ENV} を立てていない — そのフロント"
+                f"からは非終端動詞への旗が拒否されず黙って捨てられる")
 
 
 def test_the_sentinel_has_one_declaration():

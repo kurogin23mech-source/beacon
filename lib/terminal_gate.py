@@ -178,23 +178,76 @@ def require_audit(verb: str, *, reason: str = "", acknowledge: bool = False,
     )
 
 
-def require_audit_from_env(verb: str, *, reason_env: str = "BEACON_REASON",
-                           exempt: str = "") -> str:
+#: 「書かれた理由」を運ぶ env 変数の正準名。全 verb 共通 —— ``BEACON_ACKNOWLEDGE`` が
+#: 最初から 1 名だったのと揃える。
+#:
+#: 名前に ``AUDIT_`` を付けているのは、兄弟 module の ``readonly_gate.REASON_ENV``
+#: (= 読み取り専用モードに入っている「理由」= help / surface-probe の env 対応表) と
+#: **別概念なのに同名になる** のを避けるため。同じ語で違うものを指す定数が 2 つ在ると、
+#: 片方を grep した人がもう片方を読んでしまう。
+AUDIT_REASON_ENV = "BEACON_REASON"
+
+#: 旧名 (deprecated alias)。終端 verb ごとに別名を使っていた歴史の残り。
+#: ``AUDIT_REASON_ENV`` が空のときだけ順に見る。
+#:
+#: ms-166 e-6894 (AX + 保守性レビューが独立に同じ指摘 = 合意度 2/2): 当初は
+#: ``require_audit_from_env(reason_env=...)`` という可変パラメータで 4 つの別名を
+#: 温存した。これは「不一致を直す」のでなく「不一致を関数の正式な形として固定する」
+#: 形で、次に終端 verb を足す人が 5 つ目の名前を作る前例になる。パラメータを消して
+#: 1 名に寄せ、旧名はここ 1 箇所の移行用 fallback に落とした —— 新しい別名を
+#: 「書ける場所」が無くなったのが効き目。
+#:
+#: 古い bash フロント + 新しい lib の組み合わせは現にありうる (作業フォルダの CLI が
+#: main 側の lib を走らせる構成) ので、いきなり切ると理由が落ちる。移行が済んだら
+#: この tuple を空にする。
+LEGACY_AUDIT_REASON_ENVS = (
+    "BEACON_CANCEL_REASON",     # account / opportunity / acquisition の取消
+    "BEACON_COMM_REASON",       # communication cancel
+    "BEACON_MTG_CANCEL_REASON",  # meeting cancel
+)
+
+
+#: 「監査の旗が **この起動のコマンド行に実際に現れた** か」を運ぶ env。値 (理由の本文) と
+#: は別の事実なので別の変数にする。
+#:
+#: なぜ要るか (ms-166 e-6894, AX finding #1 の修正中に実測で判明): 非終端の動詞
+#: (``target work-item list`` / ``acquisition status in_progress``) に監査の旗を渡したら
+#: 拒否したいが、「``BEACON_REASON`` が空でない」から「旗が渡された」を推論すると、
+#: shell に ``BEACON_REASON`` を export している利用者や、同一プロセス内で前の呼び出しの
+#: env が残っている経路で、**旗を渡していない list が拒否される**。値の有無は
+#: 「渡されたか」の代わりにならない。フロントだけが「コマンド行に在ったか」を知っている
+#: ので、フロントが明示的に立てる。
+AUDIT_FLAG_GIVEN_ENV = "BEACON_AUDIT_FLAG_GIVEN"
+
+
+def audit_flag_was_given() -> bool:
+    """監査の旗がこの起動のコマンド行に現れたか (環境に残っている値と区別する)。"""
+    return os.environ.get(AUDIT_FLAG_GIVEN_ENV) == "1"
+
+
+def reason_from_env() -> str:
+    """正準名を見て、空なら旧名を順に見る (移行用の 1 箇所)。"""
+    v = os.environ.get(AUDIT_REASON_ENV, "")
+    if v.strip():
+        return v
+    for legacy in LEGACY_AUDIT_REASON_ENVS:
+        v = os.environ.get(legacy, "")
+        if v.strip():
+            return v
+    return ""
+
+
+def require_audit_from_env(verb: str, *, exempt: str = "") -> str:
     """``require_audit`` の env アダプタ (bash フロントエンドが渡す形を読む)。
 
     ``bin/beacon`` 系の bash フロントエンドは旗を ``BEACON_REASON`` /
     ``BEACON_ACKNOWLEDGE`` に詰めて python を起動するので、その読み替えだけを行う。
-    規則そのものは持たない (= 規則は ``require_audit`` の 1 箇所)。
-
-    ``reason_env`` は理由を運ぶ変数名。既定は ``BEACON_REASON`` だが、営業側の取消
-    verb は歴史的に ``BEACON_CANCEL_REASON`` / ``BEACON_COMM_REASON`` を使っている
-    (命名の統一は別件)。関門に乗せるためにここで名前だけ差し替えられるようにしてある —
-    変数名の不一致を理由に「この verb だけ関門に乗らない」が起きないように。
-    ``BEACON_ACKNOWLEDGE`` は全 verb 共通。
+    規則そのものは持たない (= 規則は ``require_audit`` の 1 箇所)。理由の変数名も
+    verb ごとに差し替えられない (= ``AUDIT_REASON_ENV`` 1 名 + 移行用の旧名 fallback)。
     """
     return require_audit(
         verb,
-        reason=os.environ.get(reason_env, ""),
+        reason=reason_from_env(),
         acknowledge=os.environ.get("BEACON_ACKNOWLEDGE") == "1",
         exempt=exempt,
     )

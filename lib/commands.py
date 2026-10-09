@@ -9146,8 +9146,7 @@ def cmd_account_delete():
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
     force = os.environ.get("BEACON_FORCE", "") == "1"
     # ms-166 e-6893: 取消も終端遷移なので、done と同じ共有の関門を通す。
-    reason = _require_reason_or_skip("account cancel",
-                                    reason_env="BEACON_CANCEL_REASON")
+    reason = _require_reason_or_skip("account cancel")
     data = load_project()
     try:
         orphaned = sales_entities.account_cancel(
@@ -9916,8 +9915,7 @@ def cmd_opportunity_delete():
     import sales_entities
     opp_id = os.environ.get("BEACON_OPP_ID", "")
     # ms-166 e-6893: 取消も終端遷移なので、done と同じ共有の関門を通す。
-    reason = _require_reason_or_skip("opportunity cancel",
-                                    reason_env="BEACON_CANCEL_REASON")
+    reason = _require_reason_or_skip("opportunity cancel")
     data = load_project()
     try:
         sales_entities.opportunity_cancel(data, opp_id, reason=reason)
@@ -10493,8 +10491,7 @@ def cmd_communication_cancel():
     import sales_entities
     comm_id = os.environ.get("BEACON_COMM_ID", "")
     # ms-166 e-6893: 取消も終端遷移なので、done と同じ共有の関門を通す。
-    reason = _require_reason_or_skip("communication cancel",
-                                    reason_env="BEACON_COMM_REASON")
+    reason = _require_reason_or_skip("communication cancel")
     data = load_project()
     try:
         sales_entities.communication_cancel(data, comm_id, reason=reason)
@@ -10641,6 +10638,18 @@ def cmd_meeting_end():
     print(f"Meeting {mtg_id} marked ended")
 
 
+def _terminal_gate_reason() -> str:
+    """終端遷移の「書かれた理由」を env から解決する (ms-166 e-6894)。
+
+    解決規則 (正準名 + 移行用の旧名 fallback) は ``terminal_gate`` の 1 箇所が持つ。
+    ここで ``os.environ.get("BEACON_MTG_CANCEL_REASON")`` のように verb 固有の名前を
+    直読みすると、その verb だけ正準名を見ない状態が復活する (AX + 保守性レビューが
+    独立に指摘した、合意度 2/2 の形)。
+    """
+    import terminal_gate
+    return terminal_gate.reason_from_env()
+
+
 def cmd_meeting_cancel():
     import sales_entities
     mtg_id = os.environ.get("BEACON_MTG_ID", "")
@@ -10649,7 +10658,7 @@ def cmd_meeting_cancel():
         # ms-166 e-6893: 面談の取消も終端遷移 → 共有の関門を通す。
         sales_entities.meeting_cancel(
             data, mtg_id, at=core._now_iso(),
-            reason=os.environ.get("BEACON_MTG_CANCEL_REASON", ""),
+            reason=_terminal_gate_reason(),
             acknowledge=os.environ.get("BEACON_ACKNOWLEDGE") == "1")
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

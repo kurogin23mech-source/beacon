@@ -47,15 +47,15 @@ cmd_acquisition_list() {
 
 cmd_acquisition_status() {
     ensure_project
-    local acq_id="" status="" reason="" acknowledge=""
+    local acq_id="" status="" reason="" acknowledge="" audit_given=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             # ms-166 e-6893: done は終端遷移なので監査エントリが要る (非終端の
             # 前進 todo / in_progress では不要)。旗が無いと done に倒せないので
             # 両フロントに足す。
-            --reason) reason="${2:-}"; shift 2 ;;
-            --acknowledge) acknowledge="1"; shift ;;
-            -?*) _guard_positional "$1" "Usage: beacon acquisition status <acq-id> <todo|in_progress|done> [(--reason <text> | --acknowledge)]" ;;
+            --reason) reason="${2:-}"; audit_given=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; audit_given=1; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition status <acq-id> <todo|in_progress|done> [(--reason <text> | --acknowledge)  ※done のときのみ]" ;;
             *)   if [ -z "$acq_id" ]; then acq_id="$1"; else status="$1"; fi; shift ;;
         esac
     done
@@ -65,6 +65,7 @@ cmd_acquisition_status() {
     fi
     BEACON_ACQ_ID="$acq_id" BEACON_ACQ_STATUS="$status" \
         BEACON_REASON="$reason" BEACON_ACKNOWLEDGE="$acknowledge" \
+        BEACON_AUDIT_FLAG_GIVEN="$audit_given" \
         python3 "$COMMANDS_PY" acquisition_status
 }
 
@@ -277,7 +278,7 @@ cmd_acquisition_delete() {
     # --acknowledge を両方渡したとき bash だけが黙って理由を優先していた)。
     # 判断は python の 1 箇所 (terminal_gate.require_audit) に寄せ、bash は
     # 両方の合図を転送するだけにする。
-    BEACON_ACQ_ID="$acq_id" BEACON_CANCEL_REASON="$reason" \
+    BEACON_ACQ_ID="$acq_id" BEACON_REASON="$reason" \
         BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" acquisition_delete
 }

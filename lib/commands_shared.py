@@ -234,8 +234,7 @@ def _append_changelog(op: dict) -> None:
 _ACKNOWLEDGED_REASON = _terminal_gate.ACKNOWLEDGED_REASON
 
 
-def _require_reason_or_skip(verb: str, *,
-                            reason_env: str = "BEACON_REASON") -> str:
+def _require_reason_or_skip(verb: str) -> str:
     """CLI adapter over ``terminal_gate.require_audit`` — env in, exit 1 out.
 
     ms-120 e-3906 (option B): the old design accepted ``--reason ""`` as a
@@ -271,7 +270,7 @@ def _require_reason_or_skip(verb: str, *,
         The reason string, or the acknowledgment sentinel.
     """
     try:
-        return _terminal_gate.require_audit_from_env(verb, reason_env=reason_env)
+        return _terminal_gate.require_audit_from_env(verb)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

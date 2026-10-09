@@ -630,10 +630,14 @@ def build_parser() -> argparse.ArgumentParser:
     for _iv in ("start", "done"):
         _p = acq_sub.add_parser(_iv, add_help=False)
         _p.add_argument("acq_id", nargs="?", default="")
-        # ms-166 e-6893: `done` は終端遷移。`start` は非終端だが旗の有無で
-        # 動詞ごとに形が割れないよう、同じ 2 択を両方に持たせる。
-        _p.add_argument("--reason", default="")
-        _p.add_argument("--acknowledge", action="store_true")
+        # ms-166 e-6893 (AX レビュー finding #1, high): 監査の旗は **終端遷移の動詞
+        # だけ** が受理する。当初は「旗の有無で動詞ごとに形が割れないよう」両方に
+        # 持たせたが、それは `start --reason` を受理して黙って捨てる形 (= 原則2 の
+        # silent no-op) だった。`start` (→ in_progress) は理由を読まないので受理
+        # させない。パーサが受理しないので、プロンプトでの注意書きに頼らない。
+        if _iv == "done":
+            _p.add_argument("--reason", default="")
+            _p.add_argument("--acknowledge", action="store_true")
     # ms-132 e-4507: 打ち切り (soft-cancel)。status でなく削除で中止を表す。
     # account/opportunity delete と同じ監査ゲート: --reason か --acknowledge を要求。
     for _dv in ("delete", "cancel", "rm"):
@@ -2628,7 +2632,7 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
         env = {
             "BEACON_ACCOUNT_ID": args.acc_id or "",
             "BEACON_FORCE": "1" if args.force else "",
-            "BEACON_CANCEL_REASON": getattr(args, "reason", "") or "",
+            "BEACON_REASON": getattr(args, "reason", "") or "",
             "BEACON_ACKNOWLEDGE": ("1" if getattr(args, "acknowledge", False)
                                    else ""),
         }
@@ -2766,28 +2770,41 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                                 {"BEACON_JSON": "1" if args.json else ""})
     if cmd == "status":
         if not args.acq_id or not args.status:
+            # ms-166 e-6893 (AX レビュー finding #2, medium): bash 側の Usage は
+            # 新しい旗を明記しているのに、こちらは据え置きでフロント間の自己記述が
+            # 割れていた。旗は終端 (done) にだけ効くので、その条件も書く。
             print("Usage: beacon acquisition status <acq-id> "
-                  "<todo|in_progress|done>")
+                  "<todo|in_progress|done> "
+                  "[(--reason <text> | --acknowledge)  ※done のときのみ]")
             return 1
+        # ms-166 e-6894: 旗が「コマンド行に現れた」ことを値とは別に立てる。argparse は
+        # 既定値と明示指定を区別できるので、ここが唯一それを知っている場所。
+        _given = bool(getattr(args, "reason", "")) or bool(
+            getattr(args, "acknowledge", False))
         env = {"BEACON_ACQ_ID": args.acq_id or "",
                "BEACON_ACQ_STATUS": args.status or "",
                "BEACON_REASON": getattr(args, "reason", "") or "",
                "BEACON_ACKNOWLEDGE": ("1" if getattr(args, "acknowledge", False)
-                                      else "")}
+                                      else ""),
+               "BEACON_AUDIT_FLAG_GIVEN": "1" if _given else ""}
         return _run_commands_py(root, "acquisition_status", env)
     if cmd in ("start", "done"):
         # ms-133 e-4643: named-intent lifecycle verbs, bash parity. `start` and
         # `done` set a fixed status through the same acquisition_status engine
         # (bin/beacon maps start→in_progress, done→done).
         if not args.acq_id:
-            print(f"Usage: beacon acquisition {cmd} <acq-id>")
+            _audit = (" (--reason <text> | --acknowledge)" if cmd == "done" else "")
+            print(f"Usage: beacon acquisition {cmd} <acq-id>{_audit}")
             return 1
         fixed_status = "in_progress" if cmd == "start" else "done"
+        _given = bool(getattr(args, "reason", "")) or bool(
+            getattr(args, "acknowledge", False))
         env = {"BEACON_ACQ_ID": args.acq_id or "",
                "BEACON_ACQ_STATUS": fixed_status,
                "BEACON_REASON": getattr(args, "reason", "") or "",
                "BEACON_ACKNOWLEDGE": ("1" if getattr(args, "acknowledge", False)
-                                      else "")}
+                                      else ""),
+               "BEACON_AUDIT_FLAG_GIVEN": "1" if _given else ""}
         return _run_commands_py(root, "acquisition_status", env)
     if cmd in ("delete", "cancel", "rm"):
         if not args.acq_id:
@@ -2802,7 +2819,7 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
         # 両方渡したときフロントだけが素通りさせ、「両方渡したら拒否」に到達しなかった。
         return _run_commands_py(root, "acquisition_delete",
                                 {"BEACON_ACQ_ID": args.acq_id,
-                                 "BEACON_CANCEL_REASON": reason,
+                                 "BEACON_REASON": reason,
                                  "BEACON_ACKNOWLEDGE": "1" if acknowledge else ""})
     if cmd == "attack-list":
         if not args.acq_id or not args.title:
@@ -3086,7 +3103,7 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         # ms-166 e-6893: 終端遷移 (取消) は監査エントリを運ぶ。--reason か
         # --acknowledge のどちらか一方 (両方は e-6895 で拒否)。
         env = {"BEACON_OPP_ID": args.opp_id or "",
-               "BEACON_CANCEL_REASON": args.reason or "",
+               "BEACON_REASON": args.reason or "",
                "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else ""}
         return _run_commands_py(root, "opportunity_delete", env)
     if cmd == "assign":
@@ -3248,7 +3265,7 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
             return 1
         env = {
             "BEACON_COMM_ID": args.comm_id or "",
-            "BEACON_COMM_REASON": args.reason or "",
+            "BEACON_REASON": args.reason or "",
             "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else "",
         }
         return _run_commands_py(root, "communication_cancel", env)
@@ -3436,11 +3453,16 @@ def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "meeting_end", {"BEACON_MTG_ID": args.mtg_id or ""})
     if cmd == "cancel":
         if not args.mtg_id:
-            print("Usage: beacon meeting cancel <mtg-id>")
+            # ms-166 e-6893 (AX レビュー finding #2, medium): 旗を足したのに Usage 文を
+            # 直さなかったため、bash 側だけが新しい旗を宣伝する状態になっていた。
+            # Windows / pipx 経路の読み手は引数不足時のこの 1 行しか見ないので、
+            # そこに出ない旗は存在を知る機会が無い。
+            print("Usage: beacon meeting cancel <mtg-id> "
+                  "(--reason <text> | --acknowledge)")
             return 1
         return _run_commands_py(root, "meeting_cancel", {
             "BEACON_MTG_ID": args.mtg_id or "",
-            "BEACON_MTG_CANCEL_REASON": args.reason or "",
+            "BEACON_REASON": args.reason or "",
             "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else "",
         })
     if cmd in ("list", "ls"):

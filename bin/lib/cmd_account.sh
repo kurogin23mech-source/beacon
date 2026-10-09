@@ -179,7 +179,7 @@ cmd_account_delete() {
         exit 1
     fi
     # ms-166 e-6893/e-6895: 判断は python の 1 箇所。bash は転送のみ。
-    BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" BEACON_CANCEL_REASON="$reason" \
+    BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" BEACON_REASON="$reason" \
         BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" account_delete
 }

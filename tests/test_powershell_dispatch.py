@@ -1262,7 +1262,9 @@ def test_communication_cancel(project_dir, no_bash, captured_call):
     assert rc == 0
     env = captured_call["env"]
     assert env["BEACON_COMM_ID"] == "comm-3"
-    assert env["BEACON_COMM_REASON"] == "dup"
+    # ms-166 e-6894: 理由の env 名を正準 1 名 (BEACON_REASON) に寄せた。verb ごとの
+    # 別名 (BEACON_COMM_REASON 等) は移行用 fallback に降格し、フロントは正準名で渡す。
+    assert env["BEACON_REASON"] == "dup"
     assert captured_call["cmd"][-1] == "communication_cancel"
 
 

@@ -420,7 +420,14 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
               reason: str = "", outcome: str = "",
               acknowledge: bool = False, exempt: str = "",
               verb: str = "done") -> dict:
-    """Mark a WorkItem done in place and return it.
+    """Mark a WorkItem done in place and return it — REQUIRES an audit entry.
+
+    Despite every keyword having a default, one of ``reason`` / ``acknowledge`` /
+    ``exempt`` is MANDATORY: with none of them this raises
+    ``terminal_gate.TerminalAuditRequired``. Python cannot express "exactly one of
+    these three" in a signature, so it is stated here in the first line — a reader
+    who checks only the signature would otherwise read ``mark_done(item)`` as
+    valid (ms-166 e-6894 保守性レビュー finding #3).
 
     Sets ``status="done"`` and stamps the canonical ``done_at`` (``at`` falls
     back to ``work_base.now_iso()``). When ``reason`` or a non-default

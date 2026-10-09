@@ -99,7 +99,7 @@ cmd_meeting_cancel() {
     # 「理由が空なら sentinel」と bash が代替していたため、--reason と
     # --acknowledge を両方渡したとき bash だけが黙って理由を優先し、python 側の
     # 「両方渡したら拒否」に到達しなかった (フロントごとに規則が割れていた)。
-    BEACON_MTG_ID="$mtg_id" BEACON_MTG_CANCEL_REASON="$reason" \
+    BEACON_MTG_ID="$mtg_id" BEACON_REASON="$reason" \
         BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" meeting_cancel
 }

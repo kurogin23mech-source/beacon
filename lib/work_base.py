@@ -100,7 +100,12 @@ def stamp_cancel(record: dict, *, reason: str = "", actor: str = "",
                  at: str = "", outcome: str = "",
                  acknowledge: bool = False, exempt: str = "",
                  verb: str = "cancel") -> dict:
-    """Soft-cancel a work record in place and return it.
+    """Soft-cancel a work record in place and return it — REQUIRES an audit entry.
+
+    Despite every keyword having a default, one of ``reason`` / ``acknowledge`` /
+    ``exempt`` is MANDATORY: with none of them this raises
+    ``terminal_gate.TerminalAuditRequired``. Stated in the first line because the
+    signature alone reads as "all optional" (ms-166 e-6894 保守性レビュー finding #3).
 
     Sets ``status="cancelled"`` and stamps
     ``meta.cancelled_at / cancelled_by / cancel_reason``. The record is never

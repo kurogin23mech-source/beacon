@@ -75,7 +75,7 @@ cmd_communication_cancel() {
         exit 1
     fi
     # ms-166 e-6893/e-6895: 判断は python の 1 箇所。bash は転送のみ。
-    BEACON_COMM_ID="$comm_id" BEACON_COMM_REASON="$reason" \
+    BEACON_COMM_ID="$comm_id" BEACON_REASON="$reason" \
         BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" communication_cancel
 }
