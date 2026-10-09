@@ -10644,11 +10644,13 @@ def cmd_meeting_end():
 def cmd_meeting_cancel():
     import sales_entities
     mtg_id = os.environ.get("BEACON_MTG_ID", "")
-    reason = os.environ.get("BEACON_MTG_CANCEL_REASON", "")
     data = load_project()
     try:
-        sales_entities.meeting_cancel(data, mtg_id, at=core._now_iso(),
-                                      reason=reason)
+        # ms-166 e-6893: 面談の取消も終端遷移 → 共有の関門を通す。
+        sales_entities.meeting_cancel(
+            data, mtg_id, at=core._now_iso(),
+            reason=os.environ.get("BEACON_MTG_CANCEL_REASON", ""),
+            acknowledge=os.environ.get("BEACON_ACKNOWLEDGE") == "1")
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

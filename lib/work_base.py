@@ -126,9 +126,13 @@ def stamp_cancel(record: dict, *, reason: str = "", actor: str = "",
     requirement was a list of 6 CLI handlers that happened to call
     ``commands_shared._require_reason_or_skip``, so ``task cancel`` and the four
     sales cancels reached ``cancelled`` with ``reason=""`` and nothing said so.
-    Now the coverage is a property of the code: reaching ``cancelled`` without
-    an audit entry means not calling this function. ``verb`` only labels the
-    error message.
+    ``verb`` only labels the error message. As with ``work_model.mark_done``,
+    this is not the only way to reach ``cancelled`` — hand-written
+    ``rec["status"] = "cancelled"`` writes still exist and are enumerated with a
+    reason each in ``terminal_gate.KNOWN_HANDWRITTEN_TERMINAL`` (a ratchet that
+    fails on a new one). The claim is "every path through this stamp carries an
+    audit entry, and every path that bypasses it is listed", not "there is no
+    bypass".
     """
     import terminal_gate
     reason = terminal_gate.require_audit(

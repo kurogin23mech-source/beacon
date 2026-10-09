@@ -418,14 +418,10 @@ KNOWN_GAPS: dict = {
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("account_contact", "BEACON_CONTACT_PHONE", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("account_delete", "BEACON_CANCEL_REASON", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("account_list", "BEACON_AS_PROJECT", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("account_list", "BEACON_LINKED", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("acquisition_delete", "BEACON_ACKNOWLEDGE", "bash"):
-        "bash 未配線 / python は渡す — bash 側の取りこぼし",
     ("bus_directory", "BEACON_DIR_CWD_ONLY", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("bus_send", "BEACON_BUS_ALLOW_DUPLICATE", "python"):
@@ -486,13 +482,9 @@ KNOWN_GAPS: dict = {
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("log_finalize", "BEACON_RESOLVES_SET", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("meeting_cancel", "BEACON_MTG_CANCEL_REASON", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("member_role", "BEACON_JSON", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("opportunity_add", "BEACON_OPP_ASSIGNEE", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("opportunity_delete", "BEACON_CANCEL_REASON", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("opportunity_list", "BEACON_ALL", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",

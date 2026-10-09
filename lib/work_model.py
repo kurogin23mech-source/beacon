@@ -447,12 +447,21 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     requirement was a hand-written list of 6 CLI handlers that happened to call
     ``commands_shared._require_reason_or_skip``; the production API's
     ``POST .../done``, ``task update --status done``, ``task cancel`` and the
-    four sales cancels all reached a terminal state with no reason, and a new
-    terminal verb inherited nothing. Now the coverage is a property of the code:
-    reaching ``done`` without an audit entry means not calling this function —
-    and ``terminal_gate.unguarded_terminal_calls`` enumerates such call sites
-    from the syntax tree, so a hand-written bypass is caught rather than assumed
-    absent. ``verb`` only labels the error message.
+    sales cancels all reached a terminal state with no reason, and a new
+    terminal verb inherited nothing. ``verb`` only labels the error message.
+
+    WHAT THIS DOES **NOT** MEAN (read this before claiming the rule is
+    universal). This primitive is not the only way to reach ``done``: a caller
+    can still write ``rec["status"] = "done"`` by hand, and 10 places in ``lib/``
+    did exactly that — measured, not guessed. They are listed with a reason each
+    in ``terminal_gate.KNOWN_HANDWRITTEN_TERMINAL``, and
+    ``terminal_gate.unregistered_handwritten_terminal_writes`` fails on a NEW one,
+    so the set is a ratchet rather than a claim. So the honest statement is:
+    *every path that stamps through this function carries an audit entry, and
+    every path that does not is enumerated.* The first draft of this docstring
+    said "reaching done without an audit entry means not calling this function" —
+    which was false, and is the same overstatement e-6600 already had to retract
+    once (e-6894).
     """
     import terminal_gate
     reason = terminal_gate.require_audit(

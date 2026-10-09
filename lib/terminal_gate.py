@@ -15,9 +15,20 @@ observe`` / ``activity done・cancel``) だけで、同じ終端状態に届く�
 
 そこで関門を **終端状態を実際に書く押印層** (``work_model.mark_done`` /
 ``work_base.stamp_cancel``) に下げる。これで「終端状態に至る」ことと「監査エントリを
-運ぶ」ことが同じ 1 つの関数呼び出しに束ねられ、迂回するには押印層を使わずに
-``record["status"] = "done"`` を手書きするしかなくなる (その手書きは e-6894 の
-構文木による数え上げが赤くする)。
+運ぶ」ことが同じ 1 つの関数呼び出しに束ねられる。
+
+**ただし押印層は唯一の書き手ではない。** ``record["status"] = "done"`` と手で書く経路が
+実測で 10 件在った (面談の取消 / PR の merge・close・reject / マイルストーンの done・取消 /
+Operation 配下のタスクの done / 目的達成レビューの却下 / 判断の漏斗 / 過去データの移行)。
+手で数えたときは 9 件しか挙がらず、関数名も 1 つ間違えていた —— **数え上げは機械に
+やらせないと合わない**。なので主張はこう置く:
+
+  押印層を通る経路は全て監査エントリを運ぶ。通らない経路は 1 件ずつ理由付きで
+  ``KNOWN_HANDWRITTEN_TERMINAL`` に数え上げてあり、新しい手書きが増えたら赤くなる。
+
+「迂回は存在しない」とは言わない。緑のガードは信頼されるので、**偽の安全は無ガードより
+悪い** (e-6600 で docstring に「全 work-item class で同一に強制される」と書いて撤回した
+のと同じ型を、ここで繰り返さないための明記)。
 
 ## 3 つの入力の意味 (= 混ぜてはいけない 3 種)
 
@@ -289,6 +300,160 @@ def unguarded_terminal_calls(sources: dict) -> list:
                 continue
             key = f"{hit['module']}.{hit['function']}"
             if key in EXEMPT_CALL_SITES:
+                continue
+            bad.append(hit)
+    return bad
+
+
+# ---------------------------------------------------------------------------
+# 手書きの終端書き込みの数え上げ (e-6894 の第 2 軸)
+#
+# 上の ``unguarded_terminal_calls`` は **押印層を呼ぶ** 経路だけを見る。だから
+# ``record["status"] = "cancelled"`` と手で書く経路は 1 件も挙がらず、押印層を直した
+# だけで「終端に至るには押印層を通るしかない」と言うのは **嘘** になる。実測すると
+# そういう手書きが lib/ に 9 件在った (meeting の取消 / PR の merge・close・reject /
+# マイルストーンの done・取消 / Operation 配下のタスクの done / 目的達成レビューの却下 /
+# 送信バッチの差し替え)。
+#
+# ``feedback_guard_enumerate_all_writers`` と同型の罠 —— 守りたい状態への書き手を
+# 数え上げる前に「1 箇所に寄せた」と名乗ること。緑の留めは「もう全部閉じている」という
+# 確信を与えるので、**偽の安全は無ガードより悪い**。そこで第 2 軸として手書きも数え上げ、
+# 既知の 9 件は理由付きで台帳に受理し (= ratchet)、**新しい手書きは赤くする**。
+# ---------------------------------------------------------------------------
+
+#: 押印層そのもの。ここでの status 代入は「手書きの迂回」ではなく押印の実装。
+_STAMP_OWNERS: frozenset = frozenset({
+    "work_model.mark_done", "work_base.stamp_cancel",
+})
+
+#: 終端 status を名前で持つ module-level 定数 (値が終端 literal のもの)。走査中に
+#: ソースから導出するので、ここに名前を書き並べる必要は無い (下の ``_terminal_consts``)。
+_TERMINAL_LITERALS: frozenset = frozenset({"done", "cancelled"})
+
+# ratchet 台帳: 終端 status を手書きしている既知の経路を、1 行の理由付きで受理する。
+# 直したら **行を消す** (``test_no_stale_handwritten_terminal_rows`` が削除を強制するので、
+# 台帳が嘘に腐らない)。新しい行が増えたら checker が FAIL する。
+KNOWN_HANDWRITTEN_TERMINAL: dict = {
+    "core.milestone_done": (
+        "マイルストーンの完遂。CLI の `milestone done` が共有の関門を通しており、"
+        "reason を受けて meta に残す。押印層への寄せ替えは target 側の完遂印"
+        "(capture_target_completion) と重なるので別途。"),
+    "core.milestone_delete": (
+        "マイルストーンの取消。CLI の `milestone delete` が reason を要求する。"),
+    "core.operation_task_done": (
+        "Operation 配下のタスクの done。reason を受けて meta に残すが、work-item の"
+        "押印層とは別の格納先 (operations[].entries) を歩いている。"),
+    "core.pr_merge": (
+        "PR の取り込みに伴う entry の done。PR のライフサイクルは work-item の完遂とは"
+        "別の軸 (pr_status) で、理由は PR 側の記録が持つ。未整理の債務。"),
+    "core.pr_close": (
+        "PR を取り込まずに閉じる。同上 — 理由は PR 側の記録が持つ。未整理の債務。"),
+    "core.pr_reject": (
+        "PR の却下。却下理由は review_status 側に残る。未整理の債務。"),
+    "sales_entities.settle_gate": (
+        "判断 (gate judgement) の漏斗を閉じる。advance / retry / terminal / jump の"
+        "全部がここへ収束する **判断族** で、完遂族ではない (混ぜると前進が完遂扱いに"
+        "なって壊れる — capability_ledger の警告と同じ線)。監査行は "
+        "work_base.record_audit_event が誰・いつ・なぜで持つ。"),
+    "sales_entities._migrate_opp_gates": (
+        "過去データの遡行補完 (移行処理)。人の操作ではないので、人に書かせる理由が"
+        "存在しない。"),
+    "transition_approval.append_verdict": (
+        "目的達成レビューの却下に伴う entry の取消。却下理由は approval_rationale と"
+        "approval_history が持つので、ここでの status 代入は従属的な反映。"),
+    "sales_entities.create_send_batch": (
+        "再計画で古い送信バッチを差し替えるときの内部的な無効化。人の操作ではなく"
+        "再計画の副作用なので、人に書かせる理由が存在しない。"),
+}
+
+
+def _terminal_consts(tree: ast.AST) -> set:
+    """module-level の ``NAME = "done"`` / ``NAME = "cancelled"`` の NAME 集合。
+
+    ``MEETING_CANCELLED`` / ``SEND_BATCH_CANCELLED`` のように終端 literal を別名で
+    持つ定数を、名前を手で並べずにソースから導出する (手書きの一覧に戻らないため)。
+    """
+    names = set()
+    for node in getattr(tree, "body", []):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (isinstance(node.value, ast.Constant)
+                and node.value.value in _TERMINAL_LITERALS):
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                names.add(t.id)
+    return names
+
+
+def _assigns_terminal(value: ast.AST, const_names: set) -> bool:
+    """``value`` の式の中に終端 status を指す項があるか。
+
+    三項演算子 (``"approved" if ok else "cancelled"``) のように条件で終端に倒れる形も
+    拾うため、代入される式の **部分木全体** を見る。
+    """
+    for node in ast.walk(value):
+        if isinstance(node, ast.Constant) and node.value in _TERMINAL_LITERALS:
+            return True
+        if isinstance(node, ast.Name) and node.id in const_names:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in (
+                "DONE_STATUS", "CANCELLED_STATUS"):
+            return True
+    return False
+
+
+def _targets_status_field(targets: list) -> bool:
+    """代入先が ``X["status"]`` / ``X.status`` か。"""
+    for t in targets:
+        if isinstance(t, ast.Subscript):
+            sl = t.slice
+            if isinstance(sl, ast.Constant) and sl.value == "status":
+                return True
+        elif isinstance(t, ast.Attribute) and t.attr == "status":
+            return True
+    return False
+
+
+def census_handwritten_terminal_writes(source: str, module: str) -> list:
+    """``source`` 内で status に終端を手書き代入している箇所を数え上げる (e-6894)。
+
+    Returns:
+        ``[{"module", "function", "lineno", "key"}]`` —— ``key`` は
+        ``<module>.<function>`` で、``KNOWN_HANDWRITTEN_TERMINAL`` の行と突き合わせる
+        ための識別子。押印層そのもの (``_STAMP_OWNERS``) は除く。
+    """
+    tree = ast.parse(source)
+    funcs = _function_index(tree)
+    consts = _terminal_consts(tree)
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not _targets_status_field(node.targets):
+            continue
+        if not _assigns_terminal(node.value, consts):
+            continue
+        fn = _enclosing_function(funcs, node.lineno)
+        key = f"{module}.{fn}"
+        if key in _STAMP_OWNERS:
+            continue
+        out.append({"module": module, "function": fn,
+                    "lineno": node.lineno, "key": key})
+    return out
+
+
+def unregistered_handwritten_terminal_writes(sources: dict) -> list:
+    """台帳に無い手書きの終端書き込みを返す (空であるべき集合)。
+
+    Args:
+        sources: ``{module_name: source_text}`` —— ``module_name`` は
+            ``"core"`` のような import 名 (``lib/core.py`` ではない)。
+    """
+    bad = []
+    for module, source in sources.items():
+        for hit in census_handwritten_terminal_writes(source, module):
+            if hit["key"] in KNOWN_HANDWRITTEN_TERMINAL:
                 continue
             bad.append(hit)
     return bad

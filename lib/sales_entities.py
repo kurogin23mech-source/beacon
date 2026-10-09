@@ -3867,22 +3867,34 @@ def meeting_mark_ended(data: dict, meeting_id: str, *, at: str = "") -> dict:
 
 
 def meeting_cancel(data: dict, meeting_id: str, *, at: str = "",
-                   reason: str = "") -> dict:
+                   reason: str = "", actor: str = "",
+                   acknowledge: bool = False) -> dict:
     """Cancel a scheduled meeting (予定取消). Logged to history; the calendar
     event removal is the Skill's job (this is the Beacon-side state change).
 
     ms-120 e-3906 danger-class: cancelling a meeting is destructive to the
     schedule/trail, so the CLI now requires an audit entry. ``reason`` is
     recorded on both the meeting and its history line so the cancellation is
-    never a silent state flip."""
+    never a silent state flip.
+
+    ms-166 e-6893/e-6894: this used to write ``m["status"] = MEETING_CANCELLED``
+    and a TOP-LEVEL ``m["cancel_reason"]`` by hand, so (a) the audit requirement
+    did not apply — a blank reason passed — and (b) the reason landed on a key
+    NOTHING read: every consumer (``beacon opportunity``'s cancel echo,
+    ``cmd_target``'s work-item list, the web UI's cancelled-status renderer)
+    reads ``meta.cancel_reason``. The machine census found this; a hand audit of
+    the same file missed it. Routed through the shared ``work_base.stamp_cancel``
+    so the gate applies and the reason lands where the readers already look. The
+    ``history`` row stays — it is the meeting's own append-only trail, which the
+    generic stamp does not carry."""
     opp, m = find_meeting(data, meeting_id)
     if m is None:
         raise ValueError(f"Meeting not found: {meeting_id}")
-    m["status"] = MEETING_CANCELLED
-    if reason:
-        m["cancel_reason"] = reason
+    work_base.stamp_cancel(m, reason=reason, actor=actor, at=at,
+                           acknowledge=acknowledge, verb="meeting cancel")
     m.setdefault("history", []).append(
-        {"at": at, "action": "cancelled", "reason": reason})
+        {"at": at, "action": "cancelled",
+         "reason": (m.get("meta") or {}).get("cancel_reason", "")})
     return m
 
 

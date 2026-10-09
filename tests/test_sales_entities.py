@@ -1752,7 +1752,7 @@ def test_scan_ended_meetings_idempotent_by_status():
     assert se.scan_ended_meetings(data, now) == []
     # cancelled meetings never surface either
     m2 = se.meeting_schedule(data, opp, "2026-07-20T10:00:00+00:00")
-    se.meeting_cancel(data, m2)
+    se.meeting_cancel(data, m2, reason="先約と重複")
     assert se.scan_ended_meetings(data, now) == []
 
 
