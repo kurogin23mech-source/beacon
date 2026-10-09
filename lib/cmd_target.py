@@ -953,11 +953,16 @@ def cmd_target_close():
         _ref_phase = _cur if _cur in _terminals else (
             _terminals[0] if _terminals else _cur)
         _shown = _print_completion_reference(desc, _rec_now, _ref_phase)
+    # ms-166 e-6893: 監査エントリの関門は押印層 (work_model.mark_done) が持つ。ここで
+    # 先に張ると、照合が通っていない / 最終フェーズでない といった本当の障害より先に
+    # 「理由を書け」と言ってしまう。転送だけして、関門が上げた例外を回復可能な 1 行に
+    # 変換する (TerminalAuditRequired は ValueError 派生)。
     try:
         _te.close_target(data, desc, target_id, actor=_actor_str(),
                          reason=reason, fields=fields,
+                         acknowledge=os.environ.get("BEACON_ACKNOWLEDGE") == "1",
                          reference_shown=_shown)
-    except _te.TargetEngineError as e:
+    except (_te.TargetEngineError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     # ms-142 T7 (e-5162): closing a data-defined / release target frees its live
@@ -1074,8 +1079,11 @@ def cmd_target_work_item():
             print(f"WorkItem 追加: [{item['id']}] {desc_text}")
             _print_child_fields(_td.work_item_fields(desc), item)
         elif action == "done":
-            item = _te.complete_work_item(data, desc, target_id, item_id,
-                                          actor=_actor_str(), reason=reason)
+            # ms-166 e-6893: work-item の done も終端遷移 → 押印層の関門を通る。
+            item = _te.complete_work_item(
+                data, desc, target_id, item_id, actor=_actor_str(),
+                reason=reason,
+                acknowledge=os.environ.get("BEACON_ACKNOWLEDGE") == "1")
             save_project(data, op={"op": "target_work_item_done", "kind": kind,
                                    "target_id": target_id, "item_id": item_id})
             print(f"WorkItem 完了: [{item_id}]")

@@ -79,7 +79,7 @@ def test_target_grain_lists_only_open_work_items():
     a_done = se.activity_add(data, opp, "初回面談を実施")
     a_cancelled = se.activity_add(data, opp, "不要になった打診")
     _, done_item = se.find_activity(data, a_done)
-    wm.mark_done(done_item, at="2026-09-01T00:00:00Z", actor="t")
+    wm.mark_done(done_item, at="2026-09-01T00:00:00Z", actor="t", reason="t")
     se.activity_cancel(data, a_cancelled, reason="不要")
 
     res = occupation.evidence_link_candidates(data, opp)

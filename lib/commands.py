@@ -9145,7 +9145,9 @@ def cmd_account_delete():
     import sales_entities
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
     force = os.environ.get("BEACON_FORCE", "") == "1"
-    reason = os.environ.get("BEACON_CANCEL_REASON", "")
+    # ms-166 e-6893: 取消も終端遷移なので、done と同じ共有の関門を通す。
+    reason = _require_reason_or_skip("account cancel",
+                                    reason_env="BEACON_CANCEL_REASON")
     data = load_project()
     try:
         orphaned = sales_entities.account_cancel(
@@ -9913,7 +9915,9 @@ def cmd_opportunity_delete():
     # e-3586: 物理削除でなく soft-cancel (取消)。中の証跡 (活動/証跡) を消さない。
     import sales_entities
     opp_id = os.environ.get("BEACON_OPP_ID", "")
-    reason = os.environ.get("BEACON_CANCEL_REASON", "")
+    # ms-166 e-6893: 取消も終端遷移なので、done と同じ共有の関門を通す。
+    reason = _require_reason_or_skip("opportunity cancel",
+                                    reason_env="BEACON_CANCEL_REASON")
     data = load_project()
     try:
         sales_entities.opportunity_cancel(data, opp_id, reason=reason)
@@ -10374,7 +10378,8 @@ def cmd_opportunity_contract_cancel():
     BEACON_CONTRACT_ID, BEACON_REASON."""
     import sales_entities
     ctr_id = os.environ.get("BEACON_CONTRACT_ID", "")
-    reason = os.environ.get("BEACON_REASON", "")
+    # ms-166 e-6893: 取消も終端遷移なので、done と同じ共有の関門を通す。
+    reason = _require_reason_or_skip("contract cancel")
     data = load_project()
     try:
         ctr = sales_entities.contract_cancel(data, ctr_id, reason=reason)
@@ -10487,7 +10492,9 @@ def cmd_communication_cancel():
     # status=cancelled + 理由で残す (data-immutability)。
     import sales_entities
     comm_id = os.environ.get("BEACON_COMM_ID", "")
-    reason = os.environ.get("BEACON_COMM_REASON", "")
+    # ms-166 e-6893: 取消も終端遷移なので、done と同じ共有の関門を通す。
+    reason = _require_reason_or_skip("communication cancel",
+                                    reason_env="BEACON_COMM_REASON")
     data = load_project()
     try:
         sales_entities.communication_cancel(data, comm_id, reason=reason)

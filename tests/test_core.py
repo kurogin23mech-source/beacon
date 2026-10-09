@@ -243,7 +243,8 @@ class TestTasks:
         entry = make_entry("e-1", status="todo")
         ms = make_ms(entries=[entry])
         data = make_project(milestones=[ms])
-        ret_ms, ret_entry = core.task_done(data, "e-1", date="2026-05-11")
+        ret_ms, ret_entry = core.task_done(data, "e-1", date="2026-05-11",
+                                           reason="実装完了")
         assert ret_entry["status"] == "done"
         assert ret_entry["done_at"] == "2026-05-11"
 
@@ -267,7 +268,8 @@ class TestTasks:
         entry = make_entry("e-1", status="todo")
         data = make_project(milestones=[make_ms(entries=[entry])])
         author = {"user_id": "u1", "email": "a@b.co", "display_name": "A"}
-        _, e = core.task_done(data, "e-1", date="2026-05-11", author=author)
+        _, e = core.task_done(data, "e-1", date="2026-05-11", author=author,
+                              reason="実装完了")
         # dev-specific bits still layered on top of the base stamp
         assert e["date"] == "2026-05-11"  # date mirror when absent
         assert e["meta"]["done_by_user"]["user_id"] == "u1"
@@ -276,10 +278,27 @@ class TestTasks:
         entry = make_entry("e-1")
         ms = make_ms(entries=[entry])
         data = make_project(milestones=[ms])
-        _, updated = core.task_update(data, "e-1", description="Updated desc", status="done", date="2026-05-11")
+        _, updated = core.task_update(data, "e-1", description="Updated desc",
+                                      status="in_progress")
         assert updated["description"] == "Updated desc"
-        assert updated["status"] == "done"
-        assert updated["done_at"] == "2026-05-11"
+        assert updated["status"] == "in_progress"
+
+    def test_update_refuses_a_terminal_status(self):
+        """ms-166 e-6893: 属性 patch からは終端状態を書けない。
+
+        この経路は ``entry["status"] = status`` を直書きしており、``mark_done`` を
+        丸ごと迂回していた。つまり ``beacon task update --status done`` と本番 API の
+        ``PATCH`` は、理由も ``done_by`` も完遂印も無しに task を閉じられた。
+        ``occupation.set_entry_state`` が ``cancelled`` に対して既に敷いていた分離
+        (「cancel は専用の監査経路を持つ」) を、両方の終端状態と両フロントに広げる。
+        """
+        for terminal in ("done", "cancelled"):
+            entry = make_entry("e-1")
+            data = make_project(milestones=[make_ms(entries=[entry])])
+            with pytest.raises(ValueError, match="終端状態"):
+                core.task_update(data, "e-1", status=terminal)
+            assert entry["status"] != terminal, (
+                f"拒否したのに status={terminal} を書き換えてはいけない")
 
     def test_update_invalid_status(self):
         entry = make_entry("e-1")
@@ -321,7 +340,7 @@ class TestTasks:
     def test_delete(self):
         entry = make_entry("e-1")
         data = make_project(milestones=[make_ms(entries=[entry])])
-        deleted = core.task_delete(data, "e-1")
+        deleted = core.task_delete(data, "e-1", reason="重複起票")
         assert deleted["status"] == "cancelled"
 
     def test_entry_move_to_task(self):

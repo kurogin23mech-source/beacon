@@ -159,18 +159,21 @@ cmd_target_close() {
     # at the start) for a class that declares completion_check. The Python side
     # accepts ONLY that one declared key and errors on anything else, so this is
     # not a general field writer smuggled into the completion verb.
-    local kind="" target_id="" reason="" fields=""
+    local kind="" target_id="" reason="" fields="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --class)  kind="${2:-}";   shift 2 ;;
             --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --reason) reason="${2:-}"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon target close --class <kind> <target-id> [--field <照合結果field>=<値>] [--reason <text>]" ;;
+            # ms-166 e-6893: close は終端遷移なので監査エントリが要る。
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target close --class <kind> <target-id> [--field <照合結果field>=<値>] (--reason <text> | --acknowledge)" ;;
             *)        target_id="$1";  shift ;;
         esac
     done
     BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
         BEACON_REASON="$reason" BEACON_FIELDS="$fields" \
+        BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" target_close
 }
 
@@ -231,6 +234,7 @@ cmd_target_work_item() {
     ensure_project
     local action="${1:-}"; [[ $# -gt 0 ]] && shift
     local kind="" target_id="" item_id="" desc="" reason="" json=0 fields=""
+    local acknowledge=""
     local _pos=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -238,8 +242,10 @@ cmd_target_work_item() {
             --desc)   desc="${2:-}";   shift 2 ;;
             --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --reason) reason="${2:-}"; shift 2 ;;
+            # ms-166 e-6893: done / cancel は終端遷移なので監査エントリが要る。
+            --acknowledge) acknowledge="1"; shift ;;
             --json)   json=1;          shift ;;
-            -?*)      _guard_positional "$1" "Usage: beacon target work-item <add|done|cancel|list> --class <kind> <target-id> [--field key=value ...] ..." ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target work-item <add|done|cancel|list> --class <kind> <target-id> [--field key=value ...] [(--reason <text> | --acknowledge)] ..." ;;
             *)        # ms-124 AX review: reject excess positional instead of
                       # silently overwriting target-id / item-id.
                       if [[ $_pos -eq 0 ]]; then target_id="$1";
@@ -251,7 +257,7 @@ cmd_target_work_item() {
     BEACON_WI_ACTION="$action" BEACON_TARGET_CLASS="$kind" \
         BEACON_TARGET_ID="$target_id" BEACON_WI_ITEM_ID="$item_id" \
         BEACON_WI_DESC="$desc" BEACON_REASON="$reason" BEACON_JSON="$json" \
-        BEACON_FIELDS="$fields" \
+        BEACON_FIELDS="$fields" BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" target_work_item
 }
 

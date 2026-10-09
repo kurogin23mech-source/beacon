@@ -51,14 +51,28 @@ def _acq_status(proj):
     return data["acquisitions"][0]["status"]
 
 
-@pytest.mark.parametrize("verb,expected", [
-    ("start", "in_progress"),
-    ("done", "done"),  # ms-132 e-4507: observe 除去 (打ち切りは delete で表す)
+@pytest.mark.parametrize("verb,expected,audit", [
+    ("start", "in_progress", []),            # 非終端の前進 — 監査エントリは不要
+    # ms-132 e-4507: observe 除去 (打ち切りは delete で表す)
+    # ms-166 e-6893: done は終端遷移なので監査エントリを運ぶ
+    ("done", "done", ["--reason", "施策をやり切った"]),
 ])
-def test_acquisition_intent_verbs_move_state(proj, verb, expected):
-    r = _run(proj, "acquisition", verb, "acq-1")
+def test_acquisition_intent_verbs_move_state(proj, verb, expected, audit):
+    r = _run(proj, "acquisition", verb, "acq-1", *audit)
     assert r.returncode == 0, r.stderr
     assert _acq_status(proj) == expected
+
+
+def test_acquisition_done_refuses_without_an_audit_entry(proj):
+    """ms-166 e-6893: 終端に倒すなら理由か明示的な省略が要る。
+
+    以前 ``acquisition_set_status`` は reason を受ける口すら無く、施策の done は
+    構造的に「なぜ終わったか」が空のまま記録されていた。
+    """
+    r = _run(proj, "acquisition", "done", "acq-1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "requires an audit entry" in r.stderr
+    assert _acq_status(proj) != "done", "拒否したのに状態を書き換えてはいけない"
 
 
 def test_acquisition_status_write_is_deprecated_but_works(proj):

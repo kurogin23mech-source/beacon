@@ -94,9 +94,13 @@ cmd_meeting_cancel() {
         esac
     done
     if [ -z "$mtg_id" ]; then echo "Usage: beacon meeting cancel <mtg-id> (--reason <text> | --acknowledge)"; exit 1; fi
-    _require_audit_reason "meeting cancel" "$reason" "$acknowledge"
-    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
+    # ms-166 e-6893/e-6895: bash は判断せず両方の合図を転送し、python 側の
+    # 唯一の規則 (terminal_gate.require_audit) に決めさせる。以前はここで
+    # 「理由が空なら sentinel」と bash が代替していたため、--reason と
+    # --acknowledge を両方渡したとき bash だけが黙って理由を優先し、python 側の
+    # 「両方渡したら拒否」に到達しなかった (フロントごとに規則が割れていた)。
     BEACON_MTG_ID="$mtg_id" BEACON_MTG_CANCEL_REASON="$reason" \
+        BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" meeting_cancel
 }
 

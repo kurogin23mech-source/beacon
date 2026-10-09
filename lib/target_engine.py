@@ -564,7 +564,8 @@ def record_completion_check(rec: dict, status: dict, *, actor: str = "",
 # ---------------------------------------------------------------------------
 
 def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
-                 reason: str = "", fields: Optional[dict] = None,
+                 reason: str = "", acknowledge: bool = False,
+                 fields: Optional[dict] = None,
                  reference_shown: bool = True) -> dict:
     """Mark a target done (via the shared ``work_model.mark_done`` — stamps
     status=done + done_at + done_by/done_reason). Idempotent-safe: closing an
@@ -595,7 +596,8 @@ def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
                 f"記述子 '{desc.get('kind')}' は照合 (completion_check) を宣言して"
                 f"いないため close 時に書ける field がありません "
                 f"(--field は beacon target advance で指定してください)")
-        work_model.mark_done(rec, actor=actor, reason=reason)
+        work_model.mark_done(rec, actor=actor, reason=reason,
+                             acknowledge=acknowledge, verb="target close")
         return rec
 
     unknown = [k for k in fields if k != cfg["verdict_field"]]
@@ -637,7 +639,8 @@ def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
     if cfg["verdict_field"] in fields:
         rec[cfg["verdict_field"]] = fields[cfg["verdict_field"]]
         record_completion_check(rec, status, actor=actor, reason=reason)
-    work_model.mark_done(rec, actor=actor, reason=reason)
+    work_model.mark_done(rec, actor=actor, reason=reason,
+                         acknowledge=acknowledge, verb="target close")
     return rec
 
 
@@ -738,7 +741,8 @@ def add_work_item(data: dict, desc: dict, target_id: str, description: str, *,
 
 
 def complete_work_item(data: dict, desc: dict, target_id: str, item_id: str, *,
-                       actor: str = "", reason: str = "") -> dict:
+                       actor: str = "", reason: str = "",
+                       acknowledge: bool = False) -> dict:
     """Mark one of a target's WorkItems done (shared ``work_model.mark_done``)
     and return it. Raises when the target or the item is unknown."""
     rec = find_target(data, desc, target_id)
@@ -748,12 +752,14 @@ def complete_work_item(data: dict, desc: dict, target_id: str, item_id: str, *,
     if item is None:
         raise TargetEngineError(
             f"WorkItem が見つかりません: {item_id} (target {target_id})")
-    work_model.mark_done(item, actor=actor, reason=reason)
+    work_model.mark_done(item, actor=actor, reason=reason,
+                         acknowledge=acknowledge, verb="target work-item done")
     return item
 
 
 def cancel_work_item(data: dict, desc: dict, target_id: str, item_id: str, *,
-                     actor: str = "", reason: str = "") -> dict:
+                     actor: str = "", reason: str = "",
+                     acknowledge: bool = False) -> dict:
     """Cancel one of a target's WorkItems and return it (ms-146 e-5348).
 
     Routes through the SHARED cancel vocabulary ``work_base.stamp_cancel``, the
@@ -778,7 +784,9 @@ def cancel_work_item(data: dict, desc: dict, target_id: str, item_id: str, *,
     if work_model.is_cancelled(item):
         raise TargetEngineError(
             f"WorkItem '{item_id}' は既に取り消し済みです")
-    work_base.stamp_cancel(item, reason=reason, actor=actor)
+    work_base.stamp_cancel(item, reason=reason, actor=actor,
+                           acknowledge=acknowledge,
+                           verb="target work-item cancel")
     return item
 
 

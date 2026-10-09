@@ -38,7 +38,7 @@ from commands_shared import (  # noqa: F401
     _now_iso,
     _today_iso,
     _parse_number,
-    _ACKNOWLEDGED_REASON,
+    _require_reason_or_skip,  # ms-166 e-6893: 終端遷移の共有関門
     _gate_target_class,
     _ai_session_direct_completion_ban_active,
     _self_close_ban_refuse,
@@ -120,10 +120,17 @@ def cmd_acquisition_status():
         _self_close_ban_refuse(
             acq_id, f"marking {acq_id} {status}",
             f"beacon acquisition status {acq_id} {status}")
+    # ms-166 e-6893: 監査エントリの関門は押印層 (work_model.mark_done) が持つので、
+    # ここでは合図を転送するだけにする。CLI で先に関門を張ると、本当の障害
+    # (フェーズが終端でない / 自己完結禁止) より先に「理由を書け」と言ってしまい、
+    # 読み手が実際の原因を取り違える。例外は下の except ValueError が回復可能な
+    # 1 行にして返す。非終端の前進 (todo → in_progress) は関門の対象外。
     data = load_project()
     try:
-        sales_entities.acquisition_set_status(data, acq_id, status,
-                                              at=_now_iso())
+        sales_entities.acquisition_set_status(
+            data, acq_id, status, at=_now_iso(),
+            reason=os.environ.get("BEACON_REASON", ""),
+            acknowledge=os.environ.get("BEACON_ACKNOWLEDGE") == "1")
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -147,18 +154,17 @@ def cmd_acquisition_delete():
     """
     import sales_entities
     acq_id = os.environ.get("BEACON_ACQ_ID", "")
-    reason = os.environ.get("BEACON_CANCEL_REASON", "")
-    # e-4507 follow-up (#1 DRY): the acknowledged-no-reason sentinel has ONE
-    # definition (_ACKNOWLEDGED_REASON). Callers signal a deliberate no-reason
-    # waiver with BEACON_ACKNOWLEDGE=1 and let this path stamp the sentinel,
-    # rather than each entrypoint hardcoding the literal string.
-    if not reason and os.environ.get("BEACON_ACKNOWLEDGE") == "1":
-        reason = _ACKNOWLEDGED_REASON
     if not acq_id:
         print("Usage: beacon acquisition delete <acq-id> "
               "(--reason <text> | --acknowledge)",
               file=sys.stderr)
         sys.exit(1)
+    # ms-166 e-6893: this used to re-implement the reason/acknowledge rule inline
+    # (reason or sentinel) — a THIRD copy of the decision, which is how
+    # "--reason + --acknowledge silently drops the reason" (e-6895) got to exist in
+    # more than one place. Route through the single shared gate instead.
+    reason = _require_reason_or_skip("acquisition cancel",
+                                     reason_env="BEACON_CANCEL_REASON")
     data = load_project()
     try:
         sales_entities.acquisition_cancel(data, acq_id, reason=reason,

@@ -2493,7 +2493,8 @@ def _gate_is_settled(data: dict, gate_id: str) -> bool:
     return bool(gate is not None and gate.get("status") == GATE_DONE)
 
 
-def cancel_gate(data: dict, gate_id: str, *, reason: str = "") -> dict:
+def cancel_gate(data: dict, gate_id: str, *, reason: str = "",
+                acknowledge: bool = False) -> dict:
     """Soft-cancel an advance gate (商談中止・誤起票 等) and return it. Routes
     through ``work_base.stamp_cancel`` (status=cancelled + audited meta,
     append-only — never deleted, data-immutability-principle). A cancelled gate
@@ -2501,7 +2502,9 @@ def cancel_gate(data: dict, gate_id: str, *, reason: str = "") -> dict:
     _, gate = find_gate(data, gate_id)
     if gate is None:
         raise ValueError(f"Advance gate not found: {gate_id}")
-    return work_base.stamp_cancel(gate, reason=reason)
+    return work_base.stamp_cancel(gate, reason=reason,
+                                 acknowledge=acknowledge,
+                                 verb="gate cancel")
 
 
 def gate_history(data: dict, opportunity_id: str) -> list:
@@ -2877,14 +2880,17 @@ def contract_sign(data: dict, contract_id: str, *, signed_date: str = "",
     return ctr
 
 
-def contract_cancel(data: dict, contract_id: str, *, reason: str = "") -> dict:
+def contract_cancel(data: dict, contract_id: str, *, reason: str = "",
+                    acknowledge: bool = False) -> dict:
     """Soft-cancel (取消) a Contract — correcting a mis-recorded contract without
     deleting it (data-immutability-principle). Routes through
     ``work_base.stamp_cancel``, the same cancel vocabulary activities use."""
     _opp, ctr = find_contract(data, contract_id)
     if ctr is None:
         raise ValueError(f"Contract not found: {contract_id}")
-    return work_base.stamp_cancel(ctr, reason=reason)
+    return work_base.stamp_cancel(ctr, reason=reason,
+                                 acknowledge=acknowledge,
+                                 verb="contract cancel")
 
 
 def has_gating_signed_contract(data: dict, opportunity_id: str) -> bool:
@@ -3001,7 +3007,8 @@ def live_opportunities(data: dict) -> list:
 
 
 def opportunity_cancel(data: dict, opportunity_id: str, *, reason: str = "",
-                       actor: str = "", at: str = "") -> dict:
+                       actor: str = "", at: str = "",
+                       acknowledge: bool = False) -> dict:
     """Soft-cancel (取消) an Opportunity and return it (e-3586).
 
     Routes through ``work_base.stamp_cancel`` (status=cancelled + audited meta:
@@ -3016,12 +3023,16 @@ def opportunity_cancel(data: dict, opportunity_id: str, *, reason: str = "",
     gate = current_gate(data, opportunity_id)
     if gate is not None:
         work_base.stamp_cancel(gate, reason=reason or "商談取消",
+                               verb="opportunity cancel (gate)",
                                actor=actor, at=at)
-    return work_base.stamp_cancel(opp, reason=reason, actor=actor, at=at)
+    return work_base.stamp_cancel(opp, reason=reason, actor=actor, at=at,
+                                 acknowledge=acknowledge,
+                                 verb="opportunity cancel")
 
 
 def account_cancel(data: dict, account_id: str, *, reason: str = "",
-                   actor: str = "", at: str = "", force: bool = False) -> list:
+                   actor: str = "", at: str = "", force: bool = False,
+                   acknowledge: bool = False) -> list:
     """Soft-cancel (取消) an Account and return the ids of live opportunities that
     referenced it (e-3586).
 
@@ -3044,7 +3055,8 @@ def account_cancel(data: dict, account_id: str, *, reason: str = "",
         for o in data.get("opportunities", []):
             if o.get("account_id") == account_id:
                 o["account_id"] = None
-    work_base.stamp_cancel(acc, reason=reason, actor=actor, at=at)
+    work_base.stamp_cancel(acc, reason=reason, actor=actor, at=at,
+                           acknowledge=acknowledge, verb="account cancel")
     return referencing
 
 
@@ -3165,7 +3177,7 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
 
 
 def activity_cancel(data: dict, activity_id: str, *, reason: str = "",
-                    outcome: str = "") -> dict:
+                    outcome: str = "", acknowledge: bool = False) -> dict:
     """Cancel (取消) an Activity and return it — correcting a mis-recorded plan
     without deleting it (data-immutability-principle).
 
@@ -3183,7 +3195,9 @@ def activity_cancel(data: dict, activity_id: str, *, reason: str = "",
     _, act = find_activity(data, activity_id)
     if act is None:
         raise ValueError(f"Activity not found: {activity_id}")
-    return work_base.stamp_cancel(act, reason=reason, outcome=outcome)
+    return work_base.stamp_cancel(act, reason=reason, outcome=outcome,
+                                 acknowledge=acknowledge,
+                                 verb="activity cancel")
 
 
 def activity_update(data: dict, activity_id: str, *, description: str = "",
@@ -3373,7 +3387,8 @@ def find_communication(data: dict, comm_id: str):
     return None, None, None
 
 
-def communication_cancel(data: dict, comm_id: str, *, reason: str = "") -> dict:
+def communication_cancel(data: dict, comm_id: str, *, reason: str = "",
+                         acknowledge: bool = False) -> dict:
     """Cancel (取消) a mis-recorded Communication and return it.
 
     Soft-cancel via the shared ``work_base.stamp_cancel`` (status=cancelled +
@@ -3387,7 +3402,9 @@ def communication_cancel(data: dict, comm_id: str, *, reason: str = "") -> dict:
     _, _, comm = find_communication(data, comm_id)
     if comm is None:
         raise ValueError(f"Communication not found: {comm_id}")
-    return work_base.stamp_cancel(comm, reason=reason)
+    return work_base.stamp_cancel(comm, reason=reason,
+                                 acknowledge=acknowledge,
+                                 verb="communication cancel")
 
 
 def communication_retarget(data: dict, comm_id: str, new_target_id: str, *,
@@ -4379,7 +4396,8 @@ def acquisition_add(data: dict, title: str, *, description: str = "",
 
 
 def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
-                           at: str = "") -> dict:
+                           at: str = "", reason: str = "",
+                           acknowledge: bool = False) -> dict:
     """Move an Acquisition along its standard lifecycle (todo → in_progress →
     done) and return it. Occupation-agnostic target lifecycle — no phase funnel,
     no won/lost (ms-115 方針2), and no observing (ms-132 e-4507: 打ち切りは削除で表す)."""
@@ -4402,14 +4420,19 @@ def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
     import core
     core.validate_lifecycle_transition("acquisition", acq.get("status", ""), status)
     if status == work_model.DONE_STATUS:
-        work_model.mark_done(acq, at=at, actor=work_base.current_actor())
+        # ms-166 e-6893: 獲得施策の done も終端遷移なので監査エントリを運ぶ。
+        # 以前は reason を受け取る口すら無く、理由が構造的に空のまま終端化していた。
+        work_model.mark_done(acq, at=at, actor=work_base.current_actor(),
+                             reason=reason, acknowledge=acknowledge,
+                             verb="acquisition status done")
     else:
         acq["status"] = status
     return acq
 
 
 def acquisition_cancel(data: dict, acquisition_id: str, *, reason: str = "",
-                       actor: str = "", at: str = "") -> dict:
+                       actor: str = "", at: str = "",
+                       acknowledge: bool = False) -> dict:
     """Soft-cancel (打ち切り) an Acquisition and return it (ms-132 e-4507).
 
     Discontinuing a施策 is expressed as *deletion*, not a lifecycle status: the
@@ -4421,7 +4444,8 @@ def acquisition_cancel(data: dict, acquisition_id: str, *, reason: str = "",
     if acq is None:
         raise ValueError(f"Acquisition not found: {acquisition_id}")
     work_base.stamp_cancel(acq, reason=reason, actor=actor or work_base.current_actor(),
-                           at=at)
+                           at=at, acknowledge=acknowledge,
+                           verb="acquisition cancel")
     return acq
 
 

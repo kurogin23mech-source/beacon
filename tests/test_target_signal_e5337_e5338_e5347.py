@@ -80,7 +80,7 @@ def test_cancelling_never_inflates_the_done_count():
     data, rec = _target()
     te.add_work_item(data, UNDERTAKING, rec["id"], "やる")
     te.add_work_item(data, UNDERTAKING, rec["id"], "やらない")
-    te.complete_work_item(data, UNDERTAKING, rec["id"], f"{rec['id']}-w1")
+    te.complete_work_item(data, UNDERTAKING, rec["id"], f"{rec['id']}-w1", reason="t")
     te.cancel_work_item(data, UNDERTAKING, rec["id"], f"{rec['id']}-w2",
                         reason="やらないと決めた")
     proj = te.project_target(UNDERTAKING, rec)

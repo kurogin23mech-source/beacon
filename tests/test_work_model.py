@@ -135,13 +135,13 @@ class TestWorkItemStatus:
 class TestMarkDone:
     def test_sets_status_and_done_at(self):
         item = {"status": "todo"}
-        work_model.mark_done(item, at="2026-07-17T00:00:00Z")
+        work_model.mark_done(item, at="2026-07-17T00:00:00Z", reason="r")
         assert item["status"] == "done"
         assert item["done_at"] == "2026-07-17T00:00:00Z"
 
     def test_done_at_defaults_to_now(self):
         item = {"status": "todo"}
-        work_model.mark_done(item)
+        work_model.mark_done(item, reason="r")
         # now_iso format: ...Z
         assert item["done_at"].endswith("Z")
         assert item["status"] == "done"
@@ -152,14 +152,30 @@ class TestMarkDone:
         assert item["meta"]["done_by"] == "claude"
         assert item["meta"]["done_reason"] == "PR merged"
 
-    def test_no_meta_when_no_actor_reason(self):
+    def test_refuses_without_an_audit_entry(self):
+        """ms-166 e-6893: the audit gate lives HERE, not in the CLI handlers.
+
+        Before e-6893 this call wrote ``status="done"`` with no ``meta`` at all,
+        which is how the production ``POST .../done`` route, ``task update
+        --status done`` and 4 cancel verbs reached a terminal state with an empty
+        ``why`` while "terminal transitions require a reason" was documented as a
+        universal rule.
+        """
+        import terminal_gate
         item = {"status": "todo"}
-        work_model.mark_done(item, at="2026-07-17T00:00:00Z")
-        assert "meta" not in item
+        with pytest.raises(terminal_gate.TerminalAuditRequired):
+            work_model.mark_done(item)
+        assert item["status"] == "todo", "拒否したのに状態を書き換えてはいけない"
+
+    def test_acknowledge_records_the_deliberate_waiver(self):
+        item = {"status": "todo"}
+        work_model.mark_done(item, acknowledge=True)
+        import terminal_gate
+        assert item["meta"]["done_reason"] == terminal_gate.ACKNOWLEDGED_REASON
 
     def test_returns_item(self):
         item = {"status": "todo"}
-        assert work_model.mark_done(item) is item
+        assert work_model.mark_done(item, reason="r") is item
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +396,8 @@ class TestEvidenceClose:
         wi = {"id": "e-7", "status": "todo"}
         ev = {"id": "commit-9"}
         rwi, rev = work_model.close_work_item_with_evidence(
-            wi, ev, at="2026-07-18T00:00:00Z", actor="claude")
+            wi, ev, at="2026-07-18T00:00:00Z", actor="claude",
+            reason="証跡 commit-9 が解決した")
         assert rev["linked_id"] == "e-7"
         assert rwi["status"] == "done"
         assert rwi["done_at"] == "2026-07-18T00:00:00Z"

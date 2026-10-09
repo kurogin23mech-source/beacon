@@ -88,14 +88,29 @@ class TestStampCancel:
         assert rec["meta"]["cancel_reason"] == "wrong deal"
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*Z", rec["meta"]["cancelled_at"])
 
-    def test_no_reason_omits_reason_key(self):
+    def test_refuses_without_an_audit_entry(self):
+        """ms-166 e-6893: cancel は終端遷移なので監査エントリ無しでは押せない。
+
+        以前は ``reason`` 既定値 "" のまま通り、``cancel_reason`` キーごと落ちていた
+        (= 「なぜ消えたのか」が後から読めない記録が正規の出力だった)。開発の
+        ``task cancel`` と営業の 4 つの cancel が全部この経路だった。
+        """
+        import terminal_gate
         rec = {"id": "e-1", "status": "todo"}
-        work_base.stamp_cancel(rec)
-        assert "cancel_reason" not in rec["meta"]
+        with pytest.raises(terminal_gate.TerminalAuditRequired):
+            work_base.stamp_cancel(rec)
+        assert rec["status"] == "todo", "拒否したのに状態を書き換えてはいけない"
+
+    def test_acknowledge_records_the_deliberate_waiver(self):
+        import terminal_gate
+        rec = {"id": "e-1", "status": "todo"}
+        work_base.stamp_cancel(rec, acknowledge=True)
+        assert rec["meta"]["cancel_reason"] == terminal_gate.ACKNOWLEDGED_REASON
 
     def test_explicit_actor_and_at_win(self):
         rec = {"id": "e-1", "status": "todo"}
-        work_base.stamp_cancel(rec, actor="alice", at="2026-01-01T00:00:00Z")
+        work_base.stamp_cancel(rec, actor="alice", at="2026-01-01T00:00:00Z",
+                               reason="r")
         assert rec["meta"]["cancelled_by"] == "alice"
         assert rec["meta"]["cancelled_at"] == "2026-01-01T00:00:00Z"
 
@@ -107,7 +122,7 @@ class TestStampCancel:
 
     def test_preserves_existing_meta(self):
         rec = {"id": "e-1", "status": "todo", "meta": {"author": "bob"}}
-        work_base.stamp_cancel(rec)
+        work_base.stamp_cancel(rec, reason="r")
         assert rec["meta"]["author"] == "bob"
         assert rec["meta"]["cancelled_by"]
 

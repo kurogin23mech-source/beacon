@@ -47,19 +47,34 @@ cmd_acquisition_list() {
 
 cmd_acquisition_status() {
     ensure_project
-    local acq_id="" status=""
+    local acq_id="" status="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon acquisition status <acq-id> <todo|in_progress|done>" ;;
+            # ms-166 e-6893: done は終端遷移なので監査エントリが要る (非終端の
+            # 前進 todo / in_progress では不要)。旗が無いと done に倒せないので
+            # 両フロントに足す。
+            --reason) reason="${2:-}"; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition status <acq-id> <todo|in_progress|done> [(--reason <text> | --acknowledge)]" ;;
             *)   if [ -z "$acq_id" ]; then acq_id="$1"; else status="$1"; fi; shift ;;
         esac
     done
     if [ -z "$acq_id" ] || [ -z "$status" ]; then
-        echo "Usage: beacon acquisition status <acq-id> <todo|in_progress|done>"
+        echo "Usage: beacon acquisition status <acq-id> <todo|in_progress|done> [(--reason <text> | --acknowledge)]"
         exit 1
     fi
     BEACON_ACQ_ID="$acq_id" BEACON_ACQ_STATUS="$status" \
+        BEACON_REASON="$reason" BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" acquisition_status
+}
+
+# ms-166 e-6893: `beacon acquisition start|done` は bin/beacon の 1 行 inline で
+# 直接 python を呼んでいたため、旗を一切解釈せず `--reason` を黙って捨てていた
+# (= 終端に倒す動詞が監査エントリを受け取れない)。意図動詞を旗の解釈ごと
+# cmd_acquisition_status に寄せる。status は呼び出し側が固定する。
+cmd_acquisition_status_intent() {
+    local fixed="${1:-}"; shift || true
+    cmd_acquisition_status "$@" "$fixed"
 }
 
 cmd_acquisition_attach_list() {
@@ -257,13 +272,13 @@ cmd_acquisition_delete() {
         echo "Usage: beacon acquisition delete <acq-id> (--reason <text> | --acknowledge)"
         exit 1
     fi
-    _require_audit_reason "acquisition delete" "$reason" "$acknowledge"
-    # Pre-substitute the acknowledged sentinel here, exactly like the sibling
-    # destructive verbs (account/opportunity delete, communication cancel) — one
-    # audit-gate pattern across all of bin/beacon (保守性レビュー #558 M4). The
-    # sentinel value is pinned equal to commands._ACKNOWLEDGED_REASON by a test.
-    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
+    # ms-166 e-6893/e-6895: 旧実装はここで bash が「理由が空なら sentinel」と
+    # 代替していた (= sentinel 値が bash と python に 2 つ在り、--reason と
+    # --acknowledge を両方渡したとき bash だけが黙って理由を優先していた)。
+    # 判断は python の 1 箇所 (terminal_gate.require_audit) に寄せ、bash は
+    # 両方の合図を転送するだけにする。
     BEACON_ACQ_ID="$acq_id" BEACON_CANCEL_REASON="$reason" \
+        BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" acquisition_delete
 }
 

@@ -443,8 +443,6 @@ def cmd_task_update():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     ms_id = os.environ.get("BEACON_MS_ID", "")
-    import datetime
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = load_project()
     try:
@@ -455,7 +453,6 @@ def cmd_task_update():
             description=os.environ.get("BEACON_DESCRIPTION", ""),
             status=os.environ.get("BEACON_STATUS", ""),
             detail=os.environ.get("BEACON_DETAIL", ""),
-            date=today,
             motivation=os.environ.get("BEACON_MOTIVATION", ""),
             acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
             behavior=os.environ.get("BEACON_BEHAVIOR", ""),
@@ -481,7 +478,9 @@ def cmd_task_delete():
 
 def cmd_task_cancel():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
-    reason = os.environ.get("BEACON_REASON", "")
+    # ms-166 e-6893: route through the SAME shared gate `task done` uses, so the
+    # development cancel stops being the one terminal verb with no audit rule.
+    reason = _require_reason_or_skip("task cancel")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     try:

@@ -130,7 +130,7 @@ def test_acquisition_lifecycle_no_observing(proj, monkeypatch, capsys):
         se.acquisition_set_status(data, "acq-1", "observing")
     # todo → in_progress → done flows
     se.acquisition_set_status(data, "acq-1", "in_progress")
-    se.acquisition_set_status(data, "acq-1", "done")
+    se.acquisition_set_status(data, "acq-1", "done", reason="t")
     assert se.find_acquisition(data, "acq-1")["status"] == "done"
 
 

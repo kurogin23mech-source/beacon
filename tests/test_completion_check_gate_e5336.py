@@ -148,7 +148,7 @@ def test_close_accepts_the_verdict_supplied_at_close_time():
                       fields={"enough_verdict": "満たした"})
     rec["enough_verdict"] = ""
     te.close_target(data, UNDERTAKING, rec["id"],
-                    fields={"enough_verdict": "満たしていないが閉じる"})
+                    fields={"enough_verdict": "満たしていないが閉じる"}, reason="t")
     assert rec.get("status") == "done"
     assert rec["enough_verdict"] == "満たしていないが閉じる"
 
@@ -175,7 +175,7 @@ def test_both_endings_are_recorded_and_remain_distinguishable():
         data, rec = _started()
         te.advance_target(data, UNDERTAKING, rec["id"], to_phase="enough",
                           fields={"enough_verdict": verdict}, actor="claude")
-        te.close_target(data, UNDERTAKING, rec["id"], actor="claude")
+        te.close_target(data, UNDERTAKING, rec["id"], actor="claude", reason="t")
         rows = [r for r in rec["phase_history"]
                 if r.get("kind") == "completion_check"]
         assert len(rows) == 1, "照合の記録がちょうど1件残る"
@@ -201,7 +201,7 @@ def test_class_without_completion_check_keeps_its_old_behaviour():
     nothing. A class that declares no 照合 still closes from any phase."""
     data, rec = _started(PLAIN)
     assert te.completion_check_config(PLAIN) == {}
-    te.close_target(data, PLAIN, rec["id"])        # from 'open', non-terminal
+    te.close_target(data, PLAIN, rec["id"], reason="t")        # from 'open', non-terminal
     assert rec.get("status") == "done"
 
 
@@ -253,12 +253,38 @@ def proj(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _close(monkeypatch, fields=""):
+def _close(monkeypatch, fields="", reason="照合を通したので閉じる"):
     monkeypatch.setenv("BEACON_TARGET_CLASS", "undertaking")
     monkeypatch.setenv("BEACON_TARGET_ID", "ut-1")
+    # ms-166 e-6893: close は終端遷移なので監査エントリを運ぶ。reason="" を渡すと
+    # 関門が拒否する側 (= 理由なし close) を確かめられる。
+    monkeypatch.setenv("BEACON_REASON", reason)
     if fields:
         monkeypatch.setenv("BEACON_FIELDS", fields)
     return cmd_target.cmd_target_close()
+
+
+def test_cli_close_refuses_without_an_audit_entry(proj, monkeypatch, capsys):
+    """ms-166 e-6893: 照合を通していても、理由を書かずには閉じられない。
+
+    以前は ``target close`` が ``reason=""`` のまま ``mark_done`` に届き、「なぜ
+    閉じたか」を持たない完遂が正規の出力だった。
+    """
+    monkeypatch.setenv("BEACON_TARGET_CLASS", "undertaking")
+    monkeypatch.setenv("BEACON_TARGET_ID", "ut-1")
+    monkeypatch.setenv("BEACON_TO_PHASE", "enough")
+    monkeypatch.setenv("BEACON_FIELDS", "enough_verdict=満たした\n")
+    cmd_target.cmd_target_advance()
+    monkeypatch.delenv("BEACON_TO_PHASE")
+    monkeypatch.delenv("BEACON_FIELDS")
+    with pytest.raises(SystemExit) as exc:
+        _close(monkeypatch, reason="")
+    assert exc.value.code == 1
+    assert "requires an audit entry" in capsys.readouterr().err
+    saved = json.loads((proj / ".beacon" / "project.json").read_text(
+        encoding="utf-8"))
+    assert saved["undertakings"][0]["status"] != "done", (
+        "拒否したのに完遂を書き込んではいけない")
 
 
 def test_cli_close_from_a_non_terminal_phase_shows_the_line_and_refuses(

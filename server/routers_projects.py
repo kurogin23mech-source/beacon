@@ -180,6 +180,12 @@ class EntryUpdate(BaseModel):
     description: str = ""
     status: str = ""
     detail: str = ""
+    # ms-166 e-6893: ``date`` only ever stamped ``done_at`` for a terminal write
+    # this route no longer performs, so it now changes nothing. Kept in the schema
+    # (so an older client's field is still DISCLOSED rather than silently dropped)
+    # but a non-empty value is REFUSED with a 400 naming the right route — an
+    # accepted argument that does nothing is the exact silent no-op ms-166 exists
+    # to remove.
     date: str = ""
     # ms-126 (e-4224 + AX round-2): the untriaged-recovery path must exist on
     # the web surface too — a non-terminal human triaging a machine-created
@@ -257,6 +263,12 @@ class DocumentSave(BaseModel):
 
 class DeleteRequest(BaseModel):
     reason: str = ""
+    # ms-166 e-6893: cancelling is a terminal transition, so it now needs an audit
+    # entry. ``acknowledge`` is the explicit "no written reason on purpose" path —
+    # the same two unambiguous states the CLI offers (--reason / --acknowledge),
+    # so a web client is not forced to invent prose but also cannot cancel
+    # silently.
+    acknowledge: bool = False
 
 class ActiveClaimSave(BaseModel):
     """Body for ``POST /api/projects/{pid}/active_claims/{claim_id}`` (ms-55 e-1730).
@@ -1546,13 +1558,26 @@ def make_router(
         # ms-78 / e-1909
         author = _resolve_author(user)
 
+        # ms-166 e-6893: refuse a field that no longer has an effect, rather than
+        # accepting and ignoring it (the only thing ``date`` ever did on this route
+        # was stamp ``done_at`` for a status=done write, which now routes through
+        # the done verb so it can carry an audit entry).
+        if (body.date or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="date is no longer accepted on this route — it only ever "
+                       "stamped done_at for a status=done write, which now goes "
+                       "through POST /entries/{entry_id}/done with a reason "
+                       "(ms-166 e-6893). Omit date.",
+            )
+
         def op(data: dict):
             _require_write(data, user)
             try:
                 ms, entry = core.task_update(
                     data, entry_id,
                     description=body.description, status=body.status,
-                    detail=body.detail, date=body.date,
+                    detail=body.detail,
                     # ms-126: None (field omitted) = leave priority unchanged; a
                     # provided value is validated by the single-source resolver.
                     priority=body.priority or "",
@@ -1568,7 +1593,16 @@ def make_router(
     @router.post("/api/projects/{project_id}/entries/{entry_id}/done")
     def done_entry(project_id: str, entry_id: str, request: Request,
                    user: dict = Depends(require_auth),
-                   decided_by: str = Query("autonomous-AI")):
+                   decided_by: str = Query("autonomous-AI"),
+                   reason: str = Query(""),
+                   acknowledge: bool = Query(False)):
+        # ms-166 e-6893: this route used to call ``core.task_done`` with NO reason,
+        # so the web UI's done button closed a task with an empty ``why`` — and the
+        # decision-arm event recorded just below carried ``rationale=None`` on EVERY
+        # web done, which made the ms-154 e-5592 wiring present but inert. The audit
+        # entry now rides in and the gate in ``work_model.mark_done`` enforces it
+        # (``TerminalAuditRequired`` is a ``ValueError``, so the existing handler
+        # turns it into a 400 with a recoverable message).
         # ms-154 e-5649: reject an out-of-vocab decided_by up front (400), before
         # the write — no silent coercion to autonomous-AI (which would corrupt the
         # audit attribution undetectably).
@@ -1585,7 +1619,10 @@ def make_router(
         def op(data: dict):
             _require_write(data, user)
             try:
-                ms, entry = core.task_done(data, entry_id, date=today, author=author)
+                ms, entry = core.task_done(data, entry_id, date=today,
+                                           reason=reason,
+                                           acknowledge=acknowledge,
+                                           author=author)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             captured["done_reason"] = (entry.get("meta") or {}).get("done_reason", "")
@@ -1822,10 +1859,13 @@ def make_router(
                      body: Optional[DeleteRequest] = None,
                      user: dict = Depends(require_auth)):
         reason = (body.reason if body else "") or ""
+        acknowledge = bool(body.acknowledge) if body else False
+
         def op(data: dict):
             _require_write(data, user)
             try:
-                entry = core.task_delete(data, entry_id, reason=reason)
+                entry = core.task_delete(data, entry_id, reason=reason,
+                                         acknowledge=acknowledge)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             return data, {"entry_id": entry_id, "status": "cancelled"}
