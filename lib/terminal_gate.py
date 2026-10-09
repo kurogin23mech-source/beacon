@@ -384,6 +384,15 @@ _STAMP_OWNERS: frozenset = frozenset({
 #: ソースから導出するので、ここに名前を書き並べる必要は無い (下の ``_terminal_consts``)。
 _TERMINAL_LITERALS: frozenset = frozenset({"done", "cancelled"})
 
+#: 台帳の行が「債務が残っているか」を **機械が読む印**。散文の言い回しとは分離する。
+#:
+#: 以前は test が散文から「未整理の債務」という 4 文字を grep していた (独立保守性
+#: レビュー #788 low)。それだと、分類が何も変わっていないのに文章を読みやすく直した
+#: だけでテストが割れ、逆に別の行に同じ語が偶然出れば債務と誤数えする。印を定数にして
+#: 名前で参照すれば、文章は自由に書き換えられる。
+LEDGER_TAG_DEBT = "[債務]"
+LEDGER_TAG_SETTLED = "[成立済み]"
+
 # ratchet 台帳: 終端 status を手書きしている既知の経路を、1 行の理由付きで受理する。
 # 直したら **行を消す** (``test_no_stale_handwritten_terminal_rows`` が削除を強制するので、
 # 台帳が嘘に腐らない)。新しい行が増えたら checker が FAIL する。
@@ -403,16 +412,16 @@ KNOWN_HANDWRITTEN_TERMINAL: dict = {
     # 読み手が「PR 系はまとめて債務」と丸めてしまい、本当に開いている穴が埋もれる。
     # どの行がどちらかは散文でなく ``PR_RATIONALE_CONTRACT`` が機械で測る。
     "core.pr_merge": (
-        "PR の取り込みに伴う entry の done。**未整理の債務**: merge は理由を受け取らず、"
+        "PR の取り込みに伴う entry の done。" + LEDGER_TAG_DEBT + ": merge は理由を受け取らず、"
         "かつ approve を経たことを要求しない (core.pr_merge / cmd_pr_merge のどちらにも "
         "review_status の検査が無い) ので、approve を飛ばして merge すると理由はどこにも"
         "残らない。「判断点は approve 側」は運用上の順序であってコードの性質ではない。"),
     "core.pr_close": (
-        "PR を取り込まずに閉じる。**未整理の債務**: 両フロントとも理由の旗を渡さず "
+        "PR を取り込まずに閉じる。" + LEDGER_TAG_DEBT + ": 両フロントとも理由の旗を渡さず "
         "(cmd_pr_close が読むのは ENTRY_ID / JSON だけ)、approve も要求しないので、"
         "却下理由を書かずに閉じられる。3 行の中で最も素通りに近い。"),
     "core.pr_reject": (
-        "PR の却下。**債務ではない (成立済み)**: cmd_pr_reject が rationale 無しを "
+        "PR の却下。" + LEDGER_TAG_SETTLED + ": cmd_pr_reject が rationale 無しを "
         "exit 1 で拒否し、両フロントが同じ handler に収束する (PR 系に server API 経路は"
         "無い) ので、却下理由は必ず review_status 側に在る。ここでの status 代入は"
         "その従属的な反映。"),
@@ -552,18 +561,181 @@ def pr_rationale_contract_violations(handler_source: str,
                                f"{_RATIONALE_ENV} を渡している")
         else:
             out.append(f"{verb}: 未知の宣言 '{claim}' (required / absent のみ)")
+
+    # 構文木でも「どの verb に渡しているか」が決まらない起動 (= handler 名を動的に
+    # 組む分岐) は、突き合わせを静かに無効化しうる。ただし今在る分岐は
+    # `if cmd in ("approve", "reject", "request-changes")` の内側にあり、到達する
+    # verb が全て 'required' なので問題にならない。**到達し得る verb が絞れて、
+    # そこに 'absent' が居ない時だけ黙る** —— 絞れない時は晒す。
+    absent = {v for v, c in PR_RATIONALE_CONTRACT.items() if c == "absent"}
+    for label, src in sorted(frontend_sources.items()):
+        for lineno, reachable in unresolved_dynamic_rationale_dispatch(src):
+            if reachable is not None and not (reachable & absent):
+                continue
+            scope = ("到達する verb が静的に絞れない"
+                     if reachable is None
+                     else f"到達する verb に 'absent' 宣言のもの "
+                          f"({', '.join(sorted(reachable & absent))}) が含まれる")
+            out.append(
+                f"{label}:{lineno}: handler 名を動的に組みつつ {_RATIONALE_ENV} を"
+                f"渡している。{scope}ので、PR_RATIONALE_CONTRACT の突き合わせが"
+                f"この経路を見られない (= 宣言 'absent' の verb が実は理由を"
+                f"受け取っていても緑のまま通る)。handler 名を literal に戻すか、"
+                f"到達する verb を `if cmd in (...)` で絞ること")
     return out
 
 
 def _frontend_passes_rationale(source: str, verb: str) -> bool:
     """フロントが ``verb`` の起動時に理由の env を渡しているか。
 
-    両フロントとも「``BEACON_RATIONALE=...`` を並べて handler 名を続ける」形なので、
-    handler 名の直前に現れる env の並びを見る。handler 名が出てこなければ False。
+    python フロント (= ソースが Python として読める) は **構文木で** 見る。bash は
+    構文木が無いので、handler 名の手前の env 並びをテキストで見る。
+
+    テキスト窓方式を python にも使っていたが、独立保守性レビュー (#788 medium) が
+    実測で穴を指摘した: ``dispatch.py`` には既に ``subcmd = "pr_" + cmd.replace(...)``
+    と handler 名を **動的に組む** 起動が在り、そこでは verb の literal が
+    ``BEACON_RATIONALE`` の近傍に現れない。merge / close をその共有分岐へ寄せる改修を
+    すると、理由を渡しているのに窓方式は「渡していない」と答えて **緑のまま通る**
+    (= 偽の安全)。構文木なら dict の鍵を直接見るのでこの形に強い。
     """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return _frontend_passes_rationale_textual(source, verb)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _called_name(node) != "_run_commands_py":
+            continue
+        # 第 2 実引数が handler 名。literal で verb を指しているものだけを突き合わせる
+        # (動的に組むものは下の ``unresolved_dynamic_rationale_dispatch`` が別枠で晒す)。
+        name_arg = node.args[1] if len(node.args) > 1 else None
+        if not (isinstance(name_arg, ast.Constant) and name_arg.value == verb):
+            continue
+        if _call_env_has_rationale(node):
+            return True
+    return False
+
+
+def _call_env_has_rationale(node: ast.Call) -> bool:
+    """``_run_commands_py(..., {...})`` の env に理由の鍵が入っているか。"""
+    for arg in list(node.args[2:]) + [kw.value for kw in node.keywords]:
+        if isinstance(arg, ast.Dict):
+            for k in arg.keys:
+                if isinstance(k, ast.Constant) and k.value == _RATIONALE_ENV:
+                    return True
+        elif isinstance(arg, ast.Name):
+            # 変数に組んだ env を渡す形。鍵の有無がこの式から読めないので、
+            # 同じ関数内で ``env[_RATIONALE_ENV] = ...`` と足す形を拾う。
+            return False
+    return False
+
+
+def unresolved_dynamic_rationale_dispatch(source: str) -> list:
+    """handler 名を動的に組みつつ理由を渡している起動を ``[(行, 到達 verb 集合 | None)]``。
+
+    構文木でも「どの verb に渡しているか」が決まらない形 (= ``_run_commands_py(root,
+    subcmd, {... BEACON_RATIONALE ...})``)。ここに merge / close が合流すると宣言と
+    実装の突き合わせが **静かに無効化される** ので、沈黙せず人に見せる
+    (独立保守性レビュー #788 medium)。
+
+    到達 verb は囲っている ``if cmd in ("a", "b")`` / ``if cmd == "a"`` から取る
+    (``cmd`` の値がそのまま handler 名の一部になる形)。絞れなければ ``None`` を返し、
+    呼び出し側に「判定できない」ことを伝える (絞れないことを緑に丸めない)。
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    # 各 If ノードの「verb 集合」を先に作り、子孫 → 祖先の対応を引けるようにする。
+    scopes = []  # (If ノード, verb 集合 | None)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            scopes.append((node, _verb_set_of_test(node.test)))
+
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _called_name(node) != "_run_commands_py":
+            continue
+        name_arg = node.args[1] if len(node.args) > 1 else None
+        if isinstance(name_arg, ast.Constant):
+            continue
+        if not _call_env_has_rationale(node):
+            continue
+        reachable = None
+        for if_node, verbs in scopes:
+            if verbs is None:
+                continue
+            if any(n is node for n in ast.walk(if_node)):
+                # 最も内側 (= 最小) の集合を採る。
+                reachable = verbs if reachable is None else (reachable & verbs)
+        # handler 名が接頭辞 + cmd の形なら、接頭辞を付けて宣言のキーに合わせる。
+        if reachable is not None:
+            prefix = _dynamic_handler_prefix(tree, name_arg)
+            if prefix is None:
+                reachable = None   # 名前の組み立て方が読めない = 絞れていない
+            else:
+                reachable = {(prefix + v.replace("-", "_")) for v in reachable}
+        out.append((getattr(node, "lineno", 0), reachable))
+    return sorted(out, key=lambda t: t[0])
+
+
+def _verb_set_of_test(test: ast.AST):
+    """``cmd == "x"`` / ``cmd in ("x", "y")`` から verb 集合。読めなければ ``None``。
+
+    ``None`` は「この条件からは verb を絞れない」の意。呼び出し側はこれを緑に
+    丸めず「絞れていない」として扱う。
+    """
+    if not isinstance(test, ast.Compare) or not isinstance(test.left, ast.Name):
+        return None
+    if test.left.id not in ("cmd", "verb", "sub", "subcmd"):
+        return None
+    out = set()
+    for comp in test.comparators:
+        if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
+            out.add(comp.value)
+        elif isinstance(comp, (ast.Tuple, ast.List, ast.Set)):
+            for elt in comp.elts:
+                if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+                    return None     # 1 つでも読めない要素が居たら集合を信用しない
+                out.add(elt.value)
+        else:
+            return None
+    return out or None
+
+
+def _dynamic_handler_prefix(tree: ast.AST, name_arg: ast.AST):
+    """``subcmd = "pr_" + cmd...`` の接頭辞 literal。読めなければ ``None``。
+
+    ``None`` は「handler 名の組み立て方が読めない」の意 (= 到達 verb を宣言のキーに
+    変換できないので絞れていない扱いにする)。
+    """
+    if not isinstance(name_arg, ast.Name):
+        return None
+    target = name_arg.id
+    found = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == target for t in node.targets):
+            continue
+        val = node.value
+        if isinstance(val, ast.BinOp) and isinstance(val.op, ast.Add) \
+                and isinstance(val.left, ast.Constant) \
+                and isinstance(val.left.value, str):
+            if found is not None and found != val.left.value:
+                return None     # 同名に複数の組み立て方 = 読めない
+            found = val.left.value
+        else:
+            return None         # 足し算以外の組み立て方は読めない
+    return found
+
+
+def _frontend_passes_rationale_textual(source: str, verb: str) -> bool:
+    """bash 用: handler 名の手前に現れる env の並びを見る (構文木が無いので)。"""
     for m in re.finditer(re.escape(verb), source):
-        # handler 名の手前 400 文字を同じ起動の env 並びとして見る。起動は 1 行〜
-        # 数行に収まる (bash は行継続、python は dict literal)。
+        # handler 名の手前 400 文字を同じ起動の env 並びとして見る (bash は行継続)。
         window = source[max(0, m.start() - 400):m.start()]
         # 直前に別の handler 起動が挟まっていたら、そこから後ろだけを見る。
         for other in PR_RATIONALE_CONTRACT:

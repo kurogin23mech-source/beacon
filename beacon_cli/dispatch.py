@@ -769,11 +769,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_contract.add_argument("--ref", default="")
     p_opp_contract.add_argument("--date", default="")
     p_opp_contract.add_argument("--reason", default="")
-    # ms-166 e-6912: `--acknowledge` は外した。contract の 4 verb の
-    # `_allowed_flags` はどれもこの旗を許可しないので、パーサが受理して必ず
-    # 拒否する = 誰も使えない旗を宣伝している状態だった (監査契約の面でも
-    # 「contract は acknowledge を持つ」という嘘になっていた)。取消理由は
-    # `--reason` が持つ。
+    # ms-166 e-6912: `--acknowledge` は **union パーサが受理し、verb ごとの
+    # `_allowed_flags` が明示的に断る** 対象として残す (`sign` の `--gating` と同じ)。
+    # 経緯 (私の誤りを 2 段で直した):
+    # (a) 「誰も使えない旗の宣伝」と読んで削除したが、下の `cancel` 分岐が
+    #     `args.acknowledge` を読むため `contract cancel --reason ...` が
+    #     AttributeError で落ちた (独立 AX レビュー #788 が high で検出)。
+    # (b) 戻して実測すると、削除前は **拒否されず通っていた**: `_flag_set` に
+    #     `--acknowledge` が無いので stray ガードが見ておらず、`cancel` が
+    #     `BEACON_ACKNOWLEDGE=1` を転送し、押印層が免除として受けていた。bash は
+    #     この旗を持たないので、**python フロントだけ理由なしで契約を取消できる**
+    #     認可の非対称だった。安全な側 (bash / README / help と同じ「理由必須」) に
+    #     揃え、下の `_flag_set` に載せて明示的に断る。
+    p_opp_contract.add_argument("--acknowledge", action="store_true")
     p_opp_contract.add_argument("--all", action="store_true")
     p_opp_contract.add_argument("--json", action="store_true")
 
@@ -3081,6 +3089,10 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "--ref": bool(args.ref),
             "--date": bool(args.date),
             "--reason": bool(args.reason),
+            # ms-166 e-6912: ここに載せていなかったので、どの verb の許可リストにも
+            # 無い `--acknowledge` が stray 判定を素通りしていた (= 受理して
+            # 黙って honor する側に倒れていた)。載せる = 明示的に断る。
+            "--acknowledge": args.acknowledge,
             "--all": args.all,
             "--json": args.json,
         }
@@ -3096,8 +3108,17 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
                       if on and f not in _allowed_flags[verb]]
             if _stray:
                 _ok = ", ".join(sorted(_allowed_flags[verb])) or "なし"
+                # ms-166 e-6912 (独立 AX レビュー #788 medium): 終端動詞は 9 つが
+                # `(--reason | --acknowledge)` の 2 択なので、`contract cancel` だけ
+                # `--acknowledge` が無いのを「不在」から推測させると、呼び手は
+                # 打ち間違いと区別できない。**無い理由を言う**。
+                _why = ""
+                if verb == "cancel" and "--acknowledge" in _stray:
+                    _why = ("\n  契約の取消は理由を省けません (他の終端動詞が持つ "
+                            "--acknowledge の免除経路を、この verb だけ持ちません)。"
+                            "--reason \"<理由>\" を渡してください。")
                 print(f"Error: contract {verb} は {', '.join(_stray)} を受け付けません "
-                      f"(この verb で使えるフラグ: {_ok})。", file=sys.stderr)
+                      f"(この verb で使えるフラグ: {_ok})。{_why}", file=sys.stderr)
                 return 2
         if verb == "add":
             if not args.a1 or not args.a2:
@@ -3135,10 +3156,12 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             if not args.a1:
                 print("Usage: beacon opportunity contract cancel <ctr-id> [--reason <text>]")
                 return 1
+            # BEACON_ACKNOWLEDGE は渡さない: 上の stray ガードが `--acknowledge` を
+            # 断るので到達しないし、渡せば押印層が免除として受けてしまう (bash には
+            # 無い経路なのでフロント間で認可がずれる)。理由は常に --reason が運ぶ。
             return _run_commands_py(root, "opportunity_contract_cancel", {
                 "BEACON_CONTRACT_ID": args.a1,
                 "BEACON_REASON": args.reason or "",
-                "BEACON_ACKNOWLEDGE": "1" if args.acknowledge else "",
             })
         print('Usage: beacon opportunity contract add <opp-id> "<desc>" [--gating] [--ref <url>]')
         print("       beacon opportunity contract sign <ctr-id> [--date <YYYY-MM-DD>] [--ref <url>]")

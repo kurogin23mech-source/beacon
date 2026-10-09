@@ -1877,6 +1877,7 @@ def collect_requires_drift(bin_path: Path = BIN_BEACON) -> dict:
 #: README / help レジストリ側の検査は通常どおり効く。
 AUDIT_UNION_PARSER_VERBS: set = {
     "opportunity activity",   # bash: cmd_opportunity_activity{,_done,_cancel,_update}
+    "opportunity contract",   # bash: cmd_opportunity_contract_{add,sign,list,cancel}
 }
 
 #: 監査の旗を受けるが README / help に独立の行を持たない動詞と、その理由。
@@ -1884,6 +1885,16 @@ AUDIT_SURFACE_EXEMPT: dict = {
     "acquisition cancel": "`acquisition delete` の別名。delete 行が 'aliases: cancel, rm' として併記する。",
     "acquisition rm": "同上 (`acquisition delete` の別名)。",
     "acquisition status": "下位の汎用形。利用者向けには意図動詞 `acquisition start` / `done` が行を持つ。",
+    "opportunity contract": (
+        "union パーサが `--acknowledge` を受理するのは **免除を提供するためではなく、"
+        "verb ごとに明示的に断るため** (`_allowed_flags` のどの verb もこの旗を許可しない)。"
+        "つまりこの動詞に監査の免除経路は無く、終端 verb である `contract cancel` は "
+        "`--reason` 必須として README / help に行を持つ。母集団の導出 "
+        "(= 旗を受理する動詞) がここだけ実態とずれるので免除する。"
+        "**免除が有効なのは「断り続けている」間だけ** — 実際に免除経路を足したら "
+        "tests/test_audit_contract_surfaces_e6912.py の "
+        "test_contract_cancel_refuses_the_acknowledge_waiver が赤くなり、"
+        "README / help を直す必要が出る。"),
 }
 
 
