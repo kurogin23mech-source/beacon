@@ -249,3 +249,119 @@ def test_on_posix_a_dead_pid_still_decides(tmp_path: Path, monkeypatch):
     cm._prune_stale_state_files(tmp_path, keep=keep)
 
     assert not dead.exists()
+
+
+# ---------------------------------------------------------------------------
+# The upgrade itself must not re-fire (the one-time seed), driven through the
+# hook's real entry point — a pure-helper test would not have caught a caller
+# that forgets to seed.
+# ---------------------------------------------------------------------------
+
+
+def _write_transcript(path: Path, input_tokens: int) -> None:
+    line = {"message": {"role": "assistant", "model": "claude-opus-4-8",
+                        "usage": {"input_tokens": input_tokens}}}
+    path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+
+@pytest.fixture()
+def repo_project(repo_and_worktree, monkeypatch):
+    """A cwd that is BOTH a git repository and a beacon project.
+
+    Both halves are needed: ``_main_impl`` returns early without
+    ``.beacon/project.json``, and the dedup path only leaves the per-cwd
+    directory when git can answer. Every outward side effect is stubbed.
+    """
+    main, _ = repo_and_worktree
+    (main / ".beacon").mkdir(exist_ok=True)
+    (main / ".beacon" / "project.json").write_text(
+        json.dumps({"name": "t", "milestones": []}), encoding="utf-8"
+    )
+    monkeypatch.chdir(main)
+    monkeypatch.delenv("BEACON_CONTEXT_MONITOR_DRY_RUN", raising=False)
+    monkeypatch.delenv("BEACON_CONTEXT_LIMIT", raising=False)
+    monkeypatch.setattr(cm, "_which_beacon", lambda: None)
+    monkeypatch.setattr(cm, "_build_recent_commits_text", lambda cwd: "")
+    monkeypatch.setattr(cm, "_build_pending_tasks_text", lambda beacon, cwd: "")
+    return main
+
+
+def _run_hook(payload: dict, monkeypatch):
+    import io
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    rc = cm.main()
+    return rc, out.getvalue()
+
+
+def test_the_upgrade_itself_does_not_refire_an_already_notified_threshold(
+    repo_project, monkeypatch,
+):
+    """A session already running when this fix lands holds its notified list
+    only in the per-cwd record. If the hook ignored it, the first turn after the
+    upgrade would announce 20 % a second time — the very symptom being fixed."""
+    main = repo_project
+    per_cwd = main / cm.STATE_DIR_REL / "S.json"
+    per_cwd.parent.mkdir(parents=True, exist_ok=True)
+    per_cwd.write_text(
+        json.dumps({"session_id": "S", "notified_thresholds": [20]}),
+        encoding="utf-8",
+    )
+    assert not cm._dedup_path_for("S").exists(), "fixture must start pre-upgrade"
+
+    t = main / "t.jsonl"
+    _write_transcript(t, 230_000)  # 23 % of 1M — past 20, short of 40
+
+    rc, out = _run_hook({"session_id": "S", "transcript_path": str(t)}, monkeypatch)
+
+    assert rc == 0
+    assert not out.strip(), (
+        "the first turn after the upgrade re-announced a threshold the session "
+        f"had already been notified about (output: {out.strip()[:200]})"
+    )
+    _, carried = cm._load_state(cm._dedup_path_for("S"), "S")
+    assert carried == [20], f"the dedup record was not seeded: {carried}"
+
+
+def test_a_genuinely_new_threshold_still_fires_after_the_upgrade(
+    repo_project, monkeypatch,
+):
+    """The seed must not be a blanket "stay quiet" — guards against fixing the
+    re-fire by simply never notifying again."""
+    main = repo_project
+    per_cwd = main / cm.STATE_DIR_REL / "S.json"
+    per_cwd.parent.mkdir(parents=True, exist_ok=True)
+    per_cwd.write_text(
+        json.dumps({"session_id": "S", "notified_thresholds": [20]}),
+        encoding="utf-8",
+    )
+    t = main / "t.jsonl"
+    _write_transcript(t, 430_000)  # 43 % — 40 has NOT been notified yet
+
+    rc, out = _run_hook({"session_id": "S", "transcript_path": str(t)}, monkeypatch)
+
+    assert rc == 0
+    assert out.strip(), "40 % was never announced, so the seed silenced too much"
+
+
+def test_sandboxing_state_dir_contains_every_write(
+    repo_and_worktree, monkeypatch, tmp_path,
+):
+    """A caller that redirects the records must not have one escape into the
+    repository's git directory. Before the fix the dedup base resolved itself,
+    so `state_dir=` looked like a complete sandbox and was not one (AX review of
+    PR #789)."""
+    main, _ = repo_and_worktree
+    monkeypatch.setenv("BEACON_PARENT_PID", str(os.getpid()))
+    monkeypatch.chdir(main)
+    sandbox = tmp_path / "sandbox"
+    legacy = tmp_path / "sandbox" / "legacy.json"
+
+    cm._persist_state("S", [20], context_pct=23,
+                      state_dir=sandbox, legacy_path=legacy)
+
+    escaped = list((main / ".git").rglob("*.json"))
+    assert not escaped, f"a write escaped the sandbox into .git: {escaped}"
+    assert (sandbox / "S.json").is_file()

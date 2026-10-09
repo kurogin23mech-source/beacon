@@ -64,7 +64,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +125,13 @@ Why a directory of ``<session_id>.json`` files and not one shared file:
 ABANDONED_AFTER_DAYS = 7
 """Age after which a sibling record is prunable without a liveness probe.
 
-Only reached where ``_pid_alive`` must not run (Windows). The Stop hook
+Reached whenever the pid probe cannot answer — off POSIX (where it must never
+run), and ALSO on POSIX when a record carries no ``pids`` at all. The Stop hook
 refreshes ``updated_at`` every turn, so this bound sits far from any live
 session (ms-166 / e-6917: before this, pruning returned immediately on
-non-POSIX and the folder grew forever on Windows)."""
+non-POSIX and the folder grew forever on Windows).
+
+The exact rule is ``_record_is_abandoned``; this note explains the number."""
 
 DEDUP_DIR_NAME = "context-usage-dedup"
 """Folder name for the THRESHOLD DEDUP record (ms-166 / e-6917).
@@ -358,6 +361,16 @@ def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
     ``.beacon/``, so find-root returns the worktree itself and the state would
     split again.
 
+    Two other places ask git the same question and this is the third, because
+    this hook must stay importable without ``lib/`` (so it cannot share a
+    helper with them): ``scripts/check-branch-focus-divergence.py``
+    (``is_in_main_project_root``) and ``lib/cmd_milestone.py``
+    (``_is_in_main_project_root``). Those two COMPARE ``--git-dir`` against
+    ``--git-common-dir`` to detect "am I in a worktree"; this one only needs the
+    common dir itself. If git's answer shape ever has to be handled
+    differently, all three are the set to change (maintainability review of
+    PR #789).
+
     Returns ``None`` outside a git repository (or when git is unavailable), and
     the caller then falls back to the per-cwd directory — degraded to today's
     behaviour, never worse.
@@ -480,9 +493,13 @@ def _prune_stale_state_files(
 
     A finished Claude session leaves its record behind (nothing else runs at
     session end). Without pruning the directory grows by one small file per
-    session forever, and the bridge would scan ever more candidates. A record
-    with no ``pids`` (cannot judge) is left alone. Never raises; POSIX only
-    (see ``_pid_alive``).
+    session forever, and the bridge would scan ever more candidates.
+
+    **The rule for "safe to delete" lives in ``_record_is_abandoned`` and is not
+    restated here** — an earlier revision of this docstring kept its own copy
+    ("POSIX only", "no pids is left alone") and the copy went stale the moment
+    the age-based branch landed, which is the drift this wording removes. Never
+    raises.
     """
     try:
         candidates = list(state_dir.glob("*.json"))
@@ -499,6 +516,27 @@ def _prune_stale_state_files(
                 f.unlink()
         except (OSError, ValueError, TypeError):
             continue
+
+
+def _all_recorded_pids_are_dead(pids: List[Any]) -> bool:
+    """Are ALL of a record's processes gone? ``False`` where we cannot ask.
+
+    The literal ``os.name`` gate below is BOTH the real safety invariant and the
+    shape ``scripts/check-pid-liveness.py`` recognises (ms-133 / e-6591): that
+    guard walks the syntax tree for ``if os.name != "posix": return`` in every
+    function that calls ``_pid_alive``, because ``os.kill(pid, 0)`` TERMINATES
+    the target on Windows CPython. Keeping the probe inside this one gated
+    function is what lets the branch selection in ``_record_is_abandoned`` be a
+    parameter without ever putting the probe behind a parameter.
+
+    Answering ``False`` off POSIX means "not judged dead", so the caller falls
+    through to the age-based rule rather than deleting a record it cannot read.
+    """
+    if os.name != "posix":
+        return False
+    return not any(
+        _pid_alive(int(pid)) for pid in pids if isinstance(pid, int) and pid > 0
+    )
 
 
 def _record_is_abandoned(
@@ -530,9 +568,7 @@ def _record_is_abandoned(
     on_posix = (os.name == "posix") if posix is None else posix
     pids = data.get("pids")
     if on_posix and isinstance(pids, list) and pids:
-        return not any(
-            _pid_alive(int(pid)) for pid in pids if isinstance(pid, int) and pid > 0
-        )
+        return _all_recorded_pids_are_dead(pids)
     raw = data.get("updated_at")
     if not isinstance(raw, str) or not raw:
         return False
@@ -554,14 +590,25 @@ def _persist_state(
     legacy_path: Optional[Path] = None,
     dedup_dir: Optional[Path] = None,
 ) -> None:
-    """Write this session's own record (canonical) + the legacy shared file.
+    """Write all THREE of this session's records. Never raises.
 
-    Canonical: ``STATE_DIR_REL/<session_id>.json`` with the identity fields
-    the bridge matches on and ``updated_at`` for its tie-break. Legacy:
-    ``STATE_FILE_REL`` (per-cwd, last-writer-wins) is still written so a
-    bridge that predates e-6588 keeps a badge; it is NOT read back here, so
-    its last-writer-wins shape can no longer reset anyone's dedup state.
-    Stale sibling records are pruned on the way. Never raises.
+    1. **per-cwd** ``STATE_DIR_REL/<session_id>.json`` — the bridge's input:
+       identity fields it matches on plus ``updated_at`` for its tie-break.
+    2. **dedup** ``_dedup_path_for(...)`` — the threshold fact, under a base
+       shared by every worktree of this repository (ms-166 / e-6917). Skipped
+       when it resolves to the same path as (1), which is what happens outside
+       a git repository and whenever a caller sandboxes the writes (below).
+    3. **legacy** ``STATE_FILE_REL`` (per-cwd, last-writer-wins) — still
+       written so a bridge predating e-6588 keeps a badge; NOT read back here,
+       so its last-writer-wins shape can no longer reset anyone's dedup state.
+
+    Stale sibling records are pruned in (1) and (2) on the way.
+
+    Sandboxing: passing ``state_dir`` alone is enough to contain every write —
+    ``dedup_dir`` falls back to ``state_dir`` rather than resolving itself, so a
+    caller cannot half-override the sandbox and have one write escape into the
+    repository's git directory. Pass ``dedup_dir`` explicitly only to aim the
+    two somewhere different on purpose.
     """
     own = _state_path_for(session_id, state_dir)
     extra = _identity_fields()
@@ -574,7 +621,12 @@ def _persist_state(
     # by every worktree of this repository. Written even when it resolves to
     # the same path as ``own`` (no git) — then this is simply a second write of
     # the same bytes, not a behaviour change.
-    dedup = _dedup_path_for(session_id, dedup_dir)
+    # A caller that sandboxed (1) sandboxes (2) too unless it says otherwise:
+    # resolving the dedup base independently here would let a write escape a
+    # sandbox that looked complete at the call site (AX review of PR #789).
+    dedup = _dedup_path_for(
+        session_id, dedup_dir if dedup_dir is not None else state_dir
+    )
     if dedup != own:
         _save_state(dedup, session_id, notified, context_pct=context_pct,
                     context_used=context_used, context_limit=context_limit,
