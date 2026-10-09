@@ -38,6 +38,17 @@ sides to stay in step.
                                      to one surface and silently forgotten on
                                      the other.
 
+  6. ``collect_audit_contract_drift`` — 終端遷移の **監査契約** が宣伝面に
+                                     届いているかの導出チェック (ms-166 e-6912)。
+                                     e-6893 は「終端遷移は理由を運ぶ」を押印層の
+                                     性質にしたが、強制層に入れただけでは README /
+                                     help レジストリ / python パーサは何も言わない。
+                                     実測で README 9 行・help 9 行・パーサ 3 動詞が
+                                     旗を伝えておらず、`task done --acknowledge` は
+                                     Windows / pipx で unrecognized arguments だった。
+                                     母集団は curated ではなく **パーサが
+                                     ``--acknowledge`` を受ける動詞** から導出する。
+
 Apart from that curated set, the checker deliberately ignores positional
 arg shape and general flag spelling — a blanket flag diff is too noisy, and
 the dispatcher itself enforces ``--flag`` parsing. The drift these catch is
@@ -290,7 +301,11 @@ ALLOW_MISSING_FROM_README: set[str] = {
     "member remove",
     "member role",
     "pr show",          # discoverable via `beacon pr add` workflow
-    "task cancel",      # subsumed by `task update --status cancelled`
+    # ms-166 e-6912: `task cancel` の免除を外した。免除の理由は「`task update
+    # --status cancelled` に包含される」だったが、e-6893 でその経路 (属性 patch で
+    # 終端 status を書く) を **拒否** にしたので、`task cancel` が唯一の取消経路に
+    # なった。理由が死んだのに免除だけ残ると、唯一の経路が README に出ないまま
+    # 緑で通る —— 免除リストが腐る典型。README に行を足したのでここから外す。
     "auth login",       # documented in Cloud Mode / INSTALL.md
     "auth logout",
     "auth status",
@@ -1839,6 +1854,178 @@ def collect_requires_drift(bin_path: Path = BIN_BEACON) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# ms-166 e-6912: 監査契約が「宣伝面」に届いているかを見る
+#
+# e-6893 は「終端遷移は監査エントリ (理由) を運ぶ」を押印層の性質にした。だが規則を
+# **強制する層** に入れただけでは、利用者に伝わる 3 つの宣伝面 (README / help
+# レジストリ / python パーサ) は何も言わない。実測すると、README で 9 行・help
+# レジストリで 9 行・python パーサで 3 動詞が監査の旗を伝えておらず、`beacon task done
+# --acknowledge` は Windows / pipx では argparse の unrecognized arguments になっていた。
+#
+# つまり「配線はあるのに実際には動かない」の宣伝面版。独立レビューは README の欠落を
+# 手で 1 件見つけたが、機械で数えたら 6 件だった —— **手で数えた母集団は毎回ずれる**。
+#
+# 母集団の導出: **python パーサが `--acknowledge` を受ける動詞**。この codebase で
+# `--acknowledge` は監査の免除にしか使われないので、受ける = 監査契約の下に在る。
+# その前提自体が崩れたら黙って通さないよう、`--acknowledge` を持つのに `--reason` を
+# 持たない動詞 (= 監査以外の用途で付いた疑い) を別枠で報告する。
+# ---------------------------------------------------------------------------
+
+#: union パーサで 1 つの leaf に複数 verb が畳まれている動詞。bash は verb ごとに
+#: 別関数へ割るので、leaf 単位の旗集合を bash と直接比べられない (apples-to-oranges)。
+#: README / help レジストリ側の検査は通常どおり効く。
+AUDIT_UNION_PARSER_VERBS: set = {
+    "opportunity activity",   # bash: cmd_opportunity_activity{,_done,_cancel,_update}
+    "opportunity contract",   # bash: cmd_opportunity_contract_{add,sign,list,cancel}
+}
+
+#: 監査の旗を受けるが README / help に独立の行を持たない動詞と、その理由。
+AUDIT_SURFACE_EXEMPT: dict = {
+    "acquisition cancel": "`acquisition delete` の別名。delete 行が 'aliases: cancel, rm' として併記する。",
+    "acquisition rm": "同上 (`acquisition delete` の別名)。",
+    "acquisition status": "下位の汎用形。利用者向けには意図動詞 `acquisition start` / `done` が行を持つ。",
+    "opportunity contract": (
+        "union パーサが `--acknowledge` を受理するのは **免除を提供するためではなく、"
+        "verb ごとに明示的に断るため** (`_allowed_flags` のどの verb もこの旗を許可しない)。"
+        "つまりこの動詞に監査の免除経路は無く、終端 verb である `contract cancel` は "
+        "`--reason` 必須として README / help に行を持つ。母集団の導出 "
+        "(= 旗を受理する動詞) がここだけ実態とずれるので免除する。"
+        "**免除が有効なのは「断り続けている」間だけ** — 実際に免除経路を足したら "
+        "tests/test_audit_contract_surfaces_e6912.py の "
+        "test_contract_cancel_refuses_the_acknowledge_waiver が赤くなり、"
+        "README / help を直す必要が出る。"),
+}
+
+
+def _audit_parser():
+    """``build_parser()`` を読む (読めなければ ``None``)。判定を落とさず諦める。"""
+    try:
+        return _load_dispatch_parser()
+    except Exception as e:  # pragma: no cover - import-environment guard
+        print(f"[cli-drift] WARN: could not load dispatch parser ({e})",
+              file=sys.stderr)
+        return None
+
+
+def _audit_leaf_flags(parser=None) -> dict:
+    """python パーサの leaf ごとの旗集合 ``{("task","done"): {"--reason", ...}}``。"""
+    if parser is None:
+        parser = _audit_parser()
+    if parser is None:
+        return {}
+    out: dict = {}
+
+    def walk(node, path):
+        subs = [a for a in node._actions
+                if isinstance(a, argparse._SubParsersAction)]
+        if not subs:
+            out[tuple(path)] = {s for a in node._actions for s in a.option_strings}
+            return
+        for a in subs:
+            for name, sp in a.choices.items():
+                walk(sp, path + [name])
+
+    walk(parser, [])
+    return out
+
+
+def _readme_rows(readme_path: Path) -> list:
+    r"""README の CLI 表から、行頭のバッククォート区間 (= コマンド綴り) を拾う。
+
+    セルを ``|`` で split してはならない —— 表の中の ``\|`` エスケープ
+    (``self\|counterpart`` や ``(--reason <text> \| --acknowledge)``) で分割位置が
+    ずれ、旗が別フィールドに落ちて **旗があるのに「無い」と誤判定する** (実測で
+    6 行を取りこぼした)。
+    """
+    rows = []
+    for line in readme_path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\|\s*`([^`]+)`\s*\|", line)
+        if m:
+            rows.append(m.group(1))
+    return rows
+
+
+def collect_audit_contract_drift(
+    bin_path: Path = BIN_BEACON,
+    commands_path: Path = COMMANDS_PY,
+    readme_path: Path = README,
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+) -> dict:
+    """監査の旗 (``--reason`` / ``--acknowledge``) が 4 面で揃っているかを見る。
+
+    Returns:
+        ``{ok, missing_from_readme, missing_from_help, missing_from_bash,
+        suspicious_acknowledge, stale_exempt}``
+    """
+    parser = _audit_parser()
+    leaves = _audit_leaf_flags(parser)
+    if not leaves:
+        # パーサを読めない環境 (= python フロント不在) では判定しない。
+        return {"ok": True, "missing_from_readme": [], "missing_from_help": [],
+                "missing_from_bash": [], "suspicious_acknowledge": [],
+                "stale_exempt": []}
+
+    # 別名表は正準名詞も自分自身へ写す ({"acquisition": "acquisition"}) ので、
+    # キー集合で弾くと **全動詞を飛ばして偽の緑になる** (実測で踏んだ)。
+    # 「別名である」= 写し先が自分自身でないこと。
+    _alias_map = _noun_alias_map(parser) or {}
+    alias_nouns = {k for k, v in _alias_map.items() if k != v}
+    readme_rows = _readme_rows(readme_path)
+    registry = {e["command"]: e.get("flags", []) or []
+                for e in _registry_entries(commands_path)}
+    bin_text = bin_path.read_text(encoding="utf-8") if bin_path.exists() else ""
+    lib_dir = bin_path.parent / "lib"
+    bash_text = bin_text + "".join(
+        f.read_text(encoding="utf-8") for f in sorted(lib_dir.glob("cmd_*.sh"))
+    ) if lib_dir.is_dir() else bin_text
+
+    missing_readme: list = []
+    missing_help: list = []
+    missing_bash: list = []
+    suspicious: list = []
+    seen: set = set()
+
+    for path, opts in sorted(leaves.items()):
+        if not path or "--acknowledge" not in opts:
+            continue
+        # 短縮名詞 (acc / opp / ms …) は正準名詞の別名なので 1 度だけ見る。
+        if path[0] in alias_nouns:
+            continue
+        verb = " ".join(path)
+        if "--reason" not in opts:
+            suspicious.append(verb)
+            continue
+        seen.add(verb)
+        if verb in AUDIT_SURFACE_EXEMPT:
+            continue
+        spelled = "beacon " + verb
+        rows = [r for r in readme_rows
+                if r == spelled or r.startswith(spelled + " ")]
+        if not rows or not any("--acknowledge" in r for r in rows):
+            missing_readme.append(verb)
+        reg = [c for c in registry if c == spelled or c.startswith(spelled + " ")]
+        if not reg or not any("--acknowledge" in f
+                              for c in reg for f in registry[c]):
+            missing_help.append(verb)
+        if verb not in AUDIT_UNION_PARSER_VERBS:
+            fn = "cmd_" + "_".join(p.replace("-", "_") for p in path)
+            body = _bash_function_body(fn, bash_text)
+            if body is not None and "--acknowledge)" not in body:
+                missing_bash.append(verb)
+
+    stale = sorted(set(AUDIT_SURFACE_EXEMPT) - seen)
+    return {
+        "ok": not (missing_readme or missing_help or missing_bash
+                   or suspicious or stale),
+        "missing_from_readme": sorted(missing_readme),
+        "missing_from_help": sorted(missing_help),
+        "missing_from_bash": sorted(missing_bash),
+        "suspicious_acknowledge": sorted(suspicious),
+        "stale_exempt": stale,
+    }
+
+
 def collect_drift(
     bin_path: Path = BIN_BEACON,
     commands_path: Path = COMMANDS_PY,
@@ -1895,6 +2082,10 @@ def collect_drift(
     # ms-133 e-6611: registry-advertised flags vs what any front accepts.
     help_flag_drift = collect_help_flag_drift(bin_path, commands_path)
 
+    # ms-166 e-6912: 監査契約 (--reason / --acknowledge) が 4 面で揃っているか。
+    audit_drift = collect_audit_contract_drift(
+        bin_path, commands_path, readme_path, python_dispatch_path)
+
     report = {
         "ok": not (
             bin_missing
@@ -1906,6 +2097,7 @@ def collect_drift(
             or not hand_drift["ok"]
             or not requires_drift["ok"]
             or not help_flag_drift["ok"]
+            or not audit_drift["ok"]
         ),
         "missing_requires_fn": requires_drift["missing_requires_fn"],
         "missing_requires_var": requires_drift["missing_requires_var"],
@@ -1939,6 +2131,12 @@ def collect_drift(
         "ghost_flags": help_flag_drift["ghost_flags"],
         "ghost_flag_unresolved": help_flag_drift["unresolved"],
         "stale_advertised_flag_allowlist": help_flag_drift["stale_allowlist"],
+        # ms-166 e-6912 surface (監査契約が宣伝面に届いているか):
+        "audit_missing_from_readme": audit_drift["missing_from_readme"],
+        "audit_missing_from_help": audit_drift["missing_from_help"],
+        "audit_missing_from_bash": audit_drift["missing_from_bash"],
+        "audit_suspicious_acknowledge": audit_drift["suspicious_acknowledge"],
+        "audit_stale_exempt": audit_drift["stale_exempt"],
     }
     return report
 
@@ -1947,7 +2145,9 @@ def _format_text(report: dict) -> str:
     if report["ok"]:
         return (
             "[cli-drift] OK: bin/beacon, cmd_help_json, README CLI tables, "
-            "bash↔Python dispatch, and required flag parity are aligned.\n"
+            "bash↔Python dispatch, required flag parity, and the "
+            "terminal-transition audit contract (--reason / --acknowledge) "
+            "are aligned.\n"
         )
     lines = ["[cli-drift] Drift detected between CLI source-of-truth surfaces:", ""]
     if report["missing_from_bin_help"]:
@@ -2062,6 +2262,38 @@ def _format_text(report: dict) -> str:
             lines.append(f"      {v}")
         lines.append("    -> the drift it covered is fixed; delete the line. Leaving it in place")
         lines.append("       would silently swallow the next regression on that same flag.")
+    if report.get("audit_missing_from_readme"):
+        lines.append("  - 終端遷移の監査の旗を README が伝えていない動詞:")
+        for v in report["audit_missing_from_readme"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> その動詞は --reason か --acknowledge が無いと拒否される。README が")
+        lines.append("       黙っていると、読んだ人は旗なしで呼んで弾かれる。該当行に")
+        lines.append("       `(--reason <text> \\| --acknowledge)` を足すこと (行が無いなら足す)。")
+    if report.get("audit_missing_from_help"):
+        lines.append("  - 終端遷移の監査の旗を help レジストリが伝えていない動詞:")
+        for v in report["audit_missing_from_help"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> `beacon help --json` を読む AI が旗なしで呼んで弾かれる。")
+        lines.append("       lib/commands.py:_help_registry の該当行の `flags` に足すこと。")
+    if report.get("audit_missing_from_bash"):
+        lines.append("  - bash フロントが --acknowledge を受けない (python だけ受ける) 動詞:")
+        for v in report["audit_missing_from_bash"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> 関門は 1 つ (terminal_gate) なのに旗の入口が片側に無い状態。")
+        lines.append("       bin/lib/cmd_*.sh の arg ループに `--acknowledge)` を足すこと。")
+    if report.get("audit_suspicious_acknowledge"):
+        lines.append("  - --acknowledge を受けるのに --reason を受けない動詞:")
+        for v in report["audit_suspicious_acknowledge"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> この検査は「--acknowledge は監査の免除にしか使わない」を前提に")
+        lines.append("       母集団を導出している。別用途で付けたなら前提が崩れるので、")
+        lines.append("       検査の母集団の決め方ごと見直すこと (黙って通さない)。")
+    if report.get("audit_stale_exempt"):
+        lines.append("  - AUDIT_SURFACE_EXEMPT に実在しない動詞が残っている:")
+        for v in report["audit_stale_exempt"]:
+            lines.append(f"      {v}")
+        lines.append("    -> rename か削除で動詞が消えた。免除を消すこと (残すと、同名の")
+        lines.append("       動詞が将来足されたときに検査を黙って素通りさせる)。")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
     lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")

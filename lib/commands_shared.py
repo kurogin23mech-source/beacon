@@ -38,6 +38,7 @@ from store import get_store
 import core
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 import occupation  # ms-108 e-3269: 職種 ⊃ target-class 包含ゲート (_gate_target_class)
+import terminal_gate as _terminal_gate  # ms-166 e-6893: 終端遷移の監査エントリ関門
 import transition_approval as _ta  # ms-127 e-4849 (milestone split)
 import idempotency as _idem
 
@@ -225,16 +226,21 @@ def _append_changelog(op: dict) -> None:
         pass  # changelog is best-effort; never block operations
 
 
-_ACKNOWLEDGED_REASON = "(acknowledged: no detailed reason given)"
+#: Re-export so existing readers of ``commands_shared._ACKNOWLEDGED_REASON`` keep
+#: working. The sentinel is DECLARED in ``terminal_gate`` (ms-166 e-6893) because
+#: the gate itself moved down to the stamping layer and the sentinel is the value
+#: that gate produces — two declarations of the same string would let the CLI's
+#: waiver text drift from what lands in ``meta.done_reason``.
+_ACKNOWLEDGED_REASON = _terminal_gate.ACKNOWLEDGED_REASON
 
 
 def _require_reason_or_skip(verb: str) -> str:
-    """Gate state-transition / destructive verbs on an unambiguous audit entry.
+    """CLI adapter over ``terminal_gate.require_audit`` — env in, exit 1 out.
 
     ms-120 e-3906 (option B): the old design accepted ``--reason ""`` as a
     silent waiver, but an empty string is ambiguous at read time (deliberate
     waiver vs. an AI padding the flag to pass the gate) — and a warning never
-    stops an AI that reads exit 0 as success. So the gate now admits exactly two
+    stops an AI that reads exit 0 as success. So the gate admits exactly two
     unambiguous states, and rejects the ambiguous empty:
 
     - Non-empty ``BEACON_REASON`` (``--reason "..."``) → accept, return it.
@@ -243,6 +249,19 @@ def _require_reason_or_skip(verb: str) -> str:
       from an empty string.
     - Neither, or an empty ``BEACON_REASON`` → refuse with exit 1 and a
       recoverable message (原則 3) naming both valid paths.
+    - BOTH (``--reason "..." --acknowledge``) → refuse (ms-166 e-6895). The old
+      implementation read ``BEACON_ACKNOWLEDGE`` FIRST, so passing both threw the
+      written reason away unread and recorded only the waiver boilerplate, with
+      exit code 0 — the writer could not tell. An AI pads both flags "to be
+      safe", so this was easy to hit.
+
+    THIS FUNCTION NO LONGER OWNS THE RULE (ms-166 e-6893). It reads the env form
+    the bash frontend passes and turns a refusal into ``exit 1``; the rule lives
+    in ``terminal_gate.require_audit``, which the stamping layer
+    (``work_model.mark_done`` / ``work_base.stamp_cancel``) also calls. That is
+    why a handler calling this and a handler forgetting to now obey the same
+    requirement: the second one raises from the stamp instead of silently writing
+    a terminal state with an empty ``why``.
 
     Args:
         verb: Human-facing verb for the error message (e.g. ``"task done"``).
@@ -250,19 +269,11 @@ def _require_reason_or_skip(verb: str) -> str:
     Returns:
         The reason string, or the acknowledgment sentinel.
     """
-    if os.environ.get("BEACON_ACKNOWLEDGE") == "1":
-        return _ACKNOWLEDGED_REASON
-    reason = os.environ.get("BEACON_REASON", "")
-    if reason.strip():
-        return reason
-    print(
-        f"Error: `{verb}` requires an audit entry. Pass --reason \"...\" to "
-        f"record why, or --acknowledge to deliberately proceed without a "
-        f"written reason. An empty --reason \"\" is no longer accepted "
-        f"(it was ambiguous — use --acknowledge to waive on purpose).",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+    try:
+        return _terminal_gate.require_audit_from_env(verb)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 # ms-81 e-1916: forcing function — warn (don't block) when a write targets

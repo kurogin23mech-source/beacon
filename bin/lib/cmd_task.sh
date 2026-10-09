@@ -209,20 +209,25 @@ cmd_task_cancel() {
     ensure_project
     local entry_id=""
     local reason=""
+    local acknowledge=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; shift 2 ;;
+            # ms-166 e-6893: cancel も終端遷移なので監査エントリが要る。理由を
+            # 意図して省く明示経路 (task done / milestone done と同じ 2 択)。
+            --acknowledge) acknowledge="1"; shift ;;
             -?*)           _guard_flag "$1" ;;
             *)           entry_id="$1";  shift   ;;
         esac
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task cancel <entry-id> [--reason <text>]"
+        echo "Usage: beacon task cancel <entry-id> (--reason <text> | --acknowledge)"
         exit 1
     fi
     BEACON_ENTRY_ID="$entry_id" BEACON_REASON="$reason" \
+        BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" task_cancel
 }
 

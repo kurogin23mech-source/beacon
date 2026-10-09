@@ -144,7 +144,7 @@ def test_phantom_done_no_commits_emits_warning():
             ],
         },
     ])
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-100/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-100/done?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "done"
@@ -174,7 +174,7 @@ def test_e710_style_phantom_done_flagged():
             ],
         },
     ])
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-710/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-710/done?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "done"
@@ -201,7 +201,7 @@ def test_e2567_style_drift_flagged():
             ],
         },
     ])
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-2567/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-2567/done?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     assert "phantom_done_warning" in r.json()
 
@@ -224,7 +224,7 @@ def test_id_referenced_commit_suppresses_warning():
             ],
         },
     ])
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-200/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-200/done?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "done"
@@ -252,7 +252,7 @@ def test_keyword_overlap_commit_suppresses_warning():
             ],
         },
     ])
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-300/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-300/done?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     assert "phantom_done_warning" not in r.json()
 
@@ -271,7 +271,7 @@ def test_empty_description_does_not_warn():
             ],
         },
     ])
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-400/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-400/done?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     assert "phantom_done_warning" not in r.json()
 
@@ -315,7 +315,7 @@ def test_warning_emitted_to_audit_logger():
         },
     ])
     try:
-        r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-500/done")
+        r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-500/done?reason=AC を照合して完了と判断")
     finally:
         audit_logger.removeHandler(handler)
 
@@ -343,7 +343,7 @@ def test_gate_env_disable():
     old = os.environ.get("BEACON_PHANTOM_DONE_GATE")
     os.environ["BEACON_PHANTOM_DONE_GATE"] = "0"
     try:
-        r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-600/done")
+        r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-600/done?reason=AC を照合して完了と判断")
     finally:
         if old is None:
             os.environ.pop("BEACON_PHANTOM_DONE_GATE", None)
@@ -367,7 +367,7 @@ def test_done_still_succeeds_even_when_flagged():
             ],
         },
     ])
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-700/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-700/done?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "done"

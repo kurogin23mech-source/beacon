@@ -1849,7 +1849,9 @@ def find_target_entry(data: dict, entry_id: str):
 
 def set_entry_state(data: dict, entry_id: str, status: str, *,
                     at: str = "", actor: str = "",
-                    reason: str = "", outcome: str = "") -> tuple[dict, dict]:
+                    reason: str = "", outcome: str = "",
+                    acknowledge: bool = False,
+                    verb: str = "done") -> tuple[dict, dict]:
     """Transition a work-item's lifecycle state, profession-generically (ms-143,
     設計判断 b 系統3 = 状態変更). ``done`` routes through ``work_model.mark_done``
     (canonical ``status`` / ``done_at`` + ``done_by`` / ``done_reason`` completion
@@ -1859,7 +1861,10 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
     ``reason`` / ``outcome`` (ms-166 e-6600) ride through to ``mark_done``
     unchanged: WHY the transition, and WHAT CAME OF the work. Both professions'
     done verbs pass them here, so neither the vocabulary nor the audit rule
-    forks per occupation.
+    forks per occupation. ``acknowledge`` (ms-166 e-6893) rides through the same
+    way — the audit gate itself lives in ``mark_done``, so a ``done`` with
+    neither a reason nor an acknowledgement raises here rather than writing a
+    terminal state with an empty ``why``.
 
     ``cancelled`` is a legitimate terminal state but carries its own audit stamp
     (``work_base.stamp_cancel`` via each occupation's cancel verb), so it is
@@ -1878,7 +1883,8 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
         raise ValueError(f"Entry not found: {entry_id}")
     target, _arm_list, entry, _idx = hit
     if status == _wm.DONE_STATUS:
-        _wm.mark_done(entry, at=at, actor=actor, reason=reason, outcome=outcome)
+        _wm.mark_done(entry, at=at, actor=actor, reason=reason, outcome=outcome,
+                      acknowledge=acknowledge, verb=verb)
     elif status == _wm.TODO_STATUS:
         entry["status"] = status
     else:

@@ -123,6 +123,8 @@ def test_philosophy_binds_when_descriptor_target_has_spec(proj, monkeypatch, cap
     _clear(monkeypatch)
     monkeypatch.setenv("BEACON_TARGET_CLASS", "contract")
     monkeypatch.setenv("BEACON_TARGET_ID", tid)
+    # ms-166 e-6893: close は終端遷移なので監査エントリが要る。
+    monkeypatch.setenv("BEACON_REASON", "closed")
     commands.cmd_target_close()
     t = _triggers(proj)[f"review-due-{tid}.json"]
     assert review_spine.REVIEW_PHILOSOPHY in t["bindings"]

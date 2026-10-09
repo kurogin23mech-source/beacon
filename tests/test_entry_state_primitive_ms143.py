@@ -112,7 +112,7 @@ def test_set_done_stamps_completion_attribution_dev():
 def test_set_done_sales_activity_same_stamp():
     data = _sales()
     _target, act = occupation.set_entry_state(
-        data, "act-1", "done", at=FIXED_TS, actor=ACTOR)
+        data, "act-1", "done", at=FIXED_TS, actor=ACTOR, reason="t")
     assert act["status"] == work_model.DONE_STATUS
     assert act["done_at"] == FIXED_TS
     assert act["meta"]["done_by"] == ACTOR
@@ -121,14 +121,14 @@ def test_set_done_sales_activity_same_stamp():
 def test_set_todo_is_plain_status_set():
     data = _dev()
     # first complete, then reopen to todo — todo must NOT carry a done stamp
-    occupation.set_entry_state(data, "e-1", "done", actor=ACTOR)
+    occupation.set_entry_state(data, "e-1", "done", actor=ACTOR, reason="t")
     _t, entry = occupation.set_entry_state(data, "e-1", "todo")
     assert entry["status"] == work_model.TODO_STATUS
 
 
 def test_set_nested_subtask_done():
     data = _dev()
-    _t, entry = occupation.set_entry_state(data, "e-3", "done", actor=ACTOR)
+    _t, entry = occupation.set_entry_state(data, "e-3", "done", actor=ACTOR, reason="t")
     assert entry["status"] == work_model.DONE_STATUS
     assert data["milestones"][0]["entries"][1]["entries"][0]["status"] == "done"
 

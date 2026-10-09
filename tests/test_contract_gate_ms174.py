@@ -125,7 +125,7 @@ def test_contract_cancel_drops_from_live_list_but_kept_with_all():
 def test_contract_sign_refuses_cancelled():
     data, opp = _fresh()
     ctr = se.contract_add(data, opp, "覚書", gating=True)
-    se.contract_cancel(data, ctr)
+    se.contract_cancel(data, ctr, reason="t")
     with pytest.raises(ValueError):
         se.contract_sign(data, ctr)
 
@@ -161,7 +161,7 @@ def test_predicate_false_after_cancelling_the_gating_signed():
     data, opp = _fresh()
     ctr = se.contract_add(data, opp, "覚書", gating=True)
     se.contract_sign(data, ctr, signed_date="2026-09-14")
-    se.contract_cancel(data, ctr)
+    se.contract_cancel(data, ctr, reason="t")
     assert se.has_gating_signed_contract(data, opp) is False
 
 
@@ -258,7 +258,7 @@ def test_projection_surfaces_contracts_summary_not_as_work_items():
 
 def test_projection_contracts_excludes_cancelled():
     data, opp = _fresh()
-    se.contract_cancel(data, se.contract_add(data, opp, "誤覚書", gating=True))
+    se.contract_cancel(data, se.contract_add(data, opp, "誤覚書", gating=True), reason="t")
     row = next(t for t in se.project_targets(data) if t["id"] == opp)
     assert row["detail"]["contracts"] == {"total": 0, "signed": 0, "gating_signed": False}
 
@@ -307,7 +307,7 @@ def test_live_contracts_helper_is_the_one_filter():
     """live_contracts(opp) と contracts_of(data, id) が同じ「live」定義を返す。"""
     data, opp = _fresh()
     se.contract_add(data, opp, "覚書", gating=True)
-    se.contract_cancel(data, se.contract_add(data, opp, "誤", gating=False))
+    se.contract_cancel(data, se.contract_add(data, opp, "誤", gating=False), reason="t")
     o = se.find_opportunity(data, opp)
     assert [c["id"] for c in se.live_contracts(o)] == [c["id"] for c in se.contracts_of(data, opp)]
     assert len(se.live_contracts(o)) == 1  # cancelled 除外

@@ -216,9 +216,9 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon milestone list [--json] [--all] [--ms <id>]` | List milestones / 一覧 |
 | `beacon milestone start <id>` | Activate + auto-create `ms-XX-<slug>` branch + self-add as assignee (use `--no-branch` / `--no-assignee` to opt out) / アクティブ化＋ブランチ自動作成＋自己 assignee 登録 |
 | `beacon milestone join <id> [--checkout]` | Add self as assignee (and optionally switch branch) / 他の MS に参加 |
-| `beacon milestone done <id>` | Mark as done / 完了 |
-| `beacon milestone close <id>` | Close milestone / クローズ |
-| `beacon milestone observe <id>` | Set to observing / 監視中に設定 |
+| `beacon milestone done <id> (--reason <text> \| --acknowledge)` | Mark as done — terminal, needs an audit entry / 完了 (終端遷移なので監査に --reason か --acknowledge が要る) |
+| `beacon milestone close <id> (--reason <text> \| --acknowledge)` | Close milestone (alias of done) / クローズ (done の別名, 監査の旗が要る) |
+| `beacon milestone observe <id> (--reason <text> \| --acknowledge)` | Set to observing — terminal for the active phase, needs an audit entry / 監視中に設定 (監査に --reason か --acknowledge が要る) |
 | `beacon milestone wait <id> --reason "..."` | Pause an active/observing milestone (ms-81) / 一時中断（waiting に遷移） |
 | `beacon milestone release <id>` | Release occupation claim without changing status (ms-81) / 専有解除（active のまま） |
 | `beacon milestone occupations [--ms <id>] [--json]` | List occupation event log (ms-81) / 専有イベント履歴一覧 |
@@ -243,7 +243,7 @@ A human-approval gate for a **completion** transition — a milestone reaching d
 | `beacon target approve <entry-id> [--rationale <text>]` | Approve (= executes the transition) / 承認（遷移実行） |
 | `beacon target reject <entry-id> [--rationale <text>]` | Reject (= transition does NOT execute) / 却下（遷移せず） |
 | `beacon target list [--target <id>] [--pending] [--json]` | List pending completion-approval requests / 承認依頼一覧 |
-| `beacon milestone done <id> --review` | Route completion through the review gate / 完了をレビュー経由に |
+| `beacon milestone done <id> (--reason <text> \| --acknowledge) --review` | Route completion through the review gate / 完了をレビュー経由に |
 | `beacon review context --type <ax\|philosophy> [--pr <n> \| --diff-ref <base...head>] [--origin-doc <doc-id>] [--mode diff]` | Emit the review-kernel bundle (原典 + mechanical diff) for an independent judge / 独立 judge 用の review-kernel bundle を出力 |
 
 ### Tasks & Entries
@@ -251,7 +251,8 @@ A human-approval gate for a **completion** transition — a milestone reaching d
 | Command | Description |
 |---------|-------------|
 | `beacon task add "desc" [-m ms-id] [-t type] [-d detail]` | Add task to milestone / タスク追加 |
-| `beacon task done <id> [-p progress]` | Mark as done / 完了 |
+| `beacon task done <id> (--reason <text> \| --acknowledge) [-p progress] [--outcome <text>]` | Mark as done — terminal, needs an audit entry / 完了 (終端遷移なので監査に --reason か --acknowledge が要る, --outcome は「何が得られたか」) |
+| `beacon task cancel <id> (--reason <text> \| --acknowledge)` | Cancel a task (取消) — the only path, since `task update --status cancelled` is refused / タスクを取消 (`task update --status cancelled` は拒否されるのでこちらが唯一の経路, ms-166 e-6893) |
 | `beacon task list [-m ms-id] [--json]` | List tasks / 一覧 |
 | `beacon task show <id> [--json]` | Show details / 詳細 |
 | `beacon task detail <id> [text]` | View/update detail / 詳細テキスト表示・更新 |
@@ -277,7 +278,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon account transcript-source set <acc-id> (--type <meet_calendar\|drive_folder\|external\|manual> [--folder-id <id>] [--naming <pattern>] [--tool <name>] \| --clear)` | Declare where a customer's meeting notes come from / 顧客ごとの議事録取得元を宣言（消すには `--clear` 必須） |
 | `beacon disclose <resource-id> --to-project <id>` | Disclose any Target (account/opportunity/…) to another project so its members can reference it (cross-project 開示; generic) / 任意のターゲット（取引先・商談等）を別プロジェクトに開示 |
 | `beacon undisclose <resource-id> --from-project <id>` | Revoke a Target's disclosure to a project (剥奪即時) / ターゲットの開示を取り消し（即時） |
-| `beacon account delete <acc-id> [--force]` | Delete an account (--force orphans referencing opportunities) / 取引先を削除（--force で参照中の商談を孤立化） |
+| `beacon account delete <acc-id> (--reason <text> \| --acknowledge) [--force]` | Delete an account — a terminal transition, so it needs an audit entry (--force orphans referencing opportunities) / 取引先を削除（終端遷移なので監査に --reason か --acknowledge が要る, --force で参照中の商談を孤立化） |
 | `beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self\|counterpart]` | Add a deal / 商談を追加 |
 | `beacon opportunity list [--json]` | List opportunities / 商談を一覧 |
 | `beacon opportunity phase <opp-id> <phase> [--note <text>]` | Move an opportunity to a new phase (recorded in history) / 商談のフェーズを変更（履歴に記録） |
@@ -289,7 +290,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon acquisition add "<title>" [--description <text>] [--assignee <user>]` | Add a 顧客獲得ターゲット (取引先の無い獲得・準備作業の器) / 顧客獲得ターゲットを追加 |
 | `beacon acquisition list [--json]` | List 顧客獲得ターゲット / 顧客獲得ターゲットを一覧 |
 | `beacon acquisition start <acq-id>` | Move a 顧客獲得ターゲット to in_progress / 顧客獲得ターゲットに着手 |
-| `beacon acquisition done <acq-id>` | Mark a 顧客獲得ターゲット done / 顧客獲得ターゲットを完了 |
+| `beacon acquisition done <acq-id> (--reason <text> \| --acknowledge)` | Mark a 顧客獲得ターゲット done — terminal, needs an audit entry / 顧客獲得ターゲットを完了 (終端遷移なので監査に --reason か --acknowledge が要る) |
 | `beacon acquisition delete <acq-id> (--reason <text> \| --acknowledge)` | 打ち切り: soft-cancel a 顧客獲得ターゲット (tombstone; aliases: cancel, rm) / 施策を打ち切り (削除で表す, 監査に --reason か --acknowledge が要る, ms-132) |
 | `beacon acquisition attack-list <acq-id> "<title>" [--phases <a,b,c>] [--json]` | Attach a typed アタックリスト (table-doc) to a 顧客獲得ターゲット / 施策にアタックリストを紐づけ (ms-132) |
 | `beacon acquisition attack-lists <acq-id> [--json]` | List a 顧客獲得ターゲット's アタックリスト with per-phase counts / 施策配下のアタックリスト一覧 (ms-132) |
@@ -306,11 +307,17 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity anchor <opp-id> <work-item-id>` | Bind a meeting or activity (mtg-/act-) as the 発火源 of the open 前進ゲート / 開いた前進ゲートの発火源に面談・活動を結ぶ |
 | `beacon opportunity judge <opp-id> advance\|retry\|terminal [<date\|terminal-phase>] [--note <text>]` | Judge a reached 遷移日 (3-way, human-confirmed) / 到達した遷移日を判定（次へ/やり直し/決着） |
 | `beacon opportunity due [--json]` | List opportunities awaiting a transition judgement / 判定待ち（遷移日 到達・超過）の商談を一覧 |
-| `beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Log an activity on an opportunity / 商談に活動を記録 |
-| `beacon opportunity delete <opp-id>` | Delete an opportunity and its activities / 商談と活動を削除 |
+| `beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Log an activity on an opportunity (the add form takes no audit flag — it is not a terminal transition and rejects one) / 商談に活動を記録 (追加形は終端遷移ではないので監査の旗を取らず、渡すと拒否する) |
+| `beacon opportunity activity done <act-id> (--reason <text> \| --acknowledge) [--outcome <text>]` | Finish one activity — terminal, needs an audit entry / 活動を完了 (終端遷移なので監査に --reason か --acknowledge が要る) |
+| `beacon opportunity activity cancel <act-id> (--reason <text> \| --acknowledge) [--outcome <text>]` | Cancel one activity — terminal, needs an audit entry / 活動を取消 (終端遷移なので監査に --reason か --acknowledge が要る) |
+| `beacon opportunity contract add <opp-id> "<desc>" [--gating] [--ref <url>]` | Attach a contract (契約) to an opportunity; --gating marks it a prerequisite for 成約 (本契約: 覚書/業務委託/法人契約), omitted = not a prerequisite (NDA 等) / 商談に契約を紐づけ (--gating で成約の前提にする, ms-174) |
+| `beacon opportunity contract sign <ctr-id> [--date <YYYY-MM-DD>] [--ref <url>]` | Record a contract as signed (締結) / 契約の締結を記録 (ms-174) |
+| `beacon opportunity contract list <opp-id> [--all] [--json]` | List an opportunity's contracts / 商談配下の契約を一覧 (ms-174) |
+| `beacon opportunity contract cancel <ctr-id> [--reason <text>]` | Cancel a contract; the reason goes in --reason (this verb has no --acknowledge path, unlike the other terminal verbs) / 契約を取消 (理由は --reason で渡す。この動詞だけ --acknowledge の経路が無く、他の終端動詞と非対称) |
+| `beacon opportunity delete <opp-id> (--reason <text> \| --acknowledge)` | Delete an opportunity and its activities — terminal, needs an audit entry / 商談と活動を削除 (終端遷移なので監査に --reason か --acknowledge が要る) |
 | `beacon communication add <opp-\|acc-\|act-\|nrt-id> "<summary>" --direction inbound\|outbound [--channel <free-text: email/slack/messenger/line/in-person/…>] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]` | Record a communication (証跡・事後記録型 = 営業の Commit); act-/nrt- links the activity/nurturing it fulfilled; channel is free-text for off-pipeline media (Messenger 等) / 商談・顧客・活動・ナーチャリングにやり取りの証跡を記録 |
 | `beacon communication list <opp-\|acc-\|act-\|nrt-id> [--json]` | List communications (証跡) + derived ball; act-/nrt- lists only that work item's / やり取りの証跡一覧とボール導出 |
-| `beacon communication cancel <comm-id> [--reason <text>]` | Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch / 誤記録の証跡を取消（物理削除でなく status=cancelled、履歴に残す） |
+| `beacon communication cancel <comm-id> (--reason <text> \| --acknowledge)` | Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch / 誤記録の証跡を取消（物理削除でなく status=cancelled、履歴に残す） |
 | `beacon communication retarget <comm-id> <new opp-\|acc-\|act-\|nrt->` | Re-file a communication filed under the wrong work item (moves it; the evidence is unchanged) / 誤った活動に付けた証跡を正しい活動へ付け替える |
 | `beacon sales identity add <label> --email <address>` | Register/update a send-from mail account in the ledger / 送信元メールアカウントを台帳に登録・更新（label が冪等キー） |
 | `beacon sales identity list [--json]` | List the send-account ledger (★ marks the default identity) / 送信元台帳の一覧（★ が既定） |
@@ -326,7 +333,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Book a meeting (面談) with a Beacon 識別 ID; `--set-transition` moves the 遷移日 to the meeting date / 面談を予約し識別IDを付与、遷移日も同時更新 |
 | `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従（カレンダー旗は schedule と同義） |
 | `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
-| `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
+| `beacon meeting cancel <mtg-id> (--reason <text> \| --acknowledge)` | Cancel a scheduled meeting — terminal, needs an audit entry / 面談を取消 (終端遷移なので監査に --reason か --acknowledge が要る) |
 | `beacon meeting list [<opp-id>] [--json]` | List meetings; opp-id optional — omit for all opportunities / 面談一覧 (opp-id 省略で全商談横断, e-3909) |
 | `beacon meeting list-ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 (e-3909 正式名, alias: meeting ended) |
 | `beacon watch set <work-item-id> --channel <ch> [--thread <ref>] [--cadence <min>]` | Arm a reply watch on a work item (default cadence 60m) / 返信待ちスレッドの張り込みを開始（既定 60 分間隔） |

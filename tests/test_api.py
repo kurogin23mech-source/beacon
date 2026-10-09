@@ -479,7 +479,8 @@ def test_update_entry_not_found():
 
 
 def test_done_entry():
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-1/done")
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-1/done"
+                    "?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     assert r.json()["status"] == "done"
 
@@ -490,16 +491,19 @@ def test_done_entry_records_decision_arm_event(monkeypatch):
     captured = []
     monkeypatch.setattr(_store_router_module, "append_decision_event",
                         lambda pid, rec: captured.append((pid, rec)))
-    # give the task a done_reason so it flows into rationale (= why).
-    _store[PROJECT_ID]["milestones"][0]["entries"][0]["meta"] = {
-        "done_reason": "AC 全達成と判断"}
-    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-1/done")
+    # ms-166 e-6893: この test は以前 meta.done_reason を **手で仕込んでいた** —
+    # route 側に理由を渡す口が無く、仕込まないと rationale が必ず空になるため。
+    # つまり「判断記録に why が乗る」ことを test が自分で偽装していた (本番では
+    # Web 画面由来の done が全件 rationale 空だった)。今は route が理由を受けるので、
+    # 仕込みを外して「送った理由がそのまま why になる」ことを確かめる。
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-1/done"
+                    "?reason=AC を照合して完了と判断")
     assert r.status_code == 200
     arm = [rec for (_pid, rec) in captured if rec.get("kind") == "task-done"]
     assert len(arm) == 1
     rec = arm[0]
     assert rec["decision"] == "done"                     # what
-    assert rec["rationale"] == "AC 全達成と判断"           # why (done_reason)
+    assert rec["rationale"] == "AC を照合して完了と判断"    # why (送った理由)
     assert rec["decided_by"] == "autonomous-AI"           # default for CLI done
     # ms-154 e-5650: no commit references e-1 in this store, so evidence is
     # honestly empty (the self-reference is NOT fabricated). related carries e-1.
@@ -512,7 +516,8 @@ def test_done_entry_respects_decided_by_override(monkeypatch):
     monkeypatch.setattr(_store_router_module, "append_decision_event",
                         lambda pid, rec: captured.append(rec))
     r = client.post(
-        f"/api/projects/{PROJECT_ID}/entries/e-1/done?decided_by=human-delegated")
+        f"/api/projects/{PROJECT_ID}/entries/e-1/done?decided_by=human-delegated"
+        "&reason=人が完了と判断")
     assert r.status_code == 200
     assert captured[0]["decided_by"] == "human-delegated"
 
@@ -525,7 +530,8 @@ def test_done_entry_rejects_bad_decided_by(monkeypatch):
     monkeypatch.setattr(_store_router_module, "append_decision_event",
                         lambda pid, rec: captured.append(rec))
     r = client.post(
-        f"/api/projects/{PROJECT_ID}/entries/e-1/done?decided_by=the-vibes")
+        f"/api/projects/{PROJECT_ID}/entries/e-1/done?decided_by=the-vibes"
+        "&reason=x")
     assert r.status_code == 400
     assert "decided_by" in r.json()["detail"]
     # the task is NOT marked done and no decision is recorded — rejected up front.
@@ -561,9 +567,30 @@ def test_done_milestone_records_completion_verdict(monkeypatch):
 
 
 def test_delete_entry():
-    r = client.delete(f"/api/projects/{PROJECT_ID}/entries/e-1")
+    # ms-166 e-6893: 取消も終端遷移なので監査エントリを運ぶ。
+    r = client.request(
+        "DELETE", f"/api/projects/{PROJECT_ID}/entries/e-1",
+        json={"reason": "重複起票だったため"})
     assert r.status_code == 200
     assert r.json()["status"] == "cancelled"
+
+
+def test_delete_entry_refuses_without_an_audit_entry():
+    """理由も明示的な省略も無い取消は 400。
+
+    以前は body ごと省略でき、``reason=""`` のまま cancelled に落ちていた
+    (= 「なぜ消えたか」を持たない記録が正規の出力だった)。
+    """
+    r = client.delete(f"/api/projects/{PROJECT_ID}/entries/e-1")
+    assert r.status_code == 400
+    assert "audit entry" in r.json()["detail"]
+
+
+def test_delete_entry_accepts_an_explicit_waiver():
+    r = client.request(
+        "DELETE", f"/api/projects/{PROJECT_ID}/entries/e-1",
+        json={"acknowledge": True})
+    assert r.status_code == 200
 
 
 # ---------------------------------------------------------------------------
