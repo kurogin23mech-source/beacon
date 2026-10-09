@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 
 
 # 「理由を書かずに、意図して監査エントリを省いた」ことを記録に残す定型文。
@@ -396,13 +397,25 @@ KNOWN_HANDWRITTEN_TERMINAL: dict = {
     "core.operation_task_done": (
         "Operation 配下のタスクの done。reason を受けて meta に残すが、work-item の"
         "押印層とは別の格納先 (operations[].entries) を歩いている。"),
+    # PR 3 行は「理由は PR 側の記録が持つ」で一律に片付けていたが、実測すると
+    # 3 行の状況が違った (独立レビュー #788 finding #1 の指摘を実コードで照合し、
+    # 指摘の内訳も訂正した結果)。成立している行と成立していない行を混ぜると、
+    # 読み手が「PR 系はまとめて債務」と丸めてしまい、本当に開いている穴が埋もれる。
+    # どの行がどちらかは散文でなく ``PR_RATIONALE_CONTRACT`` が機械で測る。
     "core.pr_merge": (
-        "PR の取り込みに伴う entry の done。PR のライフサイクルは work-item の完遂とは"
-        "別の軸 (pr_status) で、理由は PR 側の記録が持つ。未整理の債務。"),
+        "PR の取り込みに伴う entry の done。**未整理の債務**: merge は理由を受け取らず、"
+        "かつ approve を経たことを要求しない (core.pr_merge / cmd_pr_merge のどちらにも "
+        "review_status の検査が無い) ので、approve を飛ばして merge すると理由はどこにも"
+        "残らない。「判断点は approve 側」は運用上の順序であってコードの性質ではない。"),
     "core.pr_close": (
-        "PR を取り込まずに閉じる。同上 — 理由は PR 側の記録が持つ。未整理の債務。"),
+        "PR を取り込まずに閉じる。**未整理の債務**: 両フロントとも理由の旗を渡さず "
+        "(cmd_pr_close が読むのは ENTRY_ID / JSON だけ)、approve も要求しないので、"
+        "却下理由を書かずに閉じられる。3 行の中で最も素通りに近い。"),
     "core.pr_reject": (
-        "PR の却下。却下理由は review_status 側に残る。未整理の債務。"),
+        "PR の却下。**債務ではない (成立済み)**: cmd_pr_reject が rationale 無しを "
+        "exit 1 で拒否し、両フロントが同じ handler に収束する (PR 系に server API 経路は"
+        "無い) ので、却下理由は必ず review_status 側に在る。ここでの status 代入は"
+        "その従属的な反映。"),
     "sales_entities.settle_gate": (
         "判断 (gate judgement) の漏斗を閉じる。advance / retry / terminal / jump の"
         "全部がここへ収束する **判断族** で、完遂族ではない (混ぜると前進が完遂扱いに"
@@ -418,6 +431,150 @@ KNOWN_HANDWRITTEN_TERMINAL: dict = {
         "再計画で古い送信バッチを差し替えるときの内部的な無効化。人の操作ではなく"
         "再計画の副作用なので、人に書かせる理由が存在しない。"),
 }
+
+
+# ---------------------------------------------------------------------------
+# 台帳の PR 行が主張する「理由はどこに在るか」を、散文でなく **測る** (e-6912)
+#
+# 上の 3 行はもともと「理由は PR 側の記録が持つ」と 1 つの散文で片付けていた。実測
+# すると ``pr_reject`` だけが成立していて、``pr_merge`` / ``pr_close`` は理由を受け取る
+# 経路すら無かった。**散文は腐る** —— しかも腐っても緑のままなので、次の読み手は台帳を
+# 信じて「PR 系はまとめて債務」または「まとめて成立」と丸める。
+#
+# 同じことが実際に 2 度起きた: (1) 私がこの 3 行を一律「未整理の債務」と書き、
+# (2) それを読んだ独立レビューが実コードを当てて「2 行は成立」と訂正したが、その内訳も
+# 半分外していた (``pr_merge`` は approve を要求しないので成立していない)。**人が
+# 手で読む限り、この種の主張は毎回ずれる。** だから主張を測れる形で宣言し、実装と
+# 突き合わせる。
+# ---------------------------------------------------------------------------
+
+#: PR のライフサイクル動詞が理由 (rationale) を要求するか、という **測れる主張**。
+#: 上の ``KNOWN_HANDWRITTEN_TERMINAL`` の PR 3 行の散文は、この宣言の言い換えでなければ
+#: ならない (= 散文だけを直して実装と離れるのを防ぐ)。
+#:
+#: - ``"required"``: 理由無しを拒否する (= 理由は必ずどこかに在る)
+#: - ``"absent"``  : 理由の旗を受け取らない (= 理由はどこにも無い。未整理の債務)
+#:
+#: 判定は ``pr_rationale_contract_violations`` が ``lib/cmd_pr.py`` の実装と両フロント
+#: (bash / python) から導出する。宣言を変えずに実装を変えたら赤くなる。
+PR_RATIONALE_CONTRACT: dict = {
+    "pr_approve": "required",
+    "pr_reject": "required",
+    "pr_request_changes": "required",
+    "pr_merge": "absent",
+    "pr_close": "absent",
+}
+
+#: 理由を運ぶ env 変数名 (両フロントが handler へ渡す形)。
+_RATIONALE_ENV = "BEACON_RATIONALE"
+
+
+def _reads_rationale_env(fn: ast.AST) -> bool:
+    """関数の中で ``BEACON_RATIONALE`` を env から読んでいるか。
+
+    判定は **呼び出しの実引数に env 名が現れるか** で行う。呼び出し名
+    (``os.environ.get`` / ``os.getenv`` / ``environ.get``) で絞ろうとすると、
+    ``_called_name`` が末端名 (``get``) しか返さないため、任意の ``dict.get`` と
+    区別できず偽陰性になる (実測で approve / reject / request-changes の 3 件を
+    取りこぼした)。env 名そのものは他の用途に渡らないので、実引数に出た時点で
+    「読んでいる」と断定できる。docstring やコメントは実引数ではないので入らない。
+    """
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            if isinstance(arg, ast.Constant) and arg.value == _RATIONALE_ENV:
+                return True
+    return False
+
+
+def _refuses_when_falsy(fn: ast.AST, name: str) -> bool:
+    """``if not <name>: ... sys.exit(...)`` の形で拒否しているか。
+
+    「拒否がある」を substring で見ると、 docstring の説明文や別変数の検査で
+    false-pass する。``if`` の test が当該名前の否定であることと、その枝の中に
+    ``sys.exit`` が在ることの両方を構文木で確かめる。
+    """
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+                and isinstance(test.operand, ast.Name)
+                and test.operand.id == name):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and _called_name(inner) in ("sys.exit", "exit"):
+                return True
+    return False
+
+
+def pr_rationale_contract_violations(handler_source: str,
+                                     frontend_sources: dict) -> list:
+    """``PR_RATIONALE_CONTRACT`` の宣言と、実装 + 両フロントを突き合わせる。
+
+    Args:
+        handler_source: ``lib/cmd_pr.py`` のソース (handler = 規則の収束点)。
+        frontend_sources: ``{表示名: ソース}`` —— 理由の env を渡す側
+            (``bin/lib/cmd_pr.sh`` / ``beacon_cli/dispatch.py``)。``"absent"`` と
+            宣言した動詞に対して、どのフロントも理由を渡していないことを確かめる
+            (片方のフロントだけが渡すと、弱い側ではなく強い側が見落とされる)。
+
+    Returns:
+        違反の説明文のリスト (空なら宣言と実装が一致)。
+    """
+    tree = ast.parse(handler_source)
+    funcs = {n.name: n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    out = []
+    for verb, claim in sorted(PR_RATIONALE_CONTRACT.items()):
+        fn = funcs.get("cmd_" + verb)
+        if fn is None:
+            out.append(f"{verb}: 宣言しているが handler cmd_{verb} が見つからない "
+                       f"(rename したなら PR_RATIONALE_CONTRACT も直すこと)")
+            continue
+        reads = _reads_rationale_env(fn)
+        if claim == "required":
+            if not reads:
+                out.append(f"{verb}: 'required' と宣言しているが "
+                           f"{_RATIONALE_ENV} を読んでいない")
+            elif not _refuses_when_falsy(fn, "rationale"):
+                out.append(f"{verb}: 'required' と宣言しているが、理由が空のときに "
+                           f"sys.exit で拒否する枝が無い (受理して進むなら 'absent')")
+        elif claim == "absent":
+            if reads:
+                out.append(f"{verb}: 'absent' と宣言しているが handler が "
+                           f"{_RATIONALE_ENV} を読んでいる (理由を受けるようになったなら "
+                           f"宣言と台帳の散文を 'required' 側へ直すこと)")
+            for label, src in sorted(frontend_sources.items()):
+                if _frontend_passes_rationale(src, verb):
+                    out.append(f"{verb}: 'absent' と宣言しているが {label} が "
+                               f"{_RATIONALE_ENV} を渡している")
+        else:
+            out.append(f"{verb}: 未知の宣言 '{claim}' (required / absent のみ)")
+    return out
+
+
+def _frontend_passes_rationale(source: str, verb: str) -> bool:
+    """フロントが ``verb`` の起動時に理由の env を渡しているか。
+
+    両フロントとも「``BEACON_RATIONALE=...`` を並べて handler 名を続ける」形なので、
+    handler 名の直前に現れる env の並びを見る。handler 名が出てこなければ False。
+    """
+    for m in re.finditer(re.escape(verb), source):
+        # handler 名の手前 400 文字を同じ起動の env 並びとして見る。起動は 1 行〜
+        # 数行に収まる (bash は行継続、python は dict literal)。
+        window = source[max(0, m.start() - 400):m.start()]
+        # 直前に別の handler 起動が挟まっていたら、そこから後ろだけを見る。
+        for other in PR_RATIONALE_CONTRACT:
+            if other == verb:
+                continue
+            cut = window.rfind(other)
+            if cut != -1:
+                window = window[cut + len(other):]
+        if _RATIONALE_ENV in window:
+            return True
+    return False
 
 
 def _terminal_consts(tree: ast.AST) -> set:
