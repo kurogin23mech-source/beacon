@@ -1,0 +1,11 @@
+{
+  "id": "inspection",
+  "judge_run": true,
+  "label": "検品 (実物の見た目・手触り vs 基準書)",
+  "origin": {
+    "kind": "doc",
+    "required": true
+  },
+  "default_judge_model": "sonnet",
+  "_note": "Libertaria authored review-type (2026-08-24 vanya). origin.kind=doc — 原典はプロジェクトの検品基準 doc を --origin-doc で渡す。philosophy-review と同じ doc-origin 型の第3 instance。コード改修ゼロで registry に載る (ms-119 の data 駆動 plug-in 構造のドッグフード)。判定対象はコード差分でなく『実物の絵と実測値』なので、SKILL が PNG / 実測の採取を要求する点が AX / philosophy と異なる。"
+}
