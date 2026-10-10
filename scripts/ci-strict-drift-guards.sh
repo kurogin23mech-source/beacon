@@ -95,4 +95,14 @@ echo "[ci-strict-drift-guards] lib/ への道の持ち主が 1 つか (ms-166 e-
 # 宣言ではなく構文木で数えて止める。
 python3 "$ROOT/scripts/check-lib-path-single-owner.py" --strict
 
+echo "[ci-strict-drift-guards] worktree 判定の箇所が台帳どおりか (ms-166 e-6932)…"
+# context_monitor.py::_worktree_shared_base の docstring は「git にこの問いを立てて
+# いるのは N 箇所で、git の答えの形が変わったら全員が変更対象」と名乗る。だが名乗りは
+# 守らない。2026-10-10 の独立レビュー (保守性) が指摘し、ガードを書いた初回実行で
+# **宣言が既に誤っていた**ことが判明した: 実際は 4 箇所で、cmd_milestone.py の
+# _is_git_project が --git-dir だけを使っており、--git-common-dir を grep する数え方
+# では落ちる 4 人目だった。共有ヘルパーに寄せる案はこのフックが lib/ を import せずに
+# 動く制約と衝突するので、散在を機械で数える側で閉じる。増えても減っても赤くする。
+python3 "$ROOT/scripts/check-worktree-probe-census.py" --strict
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."

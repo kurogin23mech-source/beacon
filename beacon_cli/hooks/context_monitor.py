@@ -361,15 +361,25 @@ def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
     ``.beacon/``, so find-root returns the worktree itself and the state would
     split again.
 
-    Two other places ask git the same question and this is the third, because
-    this hook must stay importable without ``lib/`` (so it cannot share a
-    helper with them): ``scripts/check-branch-focus-divergence.py``
-    (``is_in_main_project_root``) and ``lib/cmd_milestone.py``
-    (``_is_in_main_project_root``). Those two COMPARE ``--git-dir`` against
-    ``--git-common-dir`` to detect "am I in a worktree"; this one only needs the
-    common dir itself. If git's answer shape ever has to be handled
-    differently, all three are the set to change (maintainability review of
-    PR #789).
+    Three other places ask git about the same flags and this is the fourth,
+    because this hook must stay importable without ``lib/`` (so it cannot share
+    a helper with them):
+
+    * ``scripts/check-branch-focus-divergence.py`` (``is_in_main_project_root``)
+      and ``lib/cmd_milestone.py`` (``_is_in_main_project_root``) COMPARE
+      ``--git-dir`` against ``--git-common-dir`` to detect "am I in a worktree";
+    * ``lib/cmd_milestone.py`` (``_is_git_project``) uses ``--git-dir`` alone to
+      ask the weaker "is this a git repository at all";
+    * this one needs only the common dir itself.
+
+    If git's answer shape ever has to be handled differently, all four are the
+    set to change. **That set is counted by machine, not asserted here**:
+    ``scripts/check-worktree-probe-census.py`` extracts the call sites from the
+    syntax tree and fails when the census gains or loses one, so this paragraph
+    cannot quietly go stale (maintainability review of PR #789 asked for the
+    guard; its first run showed this very paragraph had already been wrong —
+    it said "three" and named only the two that compare both flags, missing
+    ``_is_git_project``, which a ``--git-common-dir`` grep does not surface).
 
     Returns ``None`` outside a git repository (or when git is unavailable), and
     the caller then falls back to the per-cwd directory. Every such fallback is
