@@ -192,6 +192,37 @@ def cmd_pr_add():
             target_ms, f"pr add {url}"
         ):
             sys.exit(1)
+    # ms-166 e-6903: 同じ PR 番号の記録が既に在るなら **保存前に** 止める。
+    #
+    # 実測 (2026-10-08〜10): 同じ PR を指す記録が 50 組あり、うち 18 件は状態が
+    # 揃えられず残っていた (PR#60 には 4 件ぶら下がっていた)。突合はどちらを残すかを
+    # 機械で決められないので、人が判断するまで恒久的に残る。**作られてから気づく形**
+    # では、気づいた時点で既に人の判断が必要な負債になっている。
+    #
+    # 既存の claim 競合警告 (ms-80 e-1821) は「同じ MS に並列 open PR がある」を
+    # 見るだけで、**同じ PR 番号かは見ていない**。これが 50 組が作られた経路。
+    #
+    # 止める (= exit 2) 側に倒した理由: 警告だけでは同じことが起きる (claim 競合警告は
+    # 警告のみで、現に 50 組が作られた)。意図的に 2 件目を足したい場面は想像できるが
+    # 実例が無いので、必要になったら旗で開ける。
+    existing = _entries_for_pr_number(data, _pr_number_from_url(url))
+    if existing:
+        rows = "\n".join(
+            f"    [{e['eid']}] {e.get('status') or '?'}"
+            + (f" — {e['title'][:60]}" if e.get("title") else "")
+            for e in existing[:5])
+        more = (f"\n    … 他 {len(existing) - 5} 件"
+                if len(existing) > 5 else "")
+        print(
+            f"Error: PR #{_pr_number_from_url(url)} の記録は既に "
+            f"{len(existing)} 件あります:\n{rows}{more}\n"
+            f"  同じ PR を指す記録が複数あると、突合はどちらを残すかを機械で決め\n"
+            f"  られず、人が判断するまで状態が揃いません (ms-166 e-6903: 実測で\n"
+            f"  50 組 / 状態不一致 18 件がこの経路で作られていました)。\n"
+            f"  既存の記録を使ってください。捨てるなら "
+            f"`beacon task cancel <entry-id> --reason ...` で理由を残します。",
+            file=sys.stderr)
+        sys.exit(2)
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
                           intent=intent, date=date, title=title, commits=commits,
@@ -238,6 +269,44 @@ def cmd_pr_add():
             if len(conflicts) > 5:
                 print(f"  (... and {len(conflicts) - 5} more)")
             print(f"  推奨: `beacon claim` で作業範囲を調整、または各 PR の intent を見直して重複を解消してください。")
+
+def _entries_for_pr_number(data: dict, pr_number: str) -> list:
+    """Return existing PR entries that point at ``pr_number`` (ms-166 e-6903).
+
+    Terminal records are **excluded**: a record the human cancelled with a
+    reason is a decision already taken, so it must not block recording the
+    survivor. That mirrors how the reconciliation treats ``cancelled`` as a
+    terminal, human-decided state rather than a pending decision
+    (ms-166 e-6941) — if the two disagreed, cancelling a duplicate would make
+    `pr add` refuse forever while sync called the group resolved.
+
+    Matching is on the parsed number, not the raw url string: 17 records in
+    this repository hold flag text or prose in the url field (ms-166 e-6902),
+    so a string compare would miss real duplicates AND the number is what the
+    reconciliation keys on.
+    """
+    if not pr_number:
+        return []
+    out: list = []
+
+    def _walk(entries):
+        for e in entries or []:
+            if not isinstance(e, dict):
+                continue
+            if e.get("type") == "pr" and e.get("status") != "cancelled":
+                num = _pr_number_from_url(
+                    str(e.get("url") or (e.get("meta") or {}).get("url") or ""))
+                if num and num == pr_number:
+                    out.append({"eid": e.get("id", ""),
+                                "status": e.get("status", ""),
+                                "title": e.get("description", "")})
+            _walk(e.get("entries"))
+
+    for ms in data.get("milestones", []) or []:
+        if isinstance(ms, dict):
+            _walk(ms.get("entries"))
+    return out
+
 
 def _detect_pr_claim_conflict(data: dict, ms_id: str, new_eid: str) -> list:
     """Return open PR entries under ms_id that may conflict with the newly

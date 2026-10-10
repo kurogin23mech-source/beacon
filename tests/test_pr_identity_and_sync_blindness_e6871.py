@@ -417,3 +417,121 @@ def test_resolving_a_duplicate_actually_reduces_the_pending_count():
     assert before == 1, f"判断待ちが 1 件であるべき: {before}"
     assert after == 0, (
         f"取り消しても判断待ちが減っていない ({before} → {after})")
+
+
+# --- 二重登録を保存前に止める (ms-166 e-6903 の受入条件 3) --------------------
+#
+# 50 組 / 状態不一致 18 件は「作られてから気づく」形で積み上がった。既存の claim 競合
+# 警告 (ms-80 e-1821) は「同じ MS に並列 open PR がある」だけを見て、**同じ PR 番号か
+# は見ていない**。それがこの経路。気づいた時点で既に人の判断が必要な負債になっている
+# ので、保存前に止める側へ倒した。
+
+def _pr_entries_for(entries, number):
+    from cmd_pr import _entries_for_pr_number
+    return _entries_for_pr_number(_data(*entries), number)
+
+
+def test_an_existing_record_for_the_same_pr_is_found():
+    """同じ PR 番号の既存記録を見つけること。"""
+    found = _pr_entries_for(
+        [_entry("e-700", "https://github.com/o/r/pull/55", 55, status="done")],
+        "55")
+    assert [f["eid"] for f in found] == ["e-700"], found
+
+
+def test_a_cancelled_record_does_not_block_recording_the_survivor():
+    """取り消し済みの記録は邪魔をしないこと (e-6941 と整合)。
+
+    人が理由をつけて捨てた記録は決定済みなので、これが残っていると `pr add` が
+    永久に拒否する形になってはいけない。突合側が cancelled を終端として扱う
+    (duplicate_resolved) のと、ここで同じ扱いにしておかないと、**取り消した途端に
+    突合は「解決済み」と言い、pr add は「重複だ」と言う**という食い違いが起きる。
+    """
+    found = _pr_entries_for(
+        [_entry("e-701", "https://github.com/o/r/pull/56", 56,
+                status="cancelled")],
+        "56")
+    assert found == [], (
+        "取り消し済みの記録が新規登録を塞いでいる: " + repr(found))
+
+
+def test_a_different_pr_number_is_not_treated_as_a_duplicate():
+    """別の PR 番号を重複と見なさないこと (緩すぎる側の歯止め)。"""
+    found = _pr_entries_for(
+        [_entry("e-702", "https://github.com/o/r/pull/57", 57, status="done")],
+        "58")
+    assert found == [], found
+
+
+def test_the_number_is_parsed_not_string_matched():
+    """url 文字列の一致ではなく番号で突き合わせること。
+
+    この repo には url 欄にフラグ文字列や説明文が入った記録が 17 件ある
+    (ms-166 e-6902)。文字列比較だと本物の重複を取り逃すうえ、突合が鍵にしている
+    のは番号の方なので、2 つの機構が別の鍵で動くことになる。
+    """
+    found = _pr_entries_for(
+        [_entry("e-703", "https://github.com/o/r/pull/59", 59, status="done")],
+        "59")
+    assert [f["eid"] for f in found] == ["e-703"], found
+    # 番号が読めない記録 (url にフラグ文字列) は、どの番号の重複でもない
+    broken = _pr_entries_for(
+        [_entry("e-704", "--intent-stdin", None, status="in_review")], "59")
+    assert broken == [], broken
+
+
+def test_pr_add_actually_routes_through_the_duplicate_check():
+    """述語が**在る**だけでなく、`pr add` がそれを**通っている**ことを留める。
+
+    上の 4 件は `_entries_for_pr_number` の論理を測るが、`cmd_pr_add` が呼ぶのを
+    やめても緑のままになる (関数が定義されたまま未使用になるだけ)。反転で実測した:
+    呼び出しを `existing = []` に差し替えても 24 件すべて緑だった。
+    **「足した」と「全域に効く」は別**で、今日この repo で同型を 2 度踏んでいる。
+
+    文字列の部分一致ではなく構文木から呼び出し名を抽出する (共有プリミティブ
+    tests/_ast_structural.py)。docstring やコメントに名前が出ているだけで素通り
+    するのが緩い一致の失敗形。
+    """
+    import ast
+
+    from _ast_structural import called_names_in_function
+
+    # パス定数を新設せず、import 済みの module から実ソースを取る (このファイルは
+    # lib/ を sys.path に入れて cmd_pr を直接 import する作法)。
+    import inspect
+    src = inspect.getsource(cmd_pr)
+    called = called_names_in_function(ast.parse(src), "cmd_pr_add")
+    assert "_entries_for_pr_number" in called, (
+        "pr add が二重登録の検知を通っていない — 50 組が作られた経路がそのまま "
+        "開いている。実際に呼ばれている名前: " + repr(sorted(called)))
+
+
+def test_the_duplicate_check_runs_before_the_write():
+    """検知が **保存より前** に走ること。
+
+    警告してから保存する形では手遅れ (= 作られてから気づく)。`cmd_pr_add` の中で
+    `_entries_for_pr_number` の呼び出しが `save_project` より先に現れることを
+    行番号で固定する。
+    """
+    import ast
+
+    import inspect
+    tree = ast.parse(inspect.getsource(cmd_pr))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "cmd_pr_add"),
+              None)
+    assert fn is not None, "cmd_pr_add が見つからない"
+    check_at = save_at = None
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", "")
+        if name == "_entries_for_pr_number" and check_at is None:
+            check_at = node.lineno
+        if name == "save_project" and save_at is None:
+            save_at = node.lineno
+    assert check_at is not None, "検知の呼び出しが無い"
+    assert save_at is not None, "save_project の呼び出しが無い"
+    assert check_at < save_at, (
+        f"検知 (行 {check_at}) が保存 (行 {save_at}) より後に走っている — "
+        "作られてから気づく形に戻っている")
