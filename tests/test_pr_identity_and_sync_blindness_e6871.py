@@ -238,8 +238,19 @@ def test_sync_does_not_resurrect_a_duplicate_someone_cancelled():
     assert not any(a["action"] in ("merge", "close") and a["entry_id"] == "e-884"
                    for a in actions), (
         "重複として捨てられた記録を自動で動かそうとしている: " + repr(actions))
-    assert any(a["action"] == "blocked_by_duplicate" and a["entry_id"] == "e-884"
-               for a in actions), "止めたことを報告していない: " + repr(actions)
+    # 報告はやめない (= この課題が直した「無言で飛ばして整合と報告する」への退行を
+    # 防ぐ)。ただし ms-166 e-6941 で、**人が既に判断済み** のものは
+    # `duplicate_resolved` として、**これから決める必要がある** ものと別種別にした。
+    # 混ぜると「決める必要がある件数」が出せず、整理しても報告が減らないので
+    # 何件残っているのかを数える母集団が永久に出せなかった。
+    reported = [a for a in actions if a["entry_id"] == "e-884"
+                and a["action"] in ("duplicate_resolved",
+                                    "blocked_by_duplicate")]
+    assert reported, "止めたことを報告していない: " + repr(actions)
+    assert reported[0]["action"] == "duplicate_resolved", (
+        "人が理由をつけて取り消した記録を『これから決める必要がある』側に数えている: "
+        + repr(reported))
+    assert reported[0].get("blocked_reason"), "なぜ動かさないかを言っていない"
     core.apply_pr_sync(data, actions)
     assert data["milestones"][0]["entries"][1]["status"] == "cancelled", (
         "人が cancelled にした記録が done に戻された")
@@ -359,3 +370,50 @@ def test_actionable_tells_a_consumer_what_to_do_without_the_catalog():
     # 報告だけの種別が「やるべき遷移」に数えられないこと
     assert [a["action"] for a in actions if a["actionable"]] == ["merge"], (
         [a["action"] for a in actions if a["actionable"]])
+
+
+def test_a_pending_duplicate_is_still_reported_as_needing_a_decision():
+    """まだ誰も判断していない二重登録は『決める必要がある』側に残ること (e-6941)。
+
+    取り消し済みを別種別に分けた副作用で、**本当に判断が要るものまで静かになる**
+    のが怖い形 (= 緩すぎる側への倒れ込み。今日この repo で 2 回踏んだ)。
+    片方が cancelled でなければ従来どおり blocked_by_duplicate で報告される、
+    という境界をここで固定する。
+    """
+    data = _data(
+        _entry("e-900", "https://github.com/o/r/pull/77", 77, status="in_review"),
+        _entry("e-901", "https://github.com/o/r/pull/77", 77, status="in_review"),
+    )
+    gh = [{"number": 77, "state": "MERGED", "url": "https://github.com/o/r/pull/77"}]
+    actions = core.plan_pr_sync(data, gh, fetched_floor=1)
+    kinds = {a["entry_id"]: a["action"] for a in actions
+             if a["entry_id"] in ("e-900", "e-901")
+             and a["action"] != "duplicate"}
+    assert set(kinds.values()) == {"blocked_by_duplicate"}, (
+        "判断待ちの二重登録が『判断済み』側に落ちた: " + repr(actions))
+    assert not any(a["action"] == "duplicate_resolved" for a in actions), (
+        "誰も取り消していないのに解決済みと報告した: " + repr(actions))
+
+
+def test_resolving_a_duplicate_actually_reduces_the_pending_count():
+    """取り消すと『決める必要がある件数』が実際に減ること (e-6941 の受入条件)。
+
+    整理しても報告が減らないと、何件残っているのかを数える母集団が出せない。
+    **減ることを前後比較で測る** — これが無いと「分けた」だけで終わる。
+    """
+    def plan(second_status):
+        data = _data(
+            _entry("e-910", "https://github.com/o/r/pull/88", 88, status="done"),
+            _entry("e-911", "https://github.com/o/r/pull/88", 88,
+                   status=second_status),
+        )
+        gh = [{"number": 88, "state": "MERGED",
+               "url": "https://github.com/o/r/pull/88"}]
+        acts = core.plan_pr_sync(data, gh, fetched_floor=1)
+        return sum(1 for a in acts if a["action"] == "blocked_by_duplicate")
+
+    before = plan("in_review")
+    after = plan("cancelled")
+    assert before == 1, f"判断待ちが 1 件であるべき: {before}"
+    assert after == 0, (
+        f"取り消しても判断待ちが減っていない ({before} → {after})")

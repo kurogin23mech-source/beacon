@@ -996,6 +996,10 @@ def _print_pr_sync_plan(actions: list) -> None:
     unmatched = by_kind.get("unmatched", [])
     outside = by_kind.get("out_of_window", [])
     blocked = by_kind.get("blocked_by_duplicate", [])
+    # 人が既に取り消し済みの二重登録 (ms-166 e-6941)。報告はするが「決める必要が
+    # ある件数」には入れない — 混ぜると整理しても数字が減らず、何件残っているのかを
+    # 数える母集団が出せない。
+    resolved_dups = by_kind.get("duplicate_resolved", [])
     dups = by_kind.get("duplicate", [])
     repairs = [a for a in (actions or []) if a.get("needs_repair")]
 
@@ -1012,7 +1016,8 @@ def _print_pr_sync_plan(actions: list) -> None:
         if len(rows) > cap:
             print(f"  … 他 {len(rows) - cap} 件")
 
-    if not (moves or unreadable or unmatched or dups or repairs or blocked):
+    if not (moves or unreadable or unmatched or dups or repairs or blocked
+            or resolved_dups):
         tail = (f"、照合した範囲の外 {len(outside)} 件" if outside else "")
         print("beacon の PR 記録は GitHub と整合しています "
               f"(照合した記録 {len(actions or []) - len(outside)} 件、"
@@ -1047,6 +1052,13 @@ def _print_pr_sync_plan(actions: list) -> None:
         _lines(blocked, lambda a: (f"  [{a['entry_id']}] PR#{a['pr_number']}: "
                                    f"{a['from_status']} のまま "
                                    f"(本来は {a.get('intended_to_status')} に揃う)"))
+    if resolved_dups:
+        # ⚠ を付けない。人の判断が既に入っており、やることは残っていない。
+        print(f"二重登録だが人が判断済みの記録: {len(resolved_dups)} 件 "
+              "(理由つきで取り消されているため動かしません)")
+        _lines(resolved_dups,
+               lambda a: (f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                          f"{a['from_status']} のまま"))
     if dups:
         print(f"⚠ 同じ PR を指す記録が複数ある ({len(dups)} 組) "
               "— どちらを残すかは人の判断です:")
