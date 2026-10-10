@@ -10,8 +10,10 @@ Pre-fix data flow (the bug):
 Post-fix: one record per session under .claude/context-usage/<session_id>.json
 (no shared write → no reset path), each stamped with the hook's ancestor pids +
 BEACON_PARENT_PID; the bridge picks the record whose pids contain its
-process.ppid (the common Claude Code parent). Legacy per-cwd file still written
-(old bridges) but never read.
+process.ppid (the common Claude Code parent). The legacy per-cwd file is
+**neither written nor read** — it is deleted when found (ms-166 e-6919); the
+rule itself lives in ``_remove_legacy_state_file``, this header only points at
+it so the two cannot drift apart.
 """
 from __future__ import annotations
 
@@ -120,21 +122,47 @@ class TestHookDedupAcrossSessions:
         assert rec["parent_pid"] == 4242
         assert rec["context_pct"] == 10
 
-    def test_legacy_file_still_written_but_not_read(self, project, tmp_path, monkeypatch):
-        """Back-compat: an old bridge reads the legacy per-cwd file, so we keep
-        writing it. But it is NOT the dedup source — a legacy file claiming
-        'already notified' must not silence a session whose own record says
-        otherwise, and a sibling's legacy write must not reset us."""
+    def test_legacy_file_is_removed_not_written(self, project, tmp_path,
+                                                monkeypatch):
+        """旧式の単一ファイルは **書かず、在れば消す** (ms-166 e-6919)。
+
+        以前は「1 リリース前の bridge が使用率バッジを出せるように」書き続けていた。
+        実測 (2026-10-10): 現在の受信側は読んでいない (channel/ 配下に参照ゼロ) うえ、
+        作業フォルダごとに last-writer-wins で書かれるため repo 内に 8 個溜まっていた。
+        誰も読まないものを互換のために書き続ける期限を切れないので根から外した
+        (user 判断)。代償は 1 リリース前の bridge がバッジを失うこと。
+
+        あわせて、このファイルが重複防止の判定に使われないことも引き続き測る
+        (旧式ファイルが「もう通知済み」と主張しても、自分の記録がそう言っていない
+        セッションを黙らせてはならない)。
+        """
         t = tmp_path / "t.jsonl"
         _write_transcript(t, 250_000)
         legacy = Path(cm.STATE_FILE_REL)
         legacy.parent.mkdir(parents=True, exist_ok=True)
-        legacy.write_text(json.dumps({"session_id": "sess-A", "notified_thresholds": [20]}))
+        legacy.write_text(json.dumps({"session_id": "sess-A",
+                                      "notified_thresholds": [20]}))
 
-        rc, out = _run_hook({"session_id": "sess-A", "transcript_path": str(t)}, monkeypatch)
+        rc, out = _run_hook({"session_id": "sess-A", "transcript_path": str(t)},
+                            monkeypatch)
         assert _fired(out), "legacy file must not be consulted for dedup"
-        data = json.loads(legacy.read_text())
-        assert data["session_id"] == "sess-A" and data["context_pct"] == 25
+        assert not legacy.exists(), (
+            "旧式ファイルが残っている (消す側に倒したのに消えていない)")
+
+    def test_the_legacy_file_is_not_recreated(self, project, tmp_path,
+                                              monkeypatch):
+        """無かった場合に作らないこと。
+
+        「在れば消す」だけを測ると、消してから書き直す実装でも緑になる。
+        **書かない** ことを別に測る。
+        """
+        t = tmp_path / "t2.jsonl"
+        _write_transcript(t, 250_000)
+        legacy = Path(cm.STATE_FILE_REL)
+        assert not legacy.exists(), "fixture must start without the legacy file"
+        _run_hook({"session_id": "sess-B", "transcript_path": str(t)}, monkeypatch)
+        assert not legacy.exists(), (
+            "旧式ファイルが作られた (書き込みが残っている)")
 
     def test_state_path_is_sanitised(self, tmp_path):
         p = cm._state_path_for("../../evil/..", tmp_path)

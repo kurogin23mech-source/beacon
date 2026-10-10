@@ -35,9 +35,10 @@ The Python port keeps every public contract identical:
   * Env var ``BEACON_CONTEXT_LIMIT`` (integer tokens) wins over
     model-name inference. Same name as bash.
   * State files: ``.claude/context-usage/<session_id>.json`` (one per
-    Claude Code session, ms-159 e-6588) + the legacy single
-    ``.claude/context-usage-state.json`` (still written, read by no
-    current code; see ``_persist_state``).
+    Claude Code session, ms-159 e-6588) and the threshold dedup record
+    under the worktree-shared base (ms-166 e-6917). The legacy single
+    ``.claude/context-usage-state.json`` is **no longer written and is
+    removed when found** (ms-166 e-6919; see ``_persist_state``).
   * Auto-note body: identical headings to the bash template so
     downstream consumers (Claude prompt, session_notes.jsonl) don't
     care which implementation produced the note.
@@ -94,11 +95,17 @@ DEFAULT_CONTEXT_LIMIT_1M: int = 1_000_000
 _LEGACY_200K_RE = re.compile(r"claude-[0-3][.\-]", re.IGNORECASE)
 
 STATE_FILE_REL = Path(".claude") / "context-usage-state.json"
-"""LEGACY per-cwd state file (pre e-6588). Still WRITTEN for one release so an
-older bridge (channel/bus-context-usage.mjs that predates the per-session
-directory) keeps showing a context% badge; no longer READ by this monitor for
-threshold dedup. Remove the write once every deployed bridge reads
-``STATE_DIR_REL``."""
+"""LEGACY per-cwd state file (pre e-6588). **Neither written nor read** — it is
+deleted when found; see ``_remove_legacy_state_file`` for why and for the scope
+of that deletion (ms-166 e-6919).
+
+The reasoning lives THERE and not here on purpose. This constant briefly had
+three descriptions of the same rule — a comment above it, this docstring, and
+the helper's docstring — and the independent review of PR #792 caught this one
+still asserting the opposite ("Still WRITTEN for one release ... remove the
+write once every deployed bridge reads STATE_DIR_REL"), i.e. naming as a future
+task the very thing that commit had just done. One address for the rule, the
+rest are pointers."""
 
 STATE_DIR_REL = Path(".claude") / "context-usage"
 """Per-session state directory (ms-159 / e-6588).
@@ -519,6 +526,37 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
+def _remove_legacy_state_file(path: Path) -> None:
+    """Delete the legacy single state file if it is there. Never raises.
+
+    ms-166 e-6919. The file used to be written on every Stop hook so that a
+    one-release-old bridge could keep showing the usage badge. Measured
+    2026-10-10: no current reader exists (nothing under ``channel/`` refers to
+    it; the bridge reads ``.claude/context-usage/<session_id>.json`` instead),
+    and because it was per-cwd with last-writer-wins it had accumulated 8 copies
+    inside this repository alone.
+
+    **Unconditional, unlike ``_prune_stale_state_files``.** That one asks
+    ``_record_is_abandoned`` because its files are per-session and deleting a
+    live session's record would re-fire its thresholds. This file is not tied to
+    a session at all — it is one slot per directory that every session
+    overwrites — so there is no live owner whose state could be lost. The only
+    thing a delete costs is the badge on a bridge nobody is running.
+
+    **Scope: this directory only.** The hook drains the cwd it runs in, so the
+    copies sitting in other working directories (7 of the 8 found in this
+    repository on 2026-10-10 were inside registered git worktrees) go when a
+    session next runs there, or when the worktree itself is removed. Reaching
+    into sibling directories from here was deliberately NOT done: a hook that
+    deletes files outside its own cwd is a new category of side effect, and the
+    pile already drains through the two paths above.
+    """
+    try:
+        path.unlink()
+    except (OSError, ValueError):
+        return
+
+
 def _prune_stale_state_files(
     state_dir: Path, keep: Path, *, posix: Optional[bool] = None,
 ) -> None:
@@ -631,7 +669,7 @@ def _persist_state(
     legacy_path: Optional[Path] = None,
     dedup_dir: Optional[Path] = None,
 ) -> None:
-    """Write all THREE of this session's records. Never raises.
+    """Write this session's TWO records and clear the legacy one. Never raises.
 
     1. **per-cwd** ``STATE_DIR_REL/<session_id>.json`` — the bridge's input:
        identity fields it matches on plus ``updated_at`` for its tie-break.
@@ -639,18 +677,19 @@ def _persist_state(
        shared by every worktree of this repository (ms-166 / e-6917). Skipped
        when it resolves to the same path as (1), which is what happens outside
        a git repository and whenever a caller sandboxes the writes (below).
-    3. **legacy** ``STATE_FILE_REL`` (per-cwd, last-writer-wins) — still
-       written so a bridge predating e-6588 keeps a badge; NOT read back here,
-       so its last-writer-wins shape can no longer reset anyone's dedup state.
+    3. **legacy** ``STATE_FILE_REL`` (per-cwd) — **removed, not written**
+       (ms-166 e-6919). It used to be written so a one-release-old bridge could
+       still show the usage badge; no current reader exists, and it accumulated
+       one file per working directory. Writing is gone and any file found is
+       deleted, so the pile drains as sessions run.
 
-    Stale sibling records are pruned in (1) and (2) on the way.
-
-    Sandboxing: passing ``state_dir`` alone contains ALL THREE writes — both
-    ``dedup_dir`` and the legacy path fall back to ``state_dir`` rather than
-    resolving themselves, so a caller cannot half-override the sandbox and have
-    one write escape (into the repository's git directory, or into the process's
-    cwd). Pass ``dedup_dir`` / ``legacy_path`` explicitly only to aim them
-    somewhere different on purpose.
+    Sandboxing: passing ``state_dir`` alone contains BOTH writes and the
+    legacy removal — ``dedup_dir`` and ``legacy_path`` fall back to
+    ``state_dir`` rather than resolving themselves, so a caller cannot
+    half-override the sandbox and have one write escape (into the repository's
+    git directory, or into the process's cwd) or have the removal reach outside
+    the sandbox. Pass ``dedup_dir`` / ``legacy_path`` explicitly only to aim
+    them somewhere different on purpose.
 
     This promise was false once and is measured now: write (2) was fixed to fall
     back while write (3) kept a bare relative default, and the docstring claimed
@@ -690,9 +729,7 @@ def _persist_state(
     legacy = (legacy_path if legacy_path is not None
               else ((state_dir / STATE_FILE_REL.name) if state_dir is not None
                     else Path(STATE_FILE_REL)))
-    _save_state(legacy, session_id, notified, context_pct=context_pct,
-                context_used=context_used, context_limit=context_limit,
-                extra=extra)
+    _remove_legacy_state_file(legacy)
 
 
 # ---------------------------------------------------------------------------
