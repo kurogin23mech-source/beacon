@@ -240,14 +240,14 @@ def test_sync_does_not_resurrect_a_duplicate_someone_cancelled():
         "重複として捨てられた記録を自動で動かそうとしている: " + repr(actions))
     # 報告はやめない (= この課題が直した「無言で飛ばして整合と報告する」への退行を
     # 防ぐ)。ただし ms-166 e-6941 で、**人が既に判断済み** のものは
-    # `duplicate_resolved` として、**これから決める必要がある** ものと別種別にした。
+    # `duplicate_human_decided` として、**これから決める必要がある** ものと別種別にした。
     # 混ぜると「決める必要がある件数」が出せず、整理しても報告が減らないので
     # 何件残っているのかを数える母集団が永久に出せなかった。
     reported = [a for a in actions if a["entry_id"] == "e-884"
-                and a["action"] in ("duplicate_resolved",
+                and a["action"] in ("duplicate_human_decided",
                                     "blocked_by_duplicate")]
     assert reported, "止めたことを報告していない: " + repr(actions)
-    assert reported[0]["action"] == "duplicate_resolved", (
+    assert reported[0]["action"] == "duplicate_human_decided", (
         "人が理由をつけて取り消した記録を『これから決める必要がある』側に数えている: "
         + repr(reported))
     assert reported[0].get("blocked_reason"), "なぜ動かさないかを言っていない"
@@ -391,7 +391,7 @@ def test_a_pending_duplicate_is_still_reported_as_needing_a_decision():
              and a["action"] != "duplicate"}
     assert set(kinds.values()) == {"blocked_by_duplicate"}, (
         "判断待ちの二重登録が『判断済み』側に落ちた: " + repr(actions))
-    assert not any(a["action"] == "duplicate_resolved" for a in actions), (
+    assert not any(a["action"] == "duplicate_human_decided" for a in actions), (
         "誰も取り消していないのに解決済みと報告した: " + repr(actions))
 
 
@@ -444,7 +444,7 @@ def test_a_cancelled_record_does_not_block_recording_the_survivor():
 
     人が理由をつけて捨てた記録は決定済みなので、これが残っていると `pr add` が
     永久に拒否する形になってはいけない。突合側が cancelled を終端として扱う
-    (duplicate_resolved) のと、ここで同じ扱いにしておかないと、**取り消した途端に
+    (duplicate_human_decided) のと、ここで同じ扱いにしておかないと、**取り消した途端に
     突合は「解決済み」と言い、pr add は「重複だ」と言う**という食い違いが起きる。
     """
     found = _pr_entries_for(
@@ -535,3 +535,182 @@ def test_the_duplicate_check_runs_before_the_write():
     assert check_at < save_at, (
         f"検知 (行 {check_at}) が保存 (行 {save_at}) より後に走っている — "
         "作られてから気づく形に戻っている")
+
+
+# --- PR #793 の独立レビュー (AX high 2 件 + medium 1 件) ---------------------
+
+def test_the_duplicate_check_reads_the_structured_number_first():
+    """権威的な `meta.pr_number` を先に読むこと (AX high)。
+
+    最初の版は url を再解析しており、**独立レビューが実測で見逃しを示した**:
+    url が `.../pull/60.diff` (GitHub 自身が出す形。`.patch` や REST の
+    `pulls/60` も同様) で `meta.pr_number == 60` が正しく入っている記録を
+    見つけられず、新規登録がそのまま通った。url 欄に自由文が入った 17 件
+    (ms-166 e-6902) も同じ経路で素通りする。
+
+    **沈黙して発火しない拒否は、拒否が無いより悪い** — 呼び出し側は「この番号は
+    守られている」と信じる。commit message に「番号で突き合わせる」と書きながら
+    url を再解析していたのが実態だった。
+    """
+    for url in ("https://github.com/o/r/pull/60.diff",
+                "https://github.com/o/r/pull/60.patch",
+                "https://api.github.com/repos/o/r/pulls/60",
+                "--intent-stdin"):
+        data = _data(_entry("e-900", url, None, status="done"))
+        # meta.pr_number を権威として入れる (core.pr_add が書く形)
+        data["milestones"][0]["entries"][0].setdefault(
+            "meta", {})["pr_number"] = 60
+        found = cmd_pr._entries_for_pr_number(data, "60")
+        assert [f["eid"] for f in found] == ["e-900"], (
+            f"url={url!r} で見逃した (meta.pr_number=60 は入っている)")
+
+
+def test_the_url_parse_is_still_a_fallback():
+    """構造化フィールドが無い古い記録は url から読むこと (後方互換)。"""
+    # `_entry` は url を meta.url に置く。pr_number だけ落として「構造化フィールドが
+    # 無い古い記録」を作る (最初に書いた版は meta を丸ごと消して url ごと失い、
+    # 実装ではなく試験の作りが誤っていた)。
+    data = _data(_entry("e-901", "https://github.com/o/r/pull/61", None,
+                        status="done"))
+    data["milestones"][0]["entries"][0]["meta"].pop("pr_number", None)
+    assert [f["eid"] for f in cmd_pr._entries_for_pr_number(data, "61")] == [
+        "e-901"], "構造化フィールドが無い古い記録を url から読めていない"
+
+
+def test_the_live_path_does_not_claim_alignment_while_issues_remain(capsys):
+    """書き込む経路が、論点を残したまま「整合しています」と言わないこと (AX high)。
+
+    以前は `merged == 0 and closed == 0` だけを見て
+    「All beacon PR entries are already aligned with GitHub.」を出していた。
+    人の判断待ちの二重登録 8 件・判別できない記録 17 件が残っていても嘘の整合を
+    宣言する形で、**dry-run 側だけ直して書き込む側が直っていなかった** —
+    e-6871 で直した「無言で飛ばして整合と報告する」が、もう一方の消費者で
+    生き残っていた。
+
+    **実挙動で測る。** 最初に書いた版は「種別名の文字列が関数内に在るか」を構文木で
+    見ており、判定条件を元に戻しても文字列は残るので緑のままだった (反転 U2 で
+    判明)。今日 2 度言われた緩い一致をまた書いていた。実際に関数を走らせて、
+    出力に「整合しています」が出ないことを測る。
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    # 判断待ちの二重登録が 1 組ある状態 (= 状態は動かないが論点は残る)
+    data = _data(
+        _entry("e-920", "https://github.com/o/r/pull/99", 99,
+               status="in_review"),
+        _entry("e-921", "https://github.com/o/r/pull/99", 99,
+               status="in_review"),
+    )
+    gh = [{"number": 99, "state": "MERGED",
+           "url": "https://github.com/o/r/pull/99"}]
+    actions = core.plan_pr_sync(data, gh, fetched_floor=1)
+    summary = core.apply_pr_sync(data, actions)
+    assert summary["merged"] == 0 and summary["closed"] == 0, (
+        "この fixture は状態が動かない前提: " + repr(summary))
+    assert any(a["action"] == "blocked_by_duplicate" for a in actions), (
+        "判断待ちが報告されていない前提が崩れている")
+
+    # 書き込む経路と同じ判定を通す (cmd_pr_sync の非 json 分岐が使う条件)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_pr._print_pr_sync_outcome(actions, summary)
+    out = buf.getvalue()
+    assert "already aligned with GitHub" not in out, (
+        "論点が残っているのに整合を宣言した:\n" + out)
+    assert "blocked_by_duplicate" in out or "判断" in out, (
+        "何が残っているかを言っていない:\n" + out)
+
+
+def test_the_live_path_does_claim_alignment_when_nothing_remains(capsys):
+    """論点が無いときは素直に整合を名乗ること (厳しすぎる側の歯止め)。
+
+    全部に ⚠ を付けると読み手が報告を読まなくなり、「緑を信じる」のと同じ害に
+    戻る。何も残っていなければ従来どおり整合と言う。
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    data = _data(_entry("e-930", "https://github.com/o/r/pull/100", 100,
+                        status="done"))
+    gh = [{"number": 100, "state": "MERGED",
+           "url": "https://github.com/o/r/pull/100"}]
+    actions = core.plan_pr_sync(data, gh, fetched_floor=1)
+    summary = core.apply_pr_sync(data, actions)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_pr._print_pr_sync_outcome(actions, summary)
+    assert "already aligned with GitHub" in buf.getvalue(), buf.getvalue()
+
+
+def test_the_human_decided_kind_is_not_named_resolved():
+    """「解消された」と読める名前にしないこと (AX medium)。
+
+    重複の構造は消えない — 両方の記録は恒久的に残り、解消されたのは「どちらを
+    残すか」の人の判断だけ。`..._resolved` だと外部 consumer が「クリーンアップ
+    済みだから数えなくてよい」と早合点しうる。
+    """
+    kinds = {k for k in core.PR_SYNC_ACTION_KINDS}
+    assert "duplicate_human_decided" in kinds, kinds
+    assert not any(k.endswith("_resolved") for k in kinds), (
+        "『解消された』と読める種別名が在る: " + repr(sorted(kinds)))
+
+
+def test_every_report_kind_blocks_the_alignment_claim():
+    """**種別ごとに** 整合の宣言を止めること (網羅の実測)。
+
+    1 種別だけで駆動すると、網羅リストから他の種別を落としても緑のままになる
+    (反転 U2b で実測: `duplicate` だけ残して他を落としても 31 件すべて緑だった)。
+    「足した」と「全種別に効く」は別で、今日この repo で同型を何度も踏んでいる。
+
+    報告だけの種別それぞれについて、それ 1 つが在るだけで整合を名乗らないことを
+    1 件ずつ測る。
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    kinds = ["unreadable", "unmatched", "duplicate", "blocked_by_duplicate",
+             "duplicate_human_decided"]
+    zero = {"merged": 0, "closed": 0, "skipped": 0}
+    for kind in kinds:
+        actions = [{"entry_id": "e-x", "action": kind, "pr_number": 1,
+                    "from_status": "in_review", "to_status": "in_review",
+                    "reason": "probe", "duplicate_entry_ids": ["e-x", "e-y"]}]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_pr._print_pr_sync_outcome(actions, dict(zero))
+        assert "already aligned with GitHub" not in buf.getvalue(), (
+            f"種別 {kind!r} が残っているのに整合を宣言した:\n" + buf.getvalue())
+
+    # 境界: 報告だけの種別が 1 つも無ければ整合を名乗る
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cmd_pr._print_pr_sync_outcome(
+            [{"entry_id": "e-z", "action": "skip", "pr_number": 2,
+              "from_status": "done", "to_status": "done",
+              "reason": "already merged in beacon"}], dict(zero))
+    assert "already aligned with GitHub" in buf.getvalue(), buf.getvalue()
+
+
+def test_the_catalog_and_the_alignment_check_cannot_drift():
+    """網羅リストが種別カタログから外れていないことを機械で測る。
+
+    上の試験は「いま在る種別それぞれが効く」ことを測るが、**新しい種別が
+    カタログに足されたとき**に網羅リストへ入れ忘れる経路は塞げない。
+    カタログ側を真値として、報告だけの種別が全部入っているかを突き合わせる。
+    """
+    import ast
+    import inspect
+
+    fn = next((n for n in ast.walk(ast.parse(inspect.getsource(cmd_pr)))
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "_print_pr_sync_outcome"), None)
+    assert fn is not None
+    listed = {n.value for n in ast.walk(fn)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    # 状態を動かす種別 (merge / close) と skip 系はこの判定の対象外
+    report_only = set(core.PR_SYNC_ACTION_KINDS) - {
+        "merge", "close", "skip", "out_of_window"}
+    missing = report_only - listed
+    assert not missing, (
+        "カタログに在るが整合判定が見ていない種別: " + repr(sorted(missing)))
