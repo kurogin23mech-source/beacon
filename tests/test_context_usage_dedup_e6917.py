@@ -365,3 +365,139 @@ def test_sandboxing_state_dir_contains_every_write(
     escaped = list((main / ".git").rglob("*.json"))
     assert not escaped, f"a write escaped the sandbox into .git: {escaped}"
     assert (sandbox / "S.json").is_file()
+
+
+# --- PR #789 の独立レビュー由来 (全 5 件のうち、答えに依存しない 4 件) ---------
+#
+# 再実行した独立レビュー (AX / 保守性、同じ差分) が、前回のレビューが出さなかった
+# 5 件を返した。以下はそのうち「docstring が主張しているのに実装が守っていない」型を
+# 機械で測る形に落としたもの。prose は advisory だが、ここで測れば prose が規則になる。
+
+
+def test_sandboxing_state_dir_alone_contains_every_write(tmp_path, monkeypatch):
+    """``state_dir`` だけで 3 つの書き込み**全部**が中に収まること。
+
+    保守性レビューが実測で見つけた穴: write (2) の dedup は state_dir に落ちる形に
+    直っていたが、write (3) の legacy だけ素の相対パスのままで、docstring は
+    「全ての書き込みを閉じ込める」と主張していた。state_dir だけを渡すと
+    ``.claude/context-usage-state.json`` がプロセスの cwd に残る = 隔離したはずの
+    テストが開発者の作業フォルダを汚す形 (スイート自身のガードが捕まえる対象そのもの)。
+
+    **守る状態への書き手を 1 つ塞いで「全部閉じた」と称した**のは、この repo で
+    3 回踏んだ型なので、ここでは「外に 1 件も出ない」を全走査で測る。
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    sandbox = work / "sandbox"
+    cm._persist_state("S-sandbox", [20], context_pct=23, state_dir=sandbox)
+
+    inside = {p for p in sandbox.rglob("*") if p.is_file()}
+    assert inside, "サンドボックスの中に何も書かれていない (= 測れていない)"
+    outside = [p for p in work.rglob("*")
+               if p.is_file() and sandbox not in p.parents and p != sandbox]
+    assert outside == [], (
+        "state_dir だけ渡したのに外へ書き込みが逃げた: "
+        + repr([str(p.relative_to(work)) for p in outside]))
+
+
+def test_the_exact_dir_override_is_used_verbatim(tmp_path):
+    """上書きは**そのまま**使い、計算された base と違って子フォルダを足さないこと。
+
+    AX レビュー: 旧名 ``dedup_dir`` は「同じ種類の base を差し替えただけ」と読めて、
+    次の呼び出し元が ``DEDUP_DIR_NAME`` の子を期待する。名前と docstring で契約を
+    予告し、その契約をここで固定する。
+    """
+    got = cm._dedup_path_for("S", tmp_path)
+    assert got == tmp_path / "S.json", got
+    assert cm.DEDUP_DIR_NAME not in str(got), (
+        "上書きに子フォルダが足されている — 契約と違う")
+
+
+def test_an_old_posix_record_without_pids_is_pruned_not_left_alone():
+    """POSIX で pids が無い記録は「放置」ではなく年齢で掃除されること。
+
+    AX レビュー: docstring は「どちらの判定もできない記録 (POSIX で pids 無し /
+    それ以外で updated_at が読めない) は放置」と読め、POSIX + pids 無しが永久に
+    安全だと誤読させていた。実際は非 POSIX と同じ 7 日の時計で消える。
+
+    放置されるのは **両方**の判定ができない 1 ケースだけ、という実挙動を固定する。
+    """
+    old = (datetime.utcnow() - timedelta(days=cm.ABANDONED_AFTER_DAYS + 1)
+           ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert cm._record_is_abandoned({"updated_at": old}, posix=True) is True
+    assert cm._record_is_abandoned({"pids": [], "updated_at": old},
+                                   posix=True) is True
+    # 放置される唯一のケース: pids の判定も updated_at の判定もできない
+    assert cm._record_is_abandoned({}, posix=True) is False
+    assert cm._record_is_abandoned({"updated_at": "not-a-date"},
+                                   posix=True) is False
+
+
+def test_every_worktree_fallback_branch_is_logged(tmp_path, capsys,
+                                                  monkeypatch):
+    """per-cwd への後退を**どの分岐でも**黙ってやらないこと。
+
+    AX レビュー: git 呼び出しが一度こけただけで dedup が per-cwd に落ち、worktree を
+    移った回に限って節目が再発火するのに、痕跡が残らない。分裂していた従来は常に
+    再現したが、こちらは間欠的で診断できない = 「never worse」は正確でなかった。
+
+    **3 分岐すべてを駆動する。** 最初に書いた版は repo 外 (= returncode != 0) しか
+    駆動しておらず、例外分岐のログを消しても緑のままだった (反転 N4 で判明)。
+    「ログを足した」と「どの後退でも残る」は別で、弱い側が実効になる。
+    """
+    class _Res:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    # 分岐 1: git 呼び出し自体が失敗 (OSError / timeout)
+    def _raise(*a, **k):
+        raise OSError("git missing")
+    monkeypatch.setattr(cm.subprocess, "run", _raise)
+    assert cm._worktree_shared_base(tmp_path) is None
+    err = capsys.readouterr().err
+    assert "worktree-shared base unavailable" in err and "per-cwd" in err, (
+        "例外分岐の後退が記録されていない: " + repr(err))
+
+    # 分岐 2: repo 外 (非 0 終了)
+    monkeypatch.setattr(cm.subprocess, "run",
+                        lambda *a, **k: _Res(128, "", "not a git repository"))
+    assert cm._worktree_shared_base(tmp_path) is None
+    err = capsys.readouterr().err
+    assert "worktree-shared base unavailable" in err and "per-cwd" in err, (
+        "非 0 終了の後退が記録されていない: " + repr(err))
+
+    # 分岐 3: 成功したのに何も返ってこない
+    monkeypatch.setattr(cm.subprocess, "run", lambda *a, **k: _Res(0, "  \n"))
+    assert cm._worktree_shared_base(tmp_path) is None
+    err = capsys.readouterr().err
+    assert "worktree-shared base unavailable" in err and "per-cwd" in err, (
+        "空応答の後退が記録されていない: " + repr(err))
+
+
+def test_the_fallback_log_distinguishes_outside_repo_from_a_failed_call(
+        tmp_path, capsys, monkeypatch):
+    """「repo 外」(想定内) と「git 呼び出しが失敗」(想定外) を書き分けること。
+
+    どちらも同じ文面だと、grep しても間欠的な異常を想定内のノイズから選り分けられない。
+    """
+    class _Res:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    monkeypatch.setattr(cm.subprocess, "run",
+                        lambda *a, **k: _Res(128, "", "not a git repository"))
+    cm._worktree_shared_base(tmp_path)
+    outside = capsys.readouterr().err
+
+    def _raise(*a, **k):
+        raise OSError("git missing")
+    monkeypatch.setattr(cm.subprocess, "run", _raise)
+    cm._worktree_shared_base(tmp_path)
+    failed = capsys.readouterr().err
+
+    assert outside != failed, (
+        "repo 外と呼び出し失敗が同じ文面 — 診断時に選り分けられない:\n"
+        + repr(outside))
+    assert "exited 128" in outside, outside
+    assert "OSError" in failed, failed

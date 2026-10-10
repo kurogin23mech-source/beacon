@@ -372,8 +372,11 @@ def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
     PR #789).
 
     Returns ``None`` outside a git repository (or when git is unavailable), and
-    the caller then falls back to the per-cwd directory — degraded to today's
-    behaviour, never worse.
+    the caller then falls back to the per-cwd directory. Every such fallback is
+    LOGGED: the split behaviour itself is no worse than before, but an
+    intermittent fallback (a flaky git call on one turn) re-fires a threshold
+    while leaving no trace, which is harder to diagnose than the consistent
+    split it replaced. The log line makes it greppable and countable.
     """
     base_cwd = cwd if cwd is not None else Path.cwd()
     try:
@@ -381,12 +384,25 @@ def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
             ["git", "rev-parse", "--git-common-dir"],
             cwd=str(base_cwd), capture_output=True, text=True, timeout=5,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        # 無言で per-cwd に落ちると、worktree を移った回に限って節目が再発火し、
+        # しかも痕跡が残らない (= 間欠的で診断できない、分裂していた従来より悪い)。
+        # 「git が無い/repo 外」(= 想定内) と「git 呼び出しが失敗した」(= 想定外) を
+        # 書き分けて grep 可能にする (AX レビュー PR #789)。
+        _log(f"worktree-shared base unavailable: git rev-parse failed "
+             f"({type(exc).__name__}); dedup record falls back to per-cwd")
         return None
     if out.returncode != 0:
+        # repo 外は想定内なので、失敗の中身を 1 行だけ添えて区別できるようにする。
+        detail = (out.stderr or "").strip().splitlines()
+        _log("worktree-shared base unavailable: git rev-parse exited "
+             f"{out.returncode} ({detail[0] if detail else 'no stderr'}); "
+             "dedup record falls back to per-cwd")
         return None
     raw = (out.stdout or "").strip()
     if not raw:
+        _log("worktree-shared base unavailable: git rev-parse returned nothing; "
+             "dedup record falls back to per-cwd")
         return None
     # git may answer relatively (".git") — resolve against the cwd we asked in.
     common = Path(raw)
@@ -400,7 +416,7 @@ def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
 
 def _dedup_path_for(
     session_id: str,
-    dedup_dir: Optional[Path] = None,
+    exact_dir: Optional[Path] = None,
     *,
     cwd: Optional[Path] = None,
 ) -> Path:
@@ -409,9 +425,16 @@ def _dedup_path_for(
     Worktree-shared when we are in a git repository, per-cwd otherwise. The
     filename is the same sanitised ``session_id`` used by
     ``_state_path_for`` so the two records are easy to correlate by eye.
+
+    ``exact_dir`` is used VERBATIM as the containing directory — the
+    ``DEDUP_DIR_NAME`` child is NOT appended to it, unlike the computed base.
+    The name says so because the parameter used to be called ``dedup_dir``,
+    which read as "the same kind of base, just overridden" and would have led
+    the next caller to expect the subfolder (AX review of PR #789). It exists so
+    ``_persist_state`` can put this record inside a caller's sandbox directly.
     """
-    if dedup_dir is not None:
-        base = dedup_dir
+    if exact_dir is not None:
+        base = exact_dir
     else:
         shared = _worktree_shared_base(cwd)
         base = (shared / DEDUP_DIR_NAME) if shared is not None else Path(STATE_DIR_REL)
@@ -547,16 +570,24 @@ def _record_is_abandoned(
     Two independent judgements, because the precise one is not available
     everywhere:
 
-    * POSIX with recorded ``pids``: all of them are dead. Exact.
-    * Anywhere else (Windows has no usable probe here — ``os.kill(pid, 0)``
-      TERMINATES the target on CPython, see ``_pid_alive``): the record has not
-      been touched for ``ABANDONED_AFTER_DAYS``. The Stop hook rewrites
-      ``updated_at`` on every single turn, so a week of silence cannot belong
-      to a live session, while a running session is never close to the bound.
+    * POSIX AND a non-empty ``pids`` list: all of them are dead. Exact.
+    * EVERY OTHER record — no ``pids``, an empty ``pids``, or any non-POSIX host
+      (Windows has no usable probe here: ``os.kill(pid, 0)`` TERMINATES the
+      target on CPython, see ``_pid_alive``): the record has not been touched
+      for ``ABANDONED_AFTER_DAYS``. The Stop hook rewrites ``updated_at`` on
+      every single turn, so a week of silence cannot belong to a live session,
+      while a running session is never close to the bound.
 
-    A record that neither probe can judge (no ``pids`` on POSIX, no parsable
-    ``updated_at`` elsewhere) is LEFT ALONE — growing the folder is cheaper
-    than deleting a live session's dedup state and re-firing its thresholds.
+    Only a record that **neither** probe can judge is LEFT ALONE, and that means
+    exactly one case: no pids-based verdict AND no parsable ``updated_at``.
+    Growing the folder is cheaper than deleting a live session's dedup state and
+    re-firing its thresholds.
+
+    These two bullets mirror the ``if`` below 1:1 on purpose. An earlier wording
+    read as though "no ``pids`` on POSIX" were one of the unjudgeable cases and
+    therefore safe forever; it is not — it falls through to the same 7-day clock
+    as a non-POSIX host, and a reader who trusted the prose would mispredict
+    which sibling files vanish (AX review of PR #789).
 
     ``posix`` is a parameter rather than a read of ``os.name`` at the point of
     use so the non-POSIX branch is reachable from a POSIX test WITHOUT
@@ -604,11 +635,20 @@ def _persist_state(
 
     Stale sibling records are pruned in (1) and (2) on the way.
 
-    Sandboxing: passing ``state_dir`` alone is enough to contain every write —
-    ``dedup_dir`` falls back to ``state_dir`` rather than resolving itself, so a
-    caller cannot half-override the sandbox and have one write escape into the
-    repository's git directory. Pass ``dedup_dir`` explicitly only to aim the
-    two somewhere different on purpose.
+    Sandboxing: passing ``state_dir`` alone contains ALL THREE writes — both
+    ``dedup_dir`` and the legacy path fall back to ``state_dir`` rather than
+    resolving themselves, so a caller cannot half-override the sandbox and have
+    one write escape (into the repository's git directory, or into the process's
+    cwd). Pass ``dedup_dir`` / ``legacy_path`` explicitly only to aim them
+    somewhere different on purpose.
+
+    This promise was false once and is measured now: write (2) was fixed to fall
+    back while write (3) kept a bare relative default, and the docstring claimed
+    all of them were contained. ``state_dir`` alone then left a real
+    ``.claude/context-usage-state.json`` in whatever cwd the process happened to
+    have — for a hermetic test that is a leak into the developer's checkout,
+    which is the exact pollution class the suite's own guard exists to catch.
+    ``test_sandboxing_state_dir_alone_contains_every_write`` drives this.
     """
     own = _state_path_for(session_id, state_dir)
     extra = _identity_fields()
@@ -632,7 +672,14 @@ def _persist_state(
                     context_used=context_used, context_limit=context_limit,
                     extra=extra)
         _prune_stale_state_files(dedup.parent, keep=dedup)
-    legacy = legacy_path if legacy_path is not None else Path(STATE_FILE_REL)
+    # (3) も同じサンドボックスに従う。ここが素の相対パスだったため、state_dir だけを
+    # 渡した呼び出し元から 1 件だけ外へ逃げていた (= docstring は「全ての書き込みを
+    # 閉じ込める」と主張しているのに write (2) だけ直して (3) を残していた、保守性
+    # レビュー PR #789)。守る状態への書き手を 1 つ塞いで「全部閉じた」と称するのは、
+    # この repo で 3 回踏んだ形。
+    legacy = (legacy_path if legacy_path is not None
+              else ((state_dir / STATE_FILE_REL.name) if state_dir is not None
+                    else Path(STATE_FILE_REL)))
     _save_state(legacy, session_id, notified, context_pct=context_pct,
                 context_used=context_used, context_limit=context_limit,
                 extra=extra)
