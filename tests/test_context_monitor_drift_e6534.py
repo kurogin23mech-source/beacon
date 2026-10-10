@@ -80,20 +80,28 @@ def test_wired_sh_writes_context_pct(project_dir, tmp_path):
     result = _run(transcript, project_dir)
     assert result.returncode == 0, result.stderr
 
-    state = json.loads((project_dir / ".claude" / "context-usage-state.json").read_text())
+    # ms-166 e-6919: この検査はかつて旧式の単一ファイル
+    # `.claude/context-usage-state.json` を読んでいたが、そのファイルは
+    # 「もう書かない / 見つけたら消す」に倒したので読み先を移した。
+    # **この検査の対象は「配線された bash hook が context_pct を永続化するか」**
+    # (e-6499 で黙って落としていた項目) であって、保存先そのものではない。
+    # セッション別の記録に同じ項目が全部入っているので、主張は弱まっていない。
+    own = json.loads(
+        (project_dir / ".claude" / "context-usage" / "drift-sess.json").read_text())
     # The regression this guards: context_pct absent because the wired path never
     # wrote it. It must now be present with the computed percent.
-    assert state["context_pct"] == 30, state
-    assert state["context_used"] == 300_000, state
-    assert state["context_limit"] == 1_000_000, state
+    assert own["context_pct"] == 30, own
+    assert own["context_used"] == 300_000, own
+    assert own["context_limit"] == 1_000_000, own
     # notified_thresholds behaviour must NOT regress (item 3 of the done-when).
-    assert state["session_id"] == "drift-sess"
-    assert 20 in state["notified_thresholds"]
-    # e-6588: the wired path must ALSO write the per-session record — the one the
-    # monitor reads back for dedup and the bridge matches by pid identity.
-    own = json.loads((project_dir / ".claude" / "context-usage" / "drift-sess.json").read_text())
-    assert own["context_pct"] == 30 and 20 in own["notified_thresholds"], own
+    assert own["session_id"] == "drift-sess"
+    assert 20 in own["notified_thresholds"]
+    # e-6588: the bridge matches this record by pid identity.
     assert isinstance(own.get("pids"), list) and own["pids"], own
+    # ms-166 e-6919: 旧式ファイルは作られないこと。配線された bash 経路からも
+    # 書かれないことを、ここ (= 実際に hook を走らせる唯一の検査) で押さえる。
+    assert not (project_dir / ".claude" / "context-usage-state.json").exists(), (
+        "旧式ファイルが配線経路から作られている")
 
 
 def test_sh_delegates_not_reimplements():
