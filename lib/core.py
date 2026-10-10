@@ -2836,7 +2836,19 @@ PR_SYNC_ACTION_KINDS = frozenset({
     # action 値だけ kebab-case だと「複数語は snake だろう」と類推した AI が
     # `== "out_of_window"` と書いて **静かに一致しない** (構文エラーにならない)。
     "duplicate",            # 同じ PR を指す記録が複数 (組単位の報告)
-    "blocked_by_duplicate", # 二重登録のため自動で動かさなかった
+    "blocked_by_duplicate", # 二重登録のため自動で動かさなかった (= まだ人の判断待ち)
+    # 二重登録だが **人が既に判断済み** (= 理由を伴う取消がある) もの。
+    #
+    # 命名: `..._resolved` にしない (独立レビュー PR #793、medium)。「解消された」
+    # と読めるが、**重複の構造は消えない** — 両方の記録は恒久的に残り、解消された
+    # のは「どちらを残すか」の人の判断だけ。外部 consumer が「クリーンアップ済み
+    # だから数えなくてよい」と早合点する余地を名前の時点で塞ぐ。
+    # blocked_by_duplicate と分ける理由は ms-166 e-6941: 両方を同じ種別で報告すると
+    # 「決める必要がある件数」が出せず、整理しても報告が減らないので、何件残って
+    # いるのかを数える母集団が永久に出せない。動かさないのは同じ (人の判断を上書き
+    # しない)、報告をやめるのも不可 (e-6871 で直した「無言で飛ばして整合と報告する」
+    # の退行になる) ので、**種別で区別する**。
+    "duplicate_human_decided",
 })
 
 
@@ -3051,17 +3063,34 @@ def plan_pr_sync(data: dict, gh_prs: list, *, fetched_floor: int | None = None) 
     #
     # 「GitHub に合わせる」は、人が下した判断を上書きする理由にならない。どちらを
     # 残すかが決まるまで動かさず、決める必要があることを表に出す。
+    # 人が理由をつけて捨てた記録は **終端** として扱う (ms-166 e-6941)。
+    # 取消は beacon task cancel だけが通せる遷移で、理由か acknowledge が必須
+    # (ms-166 e-6893)。つまり cancelled は「人の判断が既に入っている」状態であり、
+    # 「これから決める必要がある」ものと同じ籠に入れてはいけない。
+    #
+    # 「何が終端か」は **work_model.is_cancelled が正典** で、ここでリテラルを
+    # 書き直さない。最初の版は `HUMAN_DECIDED = ("cancelled",)` と独自に符号化し、
+    # cmd_pr.py 側にも別のリテラルを置いて「docstring で互いを mirror する」形に
+    # していた (独立レビュー PR #793、medium)。同じ規則が 3 箇所に散り、次に終端
+    # 状態が増えたとき手で全部直す必要がある形だった。
     for act in actions:
         if (act.get("action") in ("merge", "close")
                 and act.get("entry_id") in duplicated_ids):
-            act["blocked_reason"] = (
-                f"同じ PR#{act.get('pr_number')} を指す記録が複数あるため自動では"
-                f"動かさない (元の状態: {act.get('from_status')})。"
-                "どれを残すかを決めてから揃える")
             act["intended_action"] = act["action"]
             act["intended_to_status"] = act.get("to_status")
-            act["action"] = "blocked_by_duplicate"
             act["to_status"] = act.get("from_status")
+            if work_model.is_cancelled({"status": act.get("from_status")}):
+                act["blocked_reason"] = (
+                    f"同じ PR#{act.get('pr_number')} を指す記録が複数あり、この記録は"
+                    "人が理由をつけて取り消し済み。終端なので動かさない "
+                    "(決める必要はもう無い)")
+                act["action"] = "duplicate_human_decided"
+            else:
+                act["blocked_reason"] = (
+                    f"同じ PR#{act.get('pr_number')} を指す記録が複数あるため自動では"
+                    f"動かさない (元の状態: {act.get('from_status')})。"
+                    "どれを残すかを決めてから揃える")
+                act["action"] = "blocked_by_duplicate"
 
     return actions
 
@@ -3074,16 +3103,18 @@ def apply_pr_sync(data: dict, actions: list) -> dict:
     """
     summary = {"merged": 0, "closed": 0, "skipped": 0, "repaired": 0,
                "unreadable": 0, "unmatched": 0, "duplicate": 0,
-               "out_of_window": 0, "blocked_by_duplicate": 0, "errors": []}
+               "out_of_window": 0, "blocked_by_duplicate": 0,
+               "duplicate_human_decided": 0, "errors": []}
     for act in actions or []:
         eid = act.get("entry_id", "")
         a = act.get("action", "")
         # 報告だけの種別は数えて終わる (勝手に直さない — unreadable はどの PR か
         # 分からないので直せず、duplicate はどちらを残すかが人の判断)。
         if a in ("unreadable", "unmatched", "duplicate", "out_of_window",
-                 "blocked_by_duplicate"):
+                 "blocked_by_duplicate", "duplicate_human_decided"):
             summary[a] += 1
-            if (a in ("unmatched", "out_of_window", "blocked_by_duplicate")
+            if (a in ("unmatched", "out_of_window", "blocked_by_duplicate",
+                      "duplicate_human_decided")
                     and eid and act.get("needs_repair")):
                 # 照合はできなかったが、記録の形だけは揃えられる (番号は判明している)。
                 if _repair_pr_identity(data, eid, act):

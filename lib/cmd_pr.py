@@ -51,6 +51,9 @@ import re
 import core  # noqa: F401
 import gh_port
 import git_read_port
+# ms-166 e-6941 / e-6903: 「何が終端か (= 人が判断済みか)」の正典。この問いに
+# 答えるリテラルをここで書き直さない (独立レビュー PR #793、medium)。
+import work_model
 
 # ms-142 e-5527 (spine §5): outward forge/vcs calls live behind the ports —
 # gh (pr view/list/create) → gh_port, read-only git (branch/log for MS
@@ -192,6 +195,36 @@ def cmd_pr_add():
             target_ms, f"pr add {url}"
         ):
             sys.exit(1)
+    # ms-166 e-6903: 同じ PR 番号の記録が既に在るなら **保存前に** 止める。
+    #
+    # 実測 (2026-10-08〜10): 同じ PR を指す記録が 50 組あり、うち 18 件は状態が
+    # 揃えられず残っていた (PR#60 には 4 件ぶら下がっていた)。突合はどちらを残すかを
+    # 機械で決められないので、人が判断するまで恒久的に残る。**作られてから気づく形**
+    # では、気づいた時点で既に人の判断が必要な負債になっている。
+    #
+    # 既存の claim 競合警告 (ms-80 e-1821) は「同じ MS に並列 open PR がある」を
+    # 見るだけで、**同じ PR 番号かは見ていない**。これが 50 組が作られた経路。
+    #
+    # 止める (= exit 2) 側に倒した理由: 警告だけでは同じことが起きる (claim 競合警告は
+    # 警告のみで、現に 50 組が作られた)。意図的に 2 件目を足したい場面は想像できるが
+    # 実例が無いので、必要になったら旗で開ける。
+    existing = _entries_for_pr_number(data, _pr_number_from_url(url))
+    if existing:
+        rows = _capped_rows(
+            existing,
+            lambda e: (f"    [{e['eid']}] {e.get('status') or '?'}"
+                       + (f" — {e['title'][:60]}" if e.get("title") else "")),
+            cap=5)
+        print(
+            f"Error: PR #{_pr_number_from_url(url)} の記録は既に "
+            f"{len(existing)} 件あります:\n{rows}\n"
+            f"  同じ PR を指す記録が複数あると、突合はどちらを残すかを機械で決め\n"
+            f"  られず、人が判断するまで状態が揃いません (ms-166 e-6903: 実測で\n"
+            f"  50 組 / 状態不一致 18 件がこの経路で作られていました)。\n"
+            f"  既存の記録を使ってください。捨てるなら "
+            f"`beacon task cancel <entry-id> --reason ...` で理由を残します。",
+            file=sys.stderr)
+        sys.exit(2)
     try:
         eid = core.pr_add(data, ms_id=ms_id, url=url, author=author,
                           intent=intent, date=date, title=title, commits=commits,
@@ -238,6 +271,94 @@ def cmd_pr_add():
             if len(conflicts) > 5:
                 print(f"  (... and {len(conflicts) - 5} more)")
             print(f"  推奨: `beacon claim` で作業範囲を調整、または各 PR の intent を見直して重複を解消してください。")
+
+def _recorded_pr_number(entry: dict) -> str:
+    """Return the PR number this record claims, structured field FIRST.
+
+    ``core.pr_add`` writes ``meta.pr_number`` as the authoritative identity;
+    the url is a display string that has drifted in practice (``.diff`` /
+    ``.patch`` / REST ``pulls/N`` shapes GitHub itself emits, plus 17 records
+    in this repository whose url field holds flag text or prose — ms-166
+    e-6902). Re-deriving the number from the url therefore MISSES real records
+    that are perfectly well identified. Measured by the independent review of
+    PR #793.
+
+    The url parse stays as a fallback for records written before the structured
+    field existed.
+    """
+    meta = entry.get("meta") or {}
+    num = meta.get("pr_number")
+    if isinstance(num, int) or (isinstance(num, str) and num.strip()):
+        return str(num).strip()
+    return _pr_number_from_url(str(entry.get("url") or meta.get("url") or ""))
+
+
+def _capped_rows(items: list, render, cap: int = 10) -> str:
+    """件数は正確に、列挙は読める量で打ち切った複数行文字列を返す。
+
+    歴史的な負債は 50 組・69 件という規模で出る。毎回全部並べると読み手は報告自体を
+    読まなくなり、「緑を信じる」のと同じ害に戻る。**件数は呼び出し側が必ず正確に出し**、
+    列挙だけを打ち切って残りの件数を言う。
+
+    module レベルに在るのは、同じ形が 2 つに割れないため (独立レビュー PR #793、low)。
+    以前は `_print_pr_sync_plan` の中の closure だけに在り、`cmd_pr_add` の拒否文は
+    同じ「打ち切り + 残り件数」を独自に書いていた。文言や打ち切り数を一方で変えても
+    他方は変わらない形で、3 つ目の報告を書く人がどちらを写すか選ぶことになる。
+    """
+    lines = [render(a) for a in items[:cap]]
+    if len(items) > cap:
+        lines.append(f"  … 他 {len(items) - cap} 件")
+    return "\n".join(lines)
+
+
+def _entries_for_pr_number(data: dict, pr_number: str) -> list:
+    """Return existing PR entries that point at ``pr_number`` (ms-166 e-6903).
+
+    Terminal records are **excluded**: a record the human cancelled with a
+    reason is a decision already taken, so it must not block recording the
+    survivor. If this disagreed with the reconciliation side, cancelling a
+    duplicate would make `pr add` refuse forever while sync called the group
+    resolved.
+
+    **They cannot disagree, because neither side owns the rule**: both ask
+    ``work_model.is_cancelled``. The first version of this function wrote
+    ``!= "cancelled"`` here and ``HUMAN_DECIDED = ("cancelled",)`` in
+    ``plan_pr_sync``, keeping them in step by a docstring that said each
+    "mirrors" the other — a hand-maintained cross-reference, which the
+    independent review of PR #793 called out: the rule then lived in three
+    places (the canonical predicate plus two literals) and the next terminal
+    status this project adds would have to be found in all of them.
+
+    Matching goes through ``_recorded_pr_number``, which reads the structured
+    field FIRST. The first version re-parsed the url instead, and the
+    independent review of PR #793 measured it letting duplicates through: a
+    record whose url is ``.../pull/60.diff`` (a shape GitHub itself hands out,
+    as are ``.patch`` and the REST ``pulls/60``) with ``meta.pr_number == 60``
+    was not found, and so were the 17 records whose url field holds flag text
+    or prose (ms-166 e-6902). A refusal that silently does not fire is worse
+    than no refusal — the caller believes the number is protected.
+    """
+    if not pr_number:
+        return []
+    out: list = []
+
+    def _walk(entries):
+        for e in entries or []:
+            if not isinstance(e, dict):
+                continue
+            if e.get("type") == "pr" and not work_model.is_cancelled(e):
+                num = _recorded_pr_number(e)
+                if num and num == pr_number:
+                    out.append({"eid": e.get("id", ""),
+                                "status": e.get("status", ""),
+                                "title": e.get("description", "")})
+            _walk(e.get("entries"))
+
+    for ms in data.get("milestones", []) or []:
+        if isinstance(ms, dict):
+            _walk(ms.get("entries"))
+    return out
+
 
 def _detect_pr_claim_conflict(data: dict, ms_id: str, new_eid: str) -> list:
     """Return open PR entries under ms_id that may conflict with the newly
@@ -996,23 +1117,24 @@ def _print_pr_sync_plan(actions: list) -> None:
     unmatched = by_kind.get("unmatched", [])
     outside = by_kind.get("out_of_window", [])
     blocked = by_kind.get("blocked_by_duplicate", [])
+    # 人が既に取り消し済みの二重登録 (ms-166 e-6941)。報告はするが「決める必要が
+    # ある件数」には入れない — 混ぜると整理しても数字が減らず、何件残っているのかを
+    # 数える母集団が出せない。
+    human_decided_dups = by_kind.get("duplicate_human_decided", [])
     dups = by_kind.get("duplicate", [])
     repairs = [a for a in (actions or []) if a.get("needs_repair")]
 
     def _lines(rows: list, render, cap: int = 10) -> None:
-        """件数は正確に、列挙は読める量で打ち切る。
+        """打ち切り + 残り件数の形は module レベルの `_capped_rows` が所管する。
 
-        歴史的な負債は 50 組・69 件という規模で出る。毎回全部並べると読み手は
-        報告自体を読まなくなり、「緑を信じる」のと同じ害に戻る (この課題が直した
-        欠陥の裏返し)。**件数は必ず正確に出し**、列挙だけを打ち切って残りの件数を
-        言う。
+        ここは「出力する」だけ。形を 2 つ持たないため (独立レビュー PR #793、low)。
         """
-        for a in rows[:cap]:
-            print(render(a))
-        if len(rows) > cap:
-            print(f"  … 他 {len(rows) - cap} 件")
+        out = _capped_rows(rows, render, cap=cap)
+        if out:
+            print(out)
 
-    if not (moves or unreadable or unmatched or dups or repairs or blocked):
+    if not (moves or unreadable or unmatched or dups or repairs or blocked
+            or human_decided_dups):
         tail = (f"、照合した範囲の外 {len(outside)} 件" if outside else "")
         print("beacon の PR 記録は GitHub と整合しています "
               f"(照合した記録 {len(actions or []) - len(outside)} 件、"
@@ -1047,11 +1169,55 @@ def _print_pr_sync_plan(actions: list) -> None:
         _lines(blocked, lambda a: (f"  [{a['entry_id']}] PR#{a['pr_number']}: "
                                    f"{a['from_status']} のまま "
                                    f"(本来は {a.get('intended_to_status')} に揃う)"))
+    if human_decided_dups:
+        # ⚠ を付けない。人の判断が既に入っており、やることは残っていない。
+        print(f"二重登録だが人が判断済みの記録: {len(human_decided_dups)} 件 "
+              "(理由つきで取り消されているため動かしません)")
+        _lines(human_decided_dups,
+               lambda a: (f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                          f"{a['from_status']} のまま"))
     if dups:
         print(f"⚠ 同じ PR を指す記録が複数ある ({len(dups)} 組) "
               "— どちらを残すかは人の判断です:")
         _lines(dups, lambda a: (f"  PR#{a['pr_number']}: "
                                 f"{', '.join(a.get('duplicate_entry_ids', []))}"))
+
+
+def _print_pr_sync_outcome(actions: list, summary: dict) -> None:
+    """書き込み後の人間向け報告。**全種別を見てから初めて整合を名乗る。**
+
+    以前はこの判定が `merged == 0 and closed == 0` だけで
+    「All beacon PR entries are already aligned with GitHub.」を出しており、
+    人の判断待ちの二重登録・判別できない記録が残っていても嘘の整合を宣言して
+    いた (独立レビュー PR #793、high)。dry-run 側 (`_print_pr_sync_plan`) は
+    全種別を見る形に直したのに、**実際に書き込むこちらの経路が直っていなかった**
+    — e-6871 で直した「無言で飛ばして整合と報告する」が、もう一方の消費者で
+    生き残っていた形。
+
+    関数に切り出したのは、テストから実挙動を駆動するため (構文木で「種別名が
+    関数内に在るか」を見る形では、判定条件を戻しても文字列が残って緑になる —
+    反転で実測した)。
+    """
+    unresolved = [a for a in actions
+                  if a.get("action") in ("unreadable", "unmatched",
+                                         "duplicate", "blocked_by_duplicate",
+                                         "duplicate_human_decided")]
+    if summary["merged"] == 0 and summary["closed"] == 0 and not unresolved:
+        print("All beacon PR entries are already aligned with GitHub.")
+        return
+    if summary["merged"] == 0 and summary["closed"] == 0:
+        print("状態を動かした記録はありません。残っている論点:")
+        _print_pr_sync_plan(actions)
+        return
+    print(f"PR sync: {summary['merged']} merged, "
+          f"{summary['closed']} closed, "
+          f"{summary['skipped']} skipped.")
+    for a in actions:
+        if a.get("action") in ("merge", "close"):
+            print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                  f"{a['from_status']} → {a['to_status']}")
+    if unresolved:
+        _print_pr_sync_plan(actions)
 
 
 def _fetch_gh_pr_list_all() -> list:
@@ -1120,16 +1286,7 @@ def cmd_pr_sync():
         print(json.dumps({"actions": actions_sorted, "summary": summary},
                          ensure_ascii=False))
     else:
-        if summary["merged"] == 0 and summary["closed"] == 0:
-            print("All beacon PR entries are already aligned with GitHub.")
-        else:
-            print(f"PR sync: {summary['merged']} merged, "
-                  f"{summary['closed']} closed, "
-                  f"{summary['skipped']} skipped.")
-            for a in actions_sorted:
-                if a.get("action") in ("merge", "close"):
-                    print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
-                          f"{a['from_status']} → {a['to_status']}")
+        _print_pr_sync_outcome(actions_sorted, summary)
         if summary["errors"]:
             print(f"  ⚠ {len(summary['errors'])} errors:", file=sys.stderr)
             for err in summary["errors"]:
