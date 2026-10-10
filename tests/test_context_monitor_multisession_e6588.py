@@ -10,8 +10,10 @@ Pre-fix data flow (the bug):
 Post-fix: one record per session under .claude/context-usage/<session_id>.json
 (no shared write → no reset path), each stamped with the hook's ancestor pids +
 BEACON_PARENT_PID; the bridge picks the record whose pids contain its
-process.ppid (the common Claude Code parent). Legacy per-cwd file still written
-(old bridges) but never read.
+process.ppid (the common Claude Code parent). The legacy per-cwd file is
+**neither written nor read** — it is deleted when found (ms-166 e-6919); the
+rule itself lives in ``_remove_legacy_state_file``, this header only points at
+it so the two cannot drift apart.
 """
 from __future__ import annotations
 

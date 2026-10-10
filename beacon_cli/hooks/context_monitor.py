@@ -94,19 +94,18 @@ DEFAULT_CONTEXT_LIMIT_1M: int = 1_000_000
 # bash 版 (bin/context-usage-monitor.sh) の grep パターンと一致させること。
 _LEGACY_200K_RE = re.compile(r"claude-[0-3][.\-]", re.IGNORECASE)
 
-# 旧式の単一ファイル。**もう書かない。見つけたら消す** (ms-166 e-6919)。
-# 残していた理由は「1 リリース前の bridge が使用率バッジを出せるように」だったが、
-# 現在の受信側は読んでいない (channel/ 配下に参照ゼロ、読むのは
-# .claude/context-usage/<session_id>.json の方)。作業フォルダごとに
-# last-writer-wins で書かれるため beacon repo 内に 8 個溜まっていた。
-# 誰も読まないものを互換のために書き続ける期限を切れないので、根から外した。
-# 代償: 1 リリース前の bridge は使用率バッジを失う (user 判断、2026-10-10)。
 STATE_FILE_REL = Path(".claude") / "context-usage-state.json"
-"""LEGACY per-cwd state file (pre e-6588). Still WRITTEN for one release so an
-older bridge (channel/bus-context-usage.mjs that predates the per-session
-directory) keeps showing a context% badge; no longer READ by this monitor for
-threshold dedup. Remove the write once every deployed bridge reads
-``STATE_DIR_REL``."""
+"""LEGACY per-cwd state file (pre e-6588). **Neither written nor read** — it is
+deleted when found; see ``_remove_legacy_state_file`` for why and for the scope
+of that deletion (ms-166 e-6919).
+
+The reasoning lives THERE and not here on purpose. This constant briefly had
+three descriptions of the same rule — a comment above it, this docstring, and
+the helper's docstring — and the independent review of PR #792 caught this one
+still asserting the opposite ("Still WRITTEN for one release ... remove the
+write once every deployed bridge reads STATE_DIR_REL"), i.e. naming as a future
+task the very thing that commit had just done. One address for the rule, the
+rest are pointers."""
 
 STATE_DIR_REL = Path(".claude") / "context-usage"
 """Per-session state directory (ms-159 / e-6588).
@@ -670,7 +669,7 @@ def _persist_state(
     legacy_path: Optional[Path] = None,
     dedup_dir: Optional[Path] = None,
 ) -> None:
-    """Write all THREE of this session's records. Never raises.
+    """Write this session's TWO records and clear the legacy one. Never raises.
 
     1. **per-cwd** ``STATE_DIR_REL/<session_id>.json`` — the bridge's input:
        identity fields it matches on plus ``updated_at`` for its tie-break.
