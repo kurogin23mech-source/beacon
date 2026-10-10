@@ -580,24 +580,18 @@ def test_the_census_does_not_define_a_second_sessionfinish_hook():
 
 # --- SQLite の連れファイルは「名前の列挙」でなく「性質」で免除する (e-6925) ----
 #
-# main が赤くなった実害: ガードの免除一覧は WAL モードの連れファイル 2 つ
-# (project.db-shm / project.db-wal) を名前で持っていたが、
-# lib/store_sqlite.py::_ensure_schema は ``PRAGMA journal_mode=WAL`` の失敗を
-# **意図的に許容する** (毎回打つと "database is locked" でクラッシュした経緯)。
-# WAL になっていない間の書き込みは ``project.db-journal`` を作るので、3 つ目の
-# 名前がガードをすり抜け、書き込み途中の一時ファイルが「漏れ」として報告され、
-# 窓が重なった無関係なテストが名指しされた (2026-10-09、main と PR で別のテストが
-# 名指しされ、ファイル名だけが一致した)。
+# **なぜこの形なのかの経緯は tests/conftest.py の _is_sqlite_sidecar 直上に 1 箇所
+# だけ置いてある** (どの保存方式で何という連れファイルが出るか / 過去 2 回この軸で
+# 負けた経緯 / 本体の実在を要求する理由)。ここに写すと、次に doctrine を訂正する人が
+# 片方だけ直して古い説明を残せてしまうので、説明は持たずに参照する。
 #
-# 同じファイルは既に 1 度この軸で負けている (project.json.tmp を名前で免除 →
-# 別名・同機構の atomic writer がすり抜け → persistence という性質へ移した)。
-# 以下はその 2 回目を固定して、3 回目が来ないようにする。
-
+# 以下はその doctrine が実際に成立していることを留めるテスト群。
 
 def test_the_rollback_journal_companion_is_excused():
     """main を赤くした当の名前。ここが赤ければ本流が赤いままになる。"""
     import conftest
-    assert conftest._is_sqlite_sidecar("project.db-journal")
+    assert conftest._is_sqlite_sidecar(
+        "project.db-journal", {"project.db", "project.db-journal"})
 
 
 def test_every_journal_mode_companion_is_excused():
@@ -611,7 +605,7 @@ def test_every_journal_mode_companion_is_excused():
     import conftest
     for name in ("project.db-journal", "project.db-wal", "project.db-shm",
                  "project.db-mjA1B2C3D4"):
-        assert conftest._is_sqlite_sidecar(name), name
+        assert conftest._is_sqlite_sidecar(name, {"project.db", name}), name
 
 
 def test_the_database_itself_is_still_reported():
@@ -621,8 +615,8 @@ def test_the_database_itself_is_still_reported():
     見えなくなることはない — その不変条件をここで留める。
     """
     import conftest
-    assert not conftest._is_sqlite_sidecar("project.db")
-    assert not conftest._is_sqlite_sidecar("other.db")
+    assert not conftest._is_sqlite_sidecar("project.db", {"project.db"})
+    assert not conftest._is_sqlite_sidecar("other.db", {"other.db"})
     assert "project.db" in conftest.KNOWN_LEAKS, (
         "本体は負債台帳に載っているべき — 載っていなければ新種として即赤になる")
 
@@ -634,10 +628,11 @@ def test_the_predicate_does_not_excuse_unrelated_names():
     ``.db`` の連れではないので免除されてはならない。
     """
     import conftest
-    for name in ("bus-budget.json", "bus-sent-log.json", "session.json",
-                 "cloud.json", "project.json", "my.db.backup",
-                 "notes-2026.json", "-journal", "project.db-"):
-        assert not conftest._is_sqlite_sidecar(name), name
+    present = {"bus-budget.json", "bus-sent-log.json", "session.json",
+               "cloud.json", "project.json", "my.db.backup",
+               "notes-2026.json", "-journal", "project.db-", "project.db"}
+    for name in sorted(present - {"project.db"}):
+        assert not conftest._is_sqlite_sidecar(name, present), name
 
 
 def test_no_sqlite_companion_is_excused_by_name_any_more():
@@ -648,7 +643,8 @@ def test_no_sqlite_companion_is_excused_by_name_any_more():
     """
     import conftest
     offenders = [n for n in conftest._NOT_THE_TESTS_FAULT
-                 if conftest._is_sqlite_sidecar(n)]
+                 if conftest._is_sqlite_sidecar(
+                     n, conftest._NOT_THE_TESTS_FAULT | {n.rpartition("-")[0]})]
     assert offenders == [], (
         "連れファイルを名前で免除している: " + repr(offenders) +
         " — 免除は _is_sqlite_sidecar (*.db から導出) が所管する")
@@ -750,3 +746,52 @@ def test_the_guard_still_fires_on_an_unlisted_database(tmp_path):
     assert r.returncode != 0, (
         "台帳に無い DB の漏れが報告されなかった:\n" + r.stdout + r.stderr)
     assert "sideboard.db" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+def test_a_companion_without_its_database_is_still_reported():
+    """本体の ``.db`` が無いのに連れ扱いして免除しないこと (AX レビュー由来)。
+
+    最初の述語は名前だけを見て ``<x>.db-<suffix>`` の形を全部免除しており、
+    本体不在でも通していた。独立レビューが実測した反例がこれ:
+    ``weird.db-export.json`` / ``notes.db-backup`` / ``release.db-old`` は
+    SQLite と無関係だが、すべて黙って免除されていた。
+
+    直していたバグの鏡像 (名前の列挙をやめた代わりに性質を緩く引きすぎ、無関係な
+    ファイルを吸い込む)。緑のガードは信頼されるので、この向きの緩さはガード無しより
+    悪い。本体が同じディレクトリに在ることを要求して閉じた。
+    """
+    import conftest
+    for name in ("weird.db-export.json", "notes.db-backup", "release.db-old",
+                 "project.db-journal"):
+        assert not conftest._is_sqlite_sidecar(name, {name}), (
+            name + " が本体の .db 不在で免除された")
+
+
+def test_a_companion_is_excused_only_beside_its_own_database():
+    """本体が在れば免除し、別の DB の名前では免除しないこと。
+
+    ``present`` は同じディレクトリの名前集合なので、連れは自分の本体の隣でだけ
+    免除される。他の DB が在っても自分の本体が無ければ報告される。
+    """
+    import conftest
+    assert conftest._is_sqlite_sidecar(
+        "project.db-journal", {"project.db", "project.db-journal"})
+    assert not conftest._is_sqlite_sidecar(
+        "project.db-journal", {"other.db", "project.db-journal"})
+
+
+def test_the_snapshot_excuses_a_companion_only_beside_its_database(tmp_path):
+    """スナップボットの実挙動で測る (述語の単体ではなく、歩いた結果で確認)。
+
+    同じディレクトリに本体が在る連れは結果に出ず、本体の無い ``.db-`` 形は出る。
+    """
+    import conftest
+    d = tmp_path / ".beacon"
+    d.mkdir()
+    (d / "project.db").write_text("", encoding="utf-8")
+    (d / "project.db-journal").write_text("", encoding="utf-8")
+    (d / "orphan.db-backup").write_text("", encoding="utf-8")
+    seen = conftest._snapshot_beacon_dir(str(d))
+    assert "project.db-journal" not in seen, "本体の隣の連れが報告された"
+    assert "project.db" in seen, "本体が報告されていない"
+    assert "orphan.db-backup" in seen, "本体不在の .db- 形が免除された"

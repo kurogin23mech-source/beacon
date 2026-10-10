@@ -129,10 +129,27 @@ def _isolate_bus_sent_log(tmp_path, monkeypatch):
 # The base is still gated: ``project.db`` itself, and any other ``*.db``, is
 # reported. A companion cannot exist without its db, so excusing companions
 # never hides a database that was leaked.
-def _is_sqlite_sidecar(name: str) -> bool:
-    """True for SQLite's companion files of a ``*.db`` in the same directory."""
+#
+# **The db must actually be there — the name alone is not enough.** The first
+# version of this predicate took only the name and excused anything shaped like
+# ``<x>.db-<suffix>``. Measured on the independent review of this change: it
+# excused ``weird.db-export.json``, ``notes.db-backup`` and ``release.db-old``
+# with no ``.db`` present at all, while the docstring claimed "companion files of
+# a *.db in the same directory". That is the same disease as the bug this change
+# fixes, mirrored: having moved off enumerating names, the property was drawn so
+# loosely that it swallowed unrelated files — and a guard that is trusted while
+# silently excusing real leftovers is worse than no guard. Requiring the base to
+# be present in the SAME directory listing makes the docstring's promise the
+# actual rule, and keeps a stray ``<x>.db-<suffix>`` reportable.
+def _is_sqlite_sidecar(name: str, present: "set[str]") -> bool:
+    """True for SQLite's companion of a ``*.db`` that is itself in ``present``.
+
+    ``present`` is the set of file names in the same directory as ``name``, so a
+    companion is only excused alongside the database it belongs to.
+    """
     base, sep, suffix = name.rpartition("-")
-    return bool(sep) and bool(suffix) and base.endswith(".db")
+    return (bool(sep) and bool(suffix)
+            and base.endswith(".db") and base in present)
 
 
 _NOT_THE_TESTS_FAULT = frozenset({
@@ -235,8 +252,9 @@ def _snapshot_beacon_dir(beacon_dir: str) -> "set[str]":
     out: "set[str]" = set()
     for root, dirs, files in os.walk(beacon_dir):
         dirs[:] = [d for d in dirs if d not in _NOT_THE_TESTS_FAULT]
+        here = set(files)   # a companion is only excused next to its own db
         for name in files:
-            if name in _NOT_THE_TESTS_FAULT or _is_sqlite_sidecar(name):
+            if name in _NOT_THE_TESTS_FAULT or _is_sqlite_sidecar(name, here):
                 continue
             out.add(os.path.relpath(os.path.join(root, name), beacon_dir))
     return out
