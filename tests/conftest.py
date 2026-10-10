@@ -78,9 +78,9 @@ def _isolate_bus_sent_log(tmp_path, monkeypatch):
 
 # Entries in the repo's .beacon/ that appear on their own while the suite runs,
 # so seeing one is not evidence that a test wrote it. The developer's own bridge
-# is live in this working copy: its poll loop stamps session state, the trigger
-# engine drops files as it fires, and SQLite creates its sidecars on open. Each
-# name is listed with why it is not the test's doing, following the doctrine the
+# is live in this working copy: its poll loop stamps session state and the
+# trigger engine drops files as it fires. Each name is listed with why it is not
+# the test's doing, following the doctrine the
 # sibling guard scripts/check-pid-liveness.py states on its own ALLOWLIST: a false
 # positive costs one line here, a false negative goes unnoticed. (An earlier draft
 # cited scripts/check-print-before-save.py, which lives in an unmerged PR —
@@ -88,6 +88,11 @@ def _isolate_bus_sent_log(tmp_path, monkeypatch):
 # Extend it when a real false positive appears —
 # do NOT widen it to a prefix match, which would quietly re-admit the leak class
 # this guard exists to catch (ms-166 e-6621).
+#
+# SQLite's companion files are NOT in this set and must not be added to it: they
+# are derived from the db's own name by _is_sqlite_sidecar below. That is not a
+# prefix match on this set's entries — the db itself stays reportable, which is
+# the property the rule above is protecting.
 # Deliberately NOT excluded, though an earlier draft listed them:
 # session.json / session-state.json / session_notes.jsonl. The reasoning for
 # excusing them was "the developer's live bridge writes these" — true here, but
@@ -97,15 +102,40 @@ def _isolate_bus_sent_log(tmp_path, monkeypatch):
 # guard exactly where it matters: a full run in a clean checkout left a
 # test-created session.json sitting there unreported, which in turn made the
 # directory exist and let a later test materialise the store.
+# SQLite's companion files accompany a ``*.db``, which is NOT excused: a test
+# that materialises the store is a real leak and gets reported by the db's own
+# name. Excusing the companions keeps that report to one line instead of three.
+#
+# **Derived, not enumerated — and that is the whole point of this function.**
+# The previous version listed ``project.db-shm`` and ``project.db-wal`` by name
+# in ``_NOT_THE_TESTS_FAULT``. Those are the two companions of WAL mode, and the
+# list silently assumed WAL is always in effect. It is not:
+# ``lib/store_sqlite.py::_ensure_schema`` issues ``PRAGMA journal_mode=WAL`` once
+# and **deliberately tolerates it failing** with SQLITE_BUSY under a concurrent
+# migration (issuing the transition on every connect is what crashed with
+# "database is locked"). While the store stays in rollback-journal mode, a write
+# creates ``project.db-journal`` instead — a third name the list did not hold, so
+# the guard reported a mid-write transient as a leak and blamed whichever test's
+# window straddled it. That is what turned main red on 2026-10-09 (measured: the
+# same file name, a different test named on each run).
+#
+# This is the SECOND time this file lost on the same axis: ``project.json.tmp``
+# was once excused by NAME here, and the next atomic writer — different name,
+# same mechanism — went straight through it, which is why that rule moved to the
+# persistence property in ``_report_persisting``. Keying on the property covers
+# every journal mode SQLite has, present and future (``-journal`` / ``-wal`` /
+# ``-shm`` / the ``-mj<hex>`` master journal), without enumerating any of them.
+#
+# The base is still gated: ``project.db`` itself, and any other ``*.db``, is
+# reported. A companion cannot exist without its db, so excusing companions
+# never hides a database that was leaked.
+def _is_sqlite_sidecar(name: str) -> bool:
+    """True for SQLite's companion files of a ``*.db`` in the same directory."""
+    base, sep, suffix = name.rpartition("-")
+    return bool(sep) and bool(suffix) and base.endswith(".db")
+
+
 _NOT_THE_TESTS_FAULT = frozenset({
-    # SQLite's sidecars accompany project.db, which is NOT excluded: a test that
-    # materialises the store is a real leak and gets reported by name. Listing the
-    # two sidecars keeps that report to one line instead of three. (They are not
-    # present in this repo today — a read only materialises the store when the
-    # project is discovered from the cwd, not when BEACON_PROJECT_FILE points at
-    # it, which is itself the two-conventions split tracked as e-6820.)
-    "project.db-shm",
-    "project.db-wal",
     ".DS_Store",             # Finder writes this whenever it looks at the folder
     "triggers",              # the trigger engine fires into this directory
     "bridges",              # per-bridge registration directory
@@ -167,8 +197,10 @@ KNOWN_LEAKS = frozenset({
                       # BEACON_PROJECT_FILE を設定しないテストは既定の
                       # cwd/.beacon に落ちるので、そこを通る経路がまだ在る
     "project.db",     # the local SQLite store, materialised by any project read
-                      # discovered from the cwd (+ its -shm/-wal sidecars, which
-                      # are excluded above so the report stays one line)
+                      # discovered from the cwd. Its companion files are excused
+                      # by _is_sqlite_sidecar above (derived from the db's name,
+                      # so every journal mode is covered) and the report stays
+                      # one line.
 })
 
 # Which KNOWN_LEAKS names were actually observed this run, so a fixed one does
@@ -204,7 +236,7 @@ def _snapshot_beacon_dir(beacon_dir: str) -> "set[str]":
     for root, dirs, files in os.walk(beacon_dir):
         dirs[:] = [d for d in dirs if d not in _NOT_THE_TESTS_FAULT]
         for name in files:
-            if name in _NOT_THE_TESTS_FAULT:
+            if name in _NOT_THE_TESTS_FAULT or _is_sqlite_sidecar(name):
                 continue
             out.add(os.path.relpath(os.path.join(root, name), beacon_dir))
     return out
