@@ -62,9 +62,9 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +121,38 @@ Why a directory of ``<session_id>.json`` files and not one shared file:
   bridge matches its ``process.ppid`` (= the Claude Code process, a common
   ancestor of both the hook and the MCP bridge) against ``pids``.
 """
+
+ABANDONED_AFTER_DAYS = 7
+"""Age after which a sibling record is prunable without a liveness probe.
+
+Reached whenever the pid probe cannot answer — off POSIX (where it must never
+run), and ALSO on POSIX when a record carries no ``pids`` at all. The Stop hook
+refreshes ``updated_at`` every turn, so this bound sits far from any live
+session (ms-166 / e-6917: before this, pruning returned immediately on
+non-POSIX and the folder grew forever on Windows).
+
+The exact rule is ``_record_is_abandoned``; this note explains the number."""
+
+DEDUP_DIR_NAME = "context-usage-dedup"
+"""Folder name for the THRESHOLD DEDUP record (ms-166 / e-6917).
+
+Two different facts were living in one file and only one of them is per-cwd:
+
+* "what % is this terminal at" — per TERMINAL. The bridge
+  (``channel/bus-context-usage.mjs``) reads it from the cwd it was started in
+  to paint that terminal's badge, so it must stay at ``STATE_DIR_REL``.
+* "which thresholds has this SESSION already been notified about" — per
+  SESSION. Its key is the Claude Code ``session_id``, which does not change
+  when the session walks into a git worktree.
+
+Keying the dedup record by session but STORING it per cwd split the dedup
+state the moment one session crossed cwds: each copy independently held
+``notified_thresholds`` and re-fired every threshold (observed 2026-10-09 by a
+peer session — 40 % and 60 % delivered twice, one extra note set written).
+``/beacon-session-fork`` makes worktree hopping normal, so the people who use
+Beacon most were the ones who hit it. The dedup record therefore lives under a
+base that is the SAME for every worktree of one repository (see
+``_worktree_shared_base``) and the per-cwd record keeps serving the bridge."""
 
 _SAFE_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -319,6 +351,97 @@ def _state_path_for(session_id: str, state_dir: Optional[Path] = None) -> Path:
     return base / f"{safe}.json"
 
 
+def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
+    """Return a directory shared by every git worktree of one repository.
+
+    ``git rev-parse --git-common-dir`` answers the main repository's ``.git``
+    from inside a linked worktree as well as from the main checkout, which is
+    exactly the "same for all worktrees" property the dedup record needs.
+    ``beacon-find-root`` cannot be used here: a worktree carries its own
+    ``.beacon/``, so find-root returns the worktree itself and the state would
+    split again.
+
+    Two other places ask git the same question and this is the third, because
+    this hook must stay importable without ``lib/`` (so it cannot share a
+    helper with them): ``scripts/check-branch-focus-divergence.py``
+    (``is_in_main_project_root``) and ``lib/cmd_milestone.py``
+    (``_is_in_main_project_root``). Those two COMPARE ``--git-dir`` against
+    ``--git-common-dir`` to detect "am I in a worktree"; this one only needs the
+    common dir itself. If git's answer shape ever has to be handled
+    differently, all three are the set to change (maintainability review of
+    PR #789).
+
+    Returns ``None`` outside a git repository (or when git is unavailable), and
+    the caller then falls back to the per-cwd directory. Every such fallback is
+    LOGGED: the split behaviour itself is no worse than before, but an
+    intermittent fallback (a flaky git call on one turn) re-fires a threshold
+    while leaving no trace, which is harder to diagnose than the consistent
+    split it replaced. The log line makes it greppable and countable.
+    """
+    base_cwd = cwd if cwd is not None else Path.cwd()
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(base_cwd), capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        # 無言で per-cwd に落ちると、worktree を移った回に限って節目が再発火し、
+        # しかも痕跡が残らない (= 間欠的で診断できない、分裂していた従来より悪い)。
+        # 「git が無い/repo 外」(= 想定内) と「git 呼び出しが失敗した」(= 想定外) を
+        # 書き分けて grep 可能にする (AX レビュー PR #789)。
+        _log(f"worktree-shared base unavailable: git rev-parse failed "
+             f"({type(exc).__name__}); dedup record falls back to per-cwd")
+        return None
+    if out.returncode != 0:
+        # repo 外は想定内なので、失敗の中身を 1 行だけ添えて区別できるようにする。
+        detail = (out.stderr or "").strip().splitlines()
+        _log("worktree-shared base unavailable: git rev-parse exited "
+             f"{out.returncode} ({detail[0] if detail else 'no stderr'}); "
+             "dedup record falls back to per-cwd")
+        return None
+    raw = (out.stdout or "").strip()
+    if not raw:
+        _log("worktree-shared base unavailable: git rev-parse returned nothing; "
+             "dedup record falls back to per-cwd")
+        return None
+    # git may answer relatively (".git") — resolve against the cwd we asked in.
+    common = Path(raw)
+    if not common.is_absolute():
+        common = base_cwd / common
+    try:
+        return common.resolve()
+    except OSError:
+        return None
+
+
+def _dedup_path_for(
+    session_id: str,
+    exact_dir: Optional[Path] = None,
+    *,
+    cwd: Optional[Path] = None,
+) -> Path:
+    """Return this session's THRESHOLD DEDUP record path.
+
+    Worktree-shared when we are in a git repository, per-cwd otherwise. The
+    filename is the same sanitised ``session_id`` used by
+    ``_state_path_for`` so the two records are easy to correlate by eye.
+
+    ``exact_dir`` is used VERBATIM as the containing directory — the
+    ``DEDUP_DIR_NAME`` child is NOT appended to it, unlike the computed base.
+    The name says so because the parameter used to be called ``dedup_dir``,
+    which read as "the same kind of base, just overridden" and would have led
+    the next caller to expect the subfolder (AX review of PR #789). It exists so
+    ``_persist_state`` can put this record inside a caller's sandbox directly.
+    """
+    if exact_dir is not None:
+        base = exact_dir
+    else:
+        shared = _worktree_shared_base(cwd)
+        base = (shared / DEDUP_DIR_NAME) if shared is not None else Path(STATE_DIR_REL)
+    safe = _SAFE_SESSION_ID_RE.sub("_", session_id)[:128] or "unknown"
+    return base / f"{safe}.json"
+
+
 def _ancestor_pids(max_depth: int = 20) -> List[int]:
     """Best-effort list of this process's pid + ancestor pids (POSIX ``ps``).
 
@@ -386,17 +509,21 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _prune_stale_state_files(state_dir: Path, keep: Path) -> None:
+def _prune_stale_state_files(
+    state_dir: Path, keep: Path, *, posix: Optional[bool] = None,
+) -> None:
     """Remove sibling records whose recorded processes are ALL dead.
 
     A finished Claude session leaves its record behind (nothing else runs at
     session end). Without pruning the directory grows by one small file per
-    session forever, and the bridge would scan ever more candidates. A record
-    with no ``pids`` (cannot judge) is left alone. Never raises; POSIX only
-    (see ``_pid_alive``).
+    session forever, and the bridge would scan ever more candidates.
+
+    **The rule for "safe to delete" lives in ``_record_is_abandoned`` and is not
+    restated here** — an earlier revision of this docstring kept its own copy
+    ("POSIX only", "no pids is left alone") and the copy went stale the moment
+    the age-based branch landed, which is the drift this wording removes. Never
+    raises.
     """
-    if os.name != "posix":
-        return
     try:
         candidates = list(state_dir.glob("*.json"))
     except OSError:
@@ -406,14 +533,81 @@ def _prune_stale_state_files(state_dir: Path, keep: Path) -> None:
             continue
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            pids = data.get("pids") if isinstance(data, dict) else None
-            if not (isinstance(pids, list) and pids):
+            if not isinstance(data, dict):
                 continue
-            if any(_pid_alive(int(p)) for p in pids if isinstance(p, int) and p > 0):
-                continue
-            f.unlink()
+            if _record_is_abandoned(data, posix=posix):
+                f.unlink()
         except (OSError, ValueError, TypeError):
             continue
+
+
+def _all_recorded_pids_are_dead(pids: List[Any]) -> bool:
+    """Are ALL of a record's processes gone? ``False`` where we cannot ask.
+
+    The literal ``os.name`` gate below is BOTH the real safety invariant and the
+    shape ``scripts/check-pid-liveness.py`` recognises (ms-133 / e-6591): that
+    guard walks the syntax tree for ``if os.name != "posix": return`` in every
+    function that calls ``_pid_alive``, because ``os.kill(pid, 0)`` TERMINATES
+    the target on Windows CPython. Keeping the probe inside this one gated
+    function is what lets the branch selection in ``_record_is_abandoned`` be a
+    parameter without ever putting the probe behind a parameter.
+
+    Answering ``False`` off POSIX means "not judged dead", so the caller falls
+    through to the age-based rule rather than deleting a record it cannot read.
+    """
+    if os.name != "posix":
+        return False
+    return not any(
+        _pid_alive(int(pid)) for pid in pids if isinstance(pid, int) and pid > 0
+    )
+
+
+def _record_is_abandoned(
+    data: dict, *, posix: Optional[bool] = None,
+) -> bool:
+    """Is this sibling record safe to delete?
+
+    Two independent judgements, because the precise one is not available
+    everywhere:
+
+    * POSIX AND a non-empty ``pids`` list: all of them are dead. Exact.
+    * EVERY OTHER record — no ``pids``, an empty ``pids``, or any non-POSIX host
+      (Windows has no usable probe here: ``os.kill(pid, 0)`` TERMINATES the
+      target on CPython, see ``_pid_alive``): the record has not been touched
+      for ``ABANDONED_AFTER_DAYS``. The Stop hook rewrites ``updated_at`` on
+      every single turn, so a week of silence cannot belong to a live session,
+      while a running session is never close to the bound.
+
+    Only a record that **neither** probe can judge is LEFT ALONE, and that means
+    exactly one case: no pids-based verdict AND no parsable ``updated_at``.
+    Growing the folder is cheaper than deleting a live session's dedup state and
+    re-firing its thresholds.
+
+    These two bullets mirror the ``if`` below 1:1 on purpose. An earlier wording
+    read as though "no ``pids`` on POSIX" were one of the unjudgeable cases and
+    therefore safe forever; it is not — it falls through to the same 7-day clock
+    as a non-POSIX host, and a reader who trusted the prose would mispredict
+    which sibling files vanish (AX review of PR #789).
+
+    ``posix`` is a parameter rather than a read of ``os.name`` at the point of
+    use so the non-POSIX branch is reachable from a POSIX test WITHOUT
+    monkeypatching ``os.name`` — doing that makes ``pathlib`` try to build a
+    ``WindowsPath`` and the test explodes instead of failing (measured while
+    writing these tests: the mutation runs raised INTERNALERROR, which would
+    have hidden a real regression behind a crash).
+    """
+    on_posix = (os.name == "posix") if posix is None else posix
+    pids = data.get("pids")
+    if on_posix and isinstance(pids, list) and pids:
+        return _all_recorded_pids_are_dead(pids)
+    raw = data.get("updated_at")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        stamped = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return (datetime.utcnow() - stamped) > timedelta(days=ABANDONED_AFTER_DAYS)
 
 
 def _persist_state(
@@ -425,15 +619,36 @@ def _persist_state(
     context_limit: Optional[int] = None,
     state_dir: Optional[Path] = None,
     legacy_path: Optional[Path] = None,
+    dedup_dir: Optional[Path] = None,
 ) -> None:
-    """Write this session's own record (canonical) + the legacy shared file.
+    """Write all THREE of this session's records. Never raises.
 
-    Canonical: ``STATE_DIR_REL/<session_id>.json`` with the identity fields
-    the bridge matches on and ``updated_at`` for its tie-break. Legacy:
-    ``STATE_FILE_REL`` (per-cwd, last-writer-wins) is still written so a
-    bridge that predates e-6588 keeps a badge; it is NOT read back here, so
-    its last-writer-wins shape can no longer reset anyone's dedup state.
-    Stale sibling records are pruned on the way. Never raises.
+    1. **per-cwd** ``STATE_DIR_REL/<session_id>.json`` — the bridge's input:
+       identity fields it matches on plus ``updated_at`` for its tie-break.
+    2. **dedup** ``_dedup_path_for(...)`` — the threshold fact, under a base
+       shared by every worktree of this repository (ms-166 / e-6917). Skipped
+       when it resolves to the same path as (1), which is what happens outside
+       a git repository and whenever a caller sandboxes the writes (below).
+    3. **legacy** ``STATE_FILE_REL`` (per-cwd, last-writer-wins) — still
+       written so a bridge predating e-6588 keeps a badge; NOT read back here,
+       so its last-writer-wins shape can no longer reset anyone's dedup state.
+
+    Stale sibling records are pruned in (1) and (2) on the way.
+
+    Sandboxing: passing ``state_dir`` alone contains ALL THREE writes — both
+    ``dedup_dir`` and the legacy path fall back to ``state_dir`` rather than
+    resolving themselves, so a caller cannot half-override the sandbox and have
+    one write escape (into the repository's git directory, or into the process's
+    cwd). Pass ``dedup_dir`` / ``legacy_path`` explicitly only to aim them
+    somewhere different on purpose.
+
+    This promise was false once and is measured now: write (2) was fixed to fall
+    back while write (3) kept a bare relative default, and the docstring claimed
+    all of them were contained. ``state_dir`` alone then left a real
+    ``.claude/context-usage-state.json`` in whatever cwd the process happened to
+    have — for a hermetic test that is a leak into the developer's checkout,
+    which is the exact pollution class the suite's own guard exists to catch.
+    ``test_sandboxing_state_dir_alone_contains_every_write`` drives this.
     """
     own = _state_path_for(session_id, state_dir)
     extra = _identity_fields()
@@ -442,7 +657,29 @@ def _persist_state(
                 context_used=context_used, context_limit=context_limit,
                 extra=extra)
     _prune_stale_state_files(own.parent, keep=own)
-    legacy = legacy_path if legacy_path is not None else Path(STATE_FILE_REL)
+    # e-6917: the dedup fact is per SESSION, so it is written to a base shared
+    # by every worktree of this repository. Written even when it resolves to
+    # the same path as ``own`` (no git) — then this is simply a second write of
+    # the same bytes, not a behaviour change.
+    # A caller that sandboxed (1) sandboxes (2) too unless it says otherwise:
+    # resolving the dedup base independently here would let a write escape a
+    # sandbox that looked complete at the call site (AX review of PR #789).
+    dedup = _dedup_path_for(
+        session_id, dedup_dir if dedup_dir is not None else state_dir
+    )
+    if dedup != own:
+        _save_state(dedup, session_id, notified, context_pct=context_pct,
+                    context_used=context_used, context_limit=context_limit,
+                    extra=extra)
+        _prune_stale_state_files(dedup.parent, keep=dedup)
+    # (3) も同じサンドボックスに従う。ここが素の相対パスだったため、state_dir だけを
+    # 渡した呼び出し元から 1 件だけ外へ逃げていた (= docstring は「全ての書き込みを
+    # 閉じ込める」と主張しているのに write (2) だけ直して (3) を残していた、保守性
+    # レビュー PR #789)。守る状態への書き手を 1 つ塞いで「全部閉じた」と称するのは、
+    # この repo で 3 回踏んだ形。
+    legacy = (legacy_path if legacy_path is not None
+              else ((state_dir / STATE_FILE_REL.name) if state_dir is not None
+                    else Path(STATE_FILE_REL)))
     _save_state(legacy, session_id, notified, context_pct=context_pct,
                 context_used=context_used, context_limit=context_limit,
                 extra=extra)
@@ -734,7 +971,17 @@ def _main_impl() -> int:
     # e-6588: read/write THIS session's own record, never the shared legacy
     # file — another session in the same cwd can then never reset our dedup.
     state_path = _state_path_for(session_id)
-    prev_session, notified = _load_state(state_path, session_id)
+    dedup_path = _dedup_path_for(session_id)
+    prev_session, notified = _load_state(dedup_path, session_id)
+    if not notified and dedup_path != state_path:
+        # e-6917 one-time seed: a session that was already running when this
+        # fix landed holds its notified list only in the per-cwd record.
+        # Without this, the upgrade itself would re-fire every threshold —
+        # the exact symptom being fixed.
+        _, carried = _load_state(state_path, session_id)
+        if carried:
+            notified = carried
+            _log(f"seeded dedup record from per-cwd state: {carried}")
 
     triggered, all_crossed = _classify_thresholds(percent, notified)
 
