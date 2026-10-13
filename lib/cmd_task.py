@@ -276,6 +276,12 @@ def cmd_task_done():
     progress = os.environ.get("BEACON_PROGRESS", "")
     reason = _require_reason_or_skip("task done")
     outcome = os.environ.get("BEACON_OUTCOME", "")  # ms-166 e-6600
+    # ms-166 e-6898: 受入条件の節ごとの判定。関門本体は
+    # terminal_gate.require_ac_adjudication が持つ (= 押印層で効くので、この
+    # handler を経ない経路も同じ要求に従う)。ここは env を読んで渡すだけ。
+    import terminal_gate as _tg
+    ac_verdicts = _tg.ac_verdicts_from_env()
+    ac_waive = _tg.ac_waive_from_env()
     import datetime
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -315,8 +321,17 @@ def cmd_task_done():
             if progress:
                 print(f"  Progress: {ms.get('progress', 0)}%")
             return
-    ms, entry = core.task_done(data, entry_id, date=today, reason=reason,
-                               outcome=outcome)
+    try:
+        ms, entry = core.task_done(data, entry_id, date=today, reason=reason,
+                                   outcome=outcome, ac_verdicts=ac_verdicts,
+                                   ac_waive=ac_waive)
+    except _tg.AcceptanceAdjudicationRequired as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as exc:
+        # 判定の形違い / 節の網羅漏れ。回復できる文面はすでに例外が持っている。
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     core.update_progress(ms, progress)
     # ms-160 e-6688: the completion lines belong AFTER the write. Observed
     # 2026-09-29: `beacon task done e-5981` printed "Done: [e-5981] ..." on
@@ -325,6 +340,13 @@ def cmd_task_done():
     # interleave, so the success line is what the reader (human or AI) keeps.
     save_project(data, op={"op": "task_done", "entry_id": entry_id, "reason": reason})
     print(f"Done: [{entry_id}] {entry['description']}")
+    # ms-166 e-6898: 未達の節は done を止めないが、黙っては通さない。exit 0 で
+    # 済ませると未達が記録の奥に沈み、「done になった」だけが読み手に残る。
+    import acceptance as _acceptance
+    unmet = _acceptance.format_unmet_warning(
+        (entry.get("meta") or {}).get("ac_adjudication"))
+    if unmet:
+        print(unmet, file=sys.stderr)
     if reason:
         print(f"  Reason: {reason}")
     if outcome:

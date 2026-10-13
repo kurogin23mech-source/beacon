@@ -1026,6 +1026,14 @@ def build_parser() -> argparse.ArgumentParser:
     # decision-arm record. --evidence is repeatable (action="append").
     p_task_done.add_argument("--decided-by", dest="decided_by", default="")
     p_task_done.add_argument("--evidence", dest="evidence", action="append", default=None)
+    # ms-166 e-6898: 受入条件の節ごとの判定 (--ac-verdict は繰り返し可)。bash 側と
+    # 同じ旗を持たせる — e-6912 で --acknowledge が片側に無く python フロントだけ
+    # 落ちた非対称を繰り返さない。旗名が --ac でないのは、--ac が既に
+    # --acceptance-criteria の別名 (= 受入条件の全文を書く) として同じ task
+    # ファミリーに在るため (独立レビュー 2 体が指摘)。
+    p_task_done.add_argument("--ac-verdict", dest="ac_verdicts",
+                             action="append", default=[])
+    p_task_done.add_argument("--ac-waive", dest="ac_waive", default="")
 
     p_task_list = task_sub.add_parser("list", aliases=["ls"], add_help=False)
     p_task_list.add_argument("-m", "--ms", dest="ms_id", default="")
@@ -3734,6 +3742,10 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             env["BEACON_REASON"] = args.reason
         if args.acknowledge:
             env["BEACON_ACKNOWLEDGE"] = "1"
+        if args.ac_verdicts:
+            env["BEACON_AC_VERDICTS"] = "\n".join(args.ac_verdicts)
+        if args.ac_waive:
+            env["BEACON_AC_WAIVE"] = args.ac_waive
         return _run_commands_py(root, "task_done", env)
 
     if cmd in ("list", "ls"):

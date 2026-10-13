@@ -61,6 +61,8 @@ import ast
 import os
 import re
 
+import acceptance as _acceptance  # ms-166 e-6898: 受入条件の節の切り出し
+
 
 # 「理由を書かずに、意図して監査エントリを省いた」ことを記録に残す定型文。
 # ms-120 e-3906 の設計: 空文字 ``--reason ""`` は「意図した免除」と「AI が関門を通すために
@@ -177,6 +179,161 @@ def require_audit(verb: str, *, reason: str = "", acknowledge: bool = False,
         f"written reason. An empty --reason \"\" is no longer accepted "
         f"(it was ambiguous — use --acknowledge to waive on purpose)."
     )
+
+
+# ---------------------------------------------------------------------------
+# 受入条件の充足判定 (ms-166 e-6898)
+#
+# 理由の関門 (``require_audit``) は「なぜこの遷移をするか」を 1 行要求する。だが
+# タスクが自分で書いた「Done when」の各節が満たされたかは、誰も突き合わせていな
+# かった。判定は AI の自己申告だけで通り、未達でも done にできた (e-6600 で実際に
+# 起きた: 3 節のうち 3 つ目が未達で、実装者自身が最後のコミットでその主張を撤回
+# した上で done のままだった)。
+#
+# 機械は「節が意味的に満たされたか」を判定できない。だからここで要求するのは
+# **判定そのものではなく、節ごとの主張と根拠を出すこと**。出せば記録に残り、後から
+# 「どの節をどう満たしたと主張したか」を引ける。嘘なら嘘だったと分かる。
+#
+# 未達 (``partial`` / ``not-met``) は done を **止めない**。止めると正直な部分報告が
+# 不利になり、「全部 met」と書く方に圧力がかかる。隠さず残す方が監査価値が高い。
+# 止めるのは「節ごとの判定を一切出さない」場合だけ (= 素通り)。
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 受入条件の判定の免除台帳 —— 理由の関門 (``EXEMPT_CALL_SITES``) とは別に持つ。
+#
+# 独立レビュー (2026-10-13) の指摘: 台帳を共有すると、「この呼び出し元は理由を
+# 持ちようがない」という判断で登録したキーが、誰も判断していない「受入条件の
+# 節ごとの判定を持ちようがない」まで自動的に免除する。2 つの独立した判断を 1 つの
+# キーに束ねない。免除するなら両方を意図して書く。
+#
+# 今日この台帳は空で、それは実測した事実: 判定を出せない呼び出し元 (PR 承認による
+# 自動完了) は理由を書けるので ``waive`` を使っており、免除を要らない。
+AC_EXEMPT_CALL_SITES: dict = {}
+
+
+def ac_exemption_reason(exempt: str) -> str:
+    """``exempt`` キーに対応する AC 免除台帳の 1 行を返す。未登録なら ``ValueError``。"""
+    try:
+        return AC_EXEMPT_CALL_SITES[exempt]
+    except KeyError:
+        known = ", ".join(sorted(AC_EXEMPT_CALL_SITES)) or "(台帳は空)"
+        raise ValueError(
+            f"受入条件の免除キー '{exempt}' は terminal_gate.AC_EXEMPT_CALL_SITES に"
+            f"登録されていません。免除するなら「なぜ節ごとの判定を持ちようがないか」を"
+            f"1 行添えて台帳に足してください (理由の関門の台帳とは別です)。"
+            f"登録済み: {known}"
+        ) from None
+
+
+#: 節ごとの判定を運ぶ env (改行区切り、``--evidence`` と同じ規約)。
+AC_VERDICTS_ENV = "BEACON_AC_VERDICTS"
+#: 節ごとの判定を出さずに意図的に通す理由を運ぶ env。
+AC_WAIVE_ENV = "BEACON_AC_WAIVE"
+
+
+class AcceptanceAdjudicationRequired(ValueError):
+    """done 遷移に受入条件の節ごとの判定が無い。
+
+    ``require_audit`` の ``TerminalAuditRequired`` と同じ理由で ``ValueError``
+    派生 (既に 400 へ変換している API / ``except ValueError`` の CLI が追加配線
+    なしで回復可能に扱える)。
+    """
+
+
+#: エラー文に出す「判定の渡し方」の既定の呼び名。CLI の綴り。
+AC_VERDICT_FLAG_DEFAULT = "--ac-verdict"
+AC_WAIVE_FLAG_DEFAULT = "--ac-waive"
+
+
+def require_ac_adjudication(verb: str, criteria: str, *,
+                            verdicts: "list" = None, waive: str = "",
+                            exempt: str = "",
+                            ac_exempt: str = "",
+                            verdict_flag: str = AC_VERDICT_FLAG_DEFAULT,
+                            waive_flag: str = AC_WAIVE_FLAG_DEFAULT) -> dict:
+    """done 遷移が運ぶ受入条件の判定を 1 つに確定して返す。足りなければ例外。
+
+    Args:
+        verb: エラー文に出す人向けの動詞 (例 ``"task done"``)。
+        criteria: 対象の ``acceptance_criteria`` 本文。
+        verdicts: ``"<節番号>:<met|partial|not-met>[:<根拠>]"`` の列。
+        waive: 節ごとの判定を出さずに通す理由 (= 債務として記録に残る)。
+        exempt: 理由の関門の免除キー。**この関門では無視される** —— 下の
+            ``ac_exempt`` を見よ。
+        ac_exempt: ``AC_EXEMPT_CALL_SITES`` 登録済みの免除キー。理由の関門の
+            台帳 (``EXEMPT_CALL_SITES``) とは **別** にしてある。独立レビュー
+            (2026-10-13) の指摘: 2 つの台帳を共有すると、「理由を持ちようがない」
+            という判断で登録したキーが、誰も判断していない「受入条件の判定を
+            持ちようがない」まで自動的に免除してしまう。独立した 2 つの判断を
+            1 つのキーに束ねない。
+        verdict_flag / waive_flag: エラー文に出す呼び名。CLI は ``--ac-verdict`` /
+            ``--ac-waive``、本番 API は ``?ac=`` / ``?ac_waive=`` のように surface
+            ごとに違うので、呼び出し元が自分の綴りを渡す。固定すると、API の 400
+            応答が存在しない CLI 旗を案内することになる (独立レビュー AX medium)。
+
+    Returns:
+        記録に入れる dict。受入条件が無ければ ``{"state": "no-criteria"}``。
+
+    Raises:
+        ValueError: 判定と waive の同時指定、判定の形が違う、節を網羅していない。
+        AcceptanceAdjudicationRequired: 受入条件が在るのに判定も waive も無い。
+    """
+    verdicts = [v for v in (verdicts or []) if (v or "").strip()]
+    waive = (waive or "").strip()
+    clause_total = _acceptance.clause_count(criteria)
+
+    if verdicts and waive:
+        raise ValueError(
+            f"`{verb}` takes {verdict_flag} OR {waive_flag}, not both. "
+            f"節ごとの判定を出すなら {verdict_flag} を、出さずに通すなら理由を添えた "
+            f"{waive_flag} を、どちらか一方に "
+            f"してください (両方は、判定を出したのに債務として記録される等の"
+            f"取り違えになります)。")
+
+    if clause_total == 0:
+        # 受入条件そのものが無い。これを素通りさせると「条件を書かない / 消す」が
+        # 抜け道になるので、数えられる状態として必ず残す (e-6898 AC 3 項目目)。
+        # 止めはしない: 既存タスクの多くは受入条件を持たず、ここで拒否すると
+        # この関門と無関係な作業がすべて止まる。
+        return {"state": _acceptance.NO_CRITERIA, "clause_count": 0,
+                "clauses": []}
+
+    if waive:
+        return {"state": _acceptance.WAIVED, "clause_count": clause_total,
+                "clauses": [], "waive_reason": waive}
+
+    if ac_exempt:
+        return {"state": _acceptance.WAIVED, "clause_count": clause_total,
+                "clauses": [], "waive_reason": ac_exemption_reason(ac_exempt)}
+
+    if not verdicts:
+        clauses, confidence = _acceptance.split_clauses_with_confidence(criteria)
+        listing = "\n".join(f"  {i}. {c}" for i, c in enumerate(clauses, 1))
+        uncertain = ""
+        if confidence == _acceptance.UNCERTAIN:
+            uncertain = ("\n(節の切り出しに確信が持てません: 番号による列挙が規則的で"
+                         "ないため、割らずに 1 節として扱いました。文面を読んで、"
+                         "判定が全体を覆うか確かめてください)")
+        raise AcceptanceAdjudicationRequired(
+            f"`{verb}` requires a verdict for each acceptance-criteria clause "
+            f"({clause_total} 節)。未達でも done は通ります — 隠さないことが目的です。\n"
+            f"{listing}{uncertain}\n"
+            f"各節に {verdict_flag} \"<節番号>:<met|partial|not-met>[:<根拠>]\" を渡すか、"
+            f"判定を出さずに通すなら {waive_flag} \"<なぜ出せないか>\" を渡してください。"
+        )
+
+    return _acceptance.build_adjudication(criteria, verdicts)
+
+
+def ac_verdicts_from_env() -> list:
+    """``AC_VERDICTS_ENV`` の改行区切りを list に解く (空行は落とす)。"""
+    raw = os.environ.get(AC_VERDICTS_ENV, "")
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def ac_waive_from_env() -> str:
+    return os.environ.get(AC_WAIVE_ENV, "").strip()
 
 
 #: 「書かれた理由」を運ぶ env 変数の正準名。全 verb 共通 —— ``BEACON_ACKNOWLEDGE`` が

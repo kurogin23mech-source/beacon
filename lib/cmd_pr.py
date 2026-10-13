@@ -846,12 +846,25 @@ def cmd_pr_approve():
             if j["confidence"] == "HIGH":
                 try:
                     core.task_done(
-                        data, j["task_id"], reason=j["reason"]
+                        data, j["task_id"], reason=j["reason"],
+                        # ms-166 e-6898: この経路は機械が「PR が解決した」と
+                        # 判断して閉じるので、受入条件の各節が満たされたかは
+                        # 判定できない。黙って素通りさせず、判定を出さずに通した
+                        # ことを理由付きで記録に残す (= 債務として数えられる)。
+                        ac_waive=(
+                            "PR 承認による自動完了。この経路は機械が解決を推定して"
+                            "閉じるため、受入条件の節ごとの充足は判定していない "
+                            "(ms-166 e-6898)。突合が要るなら人 / AI が別途行う"),
                     )
                     auto_done_results.append(j)
-                except ValueError:
-                    # Task disappeared between collect and done — skip.
-                    pass
+                except ValueError as exc:
+                    # ms-166 e-6898: 以前はここで `pass` して **何が起きたかを
+                    # 誰にも言わなかった**。想定は「collect と done の間に task が
+                    # 消えた」だけだったが、同じ except は新しい関門の拒否も飲み込む。
+                    # 自動完了が静かに起きなくなる経路は、この MS が掃討している
+                    # silent 非機能そのものなので、理由を必ず出す。
+                    print(f"Warning: 自動完了を飛ばしました ({j['task_id']}): {exc}",
+                          file=sys.stderr)
             elif j["confidence"] == "MID":
                 mid_warnings.append(j)
 
@@ -865,8 +878,13 @@ def cmd_pr_approve():
             "entry_id": entry_id,
             "review_status": "approved",
             "review_rationale": rationale,
+            # ms-166 e-6898 (独立レビュー AX high): この経路は毎回 ac_waive する
+            # (機械が解決を推定して閉じるので節を判定できない)。その事実を出力に
+            # 出さないと「エラーが出ない = 受入条件も通った」と読まれる。
             "auto_done": [
-                {"task_id": j["task_id"], "reason": j["reason"]}
+                {"task_id": j["task_id"], "reason": j["reason"],
+                 "acceptance_criteria_checked": False,
+                 "acceptance_criteria_state": "waived"}
                 for j in auto_done_results
             ],
             "mid_candidates": [
@@ -880,9 +898,11 @@ def cmd_pr_approve():
         if rationale:
             print(f"  Rationale: {rationale}")
         for j in auto_done_results:
+            # 「HIGH confidence」だけを出すと、受入条件も照合したように読める。
+            # 照合していないことを同じ行に必ず連結する (独立レビュー AX high)。
             print(
                 f"  ✓ Auto-done: {j['task_id']} ({j['description'][:60]}) "
-                f"— HIGH confidence"
+                f"— HIGH confidence (受入条件は未照合 / waived)"
             )
         for j in mid_warnings:
             print(

@@ -1393,6 +1393,8 @@ def task_add(data: dict, ms_id: str, description: str, *,
 
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
               outcome: str = "", acknowledge: bool = False,
+              ac_verdicts: list = None, ac_waive: str = "",
+              ac_flag_names: tuple = (),
               author: dict | None = None) -> tuple[dict, dict]:
     """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
     containing milestone first, the entry second (review finding #5: stated
@@ -1411,6 +1413,14 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     ``POST .../entries/{id}/done`` route did exactly that, which also made the
     decision-arm event it records carry ``rationale=None`` every single time —
     now has to say why or acknowledge that it won't.
+
+    ``ac_verdicts`` / ``ac_waive`` (ms-166 e-6898): the per-clause verdicts for
+    the task's own ``acceptance_criteria``, enforced in the same stamping layer.
+    Passing neither, on a task that HAS criteria, raises
+    ``terminal_gate.AcceptanceAdjudicationRequired`` (also a ``ValueError``). An
+    unmet clause does not block the close — it is recorded on
+    ``meta.ac_adjudication`` so "which clause did you claim, and on what
+    grounds" is answerable later.
     """
     # ms-143: locate + close through occupation.set_entry_state (manifest-driven),
     # so the verb no longer walks data['milestones'] directly. set_entry_state
@@ -1427,7 +1437,8 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     ms, entry = occupation.set_entry_state(
         data, entry_id, "done", at=date or _now_iso(),
         actor=_get_actor(), reason=reason, outcome=outcome,
-        acknowledge=acknowledge, verb="task done")
+        acknowledge=acknowledge, ac_verdicts=ac_verdicts, ac_waive=ac_waive,
+        ac_flag_names=ac_flag_names, verb="task done")
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
     author_clean = _clean_author(author)

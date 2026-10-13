@@ -138,8 +138,18 @@ def test_task_add_done_list_e2e(capfd, fresh_dir):
     assert task["description"] == "do the thing"
     task_id = task["id"]
 
+    # ms-166 e-6898: 受入条件を持つタスクは、節ごとの判定なしでは閉じない。
+    # python フロント (Windows / pipx) でも bash と同じ関門が効くことを、まず
+    # 「落ちる」側で測る (旗を足して緑にするだけだと、片側だけ素通りする非対称を
+    # 見逃す — e-6912 で --acknowledge が実際にそうなっていた)。
     capfd.readouterr()
     rc = main_mod.main(["task", "done", task_id, "-r", "done"])
+    assert rc == 1, "受入条件があるのに節ごとの判定なしで閉じられた"
+    assert "--ac-verdict" in capfd.readouterr().err
+
+    capfd.readouterr()
+    rc = main_mod.main(["task", "done", task_id, "-r", "done",
+                        "--ac-verdict", "1:met:e2e で確認した"])
     assert rc == 0
 
     capfd.readouterr()

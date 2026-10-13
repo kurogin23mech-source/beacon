@@ -148,8 +148,16 @@ beacon task add "<description>" --ms <ms-id> \
 - acceptance_criteria が記録されている場合はそれを参照して満足度を記述する
 
 ```bash
-beacon task done <entry-id> --reason "<生成したreason>" --decided-by human-delegated
+beacon task done <entry-id> --reason "<生成したreason>" \
+  --ac-verdict "1:met:<この節をどう満たしたか>" --ac-verdict "2:met:<…>" \
+  --decided-by human-delegated
 ```
+- `--ac-verdict`（ms-166 e-6898）: 受入条件を持つタスクは**節ごとの判定を出さないと done に
+  できない**。形は `--ac-verdict "<節番号>:<met|partial|not-met>[:<根拠>]"` を節の数だけ。
+  節の数と文面は、判定なしで叩いたときのエラーが列挙するので先に 1 回叩いて確認して
+  よい。未達 (`partial` / `not-met`) でも done は通る（隠さず残すのが目的で、未達の節
+  は出力にも必ず出る）。受入条件が無いタスクは不要。判定を出せない事情があるなら
+  `--ac-waive "<なぜ出せないか>"`（債務として記録に残るので安易に使わない）。
 - `--decided-by human-delegated`（ms-154 e-5650 — 決定の監査価値を実捕獲する）: この Skill の done は「ユーザーがキューを操作する意図」＝人間が完了を指示する経路なので、決定主体は人間 = `human-delegated`。これで AI が自律照合して下す `/beacon-log` の done（`autonomous-AI`）と監査上で弁別できる。
 - 完了根拠にコミットが絡む場合は実 link を `--evidence "commit:<hash:7>"` で渡す（自己参照は積まない、繰り返し可）。無ければ省略してよい（evidence 空 = 裏付け無しとして正直に残る）。
 - entry-id はユーザーが指定するか、description からの照合で特定する

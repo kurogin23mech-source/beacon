@@ -1595,7 +1595,9 @@ def make_router(
                    user: dict = Depends(require_auth),
                    decided_by: str = Query("autonomous-AI"),
                    reason: str = Query(""),
-                   acknowledge: bool = Query(False)):
+                   acknowledge: bool = Query(False),
+                   ac: list = Query(default=[]),
+                   ac_waive: str = Query("")):
         # ms-166 e-6893: this route used to call ``core.task_done`` with NO reason,
         # so the decision-arm event recorded just below could only ever carry
         # ``rationale=None`` — the ms-154 e-5592 wiring was present but structurally
@@ -1613,6 +1615,14 @@ def make_router(
         # and automation, not a button a person could press. The route was open; it
         # was not being walked through. e-6893's AC4 ("UI 側の入力欄を併せて直す")
         # is therefore vacuous — there is no UI input to add.
+        # ms-166 e-6898: the per-clause acceptance-criteria verdicts ride the same
+        # route as the audit entry, for the same reason — the gate lives in the
+        # stamping layer, so an API client that cannot pass them is refused with a
+        # 400 naming the clauses rather than closing a task whose own criteria
+        # nobody checked. ``ac`` is repeatable (``?ac=1:met:…&ac=2:not-met:…``);
+        # ``ac_waive`` proceeds without verdicts and records that as debt. Giving
+        # the flags to the CLI but not here is the asymmetry e-6912 already had to
+        # fix once for ``--acknowledge``.
         # ms-154 e-5649: reject an out-of-vocab decided_by up front (400), before
         # the write — no silent coercion to autonomous-AI (which would corrupt the
         # audit attribution undetectably).
@@ -1632,11 +1642,20 @@ def make_router(
                 ms, entry = core.task_done(data, entry_id, date=today,
                                            reason=reason,
                                            acknowledge=acknowledge,
+                                           ac_verdicts=list(ac or []),
+                                           ac_waive=ac_waive,
+                                           ac_flag_names=("?ac=", "?ac_waive="),
                                            author=author)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
-            captured["done_reason"] = (entry.get("meta") or {}).get("done_reason", "")
-            return data, {"entry_id": entry_id, "status": "done"}
+            meta = entry.get("meta") or {}
+            captured["done_reason"] = meta.get("done_reason", "")
+            # ms-166 e-6898 (独立レビュー AX high): 受入条件の状態を 200 応答に
+            # 含める。含めないと、HTTP を直に叩く client は waive / 未達 / 切り出し
+            # 不確実のどれが起きたかを応答から知れず、「200 = 受入条件も通った」と
+            # 読む。記録には残るが読まれない開示は、無いのと同じになる。
+            return data, {"entry_id": entry_id, "status": "done",
+                          "ac_adjudication": meta.get("ac_adjudication")}
         result = _apply_op_and_broadcast(
             project_id, op, op_name="entry.done", actor=user.get("sub", ""),
         )
