@@ -14,6 +14,7 @@ endpoint / 内部処理から使える 1 つの adapter を提供する。
 """
 from __future__ import annotations
 
+import _libpath  # noqa: F401 — lib/ を sys.path に載せる (ms-166 e-6890)
 import master_store  # lib: adapter 契約 + Beacon-default 実装
 import store_router   # server: backend 選択済みの master_get / master_put / master_scan
 

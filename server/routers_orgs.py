@@ -42,6 +42,7 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+import _libpath  # noqa: F401 — lib/ を sys.path に載せる (ms-166 e-6890)
 import org as org_mod  # ms-113 / e-3731: Organization tenancy primitives
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 

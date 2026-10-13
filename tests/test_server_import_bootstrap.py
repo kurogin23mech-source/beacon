@@ -29,20 +29,32 @@ import pytest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_DIR = os.path.join(REPO_ROOT, "server")
 
-# app.py が先に import された前提を持てない = 外から直接掴まれる入口。
-#   app            : uvicorn / lambda の入口そのもの
-#   lambda_handler : AWS Lambda の入口
-#   store_router   : backend router。app.py は `import store_router as db` で使うが、
-#                    テストと周辺ツールは app.py を通さず直接 import する
-#   firestore_client / dynamodb_client / mysql_client : store_router が選んで re-export する実体
-ENTRY_MODULES = [
-    "app",
-    "lambda_handler",
-    "store_router",
-    "firestore_client",
-    "dynamodb_client",
-    "mysql_client",
-]
+# ms-166 e-6890: 対象は「手書きの入口 6 本」から **server 配下の全 *.py** に広げた。
+#
+# 手書きの一覧は、一覧に載っていないモジュールを黙って検査対象外にする。実際それが
+# 起きていた: e-6728 の退行で 4 本を直したあと、それ以前から同じ状態だった 10 本が
+# 一覧に無いまま残り、誰も測っていなかった (2026-10-08 に外から数えて初めて分かった)。
+# 「app.py が先に import された」という前提はどのモジュールにも書かれていないので、
+# 1 本でも別経路から掴まれた瞬間に静かに落ちる。だから対象は列挙せず走査する。
+#
+# 対象外にするものは、なぜ対象外かを 1 行添えてここに明記する (黙って外さない)。
+EXCLUDED_MODULES = {
+    # _libpath 自身は lib/ を載せる側で、lib/ の module を import しない。
+    # これを対象に含めると「自分が自分を bootstrap できるか」という無意味な検査になる。
+    "_libpath": "lib/ を sys.path に載せる当事者。lib/ の module を import しない",
+}
+
+
+def _discover_server_modules() -> list:
+    """server/ 直下の全 *.py を module 名で返す (除外分を引いたもの)。"""
+    names = sorted(
+        f[:-3] for f in os.listdir(SERVER_DIR)
+        if f.endswith(".py") and not f.startswith("__")
+    )
+    return [n for n in names if n not in EXCLUDED_MODULES]
+
+
+ENTRY_MODULES = _discover_server_modules()
 
 
 def _import_with_only_server_on_path(module: str) -> subprocess.CompletedProcess:
@@ -57,6 +69,21 @@ def _import_with_only_server_on_path(module: str) -> subprocess.CompletedProcess
         text=True,
         cwd=SERVER_DIR,
     )
+
+
+def test_the_scan_actually_found_modules() -> None:
+    """走査が 0 件で「全部通った」ことにならないようにする。
+
+    ``_discover_server_modules`` が空を返すと parametrize が 0 ケースになり、
+    テストは緑のまま何も測らない。境界で赤に倒れる側に寄せる。
+    """
+    assert len(ENTRY_MODULES) >= 20, (
+        "server 配下の走査が {0} 件しか返していない。ディレクトリ解決が壊れている疑い"
+        .format(len(ENTRY_MODULES)))
+    # かつて手書きで挙げられていた入口は、走査でも必ず拾えていること。
+    for entry in ("app", "lambda_handler", "store_router", "firestore_client",
+                  "dynamodb_client", "mysql_client"):
+        assert entry in ENTRY_MODULES, entry
 
 
 @pytest.mark.parametrize("module", ENTRY_MODULES)
