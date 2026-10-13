@@ -3044,6 +3044,19 @@ def _pr_open_reviewed_marker_path(pr_number: str) -> str:
 #:
 #: ファイルを分ければ read-modify-write が消え、lost update が構造的に起こりえない。
 #: 既存の `<type>-review-due-<pr>.json` が同じ作法なので、形も揃う。
+#:
+#: **「このPRのレビューは済んだか」を表す住所は、これで 3 つになった** (独立レビュー
+#: 保守性 low の指摘)。全体像は次の通りで、スコープと用途が別なので統合していない:
+#:
+#:   1. cwd ごとの ``<type>-review-due-<pr>.json`` の有無 —— 発火と、その cwd での解消
+#:   2. この横断台帳 —— 別の作業フォルダで実施した事実 (関門が差し引く)
+#:   3. cwd ごとの ``.reviewed-pr-<pr>`` マーカー (``_pr_open_reviewed_marker_path``)
+#:      —— **関門では使わない**。tick anchor が review-due を再発火させないための
+#:      抑止印 (``cmd_trigger`` が読む)。
+#:
+#: 3 を fork-aware にするかは別の判断になる。いまは再発火抑止にしか使われないので
+#: 作業フォルダごとに割れていても実害が無い。統合するなら「関門の真値」と
+#: 「再発火の抑止」という別概念を 1 つにして良いかを先に決めること。
 _REVIEW_DONE_DIR = "beacon-review-done"
 
 #: 台帳が「共有されている」か「この cwd 限り」かを呼び出し側に返す値。
