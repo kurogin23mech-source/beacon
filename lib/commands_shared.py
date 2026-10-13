@@ -27,6 +27,7 @@ so the dependency graph stays one-directional and no cycle can form.
 import contextlib
 import hashlib
 import json
+import subprocess
 import logging
 import os
 import re
@@ -2924,6 +2925,8 @@ def _clear_pr_open_review_triggers(pr_number: str) -> None:
         if desc.get("fires_on") != "pr-open":
             continue
         _clear_review_due_for_pr(tid, pr_number)
+    # ms-166 e-6899: 横断台帳からも落とす (育ち続けないように)。
+    forget_review_done_across_worktrees(pr_number)
     # ms-119 e-4060: PR resolved (merged/closed) → drop the reviewed done-marker
     # too, so the trigger dir does not accumulate stale markers.
     try:
@@ -2961,10 +2964,161 @@ def _pending_review_types_for_pr(pr_number: str) -> list:
                 out.append(rtype)
     except OSError:
         return []
+    # ms-166 e-6899: 別の作業フォルダ (fork した worktree) で実施したレビューを
+    # 差し引く。トリガーファイルは cwd ごとなので、fork が消せるのは自分のぶん
+    # だけ。実施した事実は横断台帳に在るので、ここで引く。
+    #
+    # これが無いと、fork で正しく実施したレビューが親から「未実施」に見え、
+    # 回復手段が「親で打ち直す (= 判断記録が重複する)」か
+    # 「override で飛ばしたことにする (= 記録が嘘になる)」しか無くなる。
+    done = _read_review_done_ledger().get(pr_number) or []
+    if done:
+        out = [t for t in out if t not in done]
     return out
 
 def _pr_open_reviewed_marker_path(pr_number: str) -> str:
     return os.path.join(_get_triggers_dir(), f".reviewed-pr-{pr_number}")
+
+
+# ---------------------------------------------------------------------------
+# 作業フォルダ横断のレビュー実施台帳 (ms-166 e-6899)
+#
+# 問題: review-due トリガーは cwd ごとの ``.beacon/triggers/`` に発火し、
+# ``beacon review done`` はそれを **自分の cwd のぶんだけ** 消す。fork した
+# 作業フォルダ (worktree) で正しくレビューを実施しても、親の
+# ``.beacon/triggers/`` にはトリガーが残るので、親からは「未レビュー」に見えて
+# 記帳 (approve / merge) が止まる。
+#
+# 2026-10-08 の実例 (PR #787): レビューは fork で 3 巡 18 件実施され、採否は
+# すべてクラウドの判断記録に入り、CI の review-gate も pass していた。それでも
+# 親で ``beacon pr merge`` が止まり、目印は
+# ``.worktrees/ms-166-fork-d112f1/.beacon/triggers/`` にだけ在った。
+#
+# 回復手段は 2 つあったが、どちらも筋が悪い:
+#   (1) 親で ``review done`` を再実行 → 同一レビューの判断記録が重複して増える
+#   (2) ``BEACON_PR_REVIEW_OVERRIDE=1`` → 「レビューを飛ばした」痕跡が残るが、
+#       実際には飛ばしていないので記録が嘘になる
+#
+# 直し方の選択: **トリガーの発火場所は動かさない**。発火を共有ディレクトリへ移す
+# と、発火側と読み取り側が別モジュールに在るため片方だけ移って namespace が割れる
+# (この repo で過去に踏んだ罠)。代わりに「実施した」という事実だけを横断台帳に
+# 足し、関門がそれを差し引く。足すだけなので既存のトリガーファイルを孤児にしない。
+# ---------------------------------------------------------------------------
+
+#: 横断台帳のファイル名。git の共有ディレクトリ直下に置く。
+_REVIEW_DONE_LEDGER = "beacon-review-done.json"
+
+
+def _worktree_shared_dir() -> Optional[str]:
+    """1 つのリポジトリの全 worktree で同じになるディレクトリを返す。無ければ None。
+
+    ``git rev-parse --git-common-dir`` は linked worktree の中からでも
+    **主リポジトリの ``.git``** を答える。これが「全 worktree で同じ」という
+    必要な性質そのもの。``beacon-find-root`` は使えない —— worktree は自分の
+    ``.beacon/`` を持つので find-root は worktree 自身を返し、状態がまた割れる。
+
+    git に worktree の素性を尋ねる箇所は本番コードに複数在り、ここはその 1 つ。
+    集合は ``scripts/check-worktree-probe-census.py`` が構文木から抽出して台帳と
+    集合比較するので、この段落が黙って腐ることはない (増減すると CI が落ちる)。
+    ``beacon_cli/hooks/context_monitor.py::_worktree_shared_base`` が同じ問いを
+    立てているが、あちらは **hook が ``lib/`` 無しで import できる必要がある**
+    ため helper を共有できない (あちらの docstring がその理由を述べている)。
+    こちらは ``lib/`` の中なので、``lib/`` 内の呼び出し元はこれを共有する。
+
+    git が無い / repo 外 / 呼び出し失敗のときは None を返し、呼び出し側は
+    cwd ごとの置き場所に落ちる。**落ちたことは黙らせない** —— 間欠的に落ちると
+    「fork のレビューが親に伝わる回と伝わらない回がある」という、分裂していた
+    従来より診断しにくい状態になる。
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Warning: レビュー実施台帳の共有置き場を解決できませんでした "
+              f"(git rev-parse 失敗: {type(exc).__name__})。この cwd 限りの "
+              f"置き場に落ちます — fork で実施したレビューは親に伝わりません。",
+              file=sys.stderr)
+        return None
+    if out.returncode != 0:
+        return None          # git repo の外 (= 想定内、静かに落ちる)
+    path = (out.stdout or "").strip()
+    if not path:
+        return None
+    return os.path.abspath(path)
+
+
+def _review_done_ledger_path() -> str:
+    """横断台帳のパス。共有ディレクトリが取れなければ cwd の triggers に落ちる。"""
+    shared = _worktree_shared_dir()
+    if shared:
+        return os.path.join(shared, _REVIEW_DONE_LEDGER)
+    return os.path.join(_get_triggers_dir(), _REVIEW_DONE_LEDGER)
+
+
+def _read_review_done_ledger() -> dict:
+    """``{pr_number: [review_type, ...]}`` を返す。無ければ空 dict。"""
+    try:
+        with open(_review_done_ledger_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for pr, types in data.items():
+        if isinstance(types, list):
+            out[str(pr)] = [str(t) for t in types if t]
+    return out
+
+
+def record_review_done_across_worktrees(review_type: str, pr_number: str) -> bool:
+    """「この PR のこのレビューを実施した」を横断台帳に足す。足せたら True。
+
+    冪等: 同じ (PR, 種別) を 2 回足しても台帳は増えない。これが AC「重複した
+    判断記録を作らずに済む」の土台 —— 親で ``review done`` を**打ち直す必要が
+    無くなる**ので、同一レビューに対する判断記録が二重に残らない。
+    """
+    review_type = str(review_type or "").strip()
+    pr_number = str(pr_number or "").strip()
+    if not review_type or not pr_number:
+        return False
+    ledger = _read_review_done_ledger()
+    types = ledger.setdefault(pr_number, [])
+    if review_type not in types:
+        types.append(review_type)
+    path = _review_done_ledger_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(ledger, f, ensure_ascii=False, indent=1, sort_keys=True)
+        return True
+    except OSError as exc:
+        print(f"Warning: レビュー実施を横断台帳に記録できませんでした "
+              f"({exc})。この cwd では解消されますが、fork / 親の別の作業"
+              f"フォルダからは未実施に見えます。", file=sys.stderr)
+        return False
+
+
+def forget_review_done_across_worktrees(pr_number: str) -> None:
+    """PR が解決 (merge / close) したら台帳から落とす。best-effort。
+
+    落とさないと台帳が無限に育ち、同じ PR 番号を再利用する別リポジトリで
+    誤って「実施済み」と読まれる余地が残る。
+    """
+    pr_number = str(pr_number or "").strip()
+    if not pr_number:
+        return
+    ledger = _read_review_done_ledger()
+    if pr_number not in ledger:
+        return
+    ledger.pop(pr_number, None)
+    try:
+        with open(_review_done_ledger_path(), "w", encoding="utf-8") as f:
+            json.dump(ledger, f, ensure_ascii=False, indent=1, sort_keys=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

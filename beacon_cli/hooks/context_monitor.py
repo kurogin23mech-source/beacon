@@ -368,7 +368,7 @@ def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
     ``.beacon/``, so find-root returns the worktree itself and the state would
     split again.
 
-    Three other places ask git about the same flags and this is the fourth,
+    Four other places ask git about the same flags and this is the fifth,
     because this hook must stay importable without ``lib/`` (so it cannot share
     a helper with them):
 
@@ -377,9 +377,13 @@ def _worktree_shared_base(cwd: Optional[Path] = None) -> Optional[Path]:
       ``--git-dir`` against ``--git-common-dir`` to detect "am I in a worktree";
     * ``lib/cmd_milestone.py`` (``_is_git_project``) uses ``--git-dir`` alone to
       ask the weaker "is this a git repository at all";
+    * ``lib/commands_shared.py`` (``_worktree_shared_dir``) needs only the
+      common dir itself, for the cross-worktree review-done ledger (ms-166
+      e-6899) — same question as this one, but inside ``lib/`` so the callers
+      there can share it;
     * this one needs only the common dir itself.
 
-    If git's answer shape ever has to be handled differently, all four are the
+    If git's answer shape ever has to be handled differently, all five are the
     set to change. **That set is counted by machine, not asserted here**:
     ``scripts/check-worktree-probe-census.py`` extracts the call sites from the
     syntax tree and fails when the census gains or loses one, so this paragraph
