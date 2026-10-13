@@ -40,6 +40,7 @@ import secrets
 
 # ms-154 e-5652: decided_by 語彙は lib/decision_vocab.py が単一ソース (CLI と server の
 # 二重定義を廃止)。server は起動時に lib/ を path に載せる (server/app.py) ので import 可。
+import _libpath  # noqa: F401 — lib/ を sys.path に載せる (ms-166 e-6890)
 from decision_vocab import DECIDED_BY  # noqa: F401  (re-exported below)
 
 
