@@ -6541,7 +6541,7 @@ def _help_registry():
         {"command": "beacon target list", "flags": ["--target <id>", "--pending", "--json"], "description": "List target transition-approval requests"},
         {"command": "beacon review context --type <ax|philosophy>", "flags": ["--pr <n>", "--diff-ref <base...head>", "--origin-doc <doc-id>", "--mode diff"], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
-        {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。--outcome は「何が得られたか」"},
+        {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},
         {"command": "beacon task cancel <entry-id>", "flags": ["--reason <text>", "--acknowledge"], "description": "Cancel (取消) a task. `task update --status cancelled` は拒否されるのでこちらが唯一の経路。終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)"},
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
         {"command": "beacon task next", "flags": ["-m <ms-id>", "--json"], "description": "優先度順に「次にやる作業」を 1 件返す (読み取り専用)。順序は lib/next_action.py が持つ (ms-166 e-6911)"},

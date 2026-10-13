@@ -250,8 +250,23 @@ AC が空だが motivation がある場合:
 **✓ DONE**: Bash ツールで実行
 ```bash
 cd "$PROJECT_DIR" && beacon task done <entry-id> --reason "<判断軌跡 1〜2 文>" \
+  --ac "1:met:<この節をどう満たしたか>" --ac "2:met:<…>" \
   --decided-by autonomous-AI --evidence "commit:<commit.hash>"
 ```
+
+`--ac`（ms-166 e-6898 — 受入条件の各節を機械で突き合わせる）:
+- 受入条件を持つタスクは、**節ごとの判定を出さないと done にできない**（この Step で
+  AC を 1 節ずつ照合しているので、その結論をそのまま渡すだけ）。節の数と文面は、
+  判定を出さずに叩いたときのエラーが列挙してくれるので、先に 1 回叩いて確認してよい。
+- 形は `--ac "<節番号>:<met|partial|not-met>[:<根拠>]"` を節の数だけ繰り返す。
+  根拠には「どのコミットの・どのファイルで満たしたか」を書く（後から引ける形にする）。
+- **△ PARTIAL 判定のときは done を打たない**のが上の規約だが、複数節のうち一部だけ
+  未達で全体としては done にする、と判断した場合は `not-met` / `partial` をそのまま
+  渡してよい。**未達は done を止めない** — 隠さず記録に残すのが目的で、未達の節は
+  コマンドの出力にも必ず表示される。その場合は follow-up task も併せて起票する。
+- 受入条件が無いタスクは `--ac` 不要（`no-criteria` として記録に残る）。
+- 節ごとの判定を出せない事情があるなら `--ac-waive "<なぜ出せないか>"`。これは債務
+  として記録に残るので、安易に使わない。
 
 `--decided-by` / `--evidence`（ms-154 e-5650 — 決定の監査価値を実捕獲する）:
 - `--decided-by autonomous-AI`: /beacon-log の done は AI が AC を自律照合して下す判断（人間は事後監査するのみ、この場で done 可否を聞かない Step 1.9 の原則）。ゆえに「AI 単独決定」= `autonomous-AI` を明示する。これで「人間が指示した done（→ `/beacon-task` が `human-delegated` を渡す）」と監査上で弁別できる（旧: 経路の default 任せで両者が区別不能だった）。

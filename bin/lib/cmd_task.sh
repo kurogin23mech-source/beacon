@@ -171,6 +171,10 @@ cmd_task_done() {
     local evidence=""
     # ms-166 e-6600: 何が得られたか (= 計画の文面は done 時点で古くなる)。
     local outcome=""
+    # ms-166 e-6898: 受入条件の節ごとの判定。--ac は繰り返し可 (--evidence と同規約の
+    # 改行区切りで渡す)。--ac-waive は判定を出さずに通す理由 (= 債務として残る)。
+    local ac_verdicts=""
+    local ac_waive=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -179,6 +183,8 @@ cmd_task_done() {
             --outcome)     outcome="${2:-}"; shift 2 ;;
             --decided-by)  decided_by="${2:-}"; shift 2 ;;
             --evidence)    evidence="${evidence:+$evidence$'\n'}${2:-}"; shift 2 ;;
+            --ac)          ac_verdicts="${ac_verdicts:+$ac_verdicts$'\n'}${2:-}"; shift 2 ;;
+            --ac-waive)    ac_waive="${2:-}"; shift 2 ;;
             --acknowledge) acknowledge="1"; shift ;;
             -?*)           _guard_flag "$1" ;;
             *)             entry_id="$1";     shift   ;;
@@ -186,7 +192,7 @@ cmd_task_done() {
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task done <entry-id> --reason <text> [--outcome <text>] [-p <progress>] [--decided-by <who>] [--evidence <link>]"
+        echo "Usage: beacon task done <entry-id> --reason <text> (--ac \"<n>:<met|partial|not-met>[:<根拠>]\" ... | --ac-waive <text>) [--outcome <text>] [-p <progress>] [--decided-by <who>] [--evidence <link>]"
         exit 1
     fi
     # e-976: forward BEACON_REASON only when --reason was passed so the python
@@ -196,11 +202,13 @@ cmd_task_done() {
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" BEACON_REASON="$reason" \
             BEACON_OUTCOME="$outcome" \
             BEACON_DECIDED_BY="$decided_by" BEACON_DONE_EVIDENCE="$evidence" \
+            BEACON_AC_VERDICTS="$ac_verdicts" BEACON_AC_WAIVE="$ac_waive" \
             BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     else
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" \
             BEACON_OUTCOME="$outcome" \
             BEACON_DECIDED_BY="$decided_by" BEACON_DONE_EVIDENCE="$evidence" \
+            BEACON_AC_VERDICTS="$ac_verdicts" BEACON_AC_WAIVE="$ac_waive" \
             BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     fi
 }

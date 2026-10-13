@@ -419,6 +419,7 @@ def normalize_ball(value: str) -> str:
 def mark_done(item: dict, *, at: str = "", actor: str = "",
               reason: str = "", outcome: str = "",
               acknowledge: bool = False, exempt: str = "",
+              ac_verdicts: list = None, ac_waive: str = "",
               verb: str = "done") -> dict:
     """Mark a WorkItem done in place and return it — REQUIRES an audit entry.
 
@@ -447,6 +448,16 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     audit-entry gate (that gate is ``reason``). Requiring it for one occupation
     only would be exactly the branch this task removes.
 
+    THE ACCEPTANCE-CRITERIA GATE ALSO LIVES HERE (ms-166 e-6898). ``done`` also
+    demands a verdict for each clause of the item's own ``acceptance_criteria``:
+    pass ``ac_verdicts=["1:met:…", "2:not-met:…"]``, or ``ac_waive="<why not>"``
+    to proceed without them (recorded as debt). An item with NO acceptance
+    criteria is recorded as ``no-criteria`` rather than waved through unseen, so
+    "write no criteria" cannot become the quiet bypass. An unmet clause does NOT
+    block the done — blocking would make honest partial reporting costly and
+    push a writer toward claiming everything was met; recording the unmet clause
+    is where the audit value is. What is blocked is giving no verdict at all.
+
     THE AUDIT GATE LIVES HERE (ms-166 e-6893). ``done`` is a terminal state, so
     this stamp refuses to run without an audit entry: pass ``reason``, or
     ``acknowledge=True`` to record a deliberate no-reason, or an ``exempt`` key
@@ -473,11 +484,20 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     import terminal_gate
     reason = terminal_gate.require_audit(
         verb, reason=reason, acknowledge=acknowledge, exempt=exempt)
+    # ms-166 e-6898: 受入条件の節ごとの判定も、理由と同じ押印層で要求する。
+    # ``require_audit`` が「なぜこの遷移をするか」を 1 行求めるのに対し、こちらは
+    # 「このタスクが自分で書いた各節を満たしたと主張するか」を節ごとに求める。
+    # 未達は done を止めない (隠さず残す方が監査価値が高い) が、判定を一切出さない
+    # 素通りは止める。受入条件が無い item は no-criteria として記録に残り、数えられる。
+    adjudication = terminal_gate.require_ac_adjudication(
+        verb, item.get("acceptance_criteria") or "",
+        verdicts=ac_verdicts, waive=ac_waive, exempt=exempt)
     item["status"] = DONE_STATUS
     item[DONE_AT] = at or work_base.now_iso()
     meta = item.setdefault("meta", {})
     meta["done_by"] = actor or work_base.current_actor()
     meta["done_reason"] = reason
+    meta["ac_adjudication"] = adjudication
     if outcome:
         meta["done_outcome"] = outcome
     return item

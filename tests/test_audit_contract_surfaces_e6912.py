@@ -267,14 +267,29 @@ class TestTheAuditSurfaceGuardActuallyFails:
         dest.write_text(mutated, encoding="utf-8")
         return dest
 
+    @staticmethod
+    def _strip_flags_from_row(text, verb):
+        """README の ``verb`` の行を、旗を失った行に置き換える。
+
+        ms-166 e-6898: ここは以前、行の全文をリテラルで持っていた。README の行に
+        旗を 1 つ足すだけで「変異が当たっていない」で落ち、変異の意図とは無関係な
+        ところで赤くなる (実際 e-6898 で `--ac` を足したときに踏んだ)。行を構造で
+        見つけて潰す形にすれば、行の文面が育ってもこの test-the-test は意図の通り
+        働き続ける。anchor が見つからなければ下の ``_readme_copy`` が
+        「変異が当たっていない」で落とすので、黙って素通りはしない。
+        """
+        import re
+        pattern = re.compile(
+            r"^\| `beacon " + re.escape(verb) + r" <id>[^`]*` \|.*$",
+            re.M)
+        return pattern.sub(
+            "| `beacon " + verb + " <id> [-p progress]` | row with no flags |",
+            text, count=1)
+
     def test_catches_a_readme_row_losing_the_flags(self, tmp_path):
         mod = _load_drift_module()
         dest = self._readme_copy(
-            tmp_path,
-            lambda t: t.replace(
-                "| `beacon task done <id> (--reason <text> \\| --acknowledge) "
-                "[-p progress] [--outcome <text>]` |",
-                "| `beacon task done <id> [-p progress]` |", 1))
+            tmp_path, lambda t: self._strip_flags_from_row(t, "task done"))
         report = mod.collect_audit_contract_drift(readme_path=dest)
         assert "task done" in report["missing_from_readme"]
 
