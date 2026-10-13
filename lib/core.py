@@ -3387,8 +3387,54 @@ def milestone_graph(data: dict) -> dict:
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
+# ms-166 e-6911 — fields the serialized form always carries, with the fallback
+# used when the stored entry lacks them. Everything else flows through
+# automatically (see ``entries_to_json``).
+ENTRY_JSON_ALWAYS = ("id", "type", "description", "status", "created_at", "done_at")
+
+# Keys ``entries_to_json`` handles itself rather than copying verbatim.
+#   entries — recursed into, so it must not be copied as raw storage dicts.
+ENTRY_JSON_HANDLED_SEPARATELY = frozenset({"entries"})
+
+# Values that mean "absent" for an optional field. An entry carrying
+# ``motivation: ""`` is indistinguishable from one with no motivation at all,
+# so neither reaches the output — this preserves the pre-e-6911 behaviour of
+# only emitting optional fields that actually hold something.
+_ENTRY_JSON_EMPTY = (None, "", [], {}, ())
+
+
 def entries_to_json(entries: list) -> list:
-    """Convert entries to a JSON-serializable list (recursive)."""
+    """Convert entries to a JSON-serializable list (recursive).
+
+    ms-166 e-6911 — this used to be a hand-maintained allowlist: six core
+    fields plus ``meta`` / ``detail`` plus a literal tuple of
+    ``(motivation, acceptance_criteria, behavior, deadline)``. Any field not
+    named there was silently dropped on the way out, and because this one
+    function is the single serializer for the CLI, the local store, the SQLite
+    store and six server routes, a field missing from the list was missing
+    from *every* machine-readable surface at once.
+
+    The failure mode that cost us was not the drop itself but that the drop
+    is silent: a consumer reads ``entry["priority"]``, gets ``None``, and
+    concludes "no priority was set" rather than "the serializer ate it".
+    Two fields had already been added one-at-a-time after a consumer tripped
+    over exactly that — ``deadline`` (ms-139 e-4949, read by the overdue
+    surface) is the precedent recorded in this task's acceptance criteria, and
+    the incident fields (``title`` / ``opened_at`` / ``resolution`` /
+    ``resolved_at`` / ``linked_ms_task``) were still being dropped when
+    e-6911 was written.
+
+    So the shape is inverted: every stored top-level field flows through, and
+    only the keys this function handles itself are withheld. Adding a field to
+    an entry now reaches consumers with no change here, which removes the
+    add-one-at-a-time loop rather than lengthening it.
+
+    ``priority`` is the one derived field. It is stored under ``meta`` for
+    historical reasons, but the documented selection rule (the "next move"
+    ordering in /beacon-session-start Step 2.9) reads it as a top-level field,
+    so it is surfaced in both places. ``meta.priority`` stays put: it is what
+    every existing reader uses.
+    """
     result = []
     for e in entries:
         item = {
@@ -3399,15 +3445,16 @@ def entries_to_json(entries: list) -> list:
             "created_at": e.get("created_at", e.get("date", "")),
             "done_at": e.get("done_at"),
         }
-        if e.get("meta"):
-            item["meta"] = e.get("meta", {})
-        if e.get("detail"):
-            item["detail"] = e["detail"]
-        # ms-139 e-4949: deadline を JSON に出す (task list --json / session-start /
-        # cockpit の締切超過 surface が読む top-level フィールド)。
-        for field in ("motivation", "acceptance_criteria", "behavior", "deadline"):
-            if e.get(field):
-                item[field] = e[field]
+        for key, value in e.items():
+            if key in item or key in ENTRY_JSON_HANDLED_SEPARATELY:
+                continue
+            if value in _ENTRY_JSON_EMPTY:
+                continue
+            item[key] = value
+        if "priority" not in item:
+            stored = e.get("meta")
+            if isinstance(stored, dict) and stored.get("priority"):
+                item["priority"] = stored["priority"]
         children = e.get("entries", [])
         if children:
             item["entries"] = entries_to_json(children)

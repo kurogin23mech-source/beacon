@@ -658,6 +658,10 @@ case "${1:-}" in
                 shift 2
                 cmd_task_list "$@"
                 ;;
+            next)
+                shift 2
+                cmd_task_next "$@"
+                ;;
             show)
                 shift 2
                 cmd_task_show "$@"
@@ -679,7 +683,7 @@ case "${1:-}" in
                 cmd_task_delete "$@"
                 ;;
             *)
-                echo "Usage: beacon task [add|done|list|show|detail|update|cancel|delete] [-m <ms-id>] [-t <type>] [-d <detail>] [description]"
+                echo "Usage: beacon task [add|done|list|next|show|detail|update|cancel|delete] [-m <ms-id>] [-t <type>] [-d <detail>] [description]"
                 ;;
         esac
         ;;

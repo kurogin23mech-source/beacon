@@ -15,6 +15,7 @@ from typing import Optional
 
 from store import get_store
 import core
+import next_action  # ms-166 e-6911: priority-aware "next move" ordering
 import occupation  # ms-143: profession-generic target/entry primitives
 import work_model
 
@@ -369,6 +370,56 @@ def cmd_task_list():
         icon = icons.get(entry.get("status", "todo"), "?")
         etype = entry.get("type", "?")
         print(f"  {icon} [{entry['id']}] ({etype}) {entry['description']}")
+
+
+def cmd_task_next():
+    """Print the next task to work on, chosen by priority (ms-166 e-6911).
+
+    The ordering rule lives in ``lib/next_action.py``; this is only the CLI
+    surface for it. /beacon-session-start Step 2.9 calls this instead of
+    eyeballing ``task list --json``, which is what let the documented
+    priority rule go unexecuted for its whole life.
+    """
+    ms_id = os.environ.get("BEACON_MS_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    target = occupation.resolve_target(data, ms_id)
+    entries = core.filter_cancelled(target.get("entries", []))
+    ranked = next_action.rank_open_tasks(entries)
+
+    if json_mode:
+        chosen = ranked[0] if ranked else None
+        output = {
+            "milestone_id": target["id"],
+            "milestone_title": work_model.target_label(target),
+            "next": None,
+            "alternatives": [],
+            "open_task_count": len(ranked),
+        }
+        if chosen is not None:
+            output["next"] = core.entries_to_json([chosen])[0]
+            output["next"]["reason"] = next_action.explain_choice(chosen)
+            output["alternatives"] = [
+                dict(core.entries_to_json([e])[0],
+                     reason=next_action.explain_choice(e))
+                for e in ranked[1:3]
+            ]
+        print(json.dumps(output, ensure_ascii=False))
+        return
+
+    if not ranked:
+        print(f"No open tasks in {work_model.target_label(target)}")
+        return
+
+    chosen = ranked[0]
+    print(f"次の一手: [{chosen['id']}] {chosen.get('description', '')}")
+    print(f"  根拠: {next_action.explain_choice(chosen)}")
+    print(f"  対象: [{target['id']}] {work_model.target_label(target)}")
+    if len(ranked) > 1:
+        print(f"  別の選択肢 (残り {len(ranked) - 1} 件):")
+        for entry in ranked[1:3]:
+            print(f"    - [{entry['id']}] ({next_action.explain_choice(entry)}) "
+                  f"{entry.get('description', '')}")
 
 
 def cmd_task_show():

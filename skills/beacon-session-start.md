@@ -644,11 +644,17 @@ Step 3 の出力末尾に「**次の一手**」を **AI が決定的に選ぶ** 
 4. **Step 1j で抽出した session log 由来 next-action がある** → その先頭項目を推奨アクションにする。**trigger より優先**。前セッションが意図的に積んだ次の塊を見落とさないため (2026-06-09 朝に実害発生、e-1360 で構造化)。
 5. **`beacon trigger check` で active なトリガーがある** → そのトリガーの推奨アクション
 5.5. **`profession` が非 dev (= 営業等) の場合 (ms-108 e-3269 / SPEC 方針5)** → next-action を `/beacon-sales-cockpit` に委譲する。以降の 6〜9 は「アクティブ MS のタスク / SPEC / MS 提案」という **開発 instance 専用**のロジックなので、営業では評価しない。営業の『今日やること・各商談の次の一手』は cockpit が商談を横断して出すのが正 (= session-start 側で商談ごとの next-action を再実装しない)。ただし項目 3 (fork) / 項目 4 (session log 由来 next-action) が取れている場合はそちらを優先する (職種に依らない強シグナルのため)。
-6. **アクティブ MS に未消化タスクが 1 つ以上ある**
-   - そのうち `priority == "highest"` があればそれを最優先
-   - 次に `in_progress` 状態のタスク
-   - 次に `assignee` が自分 (current member) のタスク
-   - それも無ければ todo 状態の先頭タスク
+6. **アクティブ MS に未消化タスクが 1 つ以上ある** → **`beacon task next --ms <active-ms-id> --json` を叩いて、その `next` を推奨アクションにする** (ms-166 e-6911)。
+
+   順序の規則は `lib/next_action.py` が持つ唯一の実装であり、この markdown は規則の**写し**を持たない。写しを置くと、以前のように「規則は文章にあるが一度も実行されない」状態 (= 並び順の先頭が選ばれる) に戻る。実際に出てくる順序は次の通り:
+   - 優先度 5 段階 (highest → high → medium → low → lowest) の順
+   - `untriaged` (= 機械が起票して人がまだ判断していない) と優先度未設定は、5 段階すべての**後**
+   - 同じ優先度なら `in_progress` が `todo` より先
+   - それでも並ばなければ `created_at` の古い順
+
+   返り JSON の `next.reason` が根拠の 1 行、`alternatives[]` が「別の選択肢」2 件になる。`next` が `null` なら未消化タスクゼロなので項目 7 へ進む。
+
+   **タスクに `assignee` は存在しない** (ms-166 e-6911 で確認)。担当を書く経路は milestone 側 (`beacon milestone update --assignee` / `milestone join`) だけで、`beacon task update --help` に `--assignee` は無い。「誰が作業中か」は下の 2層 claim フィルタが見る唯一の面であり、タスク単位の担当という概念を新設しない (作らない方を選んだ: claim が既に同じ問いに答えている)。
 7. **アクティブ MS の SPEC が無い** → `/beacon-spec <ms-id>` で SPEC 作成
 8. **アクティブ MS が無い** → 「次のマイルストーンを決めましょう」(コンサルタントモード Step 2.5 と同じ)
 9. **どれも該当しない** → 「観察モード: 直近 retro を見直すか、cleanup 作業に着手するか」

@@ -480,6 +480,7 @@ VERB_LEDGER = {
     "task_detail": {"cls": "Q", "secondary": [], "note": ""},
     "task_done": {"cls": "R", "secondary": ["B"], "note": "done報告(R)/AC物理照合(B)"},
     "task_list": {"cls": "Q", "secondary": [], "note": ""},
+    "task_next": {"cls": "Q", "secondary": [], "note": "[post-memo] ms-166 e-6911: 優先度順に次の一手を読むだけ (read-only)"},
     "task_show": {"cls": "Q", "secondary": [], "note": ""},
     "task_update": {"cls": "R", "secondary": [], "note": ""},
 
