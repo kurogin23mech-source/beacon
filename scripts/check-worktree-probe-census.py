@@ -63,6 +63,10 @@ CENSUS = frozenset({
     # 「worktree か」ではなく「git repo か」を尋ねるが、消費する旗が同じ
     # (`--git-dir`) なので、git の答えの形が変わると一緒に影響を受ける。
     ("lib/cmd_milestone.py", "_is_git_project"),
+    # ms-166 e-6899: レビュー実施の横断台帳の置き場。hook 側の
+    # `_worktree_shared_base` と同じ問い (共有ディレクトリそのもの) を立てるが、
+    # あちらは `lib/` 無しで import できる必要があるため helper を共有できない。
+    ("lib/commands_shared.py", "_worktree_shared_dir"),
 })
 
 
