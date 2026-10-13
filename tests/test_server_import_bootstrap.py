@@ -1,4 +1,4 @@
-"""server/ の入口モジュールが app.py 抜きでも import できることを機械で見る (ms-166 e-6728 の退行止め)。
+"""server/ の全モジュールが app.py 抜きでも import できることを機械で見る (ms-166 e-6728 / e-6890)。
 
 ms-166 e-6728 で ``import idempotency as _idem`` を ``server/app.py`` の 4 行目 —
 ``lib/`` を ``sys.path`` に載せる行より **上** — に挿してしまい、次の 2 つが同時に
@@ -12,7 +12,7 @@ ms-166 e-6728 で ``import idempotency as _idem`` を ``server/app.py`` の 4 �
      この壊れ方が出ない = 片方の経路だけ見ていると緑に見える。
 
 なので「``lib/`` の module を import している」ことではなく、
-**「入口から素の interpreter で import が通るか」** を見る。前者は書き方の検査 (表層) で、
+**「素の interpreter で import が通るか」** を見る。前者は書き方の検査 (表層) で、
 ``_libpath`` を import していても順序が逆なら緑になってしまう。後者は実際の壊れ方そのもの。
 
 検査は子プロセスで行う: 親の ``sys.path`` には conftest 等が既に ``lib/`` を載せているので、
@@ -30,6 +30,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_DIR = os.path.join(REPO_ROOT, "server")
 
 # ms-166 e-6890: 対象は「手書きの入口 6 本」から **server 配下の全 *.py** に広げた。
+#
+# 変数名も ``ENTRY_MODULES`` から変えた (独立レビュー medium, 2026-10-13)。中身が
+# 「外から直接掴まれる入口 6 本」から「走査した全モジュール」に変わったのに名前が
+# 「入口の一覧」と主張し続けると、次に読む人が「ここに無いなら内部ヘルパーだ」という
+# 誤った前提でこの変数を別の判断に転用する。名前は中身を予告する。
 #
 # 手書きの一覧は、一覧に載っていないモジュールを黙って検査対象外にする。実際それが
 # 起きていた: e-6728 の退行で 4 本を直したあと、それ以前から同じ状態だった 10 本が
@@ -67,7 +72,7 @@ def _discover_server_modules() -> list:
     return [n for n in names if n not in EXCLUDED_MODULES]
 
 
-ENTRY_MODULES = _discover_server_modules()
+SCANNED_SERVER_MODULES = _discover_server_modules()
 
 
 def _import_with_only_server_on_path(module: str) -> subprocess.CompletedProcess:
@@ -115,17 +120,17 @@ def test_the_scan_actually_found_modules() -> None:
     ``_discover_server_modules`` が空を返すと parametrize が 0 ケースになり、
     テストは緑のまま何も測らない。境界で赤に倒れる側に寄せる。
     """
-    assert len(ENTRY_MODULES) >= 20, (
+    assert len(SCANNED_SERVER_MODULES) >= 20, (
         "server 配下の走査が {0} 件しか返していない。ディレクトリ解決が壊れている疑い"
-        .format(len(ENTRY_MODULES)))
+        .format(len(SCANNED_SERVER_MODULES)))
     # かつて手書きで挙げられていた入口は、走査でも必ず拾えていること。
     for entry in ("app", "lambda_handler", "store_router", "firestore_client",
                   "dynamodb_client", "mysql_client"):
-        assert entry in ENTRY_MODULES, entry
+        assert entry in SCANNED_SERVER_MODULES, entry
 
 
-@pytest.mark.parametrize("module", ENTRY_MODULES)
-def test_entry_module_imports_without_app_py_bootstrap(module: str) -> None:
+@pytest.mark.parametrize("module", SCANNED_SERVER_MODULES)
+def test_server_module_imports_without_app_py_bootstrap(module: str) -> None:
     result = _import_with_only_server_on_path(module)
 
     if result.returncode != 0 and "ModuleNotFoundError" not in result.stderr:
