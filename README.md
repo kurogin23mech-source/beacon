@@ -254,6 +254,7 @@ A human-approval gate for a **completion** transition — a milestone reaching d
 | `beacon task done <id> (--reason <text> \| --acknowledge) [-p progress] [--outcome <text>]` | Mark as done — terminal, needs an audit entry / 完了 (終端遷移なので監査に --reason か --acknowledge が要る, --outcome は「何が得られたか」) |
 | `beacon task cancel <id> (--reason <text> \| --acknowledge)` | Cancel a task (取消) — the only path, since `task update --status cancelled` is refused / タスクを取消 (`task update --status cancelled` は拒否されるのでこちらが唯一の経路, ms-166 e-6893) |
 | `beacon task list [-m ms-id] [--json]` | List tasks / 一覧 |
+| `beacon task next [-m ms-id] [--json]` | Pick the next task by priority (read-only) / 優先度順に「次にやる作業」を 1 件返す (読み取り専用, ms-166 e-6911) |
 | `beacon task show <id> [--json]` | Show details / 詳細 |
 | `beacon task detail <id> [text]` | View/update detail / 詳細テキスト表示・更新 |
 | `beacon task update <id> [options]` | Update fields / 更新 |

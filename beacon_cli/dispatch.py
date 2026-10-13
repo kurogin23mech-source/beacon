@@ -1033,6 +1033,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_list.add_argument("--all", "-a", action="store_true")
     p_task_list.add_argument("--type", "-t", dest="type_filter", default="")
 
+    # ms-166 e-6911: priority 順の「次の一手」。読み取り専用。
+    p_task_next = task_sub.add_parser("next", add_help=False)
+    p_task_next.add_argument("-m", "--ms", dest="ms_id", default="")
+    p_task_next.add_argument("--json", action="store_true")
+
     p_task_show = task_sub.add_parser("show", add_help=False)
     p_task_show.add_argument("entry_id", nargs="?", default="")
     p_task_show.add_argument("--json", action="store_true")
@@ -3739,6 +3744,13 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             "BEACON_TYPE_FILTER": args.type_filter or "",
         }
         return _run_commands_py(root, "task_list", env)
+
+    if cmd == "next":
+        env = {
+            "BEACON_MS_ID": args.ms_id or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "task_next", env)
 
     if cmd == "show":
         if not args.entry_id:

@@ -265,3 +265,33 @@ cmd_task_list() {
     BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" \
         BEACON_TYPE_FILTER="$type_filter" python3 "$COMMANDS_PY" task_list
 }
+
+# ms-166 e-6911 — "which task should I do next", ordered by priority.
+# The ordering itself lives in lib/next_action.py; this only carries the flags.
+cmd_task_next() {
+    ensure_project
+    local ms_id=""
+    local json_flag=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m|--ms)
+                ms_id="${2:-}"
+                shift 2
+                ;;
+            --json)
+                json_flag="1"
+                shift
+                ;;
+            -?*)           _guard_flag "$1" ;;
+            *)
+                # e-6918 の型 (余分な位置引数を黙って捨てる) を新しい動詞で作らない。
+                # 旗でないゴミは _guard_positional (兄弟 task add と同形) に委ねる。
+                _guard_positional "$1" "Usage: beacon task next [-m <ms-id>] [--json]"
+                ;;
+        esac
+    done
+
+    BEACON_MS_ID="$ms_id" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" task_next
+}
