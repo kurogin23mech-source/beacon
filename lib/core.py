@@ -1394,6 +1394,7 @@ def task_add(data: dict, ms_id: str, description: str, *,
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
               outcome: str = "", acknowledge: bool = False,
               ac_verdicts: list = None, ac_waive: str = "",
+              ac_flag_names: tuple = (),
               author: dict | None = None) -> tuple[dict, dict]:
     """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
     containing milestone first, the entry second (review finding #5: stated
@@ -1437,7 +1438,7 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
         data, entry_id, "done", at=date or _now_iso(),
         actor=_get_actor(), reason=reason, outcome=outcome,
         acknowledge=acknowledge, ac_verdicts=ac_verdicts, ac_waive=ac_waive,
-        verb="task done")
+        ac_flag_names=ac_flag_names, verb="task done")
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
     author_clean = _clean_author(author)

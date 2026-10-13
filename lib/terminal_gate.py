@@ -199,6 +199,33 @@ def require_audit(verb: str, *, reason: str = "", acknowledge: bool = False,
 # 止めるのは「節ごとの判定を一切出さない」場合だけ (= 素通り)。
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 受入条件の判定の免除台帳 —— 理由の関門 (``EXEMPT_CALL_SITES``) とは別に持つ。
+#
+# 独立レビュー (2026-10-13) の指摘: 台帳を共有すると、「この呼び出し元は理由を
+# 持ちようがない」という判断で登録したキーが、誰も判断していない「受入条件の
+# 節ごとの判定を持ちようがない」まで自動的に免除する。2 つの独立した判断を 1 つの
+# キーに束ねない。免除するなら両方を意図して書く。
+#
+# 今日この台帳は空で、それは実測した事実: 判定を出せない呼び出し元 (PR 承認による
+# 自動完了) は理由を書けるので ``waive`` を使っており、免除を要らない。
+AC_EXEMPT_CALL_SITES: dict = {}
+
+
+def ac_exemption_reason(exempt: str) -> str:
+    """``exempt`` キーに対応する AC 免除台帳の 1 行を返す。未登録なら ``ValueError``。"""
+    try:
+        return AC_EXEMPT_CALL_SITES[exempt]
+    except KeyError:
+        known = ", ".join(sorted(AC_EXEMPT_CALL_SITES)) or "(台帳は空)"
+        raise ValueError(
+            f"受入条件の免除キー '{exempt}' は terminal_gate.AC_EXEMPT_CALL_SITES に"
+            f"登録されていません。免除するなら「なぜ節ごとの判定を持ちようがないか」を"
+            f"1 行添えて台帳に足してください (理由の関門の台帳とは別です)。"
+            f"登録済み: {known}"
+        ) from None
+
+
 #: 節ごとの判定を運ぶ env (改行区切り、``--evidence`` と同じ規約)。
 AC_VERDICTS_ENV = "BEACON_AC_VERDICTS"
 #: 節ごとの判定を出さずに意図的に通す理由を運ぶ env。
@@ -214,9 +241,17 @@ class AcceptanceAdjudicationRequired(ValueError):
     """
 
 
+#: エラー文に出す「判定の渡し方」の既定の呼び名。CLI の綴り。
+AC_VERDICT_FLAG_DEFAULT = "--ac-verdict"
+AC_WAIVE_FLAG_DEFAULT = "--ac-waive"
+
+
 def require_ac_adjudication(verb: str, criteria: str, *,
                             verdicts: "list" = None, waive: str = "",
-                            exempt: str = "") -> dict:
+                            exempt: str = "",
+                            ac_exempt: str = "",
+                            verdict_flag: str = AC_VERDICT_FLAG_DEFAULT,
+                            waive_flag: str = AC_WAIVE_FLAG_DEFAULT) -> dict:
     """done 遷移が運ぶ受入条件の判定を 1 つに確定して返す。足りなければ例外。
 
     Args:
@@ -224,8 +259,18 @@ def require_ac_adjudication(verb: str, criteria: str, *,
         criteria: 対象の ``acceptance_criteria`` 本文。
         verdicts: ``"<節番号>:<met|partial|not-met>[:<根拠>]"`` の列。
         waive: 節ごとの判定を出さずに通す理由 (= 債務として記録に残る)。
-        exempt: ``EXEMPT_CALL_SITES`` 登録済みの免除キー。理由の関門と同じ台帳を
-            使う (免除の住所を 2 つにしない)。
+        exempt: 理由の関門の免除キー。**この関門では無視される** —— 下の
+            ``ac_exempt`` を見よ。
+        ac_exempt: ``AC_EXEMPT_CALL_SITES`` 登録済みの免除キー。理由の関門の
+            台帳 (``EXEMPT_CALL_SITES``) とは **別** にしてある。独立レビュー
+            (2026-10-13) の指摘: 2 つの台帳を共有すると、「理由を持ちようがない」
+            という判断で登録したキーが、誰も判断していない「受入条件の判定を
+            持ちようがない」まで自動的に免除してしまう。独立した 2 つの判断を
+            1 つのキーに束ねない。
+        verdict_flag / waive_flag: エラー文に出す呼び名。CLI は ``--ac-verdict`` /
+            ``--ac-waive``、本番 API は ``?ac=`` / ``?ac_waive=`` のように surface
+            ごとに違うので、呼び出し元が自分の綴りを渡す。固定すると、API の 400
+            応答が存在しない CLI 旗を案内することになる (独立レビュー AX medium)。
 
     Returns:
         記録に入れる dict。受入条件が無ければ ``{"state": "no-criteria"}``。
@@ -240,8 +285,9 @@ def require_ac_adjudication(verb: str, criteria: str, *,
 
     if verdicts and waive:
         raise ValueError(
-            f"`{verb}` takes --ac OR --ac-waive, not both. 節ごとの判定を出すなら "
-            f"--ac を、出さずに通すなら理由を添えた --ac-waive を、どちらか一方に "
+            f"`{verb}` takes {verdict_flag} OR {waive_flag}, not both. "
+            f"節ごとの判定を出すなら {verdict_flag} を、出さずに通すなら理由を添えた "
+            f"{waive_flag} を、どちらか一方に "
             f"してください (両方は、判定を出したのに債務として記録される等の"
             f"取り違えになります)。")
 
@@ -257,19 +303,24 @@ def require_ac_adjudication(verb: str, criteria: str, *,
         return {"state": _acceptance.WAIVED, "clause_count": clause_total,
                 "clauses": [], "waive_reason": waive}
 
-    if exempt:
+    if ac_exempt:
         return {"state": _acceptance.WAIVED, "clause_count": clause_total,
-                "clauses": [], "waive_reason": exemption_reason(exempt)}
+                "clauses": [], "waive_reason": ac_exemption_reason(ac_exempt)}
 
     if not verdicts:
-        clauses = _acceptance.split_clauses(criteria)
+        clauses, confidence = _acceptance.split_clauses_with_confidence(criteria)
         listing = "\n".join(f"  {i}. {c}" for i, c in enumerate(clauses, 1))
+        uncertain = ""
+        if confidence == _acceptance.UNCERTAIN:
+            uncertain = ("\n(節の切り出しに確信が持てません: 番号による列挙が規則的で"
+                         "ないため、割らずに 1 節として扱いました。文面を読んで、"
+                         "判定が全体を覆うか確かめてください)")
         raise AcceptanceAdjudicationRequired(
             f"`{verb}` requires a verdict for each acceptance-criteria clause "
             f"({clause_total} 節)。未達でも done は通ります — 隠さないことが目的です。\n"
-            f"{listing}\n"
-            f"各節に --ac \"<節番号>:<met|partial|not-met>[:<根拠>]\" を渡すか、"
-            f"判定を出さずに通すなら --ac-waive \"<なぜ出せないか>\" を渡してください。"
+            f"{listing}{uncertain}\n"
+            f"各節に {verdict_flag} \"<節番号>:<met|partial|not-met>[:<根拠>]\" を渡すか、"
+            f"判定を出さずに通すなら {waive_flag} \"<なぜ出せないか>\" を渡してください。"
         )
 
     return _acceptance.build_adjudication(criteria, verdicts)

@@ -171,8 +171,13 @@ cmd_task_done() {
     local evidence=""
     # ms-166 e-6600: 何が得られたか (= 計画の文面は done 時点で古くなる)。
     local outcome=""
-    # ms-166 e-6898: 受入条件の節ごとの判定。--ac は繰り返し可 (--evidence と同規約の
-    # 改行区切りで渡す)。--ac-waive は判定を出さずに通す理由 (= 債務として残る)。
+    # ms-166 e-6898: 受入条件の節ごとの判定。--ac-verdict は繰り返し可 (--evidence と
+    # 同規約の改行区切りで渡す)。--ac-waive は判定を出さずに通す理由 (= 債務として残る)。
+    #
+    # 旗名が --ac でないのは、--ac が既に --acceptance-criteria の別名として
+    # task add / task update / milestone add / milestone update で「受入条件の
+    # 全文を書く」意味に使われているため (独立レビュー 2 体が指摘)。同じ短い旗が
+    # 同じ task ファミリー内で「書く」と「判定する」の逆方向を指す状態を作らない。
     local ac_verdicts=""
     local ac_waive=""
 
@@ -183,7 +188,7 @@ cmd_task_done() {
             --outcome)     outcome="${2:-}"; shift 2 ;;
             --decided-by)  decided_by="${2:-}"; shift 2 ;;
             --evidence)    evidence="${evidence:+$evidence$'\n'}${2:-}"; shift 2 ;;
-            --ac)          ac_verdicts="${ac_verdicts:+$ac_verdicts$'\n'}${2:-}"; shift 2 ;;
+            --ac-verdict)  ac_verdicts="${ac_verdicts:+$ac_verdicts$'\n'}${2:-}"; shift 2 ;;
             --ac-waive)    ac_waive="${2:-}"; shift 2 ;;
             --acknowledge) acknowledge="1"; shift ;;
             -?*)           _guard_flag "$1" ;;
@@ -192,7 +197,7 @@ cmd_task_done() {
     done
 
     if [ -z "$entry_id" ]; then
-        echo "Usage: beacon task done <entry-id> --reason <text> (--ac \"<n>:<met|partial|not-met>[:<根拠>]\" ... | --ac-waive <text>) [--outcome <text>] [-p <progress>] [--decided-by <who>] [--evidence <link>]"
+        echo "Usage: beacon task done <entry-id> --reason <text> (--ac-verdict \"<n>:<met|partial|not-met>[:<根拠>]\" ... | --ac-waive <text>) [--outcome <text>] [-p <progress>] [--decided-by <who>] [--evidence <link>]"
         exit 1
     fi
     # e-976: forward BEACON_REASON only when --reason was passed so the python

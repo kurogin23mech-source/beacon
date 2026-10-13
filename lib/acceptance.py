@@ -25,14 +25,21 @@ class 共通 (sales/dev で分岐しない)」だった。実際には cancel �
 
 節の切り出し方
 --------------
-実データ 2 形式を測って決めた (``tests/test_acceptance_e6898.py``):
+実データ 4 形式を測って決めた (``tests/test_acceptance_adjudication_e6898.py``):
 
+* 箇条書き行 (``- ...``) — e-6621 / e-6633 がこの形
 * 番号付き行 (``1. ...`` / ``2) ...``) — e-6918 / e-6937 / e-6923 がこの形
+* 行内番号 (``(1) ...`` / ``1) ...``) — e-6890 / e-6891 / e-6893 / e-2420 がこの形
 * ``" / "`` 区切りの 1 段落 — e-6911 / e-6898 / e-6899 がこの形
 
-番号付き行が 2 つ以上あればそれを採り、無ければ ``" / "`` で割る。どちらでも
-割れなければ全文を 1 節として扱う (= 0 節にはしない。0 節は「検査すべきものが無い」
-と読めてしまい、関門の抜け道になる)。
+曖昧さの少ない順に試し、どれでも割れなければ全文を 1 節として扱う (= 0 節には
+しない。0 節は「検査すべきものが無い」と読めてしまい、関門の抜け道になる)。
+
+**確信が持てない場合がある。** 番号による列挙らしさが在るのに規則的に割れない
+文面 (実データに 88 件) は、``" / "`` で割ると項目の内側を切る —— 実例 e-2445 は
+「CLI / Web UI」の内側で切れ、節が意味を成さない断片になっていた。この場合は
+割らずに ``UNCERTAIN`` を併せて返し、呼び出し側が人に見せる。黙って断片への判定を
+要求しない (ms-166 e-6898 の独立レビュー AX high)。
 """
 
 import re
@@ -53,7 +60,14 @@ WAIVED = "waived"
 
 _NUMBERED_LINE = re.compile(r"^\s*(\d+)\s*[.)、]\s*(.+)$")
 _BULLET_LINE = re.compile(r"^\s*[-*・]\s+(.+)$")
-_INLINE_NUMBER = re.compile(r"\((\d+)\)\s*")
+# 行内番号は 2 綴りある: 括弧付き `(1) ` と裸の `1) `。どちらも「文の中で N 項目を
+# 列挙する」同じ意図を表す。裸の方は本文中の参照 (`過去の判断 (1) と (2)`) と
+# 見分けがつきにくいので、下の ``_split_inline_numbers`` が「1 から始まる連番」
+# であることを追加で要求する。
+_INLINE_NUMBER = re.compile(r"\(?(\d+)\)\s*")
+
+# 番号による列挙が在ることだけを見る検出器 (切り出しの確信度判定に使う)。
+_ANY_NUMBER_MARKER = re.compile(r"(?:^|[\s(])(\d+)[.)]\s")
 
 
 def _normalize(clause: str) -> str:
@@ -78,12 +92,27 @@ def _collect_prefixed_lines(text: str, pattern) -> List[str]:
 
 
 def _split_inline_numbers(text: str) -> List[str]:
-    """``(1) … (2) …`` 形の行内番号で割る。"""
+    """``(1) … (2) …`` / ``1) … 2) …`` 形の行内番号で割る。
+
+    本文中の番号参照を節区切りと誤読しないため、2 つ条件を課す:
+
+    * 最初の番号が先頭近くに在る (文の途中から始まる番号は参照)
+    * 番号が ``1`` から始まる連番である (``(1) と (2) を踏まえている`` のような
+      参照は連番に見えることもあるが、先頭条件と併せればほぼ落ちる)
+
+    裸の ``N)`` を拾うのは ms-166 e-6898 の独立レビュー (AX high) の指摘による。
+    実データ (このリポジトリの受入条件 1786 件) に ``1) … 2) … 3) …`` を改行なし
+    で書く形が多数在り、拾えないと ``" / "`` 分割に落ちて **文の途中で切れる**。
+    実例 e-2420 は 3 項目以上が 1 節に潰れ、e-2445 は「CLI / Web UI」の内側で
+    切れて意味を成さない断片になっていた。
+    """
     marks = list(_INLINE_NUMBER.finditer(text))
     if len(marks) < 2:
         return []
-    # 1 番目が先頭近くに無い場合、番号は本文中の参照なので節区切りではない。
     if marks[0].start() > 8:
+        return []
+    numbers = [int(m.group(1)) for m in marks]
+    if numbers != list(range(1, len(numbers) + 1)):
         return []
     out = []
     for i, m in enumerate(marks):
@@ -121,31 +150,66 @@ def _split_outside_parens(text: str, sep: str) -> List[str]:
     return [p for p in out if p]
 
 
-def split_clauses(text: str) -> List[str]:
-    """受入条件の文章を節に切り出す。空文字なら空リスト。
+#: ``split_clauses_with_confidence`` が返す確信度。
+#:
+#: ``uncertain`` は「節に割れた / 割れなかった結果に自信が無い」状態。節を文の
+#: 途中で切ると、関門は意味を成さない断片への判定を要求することになるので、
+#: 黙って進めずに呼び出し側へ伝える (ms-166 e-6898 の独立レビュー AX high)。
+CONFIDENT = "confident"
+UNCERTAIN = "uncertain"
 
-    実データで観測した 4 形式を、曖昧さの少ない順に試す。どれでも割れなければ
-    全文を 1 節として扱う (= 0 節にはしない。0 節は「検査すべきものが無い」と
-    読めてしまい、関門の抜け道になる)。
+
+def split_clauses_with_confidence(text: str) -> Tuple[List[str], str]:
+    """節に切り出し、その切り出しに確信が持てるかを併せて返す。
+
+    実データで観測した形式を、曖昧さの少ない順に試す:
+
+    1. 箇条書き行 (``- `` / ``* ``)
+    2. 番号付き行 (``1. `` / ``2) ``)
+    3. 行内番号 (``(1) `` / ``1) ``、1 からの連番で先頭近くから始まるもの)
+    4. ``" / "`` 区切り (括弧の外だけ)
+
+    どれでも割れなければ全文を 1 節として扱う。**0 節にはしない** —— 0 節は
+    「検査すべきものが無い」と読めてしまい、関門の抜け道になる。
+
+    確信が持てないのは次の 2 つ:
+
+    * 番号による列挙らしさ (``N.`` / ``N)`` が 2 個以上) が在るのに 1〜3 の
+      どれでも割れなかった。番号の付け方が不規則なので、``" / "`` で割ると
+      項目の内側を切る (実例 e-2445: 「CLI / Web UI」の内側で切れた)。
+      この場合は ``" / "`` 分割を **使わず** 全文 1 節にして不確実と伝える。
+    * ``" / "`` 分割を採ったが、番号列挙も混じっている。
     """
     text = (text or "").strip()
     if not text:
-        return []
+        return [], CONFIDENT
 
     for pattern in (_BULLET_LINE, _NUMBERED_LINE):
         found = _collect_prefixed_lines(text, pattern)
         if len(found) >= 2:
-            return [_normalize(c) for c in found]
+            return [_normalize(c) for c in found], CONFIDENT
 
     inline = _split_inline_numbers(text)
     if len(inline) >= 2:
-        return [_normalize(c) for c in inline]
+        return [_normalize(c) for c in inline], CONFIDENT
+
+    numbered_looking = len(_ANY_NUMBER_MARKER.findall(text)) >= 2
+    if numbered_looking:
+        # 番号で列挙されているのに規則的に割れない。" / " で割ると項目の内側を
+        # 切るので、割らずに不確実と伝える方を選ぶ (断片への判定を要求しない)。
+        return [_normalize(text)], UNCERTAIN
 
     slashed = _split_outside_parens(text, " / ")
     if len(slashed) >= 2:
-        return [_normalize(c) for c in slashed]
+        return [_normalize(c) for c in slashed], CONFIDENT
 
-    return [_normalize(text)]
+    return [_normalize(text)], CONFIDENT
+
+
+def split_clauses(text: str) -> List[str]:
+    """節のリストだけを返す (確信度を要らない呼び出し側のための薄い口)。"""
+    clauses, _confidence = split_clauses_with_confidence(text)
+    return clauses
 
 
 def clause_count(text: str) -> int:
@@ -197,7 +261,7 @@ def build_adjudication(criteria: str, raw_verdicts: List[str]) -> Dict:
         ValueError: 判定が節を網羅していない / 同じ節に 2 回出されている /
             個々の判定の形が違う。
     """
-    clauses = split_clauses(criteria)
+    clauses, confidence = split_clauses_with_confidence(criteria)
     total = len(clauses)
     if total == 0:
         raise ValueError(
@@ -227,7 +291,8 @@ def build_adjudication(criteria: str, raw_verdicts: List[str]) -> Dict:
         verdict, evidence = seen[i]
         items.append({"index": i, "clause": clauses[i - 1],
                       "verdict": verdict, "evidence": evidence})
-    return {"state": "adjudicated", "clause_count": total, "clauses": items}
+    return {"state": "adjudicated", "clause_count": total,
+            "split_confidence": confidence, "clauses": items}
 
 
 def unmet_clauses(adjudication: Optional[Dict]) -> List[Dict]:
@@ -238,18 +303,54 @@ def unmet_clauses(adjudication: Optional[Dict]) -> List[Dict]:
             if c.get("verdict") != "met"]
 
 
-def format_unmet_warning(adjudication: Optional[Dict]) -> str:
-    """未達の節を人向けに 1 ブロックで返す。無ければ空文字。
+def format_adjudication_warning(adjudication: Optional[Dict]) -> str:
+    """受入条件について「黙って通してはいけないこと」を 1 ブロックで返す。
 
-    done を止めないが、黙って通さない。exit 0 で済ませると未達が記録の奥に沈む。
+    done を止めないが、黙って通さない。exit 0 で済ませると、読み手には
+    「done になった」だけが残る。開示するのは 3 つ:
+
+    * 未達の節 (``partial`` / ``not-met``)
+    * 判定を出さずに通したこと (``waived``) —— 初版はこれを **どこにも出して
+      いなかった**。独立レビュー (AX high, 2026-10-13) の指摘。記録には残るが
+      出力には出ないので、「エラーが出ない = 受入条件も通った」と読まれる。
+      しかもこの PR が新設した自動完了経路は毎回 waive するので、黙っている
+      ことが常態になる形だった。
+    * 節の切り出しに確信が持てないこと (``uncertain``) —— 断片への判定を
+      要求していないかを人が見る契機。
+
+    無ければ空文字 (= ノイズを出さない)。
     """
-    unmet = unmet_clauses(adjudication)
-    if not unmet:
+    if not isinstance(adjudication, dict):
         return ""
-    lines = ["⚠ 受入条件のうち満たされていない節があります (記録に残しました):"]
-    for c in unmet:
-        lines.append(f"  {c['index']}. [{c['verdict']}] {c['clause']}")
-        if c.get("evidence"):
-            lines.append(f"      根拠: {c['evidence']}")
-    lines.append("  → 残作業を follow-up タスクとして起票することを検討してください。")
+    lines = []
+    state = adjudication.get("state")
+
+    if state == WAIVED:
+        lines.append("⚠ 受入条件の節ごとの判定を出さずに完了しました "
+                     f"({adjudication.get('clause_count', 0)} 節が未照合のまま)")
+        reason = adjudication.get("waive_reason")
+        if reason:
+            lines.append(f"      理由: {reason}")
+        lines.append("  → 照合が要るなら、誰がいつ行うかを決めてください。")
+
+    unmet = unmet_clauses(adjudication)
+    if unmet:
+        lines.append("⚠ 受入条件のうち満たされていない節があります (記録に残しました):")
+        for c in unmet:
+            lines.append(f"  {c['index']}. [{c['verdict']}] {c['clause']}")
+            if c.get("evidence"):
+                lines.append(f"      根拠: {c['evidence']}")
+        lines.append("  → 残作業を follow-up タスクとして起票することを検討してください。")
+
+    if adjudication.get("split_confidence") == UNCERTAIN:
+        lines.append("⚠ 受入条件の節の切り出しに確信が持てません "
+                     "(番号による列挙が規則的でないため、割らずに 1 節として扱いました)")
+        lines.append("  → 判定が受入条件の全体を覆っているか、文面を読んで確かめてください。")
+
     return "\n".join(lines)
+
+
+def format_unmet_warning(adjudication: Optional[Dict]) -> str:
+    """後方互換の薄い別名 (旧名)。新しい呼び出しは
+    ``format_adjudication_warning`` を使う。"""
+    return format_adjudication_warning(adjudication)

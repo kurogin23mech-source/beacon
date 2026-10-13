@@ -156,7 +156,7 @@ class TestGate:
             terminal_gate.require_ac_adjudication("task done", CRITERIA_3)
         msg = str(exc.value)
         assert "3 節" in msg
-        assert "--ac" in msg and "--ac-waive" in msg
+        assert "--ac-verdict" in msg and "--ac-waive" in msg
         # 節が列挙されている (呼び出し側が受入条件を読み直さなくて済む)
         assert "A が成り立つ" in msg
 
@@ -204,6 +204,130 @@ class TestGate:
 # ---------------------------------------------------------------------------
 # 押印層に在ること — handler ではなく遷移そのものの性質にする (e-6893 と同じ形)
 # ---------------------------------------------------------------------------
+
+class TestWaiveBoundary:
+    """``--ac-waive`` の境界。空文字で関門が開かないこと。
+
+    独立レビュー (low) の指摘: ``if waive:`` が正しく空を落とすことは静的に
+    読めば分かるが、機械で保証されていなかった。``if waive is not None:`` の
+    ような退行で空文字 waive が無条件に通っても、既存テストは緑のままだった。
+    """
+
+    @pytest.mark.parametrize("empty", ["", "   ", "\n", "\t "])
+    def test_empty_waive_does_not_bypass_the_gate(self, empty):
+        with pytest.raises(terminal_gate.AcceptanceAdjudicationRequired):
+            terminal_gate.require_ac_adjudication(
+                "task done", CRITERIA_3, waive=empty)
+
+    def test_empty_waive_with_verdicts_is_not_a_conflict(self):
+        """空の waive は「渡していない」と同じ (両方指定の拒否に当たらない)。"""
+        adj = terminal_gate.require_ac_adjudication(
+            "task done", CRITERIA_3, verdicts=["1:met", "2:met", "3:met"],
+            waive="   ")
+        assert adj["state"] == "adjudicated"
+
+
+class TestUncertainSplitIsNotSilent:
+    """節の切り出しに確信が持てないとき、黙って進めないこと。
+
+    独立レビュー (AX high) が実データで測った事故: 番号で列挙されているのに
+    規則的に割れない文面を ``" / "`` で割ると、項目の**内側**を切る。実例
+    e-2445 は「CLI / Web UI」の内側で切れ、節 1 が文の途中で終わり、節 2 が
+    文の途中から始まる断片になっていた。関門が意味を成さない断片への判定を
+    要求する = 機構が無いより悪い。
+    """
+
+    #: e-2445 の原文 (2026-10-08 時点の実データ、冒頭部分)。
+    E2445 = ("1) beacon CLI の write 系コマンドに最小 inter-call delay を入れる、"
+             " または 2) server 側で user-scope rate limit を CLI / Web UI で"
+             "別バケット化する、 のいずれか。 4) ms-95 で確認する")
+
+    def test_irregular_numbering_is_not_split_on_slashes(self):
+        clauses, confidence = acceptance.split_clauses_with_confidence(self.E2445)
+        assert confidence == acceptance.UNCERTAIN
+        assert len(clauses) == 1, (
+            "番号が不規則なのに割ってしまった。項目の内側を切る危険がある: "
+            + repr(clauses))
+
+    def test_regular_bare_numbering_does_split(self):
+        """境界の反対側: 1 からの連番なら割る (割らなさすぎない)。"""
+        clauses, confidence = acceptance.split_clauses_with_confidence(
+            "1) 一つ目をする 2) 二つ目をする 3) 三つ目をする")
+        assert confidence == acceptance.CONFIDENT
+        assert len(clauses) == 3
+
+    def test_inline_number_reference_is_not_a_split(self):
+        """本文中の番号参照で割らない (e-519 の形)。"""
+        text = ("packaging/homebrew/beacon.rb の caveats が: "
+                "(1) cloud 利用なら beacon setup (2) local なら init")
+        clauses, _ = acceptance.split_clauses_with_confidence(text)
+        assert len(clauses) == 1
+
+    def test_uncertainty_is_recorded_on_the_adjudication(self):
+        adj = terminal_gate.require_ac_adjudication(
+            "task done", self.E2445, verdicts=["1:met:確認した"])
+        assert adj["split_confidence"] == acceptance.UNCERTAIN
+
+    def test_uncertainty_is_surfaced_to_the_reader(self):
+        adj = terminal_gate.require_ac_adjudication(
+            "task done", self.E2445, verdicts=["1:met:確認した"])
+        warning = acceptance.format_adjudication_warning(adj)
+        assert "確信が持てません" in warning
+
+    def test_uncertainty_is_named_in_the_refusal(self):
+        """判定を出す前のエラー文でも不確実を伝える。"""
+        with pytest.raises(terminal_gate.AcceptanceAdjudicationRequired) as exc:
+            terminal_gate.require_ac_adjudication("task done", self.E2445)
+        assert "確信が持てません" in str(exc.value)
+
+
+class TestWaiveIsDisclosedNotSilent:
+    """判定を出さずに通したことを、出力でも必ず見せること。
+
+    独立レビュー (AX high) の指摘: 初版は waive を記録にだけ残し、CLI 出力にも
+    API 応答にも出していなかった。しかもこの変更が新設した自動完了経路は毎回
+    waive するので、黙っていることが常態になる形だった。
+    """
+
+    def test_waive_appears_in_the_warning(self):
+        adj = terminal_gate.require_ac_adjudication(
+            "task done", CRITERIA_3, waive="機械が解決を推定して閉じる経路")
+        warning = acceptance.format_adjudication_warning(adj)
+        assert warning, "waive が出力に一切出ない"
+        assert "判定を出さずに完了" in warning
+        assert "機械が解決を推定" in warning
+
+    def test_waive_warning_names_how_many_clauses_went_unchecked(self):
+        adj = terminal_gate.require_ac_adjudication(
+            "task done", CRITERIA_3, waive="なぜか")
+        assert "3 節" in acceptance.format_adjudication_warning(adj)
+
+    def test_fully_met_adjudication_warns_about_nothing(self):
+        """境界: 全部 met かつ確信ありなら何も出さない (ノイズを作らない)。"""
+        adj = terminal_gate.require_ac_adjudication(
+            "task done", CRITERIA_3, verdicts=["1:met", "2:met", "3:met"])
+        assert acceptance.format_adjudication_warning(adj) == ""
+
+
+class TestExemptionLedgersAreSeparate:
+    """理由の免除と受入条件の免除を 1 つの台帳に束ねないこと。
+
+    独立レビュー (low) の指摘: 共有すると「理由を持ちようがない」判断で登録した
+    キーが、誰も判断していない「節ごとの判定を持ちようがない」まで自動的に
+    免除する。
+    """
+
+    def test_two_distinct_ledgers_exist(self):
+        assert terminal_gate.EXEMPT_CALL_SITES is not \
+            terminal_gate.AC_EXEMPT_CALL_SITES
+
+    def test_reason_exemption_key_does_not_waive_the_ac_gate(self):
+        """理由の台帳のキーを AC 関門に渡しても通らない。"""
+        with pytest.raises(ValueError) as exc:
+            terminal_gate.require_ac_adjudication(
+                "task done", CRITERIA_3, ac_exempt="some.reason_only_key")
+        assert "AC_EXEMPT_CALL_SITES" in str(exc.value)
+
 
 class TestGateLivesInTheStampingLayer:
     def _item(self, criteria=CRITERIA_3):
@@ -360,6 +484,77 @@ class TestScopeIsStatedNotOverstated:
 
 
 # ---------------------------------------------------------------------------
+# 「通るが満たせない」罠を作らない
+# ---------------------------------------------------------------------------
+
+class TestNoReachableDeadEnd:
+    """関門が効く経路には、必ず満たす手段が在ること。
+
+    独立レビュー (保守性 medium) の指摘: 関門は ``item["acceptance_criteria"]``
+    を汎用に読むので、記述子駆動 (``target_descriptor``) で作られた作業項目が
+    同名 field を宣言すれば ``beacon target complete-work-item`` / ``close``
+    経路でも関門が効く。ところがそれらの CLI には判定を渡す旗が無く、エラーは
+    ``--ac-verdict`` を案内するのに **その旗が存在しない** = 詰みになる。
+
+    今日この経路は到達不能 (どの記述子も ``acceptance_criteria`` を宣言して
+    いない、実測) なので、CLI 旗を 2 動詞ぶん増やすより、**到達可能になった瞬間に
+    赤くする** 方を選んだ。宣言した人が、満たす手段を併せて用意することになる。
+    """
+
+    @staticmethod
+    def _descriptor_fields():
+        """記述子が宣言する field 名を全部集める。"""
+        import json as _json
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        names = set()
+        for base, _dirs, files in os.walk(root):
+            if any(part in base for part in
+                   (".git", ".worktrees", "node_modules", ".venv")):
+                continue
+            for fn in files:
+                if not fn.endswith(".json"):
+                    continue
+                path = os.path.join(base, fn)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        blob = _json.load(fh)
+                except Exception:
+                    continue
+                stack = [blob]
+                while stack:
+                    node = stack.pop()
+                    if isinstance(node, dict):
+                        for k, v in node.items():
+                            if k in ("fields", "work_item_fields",
+                                     "item_fields", "extra_fields"):
+                                if isinstance(v, dict):
+                                    names.update(v.keys())
+                                elif isinstance(v, list):
+                                    names.update(
+                                        x for x in v if isinstance(x, str))
+                            stack.append(v)
+                    elif isinstance(node, list):
+                        stack.extend(node)
+        return names
+
+    def test_no_descriptor_declares_acceptance_criteria_yet(self):
+        """宣言された瞬間に赤くなる。
+
+        赤くなったら、この関門が ``beacon target`` 経路でも効くようになった、
+        という意味。``cmd_target`` の ``complete-work-item`` / ``close`` に
+        判定を渡す旗 (``--ac-verdict`` / ``--ac-waive``) を足してから、この
+        テストを更新すること。旗を足さずに記述子を足すと「エラーは旗を案内するが
+        その旗が無い」詰みになる。
+        """
+        declared = self._descriptor_fields()
+        assert "acceptance_criteria" not in declared, (
+            "記述子が acceptance_criteria を宣言した。beacon target の "
+            "complete-work-item / close に --ac-verdict / --ac-waive を足して "
+            "から、このテストを更新すること (いまは旗が無く、関門に当たると"
+            "回復手段が無い)")
+
+
+# ---------------------------------------------------------------------------
 # 両フロント — 旗の入口が片側に無い非対称を作らない (e-6912 の型)
 # ---------------------------------------------------------------------------
 
@@ -368,7 +563,7 @@ class TestBothFrontsCarryTheFlags:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         src = open(os.path.join(root, "bin", "lib", "cmd_task.sh"),
                    encoding="utf-8").read()
-        assert "--ac)" in src, "bash 側に --ac が無い"
+        assert "--ac-verdict)" in src, "bash 側に --ac-verdict が無い"
         assert "--ac-waive)" in src, "bash 側に --ac-waive が無い"
         assert terminal_gate.AC_VERDICTS_ENV in src
         assert terminal_gate.AC_WAIVE_ENV in src
@@ -377,12 +572,23 @@ class TestBothFrontsCarryTheFlags:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         src = open(os.path.join(root, "beacon_cli", "dispatch.py"),
                    encoding="utf-8").read()
-        assert 'dest="ac_verdicts"' in src, "python 側に --ac が無い"
+        assert 'dest="ac_verdicts"' in src, "python 側に --ac-verdict が無い"
+        assert '"--ac-verdict"' in src, "python 側の旗名が --ac-verdict でない"
         assert 'dest="ac_waive"' in src, "python 側に --ac-waive が無い"
         assert terminal_gate.AC_VERDICTS_ENV in src
 
+    @pytest.mark.allow_repo_beacon_write
     def test_help_registry_lists_the_flags(self):
-        """案内に載っていない旗は、AI からは存在しない (e-6911 で踏んだ型)。"""
+        """案内に載っていない旗は、AI からは存在しない (e-6911 で踏んだ型)。
+
+        このテストは実リポジトリで本物の ``bin/beacon help --json`` を走らせる
+        (help 面の真値を見るのが目的なので、一時プロジェクトでは測れない)。
+        beacon CLI は atomic-write (tmp 書き込み → rename) をするので、スイート
+        全体で走らせると ``.beacon/project.json.tmp`` が leak-guard の
+        スナップショット比較と競合し、**無関係なテストの失敗として現れる**
+        ことがあった (独立レビューが実測、2026-10-13)。副作用を起こし得ることを
+        marker で宣言し、次の人が無関係なテストを疑わなくて済むようにする。
+        """
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         res = subprocess.run([os.path.join(root, "bin", "beacon"),
                               "help", "--json"],
@@ -397,5 +603,5 @@ class TestBothFrontsCarryTheFlags:
         # 部分一致させると、`--acknowledge` が `--ac` に一致して偽の緑になる
         # (このファイルの初版が実際にそうなっていた)。
         flags = [f.split()[0] for f in (rows[0].get("flags") or []) if f.strip()]
-        assert "--ac" in flags, f"help に --ac が無い: {flags}"
+        assert "--ac-verdict" in flags, f"help に --ac-verdict が無い: {flags}"
         assert "--ac-waive" in flags, f"help に --ac-waive が無い: {flags}"

@@ -420,6 +420,7 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
               reason: str = "", outcome: str = "",
               acknowledge: bool = False, exempt: str = "",
               ac_verdicts: list = None, ac_waive: str = "",
+              ac_flag_names: tuple = (),
               verb: str = "done") -> dict:
     """Mark a WorkItem done in place and return it — REQUIRES an audit entry.
 
@@ -489,9 +490,13 @@ def mark_done(item: dict, *, at: str = "", actor: str = "",
     # 「このタスクが自分で書いた各節を満たしたと主張するか」を節ごとに求める。
     # 未達は done を止めない (隠さず残す方が監査価値が高い) が、判定を一切出さない
     # 素通りは止める。受入条件が無い item は no-criteria として記録に残り、数えられる。
+    _ac_flags = {}
+    if ac_flag_names:
+        _ac_flags = {"verdict_flag": ac_flag_names[0],
+                     "waive_flag": ac_flag_names[1]}
     adjudication = terminal_gate.require_ac_adjudication(
         verb, item.get("acceptance_criteria") or "",
-        verdicts=ac_verdicts, waive=ac_waive, exempt=exempt)
+        verdicts=ac_verdicts, waive=ac_waive, **_ac_flags)
     item["status"] = DONE_STATUS
     item[DONE_AT] = at or work_base.now_iso()
     meta = item.setdefault("meta", {})

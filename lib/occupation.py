@@ -1852,6 +1852,7 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
                     reason: str = "", outcome: str = "",
                     acknowledge: bool = False,
                     ac_verdicts: list = None, ac_waive: str = "",
+                    ac_flag_names: tuple = (),
                     verb: str = "done") -> tuple[dict, dict]:
     """Transition a work-item's lifecycle state, profession-generically (ms-143,
     設計判断 b 系統3 = 状態変更). ``done`` routes through ``work_model.mark_done``
@@ -1886,7 +1887,8 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
     if status == _wm.DONE_STATUS:
         _wm.mark_done(entry, at=at, actor=actor, reason=reason, outcome=outcome,
                       acknowledge=acknowledge, ac_verdicts=ac_verdicts,
-                      ac_waive=ac_waive, verb=verb)
+                      ac_waive=ac_waive, ac_flag_names=ac_flag_names,
+                      verb=verb)
     elif status == _wm.TODO_STATUS:
         entry["status"] = status
     else:

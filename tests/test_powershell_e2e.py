@@ -145,11 +145,11 @@ def test_task_add_done_list_e2e(capfd, fresh_dir):
     capfd.readouterr()
     rc = main_mod.main(["task", "done", task_id, "-r", "done"])
     assert rc == 1, "受入条件があるのに節ごとの判定なしで閉じられた"
-    assert "--ac" in capfd.readouterr().err
+    assert "--ac-verdict" in capfd.readouterr().err
 
     capfd.readouterr()
     rc = main_mod.main(["task", "done", task_id, "-r", "done",
-                        "--ac", "1:met:e2e で確認した"])
+                        "--ac-verdict", "1:met:e2e で確認した"])
     assert rc == 0
 
     capfd.readouterr()

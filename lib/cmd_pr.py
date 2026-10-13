@@ -878,8 +878,13 @@ def cmd_pr_approve():
             "entry_id": entry_id,
             "review_status": "approved",
             "review_rationale": rationale,
+            # ms-166 e-6898 (独立レビュー AX high): この経路は毎回 ac_waive する
+            # (機械が解決を推定して閉じるので節を判定できない)。その事実を出力に
+            # 出さないと「エラーが出ない = 受入条件も通った」と読まれる。
             "auto_done": [
-                {"task_id": j["task_id"], "reason": j["reason"]}
+                {"task_id": j["task_id"], "reason": j["reason"],
+                 "acceptance_criteria_checked": False,
+                 "acceptance_criteria_state": "waived"}
                 for j in auto_done_results
             ],
             "mid_candidates": [
@@ -893,9 +898,11 @@ def cmd_pr_approve():
         if rationale:
             print(f"  Rationale: {rationale}")
         for j in auto_done_results:
+            # 「HIGH confidence」だけを出すと、受入条件も照合したように読める。
+            # 照合していないことを同じ行に必ず連結する (独立レビュー AX high)。
             print(
                 f"  ✓ Auto-done: {j['task_id']} ({j['description'][:60]}) "
-                f"— HIGH confidence"
+                f"— HIGH confidence (受入条件は未照合 / waived)"
             )
         for j in mid_warnings:
             print(

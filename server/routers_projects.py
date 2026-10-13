@@ -1644,11 +1644,18 @@ def make_router(
                                            acknowledge=acknowledge,
                                            ac_verdicts=list(ac or []),
                                            ac_waive=ac_waive,
+                                           ac_flag_names=("?ac=", "?ac_waive="),
                                            author=author)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
-            captured["done_reason"] = (entry.get("meta") or {}).get("done_reason", "")
-            return data, {"entry_id": entry_id, "status": "done"}
+            meta = entry.get("meta") or {}
+            captured["done_reason"] = meta.get("done_reason", "")
+            # ms-166 e-6898 (独立レビュー AX high): 受入条件の状態を 200 応答に
+            # 含める。含めないと、HTTP を直に叩く client は waive / 未達 / 切り出し
+            # 不確実のどれが起きたかを応答から知れず、「200 = 受入条件も通った」と
+            # 読む。記録には残るが読まれない開示は、無いのと同じになる。
+            return data, {"entry_id": entry_id, "status": "done",
+                          "ac_adjudication": meta.get("ac_adjudication")}
         result = _apply_op_and_broadcast(
             project_id, op, op_name="entry.done", actor=user.get("sub", ""),
         )

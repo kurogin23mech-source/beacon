@@ -143,11 +143,11 @@ beacon task add "<description>" --ms <ms-id> \
 
 ```bash
 beacon task done <entry-id> --reason "<生成したreason>" \
-  --ac "1:met:<この節をどう満たしたか>" --ac "2:met:<…>" \
+  --ac-verdict "1:met:<この節をどう満たしたか>" --ac-verdict "2:met:<…>" \
   --decided-by human-delegated
 ```
-- `--ac`（ms-166 e-6898）: 受入条件を持つタスクは**節ごとの判定を出さないと done に
-  できない**。形は `--ac "<節番号>:<met|partial|not-met>[:<根拠>]"` を節の数だけ。
+- `--ac-verdict`（ms-166 e-6898）: 受入条件を持つタスクは**節ごとの判定を出さないと done に
+  できない**。形は `--ac-verdict "<節番号>:<met|partial|not-met>[:<根拠>]"` を節の数だけ。
   節の数と文面は、判定なしで叩いたときのエラーが列挙するので先に 1 回叩いて確認して
   よい。未達 (`partial` / `not-met`) でも done は通る（隠さず残すのが目的で、未達の節
   は出力にも必ず出る）。受入条件が無いタスクは不要。判定を出せない事情があるなら
