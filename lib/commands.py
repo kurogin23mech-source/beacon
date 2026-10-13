@@ -485,6 +485,8 @@ from commands_shared import (  # noqa: F401
     _clear_pr_open_review_triggers,
     _pending_review_types_for_pr,
     _pr_open_reviewed_marker_path,
+    RECORDED_CWD_ONLY,
+    RECORDED_SHARED,
     record_review_done_across_worktrees,
     _fire_review_due_for_pr,
     _REVIEW_DUE_SUFFIX,
@@ -3756,12 +3758,21 @@ def cmd_review_done():
     # ms-166 e-6899: 実施した事実を作業フォルダ横断の台帳に足す。これを足すのは
     # トリガーファイルを消した **後** で、かつ remaining を数える **前**。
     # fork で打ったときに親からも実施済みとして見えるようにするのが目的。
-    _ledger_ok = record_review_done_across_worktrees(review_type, pr_number)
+    _ledger_state = record_review_done_across_worktrees(review_type, pr_number)
     remaining = _pending_review_types_for_pr(pr_number)
     print(f"レビュー実施を記録: {review_type} / PR #{pr_number} (review-due 解消)")
-    if _ledger_ok:
+    # ms-166 e-6899 (独立レビュー AX high): 名乗りを実態に合わせる。初版は書き込みの
+    # 成否だけを見て「作業フォルダ横断で記録した」と言っていたので、非 git プロジェクト
+    # (営業職種など正規サポート対象) では原理的に真になりえない主張が毎回出ていた。
+    # さらに「共有置き場が取れない」警告と、それと反対の確信表明が同一コマンド実行内で
+    # 両立していた。3 値を受けて書き分ける。
+    if _ledger_state == RECORDED_SHARED:
         print("  (この実施は作業フォルダ横断で記録したので、fork / 親のどちらから"
               "でも実施済みとして見えます)")
+    elif _ledger_state == RECORDED_CWD_ONLY:
+        print("  ⚠ 共有置き場 (git の共通ディレクトリ) が取れなかったので、この "
+              "cwd 限りの記録です — fork / 親の別の作業フォルダからは未実施に"
+              "見えます。", file=sys.stderr)
     if remaining:
         print(f"  残りの未実施レビュー: {', '.join(remaining)}")
     else:

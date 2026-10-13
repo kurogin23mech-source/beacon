@@ -40,7 +40,8 @@ def ledger_in_tmp(tmp_path, monkeypatch):
     triggers.mkdir(parents=True)
     monkeypatch.setattr(cs, "_worktree_shared_dir", lambda: str(shared))
     monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
-    return {"shared": shared, "triggers": triggers}
+    return {"shared": shared, "triggers": triggers,
+            "ledger": shared / cs._REVIEW_DONE_DIR}
 
 
 def _fire_due(triggers, review_type, pr_number):
@@ -56,7 +57,8 @@ def _fire_due(triggers, review_type, pr_number):
 
 class TestLedger:
     def test_records_and_reads_back(self, ledger_in_tmp):
-        assert cs.record_review_done_across_worktrees("ax", "796") is True
+        assert cs.record_review_done_across_worktrees("ax", "796") == \
+            cs.RECORDED_SHARED
         assert cs._read_review_done_ledger() == {"796": ["ax"]}
 
     def test_is_idempotent(self, ledger_in_tmp):
@@ -86,25 +88,31 @@ class TestLedger:
         cwd に置くと worktree ごとに割れ、直したつもりで何も直らない。
         """
         cs.record_review_done_across_worktrees("ax", "796")
-        assert (ledger_in_tmp["shared"] / cs._REVIEW_DONE_LEDGER).exists()
-        assert not (ledger_in_tmp["triggers"] / cs._REVIEW_DONE_LEDGER).exists()
+        assert (ledger_in_tmp["ledger"] / "pr-796-ax.json").exists()
+        assert not (ledger_in_tmp["triggers"] / cs._REVIEW_DONE_DIR).exists()
 
     @pytest.mark.parametrize("rtype,pr", [("", "796"), ("ax", ""), ("", "")])
     def test_refuses_empty_inputs(self, ledger_in_tmp, rtype, pr):
-        assert cs.record_review_done_across_worktrees(rtype, pr) is False
+        assert cs.record_review_done_across_worktrees(rtype, pr) == \
+            cs.RECORDED_FAILED
         assert cs._read_review_done_ledger() == {}
 
     def test_missing_ledger_reads_as_empty_not_crash(self, ledger_in_tmp):
         assert cs._read_review_done_ledger() == {}
 
-    def test_corrupt_ledger_reads_as_empty_not_crash(self, ledger_in_tmp):
-        (ledger_in_tmp["shared"] / cs._REVIEW_DONE_LEDGER).write_text(
-            "not json at all", encoding="utf-8")
-        assert cs._read_review_done_ledger() == {}
+    def test_one_corrupt_file_does_not_blank_the_whole_ledger(self, ledger_in_tmp):
+        """1 件の破損で台帳全体が空に見えないこと。
 
-    def test_wrong_shape_reads_as_empty(self, ledger_in_tmp):
-        """list が来ても落ちない (形が違う = 読めないものとして扱う)。"""
-        (ledger_in_tmp["shared"] / cs._REVIEW_DONE_LEDGER).write_text(
+        全体が空に見えると、実施済みのレビューがまとめて未実施へ戻る。
+        """
+        cs.record_review_done_across_worktrees("ax", "796")
+        (ledger_in_tmp["ledger"] / "pr-900-broken.json").write_text(
+            "not json at all", encoding="utf-8")
+        assert cs._read_review_done_ledger() == {"796": ["ax"]}
+
+    def test_wrong_shape_file_is_ignored(self, ledger_in_tmp):
+        ledger_in_tmp["ledger"].mkdir(parents=True, exist_ok=True)
+        (ledger_in_tmp["ledger"] / "pr-901-x.json").write_text(
             '["ax"]', encoding="utf-8")
         assert cs._read_review_done_ledger() == {}
 
@@ -199,13 +207,14 @@ class TestSharedDirResolution:
 
     def test_falls_back_to_cwd_triggers_when_unavailable(self, tmp_path,
                                                          monkeypatch):
-        """git が無い / repo 外では cwd の triggers に落ちる。"""
+        """git が無い / repo 外では cwd の triggers に落ち、落ちたことを返す。"""
         triggers = tmp_path / "triggers"
         triggers.mkdir()
         monkeypatch.setattr(cs, "_worktree_shared_dir", lambda: None)
         monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
-        assert cs._review_done_ledger_path() == str(
-            triggers / cs._REVIEW_DONE_LEDGER)
+        directory, shared = cs._review_done_dir()
+        assert directory == str(triggers / cs._REVIEW_DONE_DIR)
+        assert shared is False
 
     def test_fallback_is_announced_not_silent(self, monkeypatch, capsys):
         """git 呼び出しの失敗を黙らせない。
@@ -242,3 +251,151 @@ class TestProbeIsRegistered:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         assert ("lib/commands_shared.py", "_worktree_shared_dir") in mod.CENSUS
+
+
+# ---------------------------------------------------------------------------
+# 独立レビュー (AX high ×3) が実測した 3 つの穴
+# ---------------------------------------------------------------------------
+
+class TestConcurrentWritesDoNotLoseRecords:
+    """並行書き込みで記録が消えないこと (AX high)。
+
+    初版は 1 つの JSON 辞書を読み込み → 自分のぶんを足す → 全体を書き戻す形で、
+    judge がほぼ同時の 2 呼び出しで lost update を実測した。後から書いた側が古い
+    スナップショットで上書きし、先の記録が跡形もなく消え、**エラーは一切出なかった**。
+
+    この機能の想定ユースケースは「複数の fork worktree が同じ .git を共有しながら
+    並行に書くこと」そのものなので、まさにその条件下で、直したはずの不具合が
+    間欠的に自己再発する形だった。
+    """
+
+    def test_two_records_for_different_prs_both_survive(self, ledger_in_tmp):
+        """judge の再現: A が書いた直後に B が書いても A が残る。"""
+        cs.record_review_done_across_worktrees("ax", "787")
+        cs.record_review_done_across_worktrees("maintainability", "500")
+        ledger = cs._read_review_done_ledger()
+        assert ledger.get("787") == ["ax"], "先に書いた記録が消えた"
+        assert ledger.get("500") == ["maintainability"]
+
+    def test_many_concurrent_writers_all_survive(self, ledger_in_tmp):
+        """本当に並行に走らせて 1 件も落ちないことを測る。"""
+        import threading
+        pairs = [("ax", str(900 + i)) for i in range(12)]
+        pairs += [("maintainability", str(900 + i)) for i in range(12)]
+        threads = [threading.Thread(
+            target=cs.record_review_done_across_worktrees, args=(t, pr))
+            for t, pr in pairs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        ledger = cs._read_review_done_ledger()
+        for rtype, pr in pairs:
+            assert rtype in (ledger.get(pr) or []), f"{pr}/{rtype} が落ちた"
+
+    def test_one_fact_one_file(self, ledger_in_tmp):
+        """read-modify-write が構造的に無いこと = 1 事実 1 ファイル。
+
+        1 つの共有 blob に戻すと lost update が復活するので、形そのものを留める。
+        """
+        cs.record_review_done_across_worktrees("ax", "787")
+        cs.record_review_done_across_worktrees("maintainability", "787")
+        files = sorted(p.name for p in ledger_in_tmp["ledger"].iterdir())
+        assert files == ["pr-787-ax.json", "pr-787-maintainability.json"]
+
+    def test_no_tmp_file_is_left_behind(self, ledger_in_tmp):
+        """tmp → rename で書くが、残骸を置かない。"""
+        cs.record_review_done_across_worktrees("ax", "787")
+        assert not [p for p in ledger_in_tmp["ledger"].iterdir()
+                    if p.name.endswith(".tmp")]
+
+
+class TestTheClaimMatchesReality:
+    """「横断で記録した」と名乗れるのは、本当に横断で記録できたときだけ (AX high)。
+
+    初版は書き込みの成否だけを True/False で返し、共有置き場が取れたかを見て
+    いなかった。その結果、非 git プロジェクト (営業職種など正規サポート対象) で
+    原理的に真になりえない名乗りが毎回出て、しかも「共有置き場が取れない」警告と
+    反対の確信表明が **同一コマンド実行内で両立** していた。
+    """
+
+    def test_shared_is_reported_when_shared(self, ledger_in_tmp):
+        assert cs.record_review_done_across_worktrees("ax", "787") == \
+            cs.RECORDED_SHARED
+
+    def test_cwd_only_is_reported_when_not_shared(self, tmp_path, monkeypatch):
+        triggers = tmp_path / "triggers"
+        triggers.mkdir()
+        monkeypatch.setattr(cs, "_worktree_shared_dir", lambda: None)
+        monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+        assert cs.record_review_done_across_worktrees("ax", "787") == \
+            cs.RECORDED_CWD_ONLY
+
+    def test_the_three_states_are_distinct(self):
+        """3 値が潰れていないこと (真偽値に戻すとこの区別が消える)。"""
+        assert len({cs.RECORDED_SHARED, cs.RECORDED_CWD_ONLY,
+                    cs.RECORDED_FAILED}) == 3
+
+    def test_failure_is_reported_when_the_write_fails(self, ledger_in_tmp,
+                                                      monkeypatch):
+        def _boom(*_a, **_kw):
+            raise OSError("disk full")
+        monkeypatch.setattr(cs.os, "makedirs", _boom)
+        assert cs.record_review_done_across_worktrees("ax", "787") == \
+            cs.RECORDED_FAILED
+
+
+class TestSubtractionIsDisclosedWithProvenance:
+    """台帳で関門を差し引いたら、誰の記録で差し引いたかを必ず言う (AX high)。
+
+    台帳はローカルのファイルなので **手で書けば偽装できる**。judge が実測した通り、
+    手書きで「実施済み」に見せると関門が通る。これは旧機構 (cwd の trigger ファイル
+    を消す) でも同じだったが、横断台帳は全 worktree に効くので 1 回の偽装の影響範囲
+    が広い —— labor は同じで被害が N 倍になる。
+
+    ファイルの編集そのものは防げない (ローカルファイルは安全境界ではない)。
+    できるのは **黙って関門が外れないようにすること**: 何を誰の記録で差し引いたかを
+    開示し、出自の無い記録はそう言う。
+    """
+
+    def test_record_carries_provenance(self, ledger_in_tmp):
+        cs.record_review_done_across_worktrees("ax", "787")
+        prov = cs.review_done_provenance("787")
+        assert len(prov) == 1
+        rec = prov[0]
+        assert rec["pr"] == "787" and rec["review_type"] == "ax"
+        assert rec["recorded_at"] and rec["recorded_in_cwd"]
+        assert rec["shared"] is True
+
+    def test_subtraction_is_announced(self, ledger_in_tmp, capsys):
+        _fire_due(ledger_in_tmp["triggers"], "ax", "787")
+        cs.record_review_done_across_worktrees("ax", "787")
+        capsys.readouterr()
+        assert cs._pending_review_types_for_pr("787") == []
+        err = capsys.readouterr().err
+        assert "関門から差し引きました" in err
+        assert "ax:" in err
+
+    def test_nothing_is_announced_when_nothing_is_subtracted(self, ledger_in_tmp,
+                                                             capsys):
+        """境界: 差し引きが無いときは黙る (ノイズを作らない)。"""
+        _fire_due(ledger_in_tmp["triggers"], "ax", "787")
+        capsys.readouterr()
+        cs._pending_review_types_for_pr("787")
+        assert "差し引きました" not in capsys.readouterr().err
+
+    def test_a_hand_written_record_is_flagged_as_provenance_less(
+            self, ledger_in_tmp, capsys):
+        """judge と同じ偽装を再現し、出自が無いことが開示されること。
+
+        偽装自体は止められないが、**黙っては通らない**。
+        """
+        ledger_in_tmp["ledger"].mkdir(parents=True, exist_ok=True)
+        (ledger_in_tmp["ledger"] / "pr-787-ax.json").write_text(
+            json.dumps({"pr": "787", "review_type": "ax"}), encoding="utf-8")
+        _fire_due(ledger_in_tmp["triggers"], "ax", "787")
+        capsys.readouterr()
+        assert cs._pending_review_types_for_pr("787") == []
+        err = capsys.readouterr().err
+        assert "出自不明" in err or "出自がありません" in err, (
+            "出自の無い記録で関門が外れたのに、そのことが開示されていない\n" + err)

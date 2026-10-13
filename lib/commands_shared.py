@@ -2972,9 +2972,35 @@ def _pending_review_types_for_pr(pr_number: str) -> list:
     # 回復手段が「親で打ち直す (= 判断記録が重複する)」か
     # 「override で飛ばしたことにする (= 記録が嘘になる)」しか無くなる。
     done = _read_review_done_ledger().get(pr_number) or []
-    if done:
+    subtracted = [t for t in out if t in done]
+    if subtracted:
+        # **何を誰の記録で差し引いたかを開示する** (独立レビュー AX high)。
+        # 台帳はローカルのファイルなので手で書けば偽装できる —— それは旧機構
+        # (cwd の trigger ファイルを消す) でも同じだったが、横断台帳は全 worktree に
+        # 効くので 1 回の偽装の影響範囲が広い。ファイルの編集自体は防げないので、
+        # **黙って関門が外れないようにする**: 誰の記録で外したかを必ず言い、
+        # 出自が無い記録ならそれも言う。
+        _announce_review_ledger_subtraction(pr_number, subtracted)
         out = [t for t in out if t not in done]
     return out
+
+
+def _announce_review_ledger_subtraction(pr_number: str, subtracted: list) -> None:
+    """横断台帳で関門から差し引いた分を、出自つきで stderr に開示する。"""
+    prov = {r.get("review_type"): r for r in review_done_provenance(pr_number)
+            if isinstance(r, dict)}
+    lines = [f"ℹ PR #{pr_number} の独立レビュー {len(subtracted)} 件は、別の作業"
+             f"フォルダで実施済みとして台帳に在るため関門から差し引きました:"]
+    for t in sorted(subtracted):
+        rec = prov.get(t) or {}
+        who = rec.get("recorded_by") or "(出自不明)"
+        when = rec.get("recorded_at") or "(時刻不明)"
+        where = rec.get("recorded_in_cwd") or "(場所不明)"
+        lines.append(f"    {t}: {who} / {when} / {where}")
+        if not rec:
+            lines.append(f"      ⚠ この種別の記録に出自がありません "
+                         f"(台帳ファイルが手で書かれた可能性)")
+    print("\n".join(lines), file=sys.stderr)
 
 def _pr_open_reviewed_marker_path(pr_number: str) -> str:
     return os.path.join(_get_triggers_dir(), f".reviewed-pr-{pr_number}")
@@ -3005,8 +3031,31 @@ def _pr_open_reviewed_marker_path(pr_number: str) -> str:
 # 足し、関門がそれを差し引く。足すだけなので既存のトリガーファイルを孤児にしない。
 # ---------------------------------------------------------------------------
 
-#: 横断台帳のファイル名。git の共有ディレクトリ直下に置く。
-_REVIEW_DONE_LEDGER = "beacon-review-done.json"
+#: 横断台帳のディレクトリ名。git の共有ディレクトリ直下に置く。
+#:
+#: **1 事実 1 ファイル**にしている。初版は 1 つの JSON 辞書を読み込み → 自分のぶんを
+#: 足す → 全体を書き戻す形だったが、独立レビュー (AX high) が lost update を実測した:
+#: ほぼ同時に 2 回呼ぶと、後から書いた側が古いスナップショットで上書きし、先の記録が
+#: 跡形もなく消えた。しかもエラーは一切出ない。
+#:
+#: この機能の想定ユースケースは **複数の fork worktree が同じ .git を共有しながら
+#: 並行に書くこと** そのものなので、まさにその条件下で「fork のレビューが親に伝わらない」
+#: という直したはずの不具合が間欠的に自己再発する形だった。
+#:
+#: ファイルを分ければ read-modify-write が消え、lost update が構造的に起こりえない。
+#: 既存の `<type>-review-due-<pr>.json` が同じ作法なので、形も揃う。
+_REVIEW_DONE_DIR = "beacon-review-done"
+
+#: 台帳が「共有されている」か「この cwd 限り」かを呼び出し側に返す値。
+#:
+#: 初版は書き込みの成否だけを True/False で返し、**共有置き場が取れたかを見ていな
+#: かった**。その結果、非 git プロジェクト (営業職種など正規サポート対象) で
+#: 「作業フォルダ横断で記録したので fork / 親のどちらからでも実施済みとして見えます」
+#: という、原理的に真になりえない名乗りが毎回出ていた (独立レビュー AX high が実測)。
+#: さらに警告と、それと反対の確信表明が **同一コマンド実行内で両立** していた。
+RECORDED_SHARED = "shared"
+RECORDED_CWD_ONLY = "cwd-only"
+RECORDED_FAILED = "failed"
 
 
 def _worktree_shared_dir() -> Optional[str]:
@@ -3025,10 +3074,10 @@ def _worktree_shared_dir() -> Optional[str]:
     ため helper を共有できない (あちらの docstring がその理由を述べている)。
     こちらは ``lib/`` の中なので、``lib/`` 内の呼び出し元はこれを共有する。
 
-    git が無い / repo 外 / 呼び出し失敗のときは None を返し、呼び出し側は
-    cwd ごとの置き場所に落ちる。**落ちたことは黙らせない** —— 間欠的に落ちると
-    「fork のレビューが親に伝わる回と伝わらない回がある」という、分裂していた
-    従来より診断しにくい状態になる。
+    git が無い / repo 外 / 呼び出し失敗のときは None を返す。**落ちたことを黙らせ
+    ない** —— 間欠的に落ちると「fork のレビューが親に伝わる回と伝わらない回がある」
+    という、分裂していた従来より診断しにくい状態になる。repo 外 (= 想定内) は
+    静かに落ちる。
     """
     try:
         out = subprocess.run(
@@ -3049,56 +3098,133 @@ def _worktree_shared_dir() -> Optional[str]:
     return os.path.abspath(path)
 
 
-def _review_done_ledger_path() -> str:
-    """横断台帳のパス。共有ディレクトリが取れなければ cwd の triggers に落ちる。"""
+def _review_done_dir() -> Tuple[str, bool]:
+    """``(台帳ディレクトリ, 共有されているか)`` を返す。
+
+    共有置き場が取れなければ cwd の triggers 配下に落ちる。**落ちたかどうかを
+    呼び出し側に返す** のが肝で、返さないと「横断で記録した」と嘘を名乗ることに
+    なる (独立レビュー AX high)。
+    """
     shared = _worktree_shared_dir()
     if shared:
-        return os.path.join(shared, _REVIEW_DONE_LEDGER)
-    return os.path.join(_get_triggers_dir(), _REVIEW_DONE_LEDGER)
+        return os.path.join(shared, _REVIEW_DONE_DIR), True
+    return os.path.join(_get_triggers_dir(), _REVIEW_DONE_DIR), False
+
+
+def _review_done_marker_name(review_type: str, pr_number: str) -> str:
+    return f"pr-{pr_number}-{review_type}.json"
 
 
 def _read_review_done_ledger() -> dict:
-    """``{pr_number: [review_type, ...]}`` を返す。無ければ空 dict。"""
+    """``{pr_number: [review_type, ...]}`` を返す。無ければ空 dict。
+
+    ディレクトリを走査するだけで、1 つの大きなファイルを読まない (lost update の
+    原因だった read-modify-write が無い)。壊れた / 読めないファイルは **その 1 件
+    だけ** 無視する —— 1 件の破損で台帳全体が空に見えると、実施済みのレビューが
+    まとめて未実施に戻る。
+    """
+    directory, _shared = _review_done_dir()
+    out: dict = {}
     try:
-        with open(_review_done_ledger_path(), encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+        names = os.listdir(directory)
+    except OSError:
         return {}
-    if not isinstance(data, dict):
-        return {}
-    out = {}
-    for pr, types in data.items():
-        if isinstance(types, list):
-            out[str(pr)] = [str(t) for t in types if t]
+    for name in names:
+        if not name.startswith("pr-") or not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        pr = str(rec.get("pr") or "").strip()
+        rtype = str(rec.get("review_type") or "").strip()
+        if not pr or not rtype:
+            continue
+        types = out.setdefault(pr, [])
+        if rtype not in types:
+            types.append(rtype)
     return out
 
 
-def record_review_done_across_worktrees(review_type: str, pr_number: str) -> bool:
-    """「この PR のこのレビューを実施した」を横断台帳に足す。足せたら True。
+def review_done_provenance(pr_number: str) -> list:
+    """この PR について台帳が持つ出自の記録を返す (誰が・いつ・どこで記録したか)。
 
-    冪等: 同じ (PR, 種別) を 2 回足しても台帳は増えない。これが AC「重複した
-    判断記録を作らずに済む」の土台 —— 親で ``review done`` を**打ち直す必要が
-    無くなる**ので、同一レビューに対する判断記録が二重に残らない。
+    台帳は **ローカルのファイルなので、手で書けば偽装できる**。これは旧機構
+    (cwd ごとの trigger ファイルを消す) でも同じだったが、横断台帳は「全 worktree に
+    効く」ことを目的にしているので、1 回の偽装の影響範囲が広い (独立レビュー AX
+    high の指摘)。ファイルの編集そのものを防ぐことはできない —— できるのは
+    **偽装を見えるようにし、誰の記録で関門を外したのかを言えるようにする** こと。
+
+    だから各記録は出自を持ち、関門はそれを開示する。出自が空 / 不明な記録で
+    approve / merge が通ったら、それは記録として残り、後から辿れる。
+    """
+    directory, _shared = _review_done_dir()
+    pr_number = str(pr_number or "").strip()
+    found = []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    for name in names:
+        if not name.startswith(f"pr-{pr_number}-") or not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            found.append(rec)
+    return found
+
+
+def record_review_done_across_worktrees(review_type: str, pr_number: str) -> str:
+    """「この PR のこのレビューを実施した」を横断台帳に記録する。
+
+    Returns:
+        ``RECORDED_SHARED`` (全 worktree に効く置き場に書けた) /
+        ``RECORDED_CWD_ONLY`` (共有置き場が取れず、この cwd 限りに書いた) /
+        ``RECORDED_FAILED`` (入力が空、または書けなかった)。
+
+        **真偽値ではなく 3 値を返す**。初版は書き込みの成否だけを返し、共有置き場が
+        取れたかを見ていなかったため、呼び出し側が「横断で記録した」と嘘を名乗った
+        (独立レビュー AX high)。
+
+    冪等: 同じ (PR, 種別) を 2 回記録しても増えない (同じファイル名を上書きする)。
+    これが「重複した判断記録を作らずに済む」の土台 —— 親で ``review done`` を
+    打ち直す必要が無くなるので、同一レビューに対する判断記録が二重に残らない。
     """
     review_type = str(review_type or "").strip()
     pr_number = str(pr_number or "").strip()
     if not review_type or not pr_number:
-        return False
-    ledger = _read_review_done_ledger()
-    types = ledger.setdefault(pr_number, [])
-    if review_type not in types:
-        types.append(review_type)
-    path = _review_done_ledger_path()
+        return RECORDED_FAILED
+    directory, shared = _review_done_dir()
+    path = os.path.join(directory, _review_done_marker_name(review_type, pr_number))
+    record = {
+        "pr": pr_number,
+        "review_type": review_type,
+        "recorded_at": _now_iso_for_review_ledger(),
+        "recorded_by": _actor_for_review_ledger(),
+        "recorded_in_cwd": os.getcwd(),
+        "shared": shared,
+    }
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(ledger, f, ensure_ascii=False, indent=1, sort_keys=True)
-        return True
+        os.makedirs(directory, exist_ok=True)
+        # 1 ファイル 1 事実なので read-modify-write が無く、並行書き込みで
+        # 他の記録を失わない。tmp → rename で、読み手が途中の内容を見ない。
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=1, sort_keys=True)
+        os.replace(tmp, path)
     except OSError as exc:
-        print(f"Warning: レビュー実施を横断台帳に記録できませんでした "
-              f"({exc})。この cwd では解消されますが、fork / 親の別の作業"
-              f"フォルダからは未実施に見えます。", file=sys.stderr)
-        return False
+        print(f"Warning: レビュー実施を台帳に記録できませんでした ({exc})。"
+              f"この cwd では review-due を解消しましたが、他の作業フォルダからは "
+              f"未実施に見えます。", file=sys.stderr)
+        return RECORDED_FAILED
+    return RECORDED_SHARED if shared else RECORDED_CWD_ONLY
 
 
 def forget_review_done_across_worktrees(pr_number: str) -> None:
@@ -3110,14 +3236,33 @@ def forget_review_done_across_worktrees(pr_number: str) -> None:
     pr_number = str(pr_number or "").strip()
     if not pr_number:
         return
-    ledger = _read_review_done_ledger()
-    if pr_number not in ledger:
-        return
-    ledger.pop(pr_number, None)
+    directory, _shared = _review_done_dir()
     try:
-        with open(_review_done_ledger_path(), "w", encoding="utf-8") as f:
-            json.dump(ledger, f, ensure_ascii=False, indent=1, sort_keys=True)
+        names = os.listdir(directory)
     except OSError:
+        return
+    for name in names:
+        if not name.startswith(f"pr-{pr_number}-"):
+            continue
+        try:
+            os.remove(os.path.join(directory, name))
+        except OSError:
+            continue
+
+
+def _now_iso_for_review_ledger() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _actor_for_review_ledger() -> str:
+    """記録した主体 (= 出自)。解決できなければ空文字。"""
+    try:
+        import work_base
+        return work_base.current_actor() or ""
+    except Exception:
+        return ""
         pass
 
 
