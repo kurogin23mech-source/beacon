@@ -38,11 +38,24 @@ SERVER_DIR = os.path.join(REPO_ROOT, "server")
 # 1 本でも別経路から掴まれた瞬間に静かに落ちる。だから対象は列挙せず走査する。
 #
 # 対象外にするものは、なぜ対象外かを 1 行添えてここに明記する (黙って外さない)。
+#
+# ただし「1 行添える」は書き手の自己申告で、機械は理由の妥当性を測れない。独立レビューが
+# 実測した通り (2026-10-13)、このキーに 1 行足すだけで任意のモジュールが走査から落ち、
+# 件数が 28 → 27 に減ったまま全部緑で通る。それは e-6890 が直したはずの失敗の型
+# (手書きの一覧が、載っていないものを黙って検査対象外にする) を、新しい場所で
+# 作り直したことになる。
+#
+# なので除外の集合そのものを下の ``EXCLUDED_SNAPSHOT`` で留める。除外を 1 つ増やすと
+# 必ず赤くなり、増やす人は「スナップショットも直す」という形で意図を表明させられる。
+# 自動では通らない = 人間が一度見る、が狙い (禁止ではなく可視化)。
 EXCLUDED_MODULES = {
     # _libpath 自身は lib/ を載せる側で、lib/ の module を import しない。
     # これを対象に含めると「自分が自分を bootstrap できるか」という無意味な検査になる。
     "_libpath": "lib/ を sys.path に載せる当事者。lib/ の module を import しない",
 }
+
+# 上の除外が増減したら赤になるための留め。増やすときは一緒に直す (= 意図の表明)。
+EXCLUDED_SNAPSHOT = frozenset({"_libpath"})
 
 
 def _discover_server_modules() -> list:
@@ -69,6 +82,31 @@ def _import_with_only_server_on_path(module: str) -> subprocess.CompletedProcess
         text=True,
         cwd=SERVER_DIR,
     )
+
+
+def test_exclusions_cannot_grow_silently() -> None:
+    """走査から外す判断を、黙って通さない。
+
+    ``EXCLUDED_MODULES`` に 1 行足せば任意のモジュールが検査から落ちる。理由を
+    1 行添える規約はあるが、理由の妥当性は機械には測れないし、diff 上の 1 行追加は
+    レビューでも見落としやすい。独立レビューが実際にそれをやって全部緑のまま
+    28 → 27 件に減ることを実測した (2026-10-13)。
+
+    除外の集合を留めて、増減したら必ず赤にする。増やす人はスナップショットも
+    直すことになるので、「外した」が意図の表明として残る。
+    """
+    current = frozenset(EXCLUDED_MODULES)
+    added = current - EXCLUDED_SNAPSHOT
+    removed = EXCLUDED_SNAPSHOT - current
+    assert not added, (
+        "走査対象から新たに外されたモジュールがある: {0}。"
+        "意図的なら EXCLUDED_SNAPSHOT も更新し、なぜ外すのかを "
+        "EXCLUDED_MODULES の値に書くこと".format(sorted(added)))
+    assert not removed, (
+        "除外が消えている: {0}。EXCLUDED_SNAPSHOT を更新すること".format(sorted(removed)))
+    for module, reason in EXCLUDED_MODULES.items():
+        assert reason and reason.strip(), (
+            "{0} の除外理由が空。なぜ外すのかを 1 行書くこと".format(module))
 
 
 def test_the_scan_actually_found_modules() -> None:
