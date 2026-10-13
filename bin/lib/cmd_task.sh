@@ -283,11 +283,11 @@ cmd_task_next() {
                 json_flag="1"
                 shift
                 ;;
+            -?*)           _guard_flag "$1" ;;
             *)
                 # e-6918 の型 (余分な位置引数を黙って捨てる) を新しい動詞で作らない。
-                echo "beacon task next: unknown argument: $1" >&2
-                echo "Usage: beacon task next [-m <ms-id>] [--json]" >&2
-                return 2
+                # 旗でないゴミは _guard_positional (兄弟 task add と同形) に委ねる。
+                _guard_positional "$1" "Usage: beacon task next [-m <ms-id>] [--json]"
                 ;;
         esac
     done

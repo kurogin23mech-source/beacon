@@ -652,7 +652,7 @@ Step 3 の出力末尾に「**次の一手**」を **AI が決定的に選ぶ** 
    - 同じ優先度なら `in_progress` が `todo` より先
    - それでも並ばなければ `created_at` の古い順
 
-   返り JSON の `next.reason` が根拠の 1 行、`alternatives[]` が「別の選択肢」2 件になる。`next` が `null` なら未消化タスクゼロなので項目 7 へ進む。
+   返り JSON の `next.selection_reason` が根拠の 1 行、`alternatives[]` が「別の選択肢」2 件になる (書き込み系の `--reason` と混ざらないよう別名になっている)。`next` が `null` なら未消化タスクゼロなので項目 7 へ進む。
 
    **タスクに `assignee` は存在しない** (ms-166 e-6911 で確認)。担当を書く経路は milestone 側 (`beacon milestone update --assignee` / `milestone join`) だけで、`beacon task update --help` に `--assignee` は無い。「誰が作業中か」は下の 2層 claim フィルタが見る唯一の面であり、タスク単位の担当という概念を新設しない (作らない方を選んだ: claim が既に同じ問いに答えている)。
 7. **アクティブ MS の SPEC が無い** → `/beacon-spec <ms-id>` で SPEC 作成

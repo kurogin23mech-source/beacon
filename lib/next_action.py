@@ -15,9 +15,15 @@ A rule that only exists in a prompt is a request. This module is the same
 rule as code, so the ordering is a fact a test can pin down and the Skill
 asks for an answer instead of re-deriving one.
 
-The severity order itself is NOT redefined here — it is read from
-``core._PRIORITY_SCALE_ORDER``, which is the one place the five severities
-are ordered. Copying the order into a second file is how the two drift.
+Neither rule this module depends on is redefined here. The severity order is
+read from ``core._PRIORITY_SCALE_ORDER``, the one place the five severities are
+ordered; "which statuses mean the work is over" is read from
+``work_model.is_open``, the occupation-agnostic predicate both the dev and
+sales instances already share. Copying either into a second file is how the
+two drift — the first draft of this module did exactly that with a local
+``TERMINAL_STATUSES = {"done", "cancelled"}`` literal, which an independent
+review caught: the discipline was applied to priority and not to status, in
+the same file that preaches it.
 
 What "no priority" means in the ordering
 ----------------------------------------
@@ -37,10 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import core  # noqa: E402
-
-# Statuses that mean the task is finished one way or another, so it is never a
-# candidate for "what should I do next".
-TERMINAL_STATUSES = frozenset({"done", "cancelled"})
+import work_model  # noqa: E402
 
 # Status tie-break among tasks of equal priority. Work already underway comes
 # before work not yet started; anything parked (waiting on someone else, out
@@ -87,7 +90,7 @@ def iter_open_tasks(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Collect open task entries, descending into sub-entries."""
     found: List[Dict[str, Any]] = []
     for entry in entries or []:
-        if entry.get("type") == "task" and entry.get("status") not in TERMINAL_STATUSES:
+        if entry.get("type") == "task" and work_model.is_open(entry):
             found.append(entry)
         found.extend(iter_open_tasks(entry.get("entries") or []))
     return found

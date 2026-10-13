@@ -398,10 +398,10 @@ def cmd_task_next():
         }
         if chosen is not None:
             output["next"] = core.entries_to_json([chosen])[0]
-            output["next"]["reason"] = next_action.explain_choice(chosen)
+            output["next"]["selection_reason"] = next_action.explain_choice(chosen)
             output["alternatives"] = [
                 dict(core.entries_to_json([e])[0],
-                     reason=next_action.explain_choice(e))
+                     selection_reason=next_action.explain_choice(e))
                 for e in ranked[1:3]
             ]
         print(json.dumps(output, ensure_ascii=False))

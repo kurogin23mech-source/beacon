@@ -18,6 +18,10 @@ test-the-test: 本ファイルは「許可リストに戻すと赤くなる」�
 priority 未設定 / terminal 状態) も赤に倒れる形で書く。
 """
 
+import json
+import os
+import subprocess
+
 import core
 import next_action
 
@@ -213,18 +217,135 @@ class TestReasonTravelsWithThePick:
         assert "着手" in next_action.explain_choice(chosen)
 
 
-class TestScaleOrderHasOneAddress:
-    def test_next_action_does_not_define_its_own_severity_order(self):
-        """順序の住所を 2 つにしない (= drift の作り方そのもの)。
+def _code_string_literals(module):
+    """module のコードに現れる文字列リテラルを返す (docstring / コメントは除く)。
 
-        5 段階の順序は ``core._PRIORITY_SCALE_ORDER`` が唯一の持ち主。
-        next_action.py が自前のリテラル順序表を持ったら赤にする。
-        """
-        import inspect
-        src = inspect.getsource(next_action)
+    素の ``in`` でソース全文を検査すると、**規律を説明している docstring 自身**
+    に書いた例示文字列を欠陥として検出してしまう (このファイルの初版が実際に
+    そうなった)。構文木から読み、docstring を明示的に外すことで「規則が本当に
+    コードに埋め込まれているか」だけを測る。
+    """
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(module))
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None) or []
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docstrings]
+
+
+class TestRulesHaveOneAddress:
+    """規則の住所を 2 つにしない (= drift の作り方そのもの)。
+
+    この 2 本は対になっている。初版は severity 側だけを留めて status 側を
+    留めず、同じファイルで説いている規律を自分で破った (独立レビューが指摘)。
+    片方だけ留めると「留めた側は守られ、留めなかった側は破られる」という
+    不揃いが残る。
+    """
+
+    def test_does_not_define_its_own_severity_order(self):
+        """5 段階の順序は ``core._PRIORITY_SCALE_ORDER`` が唯一の持ち主。"""
+        literals = _code_string_literals(next_action)
         for severity in core._PRIORITY_SCALE_ORDER:
-            quoted = '"{0}"'.format(severity)
-            single = "'{0}'".format(severity)
-            assert quoted not in src and single not in src, (
-                "next_action.py が severity 名 {0} をリテラルで持っている。"
+            assert severity not in literals, (
+                "next_action.py のコードが severity 名 {0} をリテラルで持っている。"
                 "順序は core._PRIORITY_SCALE_ORDER から読むこと".format(severity))
+
+    def test_does_not_define_its_own_terminal_statuses(self):
+        """「作業が終わっている状態」は ``work_model.is_open`` が唯一の持ち主。
+
+        初版は ``TERMINAL_STATUSES = {"done", "cancelled"}`` というリテラルを
+        持っていた。今日の値は一致していたが、``work_model`` 側に別名を足した
+        人はこちらに追従しないので黙ってズレる。
+        """
+        import work_model
+        literals = _code_string_literals(next_action)
+        for status in (work_model.DONE_STATUS, work_model.CANCELLED_STATUS):
+            assert status not in literals, (
+                "next_action.py のコードが終端 status 名 {0} をリテラルで持っている。"
+                "判定は work_model.is_open に委ねること".format(status))
+
+    def test_open_filter_follows_work_model(self):
+        """``work_model`` の述語をそのまま使っていることを挙動で測る。
+
+        文字列検査だけだと「リテラルは無いが別の自前判定を書いた」を見逃す。
+        """
+        import work_model
+        for status in (work_model.DONE_STATUS, work_model.CANCELLED_STATUS):
+            assert next_action.rank_open_tasks(
+                [_task("e-x", priority="highest", status=status)]) == []
+        assert len(next_action.rank_open_tasks(
+            [_task("e-x", priority="lowest", status="waiting")])) == 1
+
+
+class TestHelpSurfaceCarriesTheVerb:
+    """``beacon task next`` が help / 機械可読面から消えていないこと。
+
+    初版は dispatch の 5 箇所に配線しながら ``_help_registry()`` への 1 行を
+    落としていた。結果、`beacon task --help` に動詞が出ず、
+    `beacon task next --help` は exit 2 で落ちた (兄弟はすべて exit 0)。
+    独立レビュー 2 体が別々にこれを high で挙げた。
+
+    `scripts/check-cli-help-drift.py` はこの欠落に対して緑を返したので
+    (= 偽の安全)、ここでは **実際にコマンドを叩いて** 測る。
+    """
+
+    def _beacon(self, *args):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return subprocess.run(
+            [os.path.join(root, "bin", "beacon")] + list(args),
+            capture_output=True, text=True, cwd=root, timeout=120)
+
+    def test_verb_help_exits_zero_like_its_siblings(self):
+        """``--help`` は常に安全に成功する (ms-178 e-6654 で 2 度直された不変条件)。
+
+        これは不変条件そのものの留めで、2 経路のどちらで満たしてもよい
+        (registry 由来の usage / ``_guard_flag`` の案内)。どちらで満たしたかは
+        下の ``test_verb_help_renders_real_usage`` が分ける。
+        """
+        mine = self._beacon("task", "next", "--help")
+        sibling = self._beacon("task", "list", "--help")
+        assert sibling.returncode == 0, "前提が崩れている: 兄弟の --help が落ちた"
+        assert mine.returncode == 0, (
+            "beacon task next --help が exit {0} で落ちた\nstdout={1}\nstderr={2}"
+            .format(mine.returncode, mine.stdout, mine.stderr))
+
+    def test_verb_help_renders_real_usage_not_a_pointer(self):
+        """``--help`` が実際の usage を出す (「--help を見よ」の案内で終わらない)。
+
+        registry に行が無いと ``_guard_flag`` の fallback に落ち、
+        「beacon task next — run 'beacon task --help' for usage.」という
+        **案内だけ**を exit 0 で返す。それでも上の不変条件は満たされるので、
+        exit code だけ見るテストは registry 欠落に対して緑のままになる
+        (初版がまさにそうで、反転 U5 で緑のままだった)。案内と実 usage を
+        分けて測る。
+        """
+        out = self._beacon("task", "next", "--help").stdout
+        assert "Usage: beacon task next" in out, (
+            "usage 本体でなく案内が返っている (= _help_registry() に行が無い)\n"
+            + out)
+        assert "run 'beacon" not in out, (
+            "「--help を見よ」の案内に落ちている\n" + out)
+
+    def test_verb_is_listed_in_the_noun_help(self):
+        """探索の正規の入口 (``beacon task --help``) に動詞が出る。"""
+        out = self._beacon("task", "--help").stdout
+        assert "beacon task next" in out, (
+            "beacon task --help に next が出ない (= AI からは存在しないコマンド)")
+
+    def test_verb_is_in_the_machine_readable_help(self):
+        """``beacon help --json`` (機械可読面) にも出る。"""
+        res = self._beacon("help", "--json")
+        assert res.returncode == 0, res.stderr
+        commands = [e.get("command", "")
+                    for e in json.loads(res.stdout)["commands"]]
+        assert any(c.startswith("beacon task next") for c in commands), (
+            "help --json に beacon task next が無い")
