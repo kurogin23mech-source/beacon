@@ -2358,15 +2358,13 @@ def _validate_cadence_minutes(value: int) -> None:
 
     Zero would burn the bus by firing every server tick; negative makes
     no sense. ms-83 / e-1994.
+
+    ms-166 e-5980: 規則そのものは ``tick_scheduler.validate_cadence_minutes``
+    に 1 つだけ置く (= 同じ値を読む側と同じ module)。ここで独自に符号化していた
+    ため、Operation 側の書き込みがこの規則を知らずに非正値を素通りさせていた。
     """
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(
-            f"cadence_minutes must be int, got {type(value).__name__}"
-        )
-    if value <= 0:
-        raise ValueError(
-            f"cadence_minutes must be > 0, got {value}"
-        )
+    import tick_scheduler
+    tick_scheduler.validate_cadence_minutes(value)
 
 
 def get_cadence_minutes(trek_doc: dict) -> int:

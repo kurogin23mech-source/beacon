@@ -853,7 +853,25 @@ case "${1:-}" in
                         --off)     _ost_mode="off"; shift ;;
                         --cadence) _need_flag_value "$#" "$1"; _ost_cadence="$2"; shift 2 ;;
                         -?*)       _guard_flag "$1" ;;
-                        *)         _ost_id="$1"; shift ;;
+                        *)
+                            # ms-166 e-5980 (独立 AX レビュー medium): 余分な位置
+                            # 引数を黙って受けない。初版は無条件代入で **最後の語が
+                            # 勝つ** 形だったので、`server-tick op-1 op-2 --on` が
+                            # op-2 に適用され、明示した op-1 が黙って捨てられた
+                            # (judge が実測)。同ファイルの兄弟 (operation create /
+                            # update) は最初の語が勝つ形なので、作法が逆だった。
+                            # どちらに揃えるかではなく **拒否** を選ぶ: 2 つ目の
+                            # id は打ち間違いであって、どちらを採っても誤った
+                            # Operation に適用されうる。
+                            if [ -z "$_ost_id" ]; then
+                                _ost_id="$1"; shift
+                            else
+                                echo "Error: 余分な位置引数です: $1 (op-id は 1 つだけ渡してください)" >&2
+                                echo "  受け取った 1 つ目: $_ost_id / 2 つ目: $1" >&2
+                                echo "  どちらを採っても誤った Operation に適用されうるため拒否します (ms-166 e-5980)。" >&2
+                                exit 1
+                            fi
+                            ;;
                     esac
                 done
                 if [ -z "$_ost_id" ]; then
@@ -1055,6 +1073,22 @@ except ValueError as e:
                 esac
                 ;;
             *)
+                # ms-166 e-5980 (独立 AX レビュー high): 知らない sub-verb と
+                # 「sub-verb 無し / --help (= 一覧が見たい)」を分ける。以前はどちらも
+                # Usage を stdout に出して **exit 0** だったので、終了コードだけを
+                # 見る script / AI には「成功した」と読めた。judge が実測: 他の
+                # noun の作法 (`channel opt-in`) から類推した
+                # `beacon operation opt-in <op-id>` が exit 0 で何もしなかった。
+                # 兄弟 (`beacon review <知らない語>`) は exit 1 なので揃える。
+                _op_unknown=""
+                case "${2:-}" in
+                    ""|-h|--help) _op_unknown="" ;;
+                    *)            _op_unknown="${2}" ;;
+                esac
+                if [ -n "$_op_unknown" ]; then
+                    echo "Error: 知らない operation の sub-verb です: $_op_unknown" >&2
+                    echo "  下の一覧に在る語を使ってください (定期発火の on/off は 'server-tick')。" >&2
+                fi
                 echo "Usage: beacon operation open \"<title>\" [--schedule daily|weekdays|weekly]"
                 echo "                                [--status todo|in_progress|open|closed]"
                 echo "                                [--activation-hint H --objective O --ac A --priority P]"
@@ -1071,7 +1105,11 @@ except ValueError as e:
                 echo "       beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD] [--json]"
                 echo "       beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT] [--json]"
                 echo "       beacon operation envelope verify <op-id> <action> [--json]"
+                echo "       beacon operation server-tick <op-id> [--on|--off] [--cadence <分>]"
                 echo "       beacon operation task add/done/list ..."
+                # `[ -n "" ] && exit 1` は偽のとき終了コード 1 を残すので、
+                # sub-verb 無し (= 一覧が見たいだけ) が失敗扱いになる。if で書く。
+                if [ -n "$_op_unknown" ]; then exit 1; fi
                 ;;
         esac
         ;;

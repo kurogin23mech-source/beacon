@@ -142,16 +142,41 @@ def cmd_operation_server_tick():
     meta = op.setdefault("meta", {})
     meta["server_tick"] = mode in ("on", "1", "true", "yes")
     if cadence:
+        # ms-166 e-5980 (独立 AX レビュー high): ゼロ / 負値を素通りさせていた。
+        # 読み取り側 (tick_scheduler.cadence_minutes) は非正値を既定 60 分に
+        # 読み替えるので、「cadence_minutes=0 にした」と成功を名乗りながら実際は
+        # 60 分で動く形になっていた。規則は読み取り側と同じ module に 1 つだけ。
+        import tick_scheduler
         try:
-            meta["cadence_minutes"] = int(cadence)
+            meta["cadence_minutes"] = tick_scheduler.validate_cadence_minutes(
+                int(cadence))
         except ValueError:
-            print(f"Error: --cadence must be an integer, got {cadence!r}",
-                  file=sys.stderr)
+            print(f"Error: --cadence は 1 以上の整数で渡してください "
+                  f"(受け取った値: {cadence!r})。0 は毎ティック発火して bus を"
+                  f"焼き、負値は意味を持たず、どちらも読み取り側で既定 60 分に"
+                  f"読み替えられるため、指定した値どおりに動きません "
+                  f"(ms-166 e-5980)。", file=sys.stderr)
             sys.exit(1)
     save_project(data, op={"type": "operation_update", "op_id": op_id})
     state = "on" if meta["server_tick"] else "off"
     cad = meta.get("cadence_minutes", "default 60")
+    # ms-166 e-5980 (独立 AX レビュー high): **実際に発火するか** を一緒に言う。
+    # サーバ側 (_operation_schedule_descriptor) の発火条件は
+    # `status == "open" AND truthy(meta.server_tick)` の AND なので、
+    # server_tick=on だけを報告すると「これで自律発火する」と読まれる。
+    # status が open でない Operation に opt-in しても発火しない。
+    _status = op.get("status", "")
+    _firing = meta["server_tick"] and _status == "open"
     print(f"Operation {op_id}: server_tick={state}, cadence_minutes={cad}")
+    if _firing:
+        print(f"  → 発火します (status={_status})")
+    elif meta["server_tick"]:
+        print(f"  ⚠ まだ発火しません: status={_status or '(不明)'} で、"
+              f"サーバ側の発火条件は status=open かつ server_tick=on の両方です。"
+              f"`beacon operation activate {op_id}` で open にしてください。",
+              file=sys.stderr)
+    else:
+        print(f"  → 発火しません (server_tick=off)")
 
 
 def cmd_operation_open():

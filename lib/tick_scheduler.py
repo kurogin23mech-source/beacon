@@ -115,6 +115,28 @@ def clear_failure(meta: dict, *, key: str = "fire") -> None:
     meta.pop(f"{key}_last_failed_at", None)
 
 
+def validate_cadence_minutes(value) -> int:
+    """書き込む前に cadence を検証して int で返す。不正なら ValueError。
+
+    ms-166 e-5980 (独立 AX レビュー high): 書き込み側がゼロ / 負値を素通ししていた。
+    ``cadence_minutes`` (下の読み取り側) は非正値を既定 60 分に読み替えるので、
+    **CLI が「cadence_minutes=0 にした」と成功を名乗りながら、実際には 60 分で
+    動く** という名乗りと実態のズレになっていた。ゼロは毎ティック発火して bus を
+    焼き、負値は意味を持たない。
+
+    検証をこの module に置くのは、**同じ値を読む側がここに居る** から。
+    ``lib/trek.py:_validate_cadence_minutes`` が同じ規則を独自に持っていたが、
+    Operation 側はそれを知らずに素通りしていた (= 同じ 1 つのフィールドについて
+    兄弟機能が別々の規則を持つと、片方だけ緩いまま残る)。trek 側もここを呼ぶ。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"cadence_minutes must be int, got {type(value).__name__}")
+    if value <= 0:
+        raise ValueError(f"cadence_minutes must be > 0, got {value}")
+    return value
+
+
 def cadence_minutes(descriptor: dict,
                     default: int = DEFAULT_CADENCE_MINUTES) -> int:
     """The descriptor's effective cadence in minutes (non-positive / unparseable

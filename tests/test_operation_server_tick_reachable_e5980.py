@@ -132,3 +132,138 @@ def test_the_activation_skill_actually_calls_it(rel):
     assert "tick-health" in joined, (
         f"{rel} が駆動の生死 (tick-health) の確認を実行するコマンドとして"
         f"持っていない")
+
+
+# --- 2. 名乗りと実態を合わせる (独立 AX レビュー high 2 件 + medium 1 件) -------
+
+def _op_project(tmp_path, *ops):
+    import json
+    (tmp_path / ".beacon").mkdir()
+    (tmp_path / ".beacon" / "project.json").write_text(json.dumps({
+        "name": "t", "profession": "dev", "next_entry_id": 1,
+        "milestones": [],
+        "operations": [dict(id=i, title=i, status=st, entries=[],
+                            schedule={"frequency": "daily", "days": ["mon"]})
+                       for i, st in ops],
+    }), encoding="utf-8")
+    return tmp_path
+
+
+def _run(tmp_path, *args):
+    return subprocess.run([os.path.join(ROOT, "bin", "beacon"),
+                           "operation", "server-tick", *args],
+                          capture_output=True, text=True, cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "1.5"])
+def test_a_cadence_the_reader_would_override_is_refused(tmp_path, bad):
+    """読み取り側が既定に読み替える値を、成功として受けないこと。
+
+    ``tick_scheduler.cadence_minutes`` は非正値を既定 60 分に読み替える。書き込み側が
+    ゼロ / 負値を素通りさせていたので、**CLI が「cadence_minutes=0 にした」と成功を
+    名乗りながら実際には 60 分で動く** 形だった (独立 AX レビュー high、judge が実測)。
+    """
+    proj = _op_project(tmp_path, ("op-1", "open"))
+    proc = _run(proj, "op-1", "--on", "--cadence", bad)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "--cadence" in proc.stderr, proc.stderr
+
+
+def test_a_positive_cadence_is_accepted(tmp_path):
+    """効く側も測る (拒否を広げすぎていないこと)。"""
+    proj = _op_project(tmp_path, ("op-1", "open"))
+    proc = _run(proj, "op-1", "--on", "--cadence", "30")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "cadence_minutes=30" in proc.stdout, proc.stdout
+
+
+def test_the_rule_for_cadence_lives_in_one_place():
+    """cadence の規則が 1 箇所であること。
+
+    同じ 1 つのフィールドについて trek 側が独自の検証を持ち、Operation 側はそれを
+    知らずに素通りさせていた = 兄弟機能が同じフィールドで別々の規則を持つと、片方
+    だけ緩いまま残る。読み取り側と同じ module に寄せ、trek もそこを呼ぶ。
+    """
+    import ast as _ast
+    import inspect
+    import tick_scheduler
+    import trek
+    assert hasattr(tick_scheduler, "validate_cadence_minutes")
+    tree = _ast.parse(inspect.getsource(trek._validate_cadence_minutes))
+    calls = {(getattr(c.func, "id", None) or getattr(c.func, "attr", ""))
+             for c in _ast.walk(tree) if isinstance(c, _ast.Call)}
+    assert "validate_cadence_minutes" in calls, (
+        "trek が自前の規則を持ったまま (= 同じフィールドで規則が 2 つ): "
+        + repr(sorted(calls)))
+
+
+def test_it_says_whether_firing_will_actually_happen(tmp_path):
+    """**実際に発火するか** を報告すること (独立 AX レビュー high)。
+
+    サーバ側の発火条件は `status == "open" AND truthy(server_tick)` の AND なので、
+    server_tick=on だけを報告すると「これで自律発火する」と読まれる。status が
+    open でない Operation に opt-in しても発火しない。
+    """
+    proj = _op_project(tmp_path, ("op-1", "open"), ("op-2", "todo"))
+    ok = _run(proj, "op-1", "--on")
+    assert ok.returncode == 0, ok.stderr
+    assert "発火します" in ok.stdout, ok.stdout
+
+    not_yet = _run(proj, "op-2", "--on")
+    assert not_yet.returncode == 0, not_yet.stderr
+    combined = not_yet.stdout + not_yet.stderr
+    assert "まだ発火しません" in combined, combined
+    assert "status=todo" in combined, combined
+    assert "activate" in combined, "open にする手順を案内していない"
+
+
+def test_turning_it_off_says_it_will_not_fire(tmp_path):
+    proj = _op_project(tmp_path, ("op-1", "open"))
+    proc = _run(proj, "op-1", "--off")
+    assert proc.returncode == 0, proc.stderr
+    assert "発火しません" in proc.stdout, proc.stdout
+
+
+def test_a_stray_second_op_id_is_refused(tmp_path):
+    """余分な位置引数を黙って受けないこと (独立 AX レビュー medium)。
+
+    初版は無条件代入で **最後の語が勝つ** 形で、`server-tick op-1 op-2 --on` が
+    op-2 に適用され明示した op-1 が黙って捨てられた (judge が実測)。同ファイルの
+    兄弟 (create / update) は最初の語が勝つので作法が逆だった。どちらを採っても
+    誤った Operation に適用されうるので拒否する。
+    """
+    proj = _op_project(tmp_path, ("op-1", "open"), ("op-2", "open"))
+    proc = _run(proj, "op-1", "op-2", "--on")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "余分な位置引数" in proc.stderr, proc.stderr
+    assert "op-1" in proc.stderr and "op-2" in proc.stderr, proc.stderr
+
+
+def test_an_unknown_operation_sub_verb_exits_non_zero():
+    """知らない sub-verb で exit 0 を返さないこと (独立 AX レビュー high)。
+
+    judge が実測: 他の noun の作法 (`channel opt-in`) から類推した
+    `beacon operation opt-in <op-id>` が Usage を stdout に出して **exit 0** で
+    終わり、終了コードだけを見る script / AI には「成功した」と読めた。
+    兄弟 (`beacon review <知らない語>`) は exit 1。
+    """
+    for guess in ("opt-in", "opt-out", "server-tick-on", "bogus"):
+        proc = subprocess.run(
+            [os.path.join(ROOT, "bin", "beacon"), "operation", guess, "op-1"],
+            capture_output=True, text=True, cwd=ROOT)
+        assert proc.returncode != 0, f"{guess}: exit 0 で黙って成功した"
+        assert guess in proc.stderr, (
+            f"{guess}: 何が知らない語だったのか名指ししていない:\n" + proc.stderr)
+
+
+def test_asking_for_the_operation_usage_still_succeeds():
+    """一覧を見たいだけの呼び出しは成功のままであること。
+
+    知らない語を非 0 にした副作用で、help 要求まで失敗扱いにしない
+    (`[ -n "" ] && exit 1` が偽のとき終了コード 1 を残す罠を一度踏んだ)。
+    """
+    proc = subprocess.run(
+        [os.path.join(ROOT, "bin", "beacon"), "operation"],
+        capture_output=True, text=True, cwd=ROOT)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "server-tick" in proc.stdout, "一覧に新しい動詞が出ていない"
