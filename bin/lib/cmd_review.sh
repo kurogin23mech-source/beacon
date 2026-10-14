@@ -16,19 +16,21 @@ cmd_review_context() {
     # ms-119 e-3947: emit the review-kernel bundle (原典 + mechanical diff only)
     # for an independent judge subagent. See /beacon-review-run.
     ensure_project
-    local review_type="" diff_ref="" pr="" origin_doc="" mode="diff" target="" judge_model="" batch=""
+    local review_type="" diff_ref="" pr="" origin_doc="" mode="diff" target="" judge_model="" batch="" pr_repo=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --batch)       batch="1";            shift ;;
             --type)        review_type="${2:-}"; shift 2 ;;
             --diff-ref)    diff_ref="${2:-}";    shift 2 ;;
             --pr)          pr="${2:-}";          shift 2 ;;
+            # ms-166 e-6971: どのリポジトリの PR 番号か。省略時は cwd のリポジトリ。
+            --repo)        pr_repo="${2:-}";     shift 2 ;;
             --origin-doc)  origin_doc="${2:-}";  shift 2 ;;
             --target)      target="${2:-}";      shift 2 ;;
             --judge-model) judge_model="${2:-}"; shift 2 ;;
             --mode)        mode="${2:-}";        shift 2 ;;
             -?*)           _guard_flag "$1" ;;
-            *)             _guard_positional "$1" "Usage: beacon review context [--batch] --type <ax|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (このコマンドは flag のみを取ります。--type <値> の形で渡してください)" ;;
+            *)             _guard_positional "$1" "Usage: beacon review context [--batch] --type <ax|philosophy|attainment> [--pr <n> [--repo <owner/name>] | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (このコマンドは flag のみを取ります。--type <値> の形で渡してください)" ;;
         esac
     done
     if [[ -n "$batch" ]]; then
@@ -37,14 +39,18 @@ cmd_review_context() {
         # --batch honors only --pr; reject the flags it would silently ignore
         # (e-4125 AX review: accepted-but-ignored input is a silent no-op).
         if [[ -n "$review_type" || -n "$diff_ref" || -n "$origin_doc" || -n "$target" || -n "$judge_model" || "$mode" != "diff" ]]; then
-            echo "Error: --batch は --pr のみを取ります。--type / --mode / --origin-doc / --target / --judge-model は無視されるため拒否します (batch は節目の全 review 種別を自動で出します)。" >&2
+            echo "Error: --batch は --pr (と --repo) のみを取ります。--type / --mode / --origin-doc / --target / --judge-model は無視されるため拒否します (batch は節目の全 review 種別を自動で出します)。" >&2
             exit 1
         fi
-        BEACON_PR="$pr" BEACON_IMPLEMENTER_MODEL="${BEACON_IMPLEMENTER_MODEL:-}" \
+        # ms-166 e-6971: --repo は batch でも **効く** (batch 側も同じ収集を通る)。
+        # 効くものを拒否リストに入れないこと — 拒否するのは無視される旗だけ。
+        BEACON_PR="$pr" BEACON_PR_REPO="$pr_repo" \
+            BEACON_IMPLEMENTER_MODEL="${BEACON_IMPLEMENTER_MODEL:-}" \
             python3 "$COMMANDS_PY" review_batch_context
         return
     fi
     BEACON_REVIEW_TYPE="$review_type" BEACON_DIFF_REF="$diff_ref" BEACON_PR="$pr" \
+        BEACON_PR_REPO="$pr_repo" \
         BEACON_ORIGIN_DOC="$origin_doc" BEACON_TARGET_ID="$target" BEACON_MODE="$mode" \
         BEACON_JUDGE_MODEL="$judge_model" \
         python3 "$COMMANDS_PY" review_context

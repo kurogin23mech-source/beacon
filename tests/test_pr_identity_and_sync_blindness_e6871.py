@@ -426,9 +426,15 @@ def test_resolving_a_duplicate_actually_reduces_the_pending_count():
 # は見ていない**。それがこの経路。気づいた時点で既に人の判断が必要な負債になっている
 # ので、保存前に止める側へ倒した。
 
-def _pr_entries_for(entries, number):
-    from cmd_pr import _entries_for_pr_number
-    return _entries_for_pr_number(_data(*entries), number)
+def _pr_entries_for(entries, number, repo="o/r"):
+    """ms-166 e-6972: 鍵は (リポジトリ, 番号) になったので repo も渡す。
+
+    既定を "o/r" にしているのは、この file の `_entry` が作る url
+    (https://github.com/o/r/pull/N) と同じリポジトリを指すため = 従来の
+    「同じリポジトリの同じ番号」の測定をそのまま続けられる。
+    """
+    from cmd_pr import _entries_for_pr_identity
+    return _entries_for_pr_identity(_data(*entries), number, repo)
 
 
 def test_an_existing_record_for_the_same_pr_is_found():
@@ -483,7 +489,7 @@ def test_the_number_is_parsed_not_string_matched():
 def test_pr_add_actually_routes_through_the_duplicate_check():
     """述語が**在る**だけでなく、`pr add` がそれを**通っている**ことを留める。
 
-    上の 4 件は `_entries_for_pr_number` の論理を測るが、`cmd_pr_add` が呼ぶのを
+    上の 4 件は `_entries_for_pr_identity` の論理を測るが、`cmd_pr_add` が呼ぶのを
     やめても緑のままになる (関数が定義されたまま未使用になるだけ)。反転で実測した:
     呼び出しを `existing = []` に差し替えても 24 件すべて緑だった。
     **「足した」と「全域に効く」は別**で、今日この repo で同型を 2 度踏んでいる。
@@ -501,7 +507,7 @@ def test_pr_add_actually_routes_through_the_duplicate_check():
     import inspect
     src = inspect.getsource(cmd_pr)
     called = called_names_in_function(ast.parse(src), "cmd_pr_add")
-    assert "_entries_for_pr_number" in called, (
+    assert "_entries_for_pr_identity" in called, (
         "pr add が二重登録の検知を通っていない — 50 組が作られた経路がそのまま "
         "開いている。実際に呼ばれている名前: " + repr(sorted(called)))
 
@@ -510,7 +516,7 @@ def test_the_duplicate_check_runs_before_the_write():
     """検知が **保存より前** に走ること。
 
     警告してから保存する形では手遅れ (= 作られてから気づく)。`cmd_pr_add` の中で
-    `_entries_for_pr_number` の呼び出しが `save_project` より先に現れることを
+    `_entries_for_pr_identity` の呼び出しが `save_project` より先に現れることを
     行番号で固定する。
     """
     import ast
@@ -526,7 +532,7 @@ def test_the_duplicate_check_runs_before_the_write():
         if not isinstance(node, ast.Call):
             continue
         name = getattr(node.func, "id", None) or getattr(node.func, "attr", "")
-        if name == "_entries_for_pr_number" and check_at is None:
+        if name == "_entries_for_pr_identity" and check_at is None:
             check_at = node.lineno
         if name == "save_project" and save_at is None:
             save_at = node.lineno
@@ -560,7 +566,7 @@ def test_the_duplicate_check_reads_the_structured_number_first():
         # meta.pr_number を権威として入れる (core.pr_add が書く形)
         data["milestones"][0]["entries"][0].setdefault(
             "meta", {})["pr_number"] = 60
-        found = cmd_pr._entries_for_pr_number(data, "60")
+        found = cmd_pr._entries_for_pr_identity(data, "60", "o/r")
         assert [f["eid"] for f in found] == ["e-900"], (
             f"url={url!r} で見逃した (meta.pr_number=60 は入っている)")
 
@@ -573,7 +579,7 @@ def test_the_url_parse_is_still_a_fallback():
     data = _data(_entry("e-901", "https://github.com/o/r/pull/61", None,
                         status="done"))
     data["milestones"][0]["entries"][0]["meta"].pop("pr_number", None)
-    assert [f["eid"] for f in cmd_pr._entries_for_pr_number(data, "61")] == [
+    assert [f["eid"] for f in cmd_pr._entries_for_pr_identity(data, "61", "o/r")] == [
         "e-901"], "構造化フィールドが無い古い記録を url から読めていない"
 
 

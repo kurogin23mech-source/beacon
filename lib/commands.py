@@ -488,8 +488,9 @@ from commands_shared import (  # noqa: F401
     RECORDED_CWD_ONLY,
     RECORDED_SHARED,
     record_review_done_across_worktrees,
+    _read_review_done_ledger,
     _fire_review_due_for_pr,
-    _REVIEW_DUE_SUFFIX,
+    review_due_filename,
 )
 # ms-127 e-4849: 4 helpers promoted to commands_shared during the milestone
 # split. They are shared across families: the milestone handlers (cmd_milestone.py,
@@ -1665,13 +1666,21 @@ def _collect_whole_target_artifact(target_id: str):
     return artifact, gaps
 
 
-def _collect_change_diff(argv: list, target_ref: str, gaps: list) -> str:
+def _collect_change_diff(argv: list, target_ref: str, gaps: list,
+                         *, empty_is_error: bool = False) -> str:
     """Run a change-scoped diff collector (gh pr diff / git diff) and return its text
     (ms-119 / e-4196 maint review — keeps each artifact-source branch self-contained).
 
-    Exits the process on a collection failure and appends an empty-diff gap. This is
-    CLI glue (bound to cmd_review_context), so exiting here is fine — unlike the
-    reusable ``_collect_whole_target_artifact`` collector, which raises instead.
+    Exits the process on a collection failure. This is CLI glue (bound to
+    cmd_review_context), so exiting here is fine — unlike the reusable
+    ``_collect_whole_target_artifact`` collector, which raises instead.
+
+    ``empty_is_error`` (ms-166 e-6971): for a **PR** an empty diff is not a
+    reviewable state of the world, it means we did not get the change — so the
+    caller must not receive a plausible-looking bundle with nothing in it, which
+    a judge would then "review" and a ``review done`` would record as performed.
+    For ``--diff-ref`` an empty diff is a legitimate answer (the two refs really
+    are identical), so that caller keeps the gap and the bundle.
     """
     proc = subprocess.run(argv, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -1679,8 +1688,75 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list) -> str:
         sys.exit(1)
     diff_text = proc.stdout
     if not diff_text.strip():
+        if empty_is_error:
+            print(f"Error: {target_ref} の差分が空です。PR のレビューで差分が空に"
+                  f"なるのは「変更が無い」ではなく「差分を取れていない」状態なので、"
+                  f"もっともらしい空の bundle を返さずに止めます "
+                  f"(ms-166 e-6971)。\n"
+                  f"  確認: その PR 番号がこのリポジトリのものか "
+                  f"(別リポジトリなら --repo <owner/name> を付ける)。",
+                  file=sys.stderr)
+            sys.exit(1)
         gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
     return diff_text
+
+
+def _pr_diff_collection(pr: str, pr_repo: str, gaps: list) -> tuple:
+    """PR の差分を採るための ``(argv, target_ref, resolved_repo)`` を組む。
+
+    ms-166 e-6971: ``gh pr diff <n>`` を **リポジトリ指定なしで** 叩く形が 3 箇所に
+    手で書かれていた (review context / review batch context / 目的達成 bundle)。
+    1 箇所だけ直すと、残り 2 箇所で同じ取り違えが起き続ける —— 「足した」と
+    「全域に効く」は別。だから **組み立てをここに 1 つ置き、3 つの呼び出し側は
+    これを通る**。
+
+    ``target_ref`` に ``owner/repo#N`` を入れるのが要点。旧実装は ``"PR #3"`` だけ
+    だったので、judge も利用者も「どのリポジトリの 3 番か」を bundle から知る術が
+    無く、取り違えに気づけなかった。
+    """
+    resolved = _resolve_review_pr_repo(pr_repo, gaps)
+    argv = ["gh", "pr", "diff", pr]
+    if resolved:
+        argv += ["--repo", resolved]
+    target_ref = f"{resolved}#{pr}" if resolved else f"PR #{pr} (リポジトリ不明)"
+    return argv, target_ref, resolved
+
+
+def _resolve_review_pr_repo(explicit: str, gaps: list) -> str:
+    """レビュー対象 PR の **リポジトリ** を決める (ms-166 e-6971)。
+
+    返り値は ``owner/repo``、決められなければ空文字。
+
+    順序は 1. 明示指定 (``--repo``) 2. cwd のリポジトリ (``gh repo view``)。
+    2 を使うのは、既定の挙動 (「いま居るリポジトリの PR 番号」) を変えないため ——
+    変えると今まで通る呼び出しが落ちる。変えるのは **その既定を記録に残すか** で、
+    旧実装は解決した結果を捨てていたので bundle からどのリポジトリか辿れなかった。
+
+    決められなかったとき空文字を返して gap に書くのは、「分からない」を judge と
+    利用者に **分かる形で** 渡すため。推測で埋めると、取り違えに気づく手段が消える。
+    """
+    explicit = str(explicit or "").strip()
+    if explicit:
+        if not core.is_repo_slug(explicit):
+            print(f"Error: --repo は owner/name の形で渡してください "
+                  f"(受け取った値: {explicit!r})。", file=sys.stderr)
+            sys.exit(1)
+        return explicit
+    try:
+        proc = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner",
+             "-q", ".nameWithOwner"],
+            capture_output=True, text=True)
+    except OSError:
+        proc = None
+    resolved = (proc.stdout.strip() if proc and proc.returncode == 0 else "")
+    if resolved and core.is_repo_slug(resolved):
+        return resolved
+    gaps.append("レビュー対象 PR のリポジトリを特定できませんでした "
+                "(gh が cwd のリポジトリを答えない)。別リポジトリの同じ番号の PR を"
+                "見ている可能性を judge 側で排除できないため、`--repo <owner/name>` "
+                "で明示してください (ms-166 e-6971)。")
+    return ""
 
 
 def _model_independence_gap():
@@ -1701,7 +1777,8 @@ def _model_independence_gap():
     return None if verdict["ok"] else ("⚠ モデル独立性: " + verdict["reason"])
 
 
-def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = "") -> None:
+def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = "",
+                             pr_repo: str = "") -> None:
     """Emit the 目的達成 evidence-generation bundle for a context-zero judge
     (ms-119 / e-4005).
 
@@ -1766,12 +1843,11 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
         print("Error: --pr and --diff-ref are mutually exclusive.", file=sys.stderr)
         sys.exit(1)
     if pr:
-        target_ref = f"{target_id} (PR #{pr})"
-        proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-            sys.exit(1)
-        diff_text = proc.stdout
+        # ms-166 e-6971: リポジトリ込みで採る (3 箇所に手書きされていた収集を
+        # _pr_diff_collection / _collect_change_diff に通す)。
+        argv, pr_ref, _repo = _pr_diff_collection(pr, pr_repo, gaps)
+        target_ref = f"{target_id} ({pr_ref})"
+        diff_text = _collect_change_diff(argv, pr_ref, gaps, empty_is_error=True)
     elif diff_ref:
         target_ref = f"{target_id} ({diff_ref})"
         proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
@@ -1834,6 +1910,12 @@ def cmd_review_context():
                             see _emit_decision_verification_context).
         BEACON_DIFF_REF:    git ref range (e.g. "origin/main...HEAD"); or
         BEACON_PR:          a PR number (uses `gh pr diff`).
+        BEACON_PR_REPO:     which repository that number belongs to, as
+                            ``owner/name`` (ms-166 e-6971). Optional — the cwd
+                            repository is resolved and recorded when omitted.
+                            Only meaningful with BEACON_PR; rejected otherwise,
+                            because an accepted-but-ignored input is a silent
+                            no-op (the caller believes it named the repository).
         BEACON_ORIGIN_DOC:  doc-id of the 原典 (required for philosophy; the SPEC
                             / vision the implementation is checked against;
                             rejected with --type ax, whose 原典 is fixed).
@@ -1854,6 +1936,8 @@ def cmd_review_context():
     review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
     diff_ref = os.environ.get("BEACON_DIFF_REF", "").strip()
     pr = os.environ.get("BEACON_PR", "").strip()
+    # ms-166 e-6971: どのリポジトリの PR 番号か (owner/name)。空なら cwd のリポジトリ。
+    pr_repo = os.environ.get("BEACON_PR_REPO", "").strip()
     origin_doc = os.environ.get("BEACON_ORIGIN_DOC", "").strip()
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
     mode = os.environ.get("BEACON_MODE", "diff").strip() or "diff"
@@ -1867,7 +1951,8 @@ def cmd_review_context():
     # e-4006-gated). Handled as a self-contained branch (its 原典 is the target's
     # SPEC, resolved from --target, not --origin-doc).
     if review_type == review_spine.REVIEW_ATTAINMENT:
-        _emit_attainment_context(target_id, pr=pr, diff_ref=diff_ref)
+        _emit_attainment_context(target_id, pr=pr, diff_ref=diff_ref,
+                                 pr_repo=pr_repo)
         return
 
     # ms-154 / e-5595: decision-verification. The artifact is the declared
@@ -1895,6 +1980,14 @@ def cmd_review_context():
         print("Error: --pr and --diff-ref are mutually exclusive; pass exactly "
               "one (the Usage brackets mean 'one of', not 'both').",
               file=sys.stderr)
+        sys.exit(1)
+    # ms-166 e-6971: --repo は PR 番号を解決する先を指すので --pr 以外では意味が無い。
+    # 黙って無視すると、利用者は「リポジトリを指定した」と信じたまま別の対象の
+    # bundle を受け取る (= この課題が直した欠陥と同じ形)。
+    if pr_repo and not pr:
+        print("Error: --repo は --pr と一緒に使ってください (PR 番号を解決する先を"
+              "指す指定なので、--diff-ref / --target / --mode full-surface では"
+              "意味を持ちません)。", file=sys.stderr)
         sys.exit(1)
     # ms-119 / e-4196 (AX review): --target (whole-target scope) and --pr / --diff-ref
     # (change scope) are contradictory artifact sources. The old elif chain silently
@@ -1998,8 +2091,17 @@ def cmd_review_context():
         # collection (returncode check + diff/empty handling) so there is no
         # cross-branch `proc` re-tested by a duplicated `if pr or diff_ref` guard.
         if pr:
-            target_ref = f"PR #{pr}"
-            diff_text = _collect_change_diff(["gh", "pr", "diff", pr], target_ref, gaps)
+            # ms-166 e-6971: **どのリポジトリの** PR なのかを決めてから差分を採る。
+            # 旧実装は `gh pr diff <n>` をリポジトリ指定なしで叩いていたので、gh は
+            # cwd のリポジトリに対して番号を解決した。別リポジトリの PR を見るつもりで
+            # 叩くと「cwd のリポジトリの同じ番号」の差分が **エラーでなく成功として**
+            # 返り、しかも bundle の target_ref は "PR #3" だけでどのリポジトリか
+            # 残らない。その上で `beacon review done` が「実施した」と記録して
+            # approve / merge の関門を外す = 別のコードを真面目にレビューした結果が
+            # 品質の証拠として通る (2026-10-13 実測、別プロジェクトのセッション報告)。
+            argv, target_ref, pr_repo = _pr_diff_collection(pr, pr_repo, gaps)
+            diff_text = _collect_change_diff(argv, target_ref, gaps,
+                                             empty_is_error=True)
         elif diff_ref:
             target_ref = diff_ref
             # ms-119 / e-4096: -U25 widens the diff context so surrounding code
@@ -2181,15 +2283,13 @@ def cmd_review_batch_context():
               file=sys.stderr)
         sys.exit(1)
 
-    target_ref = f"PR #{pr}"
-    proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    diff_text = proc.stdout
+    # ms-166 e-6971: batch も同じ収集を通す。ここだけリポジトリ指定なしのままだと、
+    # /beacon-review-run が既定で使う経路 (--batch) が取り違えたままになる。
     shared_gaps = []
-    if not diff_text.strip():
-        shared_gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+    argv, target_ref, _repo = _pr_diff_collection(
+        pr, os.environ.get("BEACON_PR_REPO", "").strip(), shared_gaps)
+    diff_text = _collect_change_diff(argv, target_ref, shared_gaps,
+                                     empty_is_error=True)
 
     external_references = []
     surface_ref = _review_surface_index_reference()
@@ -3352,13 +3452,14 @@ def _review_skip_gate_record() -> dict:
     }
 
 
-def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> None:
+def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str,
+                                pr_repo: str = "") -> None:
     _fire_review_due_for_pr("ax", "AX (AI-Experience interface drift)",
-                            pr_number, pr_title, pr_url)
+                            pr_number, pr_title, pr_url, pr_repo=pr_repo)
 
 
-def _clear_ax_review_due_trigger(pr_number: str) -> None:
-    _clear_review_due_for_pr("ax", pr_number)
+def _clear_ax_review_due_trigger(pr_number: str, pr_repo: str = "") -> None:
+    _clear_review_due_for_pr("ax", pr_number, pr_repo=pr_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -3517,7 +3618,7 @@ def cmd_review_skip():
     """Record a HUMAN's deliberate decision to skip an owed review (ms-119 e-4124).
 
     beacon review skip --type <ax|maintainability|philosophy|...> \\
-        (--pr <N> | --target <ms-XX|op-X>) --reason "<なぜ省くか>"
+        (--pr <N> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason "<なぜ省くか>"
 
     First-class, reason-bearing, audited — semantically distinct from
     BEACON_PR_REVIEW_OVERRIDE (force a merge PAST a review that is still owed).
@@ -3527,13 +3628,33 @@ def cmd_review_skip():
     recorded reason is exactly the silent skip this MS exists to prevent."""
     review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
     pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
+    # ms-166 e-6971: どのリポジトリの PR 番号に対する waiver か。done と同じ識別子を
+    # 持たせる (兄弟で「この PR」の意味が割れると、片方で免除した対象ともう片方で
+    # 実施した対象が別物になりうる)。
+    pr_repo = os.environ.get("BEACON_PR_REPO", "").strip()
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
     reason = (os.environ.get("BEACON_REASON", "") or "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    if pr_repo and not core.is_repo_slug(pr_repo):
+        print(f"Error: --repo は owner/name の形で渡してください "
+              f"(受け取った値: {pr_repo!r})。", file=sys.stderr)
+        sys.exit(1)
+    if pr_repo and not pr_number:
+        print("Error: --repo は --pr と一緒に使ってください (PR 番号を解決する先を"
+              "指す指定なので、--target では意味を持ちません)。", file=sys.stderr)
+        sys.exit(1)
+    if pr_number and not pr_number.isdigit():
+        print(f"Error: --pr は PR 番号 (数字) を渡してください "
+              f"(受け取った値: {pr_number!r})。数字以外を通すと、レビュー未実施の"
+              f"印の名前を読み戻せず、別の PR の関門に誤帰属します "
+              f"(ms-166 e-6971)。", file=sys.stderr)
+        sys.exit(1)
+
     if not review_type or not (pr_number or target_id):
         print("Usage: beacon review skip --type <ax|maintainability|philosophy|...> "
-              "(--pr <N> | --target <ms-XX|op-X>) --reason \"<なぜ省くか>\"",
+              "(--pr <N> [--repo <owner/name>] | --target <ms-XX|op-X>) "
+              "--reason \"<なぜ省くか>\"",
               file=sys.stderr)
         sys.exit(1)
     if pr_number and target_id:
@@ -3546,6 +3667,16 @@ def cmd_review_skip():
               "そのものです。", file=sys.stderr)
         sys.exit(1)
 
+    # ms-166 e-6971 (独立 AX レビュー misleading): 兄弟の `review done` は --repo
+    # 省略時に cwd のリポジトリを解決するのに、こちらは生の値を使っていた。同じ
+    # `--pr [--repo]` の形を取る 2 兄弟で既定の読み方が割れていると、done で覚えた
+    # 挙動を skip に持っていった人に「一致する review-due が無い」と返り、しかも
+    # 「PR 番号の typo を確認せよ」と **誤った原因** を案内することになる
+    # (judge が実測: 実在する ax-review-due-3@o~r.json に対し --repo 省略で
+    #  waived_obligation=false + typo 案内。--repo o/r を付けると即座に見つかる)。
+    _skip_repo_confirmed = bool(pr_repo)
+    if pr_number and not pr_repo:
+        pr_repo = _resolve_review_pr_repo("", [])
     import review_spine
     import datetime
     # e-4124 AX/maint review: reject an unknown --type. Without this a typo'd type
@@ -3562,8 +3693,13 @@ def cmd_review_skip():
     # Peek BEFORE mutating: does a matching owed review actually exist? A skip of a
     # non-existent obligation (wrong PR / target id) must not look successful.
     if pr_number:
-        owed = os.path.isfile(os.path.join(
-            _get_triggers_dir(), f"{review_type}-review-due-{pr_number}.json"))
+        # ms-166 e-6971: 名前の組み立ては review_due_filename に一本化する
+        # (ここで手組みすると、リポジトリ付きの名前になった後も旧式だけを見て
+        #  「免除する義務が無い」と誤報する)。両形を見る判断と廃止条件は
+        # commands_shared.LEGACY_REVIEW_DUE_TOLERANCE に 1 箇所だけ書いてある。
+        owed = any(os.path.isfile(os.path.join(_get_triggers_dir(), _n))
+                   for _n in {review_due_filename(review_type, pr_number, pr_repo),
+                              review_due_filename(review_type, pr_number, "")})
     else:
         owed = _target_review_due_has_binding(target_id, review_type)
 
@@ -3574,6 +3710,11 @@ def cmd_review_skip():
         review_type=review_type, ref_kind=ref_kind, ref=ref, reason=reason,
         actor=_actor_str(), gate=gate, at=datetime.datetime.now().isoformat())
     record["waived_obligation"] = owed  # honest audit: was anything actually owed?
+    if pr_number:
+        # ms-166 e-6971: **どのリポジトリの** PR N を免除したのか。番号だけだと、
+        # 別リポジトリの同じ番号の免除と区別できない (監査記録として辿れない)。
+        # 明示が無ければ cwd のリポジトリを解決し、取れなければ空文字 = 「不明」。
+        record["repo"] = pr_repo or _resolve_review_pr_repo("", [])
 
     # Durable audit first (the record must survive even if trigger clearing
     # races); then clear ONLY this type's review-due obligation.
@@ -3585,7 +3726,8 @@ def cmd_review_skip():
         sys.exit(1)
     if pr_number:
         # One file per (type, PR); removing it waives exactly this type.
-        _clear_review_due_for_pr(review_type, pr_number)
+        _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo,
+                                 repo_confirmed=_skip_repo_confirmed)
     else:
         # The target review-due trigger is ONE file carrying ALL bindings that
         # fired at the completion 節目 (e.g. philosophy + attainment). A per-type
@@ -3617,7 +3759,8 @@ def cmd_review_skip():
 
 
 def _record_review_adjudication_decision(review_type: str, pr_number: str,
-                                         summary: str, adjudications: list) -> None:
+                                         summary: str, adjudications: list,
+                                         pr_repo: str = "") -> None:
     """ms-166 e-5971 — weld the finding-level review adjudication onto the decision
     arm at the SAME choke point that clears the review gate (``beacon review done``),
     so recording a review structurally captures WHAT was decided about its findings —
@@ -3684,7 +3827,11 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
             # event ids, so `related.pr_number` was silently dropped (found by
             # dogfooding this very seam; a review-adjudication is about a PR, not a
             # task/target). "pr:<n>" makes "which採否 for PR N" queryable via evidence.
-            "evidence": [f"review:{review_type}", f"pr:{pr_number}"],
+            # ms-166 e-6971: **どのリポジトリの** PR N かも evidence に入れる。
+            # 番号だけだと、別リポジトリの同じ番号に対する採否と区別できない
+            # (= 関門を外した判断がどの差分のものか辿れない)。
+            "evidence": ([f"review:{review_type}", f"pr:{pr_number}"]
+                         + ([f"repo:{pr_repo}"] if pr_repo else [])),
         })
 
 
@@ -3722,6 +3869,7 @@ def cmd_review_done():
     so beacon pr approve/merge no longer blocks on it (ms-119 e-4060).
 
     beacon review done --type <ax|maintainability|...> --pr <N>
+        [--repo <owner/name>]
         [--adjudication-summary <text>]
         [--adjudications '[{"finding":..,"disposition":accepted|declined|deferred,"rationale":..}]']
 
@@ -3737,17 +3885,54 @@ def cmd_review_done():
     "verdict" concepts — it is the 採否 summary, not an approval verdict.)"""
     review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
     pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
+    # ms-166 e-6971: **どのリポジトリの** その番号に対する実施か。関門を外す記録が
+    # どの差分に対するものか辿れない状態を残さないために記録する。明示が無ければ
+    # cwd のリポジトリ (= review context が既定で差分を採る先と同じ) を解決する。
+    pr_repo = os.environ.get("BEACON_PR_REPO", "").strip()
+    if pr_number and not pr_number.isdigit():
+        print(f"Error: --pr は PR 番号 (数字) を渡してください "
+              f"(受け取った値: {pr_number!r})。数字以外を通すと、レビュー未実施の"
+              f"印の名前を読み戻せず、別の PR の関門に誤帰属します "
+              f"(ms-166 e-6971)。", file=sys.stderr)
+        sys.exit(1)
+    if pr_repo and not core.is_repo_slug(pr_repo):
+        print(f"Error: --repo は owner/name の形で渡してください "
+              f"(受け取った値: {pr_repo!r})。", file=sys.stderr)
+        sys.exit(1)
     if not review_type or not pr_number:
         print("Usage: beacon review done --type <ax|maintainability|...> --pr <N> "
-              "[--adjudication-summary <text>] "
+              "[--repo <owner/name>] [--adjudication-summary <text>] "
               "[--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,"
               "\"rationale\":..}]']", file=sys.stderr)
         sys.exit(1)
-    _clear_review_due_for_pr(review_type, pr_number)
+    # 明示の --repo かどうかを覚えておく (独立 AX レビュー high)。cwd から推測した
+    # 値で、リポジトリを持たない旧式の印を引退させてはならない —— judge の実測では
+    # 無関係な cwd からの `review done --pr 42` が、別リポジトリの同番号の PR の
+    # 関門を一度もレビューせずに開けた。
+    _repo_confirmed = bool(pr_repo)
+    if not pr_repo:
+        # 明示が無ければ cwd のリポジトリを解決する。**記録を書く前に** 決めるのが
+        # 要点 — 後で決めると、先に書かれる判断記録 (decision arm) だけリポジトリを
+        # 持たない形になり、2 つの記録が同じ実施について違うことを言う。
+        # 解決できなければ空のまま = 「不明」を記録し、推測で埋めない。
+        pr_repo = _resolve_review_pr_repo("", [])
+    # ms-166 e-6971: **消す前に** この (リポジトリ, 番号) に義務が在ったかを見る。
+    # 後から数えると「元から無かった」と「いま解消した」を区別できず、下の報告が
+    # 「全て実施済み — gate を通過できます」と、別リポジトリの PR には成り立たない
+    # ことを言ってしまう (実機で踏んだ: 誤った --repo を渡すと、この PR 番号の
+    # 記録が 2 件とも依然 block されているのに「通過できます」と出た)。
+    _owed_before = _pending_review_types_for_pr(pr_number, pr_repo)
+    # 「既に台帳に在るか」も **この実行が書く前に** 見る。後で見ると、この実行自身の
+    # 記録で必ず真になり、下の「義務が無かったので非 0 で終える」分岐が死ぬ
+    # (自分の試験がこれを捕まえた —— _owed_before と同じ「変える前に測る」の話)。
+    _already_recorded = review_type in (
+        _read_review_done_ledger().get(pr_number) or [])
+    _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo,
+                             repo_confirmed=_repo_confirmed)
     _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
     _adjudications = _adjudications_from_env()
     _record_review_adjudication_decision(
-        review_type, pr_number, _adj_summary, _adjudications)
+        review_type, pr_number, _adj_summary, _adjudications, pr_repo)
     if not _adj_summary and not _adjudications:
         # ms-166 e-5971 (AX review): the weld is opt-in and the command cannot know
         # how many findings the judge produced — so make the OMISSION visible rather
@@ -3758,9 +3943,15 @@ def cmd_review_done():
     # ms-166 e-6899: 実施した事実を作業フォルダ横断の台帳に足す。これを足すのは
     # トリガーファイルを消した **後** で、かつ remaining を数える **前**。
     # fork で打ったときに親からも実施済みとして見えるようにするのが目的。
-    _ledger_state = record_review_done_across_worktrees(review_type, pr_number)
-    remaining = _pending_review_types_for_pr(pr_number)
-    print(f"レビュー実施を記録: {review_type} / PR #{pr_number} (review-due 解消)")
+    _ledger_state = record_review_done_across_worktrees(
+        review_type, pr_number, pr_repo)
+    remaining = _pending_review_types_for_pr(pr_number, pr_repo)
+    print(f"レビュー実施を記録: {review_type} / "
+          f"{pr_repo + '#' if pr_repo else 'PR #'}{pr_number} (review-due 解消)")
+    if not pr_repo:
+        print("  ⚠ どのリポジトリの PR かを記録できませんでした — この記録からは"
+              "「どの差分に対する実施か」を辿れません。`--repo <owner/name>` を"
+              "付けて打ち直すと残ります (ms-166 e-6971)。", file=sys.stderr)
     # ms-166 e-6899 (独立レビュー AX high): 名乗りを実態に合わせる。初版は書き込みの
     # 成否だけを見て「作業フォルダ横断で記録した」と言っていたので、非 git プロジェクト
     # (営業職種など正規サポート対象) では原理的に真になりえない主張が毎回出ていた。
@@ -3780,13 +3971,37 @@ def cmd_review_done():
         # anchor does NOT re-fire review-due for this (now review-less) PR.
         try:
             os.makedirs(_get_triggers_dir(), exist_ok=True)
-            with open(_pr_open_reviewed_marker_path(pr_number), "w",
+            with open(_pr_open_reviewed_marker_path(pr_number, pr_repo), "w",
                       encoding="utf-8") as f:
                 f.write(review_type)
         except OSError:
             pass
-        print(f"  PR #{pr_number} の独立レビューは全て実施済み "
-              f"— approve/merge の gate を通過できます。")
+        _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
+        if _owed_before:
+            print(f"  {_where} の独立レビューは全て実施済み "
+                  f"— approve/merge の gate を通過できます。")
+        else:
+            # 元から義務が無かった = この (リポジトリ, 番号) に review-due が
+            # 発火していない。**「全て実施済み」と言ってはいけない** —— 同じ番号の
+            # 別リポジトリの PR は依然 block されていることがあり、その gate を
+            # 通過できるかは何も言えていない。--repo の指定間違いが最も疑わしい。
+            #
+            # 終了コードでも言う (独立 AX レビュー medium): 兄弟の `review skip` は
+            # 同じ意味 (解消すべき義務が無かった) で非 0 を返すのに、こちらは 0 を
+            # 返していた。`$?` だけを見る script / AI が「何も起きなかった」を
+            # 「関門が外れた」と取り違える。
+            #
+            # ただし **冪等な打ち直しは 0 のまま**。台帳に同じ (種別, PR) の記録が
+            # 既にあるなら「さっき実施して解消した」のであって、間違った指定では
+            # ない。ここを分けないと /beacon-review-run の再実行が失敗に見える。
+            print(f"  ℹ {_where} には未実施のレビューが元から在りませんでした "
+                  f"(review-due が発火していない)。この記録は残りますが、"
+                  f"どの PR の gate も新たに外れていません。"
+                  f"--repo の指定が意図と合っているか確認してください "
+                  f"(ms-166 e-6971)。", file=sys.stderr)
+            if not _already_recorded:
+                # CI の関門も倒さずに終える (何も解消していないので)。
+                sys.exit(3)
         # ms-119 e-4073 (scaffold, opt-in): flip the CI gate status to success so
         # a branch-protection required check unblocks the merge button on ALL
         # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by
@@ -6553,12 +6768,13 @@ def _help_registry():
         {"command": "beacon operation approve <op-id> --spec <doc-id>", "flags": ["--expires-at YYYY-MM-DD", "--ttl-seconds N", "--json"], "description": "Mint T2 envelope from SPEC doc's approved_actions list (ms-60 / e-1339)"},
         {"command": "beacon operation revoke <op-id>", "flags": ["--envelope-id ENV", "--reason TEXT", "--json"], "description": "Invalidate the active T2 envelope (auto-picks active if --envelope-id omitted)"},
         {"command": "beacon operation envelope verify <op-id> <action>", "flags": ["--json"], "description": "AI self-check: is <action> permitted by the active envelope's approved_actions? (ms-60 / e-1340)"},
+        {"command": "beacon operation server-tick <op-id>", "flags": ["--on", "--off", "--cadence <分>"], "description": "この Operation をサーバ側の定期ティックの発火対象にする / やめる (ms-166 e-5980)。既定 --on。opt-in した Operation だけが本番の tick (beacon-tick.timer → /api/system/trek-scheduler/tick) で自律発火する"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
         {"command": "beacon target review-request <target-id>", "flags": ["--new-state <s>", "--old-state <s>", "--intent <text>", "--evidence e-1,e-2"], "description": "Request human approval for a target transition (目的達成レビュー; ms-119)"},
         {"command": "beacon target approve <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Approve a pending target transition (= executes the transition; --reason alias of --rationale, e-3906)"},
         {"command": "beacon target reject <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Reject a pending target transition (= transition does NOT execute; --reason alias of --rationale, e-3906)"},
         {"command": "beacon target list", "flags": ["--target <id>", "--pending", "--json"], "description": "List target transition-approval requests"},
-        {"command": "beacon review context --type <ax|philosophy>", "flags": ["--pr <n>", "--diff-ref <base...head>", "--origin-doc <doc-id>", "--mode diff"], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)"},
+        {"command": "beacon review context --type <ax|philosophy>", "flags": ["--pr <n>", "--repo <owner/name>", "--diff-ref <base...head>", "--origin-doc <doc-id>", "--mode diff"], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)。--repo は --pr の番号がどのリポジトリのものかを指す (省略時は cwd のリポジトリ; ms-166 e-6971)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac-verdict <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac-verdict を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},
         {"command": "beacon task cancel <entry-id>", "flags": ["--reason <text>", "--acknowledge"], "description": "Cancel (取消) a task. `task update --status cancelled` は拒否されるのでこちらが唯一の経路。終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)"},

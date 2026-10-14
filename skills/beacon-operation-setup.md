@@ -379,6 +379,39 @@ cd "$PROJECT_DIR" && beacon operation task list -o <op-id>
 cd "$PROJECT_DIR" && beacon operation activate <op-id>
 ```
 
+### Step 5b: 定期ティックに乗せるか（ms-166 e-5980）
+
+**open にしただけでは自律発火しない。** 本番のサーバ側ティック
+(`beacon-tick.timer` → `POST /api/system/trek-scheduler/tick`) は、
+**`meta.server_tick` を opt-in した Operation だけ**を発火対象にする。
+この opt-in を打つ経路がどこにも無かったため、「定期実行の Operation を
+open にしたのに何も起きない」が起きていた（動詞は在ったが bin/beacon に
+route されておらず、Skill からも呼ばれていなかった = 配線はあるが動かない）。
+
+Step 1c の `activation_hint` や schedule から「これは定期的に自分で動く
+Operation か」を判断し、**そうならユーザーに確認して opt-in する**:
+
+```bash
+cd "$PROJECT_DIR" && beacon operation server-tick <op-id> --on --cadence <分>
+```
+
+- `--cadence` は発火間隔（分）。省略時は既定 60 分。hourly の監視なら 60、
+  日次なら 1440 を目安に、Step 1c で聞いた条件に合わせる。
+- 「人が `/beacon-operation-review` を手で回す Operation」なら opt-in しない
+  （勝手に自律発火させない）。その場合もユーザーにそう伝える。
+- 後から切るのは `beacon operation server-tick <op-id> --off`。
+
+opt-in したら、本番のティックが生きているかを 1 度だけ確認して伝える
+（読み取り専用、認証不要）:
+
+```bash
+curl -fsS https://beacon-ai.dev/api/system/tick-health
+```
+
+`status` が `ok` なら駆動は生きている。`stale` / `unreachable` なら
+**opt-in しても発火しない**ので、その事実をユーザーに伝える
+（復旧手順は `docs/DEPLOY_VPS.md` の「定期ティック」節）。
+
 ### まだ done になっていない OperationTasks がある
 
 `todo` のまま終了。  

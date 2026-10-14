@@ -450,11 +450,14 @@ case "${1:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
                         --pr)                   _need_flag_value "$#" "$1"; _rd_pr="$2";      shift 2 ;;
+                        # ms-166 e-6971: どのリポジトリの PR 番号に対する実施か。
+                        # 関門を外す記録がどの差分のものか辿れるようにするため。
+                        --repo)                 _need_flag_value "$#" "$1"; _rd_repo="$2";    shift 2 ;;
                         --adjudication-summary) _need_flag_value "$#" "$1"; _rd_summary="$2"; shift 2 ;;
                         --adjudications)        _need_flag_value "$#" "$1"; _rd_adj="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
@@ -462,29 +465,32 @@ case "${1:-}" in
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rd_type" BEACON_PR_NUMBER="$_rd_pr" \
+                    BEACON_PR_REPO="$_rd_repo" \
                     BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
                     python3 "$COMMANDS_PY" review_done ;;
             skip)
                 shift 2
-                _rs_type="" _rs_pr="" _rs_target="" _rs_reason="" _rs_json=""
+                _rs_type="" _rs_pr="" _rs_target="" _rs_reason="" _rs_json="" _rs_repo=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)   _rs_type="${2:-}";   shift 2 ;;
                         --pr)     _rs_pr="${2:-}";      shift 2 ;;
+                        --repo)   _rs_repo="${2:-}";    shift 2 ;;
                         --target) _rs_target="${2:-}";  shift 2 ;;
                         --reason) _rs_reason="${2:-}";  shift 2 ;;
                         --json)   _rs_json="1";         shift ;;
                         -?*)      _guard_flag "$1" ;;
-                        *)        _guard_positional "$1" "Usage: beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (このコマンドは flag のみを取ります)" ;;
+                        *)        _guard_positional "$1" "Usage: beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason \"...\"  (このコマンドは flag のみを取ります)" ;;
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rs_type" BEACON_PR_NUMBER="$_rs_pr" \
+                    BEACON_PR_REPO="$_rs_repo" \
                     BEACON_TARGET_ID="$_rs_target" BEACON_REASON="$_rs_reason" \
                     BEACON_JSON="$_rs_json" python3 "$COMMANDS_PY" review_skip ;;
-            *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力)" >&2
-                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--adjudication-summary <text>] [--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,\"rationale\":..}]']  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--adjudication-summary/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
-                      echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
+            *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> [--repo <owner/name>] | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力。--repo は PR 番号の属するリポジトリ、省略時は cwd; ms-166 e-6971)" >&2
+                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--repo <owner/name>] [--adjudication-summary <text>] [--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,\"rationale\":..}]']  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--adjudication-summary/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
+                      echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac
@@ -782,7 +788,8 @@ case "${1:-}" in
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                        *) _guard_extra_positional "$title" "$1" "Usage: beacon operation open|create \"<title>\" [...]"
+                           title="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_TITLE="$title" \
@@ -810,7 +817,8 @@ case "${1:-}" in
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                        *) _guard_extra_positional "$title" "$1" "Usage: beacon operation open|create \"<title>\" [...]"
+                           title="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_TITLE="$title" \
@@ -833,6 +841,41 @@ case "${1:-}" in
                 BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="open" \
                     python3 "$COMMANDS_PY" operation_set_status
                 ;;
+            server-tick)
+                # ms-166 e-5980: この Operation をサーバ側の定期ティックの発火対象に
+                # する / しない。python 側の動詞は在ったが **どのフロントからも
+                # 到達できなかった** (bin/beacon 未 route + Skill からの呼び出しゼロ)。
+                # 「内部専用だから出さない」という元の意図が、結果として
+                # 「誰も opt-in できない機能」を作っていた (ms-166 の主題)。
+                shift 2
+                _ost_id="" _ost_mode="on" _ost_cadence=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --on)      _ost_mode="on";  shift ;;
+                        --off)     _ost_mode="off"; shift ;;
+                        --cadence) _need_flag_value "$#" "$1"; _ost_cadence="$2"; shift 2 ;;
+                        -?*)       _guard_flag "$1" ;;
+                        *)
+                            # ms-166 e-5980: 余分な位置引数は打ち間違い。
+                            # 共通の _guard_extra_positional に揃える
+                            # (独立保守性レビュー medium: operation noun の中に
+                            #  「最初が勝つ」と「拒否」の 2 流儀が並存していた。
+                            #  拒否側に全部揃えた)。
+                            _guard_extra_positional "$_ost_id" "$1" \
+                                "Usage: beacon operation server-tick <op-id> [--on|--off] [--cadence <分>]"
+                            _ost_id="$1"; shift
+                            ;;
+                    esac
+                done
+                if [ -z "$_ost_id" ]; then
+                    echo "Usage: beacon operation server-tick <op-id> [--on|--off] [--cadence <分>]" >&2
+                    echo "       サーバ側の定期ティックで自律発火させるかを切り替える (既定 --on)。" >&2
+                    exit 1
+                fi
+                BEACON_OP_ID="$_ost_id" BEACON_SERVER_TICK="$_ost_mode" \
+                    BEACON_CADENCE="$_ost_cadence" \
+                    python3 "$COMMANDS_PY" operation_server_tick
+                ;;
             status)
                 # ms-120 e-3907: deprecated write form. `activate` (→open) and
                 # `close` (→closed) are the canonical named verbs; `status` now
@@ -854,7 +897,8 @@ case "${1:-}" in
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_ID="$op_id" BEACON_TITLE="$title" \
@@ -879,7 +923,8 @@ case "${1:-}" in
                         --reason) reason="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
                         -?*) _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_ID="$op_id" BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
@@ -902,7 +947,8 @@ case "${1:-}" in
                         --ttl-seconds) ttl_seconds="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 # Translate --expires-at YYYY-MM-DD into ttl_seconds (the API expects seconds).
@@ -936,7 +982,8 @@ except ValueError as e:
                         -r|--reason) reason="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_ID="$op_id" BEACON_ENVELOPE_ID="$env_id" \
@@ -980,7 +1027,8 @@ except ValueError as e:
                                 --motivation|--why) motivation="${2:-}"; shift 2 ;;
                                 --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                                 -?*)           _guard_flag "$1" ;;
-                                *) [[ -z "$desc" ]] && desc="$1"; shift ;;
+                                *) _guard_extra_positional "$desc" "$1" "Usage: beacon operation task add \"<desc>\" -o <op-id> [...]"
+                                   desc="$1"; shift ;;
                             esac
                         done
                         BEACON_OPERATION_ID="$op_id" BEACON_DESCRIPTION="$desc" \
@@ -996,7 +1044,8 @@ except ValueError as e:
                             case "$1" in
                                 -r|--reason) reason="${2:-}"; shift 2 ;;
                                 -?*)           _guard_flag "$1" ;;
-                                *) [[ -z "$entry_id" ]] && entry_id="$1"; shift ;;
+                                *) _guard_extra_positional "$entry_id" "$1" "Usage: beacon operation task done <entry-id> [--reason R]"
+                                   entry_id="$1"; shift ;;
                             esac
                         done
                         BEACON_ENTRY_ID="$entry_id" BEACON_REASON="$reason" \
@@ -1023,6 +1072,22 @@ except ValueError as e:
                 esac
                 ;;
             *)
+                # ms-166 e-5980 (独立 AX レビュー high): 知らない sub-verb と
+                # 「sub-verb 無し / --help (= 一覧が見たい)」を分ける。以前はどちらも
+                # Usage を stdout に出して **exit 0** だったので、終了コードだけを
+                # 見る script / AI には「成功した」と読めた。judge が実測: 他の
+                # noun の作法 (`channel opt-in`) から類推した
+                # `beacon operation opt-in <op-id>` が exit 0 で何もしなかった。
+                # 兄弟 (`beacon review <知らない語>`) は exit 1 なので揃える。
+                _op_unknown=""
+                case "${2:-}" in
+                    ""|-h|--help) _op_unknown="" ;;
+                    *)            _op_unknown="${2}" ;;
+                esac
+                if [ -n "$_op_unknown" ]; then
+                    echo "Error: 知らない operation の sub-verb です: $_op_unknown" >&2
+                    echo "  下の一覧に在る語を使ってください (定期発火の on/off は 'server-tick')。" >&2
+                fi
                 echo "Usage: beacon operation open \"<title>\" [--schedule daily|weekdays|weekly]"
                 echo "                                [--status todo|in_progress|open|closed]"
                 echo "                                [--activation-hint H --objective O --ac A --priority P]"
@@ -1039,7 +1104,11 @@ except ValueError as e:
                 echo "       beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD] [--json]"
                 echo "       beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT] [--json]"
                 echo "       beacon operation envelope verify <op-id> <action> [--json]"
+                echo "       beacon operation server-tick <op-id> [--on|--off] [--cadence <分>]"
                 echo "       beacon operation task add/done/list ..."
+                # `[ -n "" ] && exit 1` は偽のとき終了コード 1 を残すので、
+                # sub-verb 無し (= 一覧が見たいだけ) が失敗扱いになる。if で書く。
+                if [ -n "$_op_unknown" ]; then exit 1; fi
                 ;;
         esac
         ;;

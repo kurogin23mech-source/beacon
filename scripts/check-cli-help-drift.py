@@ -401,6 +401,11 @@ ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
     "operation activate", "operation approve", "operation close",
     "operation create", "operation list", "operation open",
     "operation pause", "operation resume",  # ms-160 e-5814
+    # ms-166 e-5980: server-tick の opt-in。operation noun の兄弟すべてと同じ
+    # 扱い (dev/ops 向けで Windows の主要動線ではない)。bash 側に route して
+    # 到達可能にしたのが今回の主旨で、python dispatch の parity は兄弟に揃えた
+    # follow-up 扱い。
+    "operation server-tick", "operation server_tick",
     "operation revoke",
     "operation show", "operation start", "operation status", "operation task",
     "operation update",

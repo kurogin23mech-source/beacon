@@ -82,11 +82,17 @@ def _pr_number_from_url(url: str) -> str:
     n = core._extract_pr_number_from_url(url)
     return str(n) if n is not None else ""
 
-def _review_gate_check(pr_number: str, *, action: str) -> None:
+def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> None:
     """Refuse ``action`` (approve / merge) while independent reviews are still
     owed for this PR, unless BEACON_PR_REVIEW_OVERRIDE=1 (which proceeds but
-    prints an audit line). Exits 2 on block. ms-119 e-4060."""
-    pending = _pending_review_types_for_pr(pr_number)
+    prints an audit line). Exits 2 on block. ms-119 e-4060.
+
+    ``pr_repo`` (ms-166 e-6971): which repository this number belongs to, so a
+    review recorded for a DIFFERENT repository's PR#N does not lift this PR's
+    gate. Pass it from the entry being gated (``_recorded_pr_repo(entry)``) —
+    the gate reads the same identity the record carries.
+    """
+    pending = _pending_review_types_for_pr(pr_number, pr_repo)
     if not pending:
         return
     if os.environ.get("BEACON_PR_REVIEW_OVERRIDE") == "1":
@@ -208,19 +214,65 @@ def cmd_pr_add():
     # 止める (= exit 2) 側に倒した理由: 警告だけでは同じことが起きる (claim 競合警告は
     # 警告のみで、現に 50 組が作られた)。意図的に 2 件目を足したい場面は想像できるが
     # 実例が無いので、必要になったら旗で開ける。
-    existing = _entries_for_pr_number(data, _pr_number_from_url(url))
-    if existing:
+    #
+    # ms-166 e-6972: 鍵は **リポジトリ + 番号**。番号だけで止めると、1 プロジェクト
+    # で複数リポジトリを扱ったときに別リポジトリの同番号を「既に在る」と誤判定して
+    # 登録そのものを拒む (実測: その MS の PR が一切記録できなくなった)。
+    #
+    # 止める対象は 2 つで、理由が違うので文面も分ける:
+    #   * 同じリポジトリの同じ番号 → 従来どおり **確実な二重登録** なので止める。
+    #   * リポジトリが判定できない → 同じ PR かどうかを機械で決められない。
+    #     推測で通すと二重登録ガードが黙って効かなくなるので止めるが、「二重登録
+    #     です」とは言わない (それは確定していない)。何が分からないかを言う。
+    # 別リポジトリだと **分かった** 組だけが通る。
+    # ms-166 e-6971 (独立 AX レビュー high): **完全な URL なのにリポジトリが取れない**
+    # 入力を受け付けない。番号だけ取れてリポジトリが取れない記録は「リポジトリ不明」の
+    # トリガーを発火させ、そのトリガーは移行互換のためどのリポジトリからでも消せるので、
+    # 別リポジトリの同番号の PR の関門が一度もレビューせずに開く経路になる。
+    # 不明の記録を **移行の名残に限定する** ために、作り続ける口をここで閉じる。
+    if core.url_has_unparseable_repo(url):
+        print(
+            f"Error: {url!r} は PR の URL の形 "
+            f"(https://<host>/<owner>/<repo>/pull/<番号>) ではありません。\n"
+            f"  番号は読めますが、どのリポジトリの PR かが読めません。\n"
+            f"  リポジトリが分からない記録は、レビュー未実施の印をリポジトリ無しで\n"
+            f"  発火させ、その印は別リポジトリの同じ番号からも消せてしまうため、\n"
+            f"  一度もレビューしていない PR の取り込み関門が開く経路になります\n"
+            f"  (ms-166 e-6971)。正しい形の URL を渡してください。",
+            file=sys.stderr)
+        sys.exit(1)
+    _new_repo = core.extract_pr_repo_from_url(url)
+    existing = _entries_for_pr_identity(data, _pr_number_from_url(url), _new_repo)
+    _same = [e for e in existing if e["repo_match"] == REPO_SAME]
+    _unknown = [e for e in existing if e["repo_match"] == REPO_UNKNOWN]
+    if _same or _unknown:
+        blocking = _same + _unknown
         rows = _capped_rows(
-            existing,
+            blocking,
             lambda e: (f"    [{e['eid']}] {e.get('status') or '?'}"
+                       + f" / {e.get('repo') or 'リポジトリ不明'}"
                        + (f" — {e['title'][:60]}" if e.get("title") else "")),
             cap=5)
+        if _same:
+            headline = (f"Error: {_new_repo or 'このリポジトリ'} の PR "
+                        f"#{_pr_number_from_url(url)} の記録は既に "
+                        f"{len(_same)} 件あります")
+        else:
+            headline = (f"Error: PR #{_pr_number_from_url(url)} の記録が "
+                        f"{len(_unknown)} 件ありますが、同じリポジトリの PR かを"
+                        f"判定できません")
+        detail = (
+            "  同じ PR を指す記録が複数あると、突合はどちらを残すかを機械で決め\n"
+            "  られず、人が判断するまで状態が揃いません (ms-166 e-6903: 実測で\n"
+            "  50 組 / 状態不一致 18 件がこの経路で作られていました)。\n"
+            if _same else
+            "  どちらかの記録でリポジトリが分からない (url 欄が壊れている / 構造化\n"
+            "  フィールドが無い) ため、同じ PR なのか別リポジトリの同番号なのかを\n"
+            "  機械で決められません。推測で通すと二重登録ガードが黙って効かなく\n"
+            "  なるので止めます (ms-166 e-6972: 判定できないものは判定できないと\n"
+            "  分かる形にする)。既存記録の url を直せば判定できるようになります。\n")
         print(
-            f"Error: PR #{_pr_number_from_url(url)} の記録は既に "
-            f"{len(existing)} 件あります:\n{rows}\n"
-            f"  同じ PR を指す記録が複数あると、突合はどちらを残すかを機械で決め\n"
-            f"  られず、人が判断するまで状態が揃いません (ms-166 e-6903: 実測で\n"
-            f"  50 組 / 状態不一致 18 件がこの経路で作られていました)。\n"
+            f"{headline}:\n{rows}\n{detail}"
             f"  既存の記録を使ってください。捨てるなら "
             f"`beacon task cancel <entry-id> --reason ...` で理由を残します。",
             file=sys.stderr)
@@ -243,7 +295,8 @@ def cmd_pr_add():
     # every PR-bound review (AX + maintainability, data-driven from the registry)
     # so they fire structurally at the 節目 (not only when a human remembers
     # /beacon-review-run). Advisory, non-blocking.
-    _fire_pr_open_review_triggers(_pr_number_from_url(url), title, url)
+    _fire_pr_open_review_triggers(_pr_number_from_url(url), title, url,
+                                  pr_repo=_new_repo)
 
     # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
     # を author に知らせる (= 警告のみ、block しない)。
@@ -311,7 +364,41 @@ def _capped_rows(items: list, render, cap: int = 10) -> str:
     return "\n".join(lines)
 
 
-def _entries_for_pr_number(data: dict, pr_number: str) -> list:
+def _recorded_pr_repo(entry: dict) -> str:
+    """Return the repository (``owner/repo``) this record points at, or "".
+
+    Thin delegation to ``core.recorded_pr_repo`` so the "structured field first,
+    url parse as fallback" rule lives in ONE place. A second copy here would be a
+    rule maintained by hand in two files — the exact shape the independent review
+    of PR #793 called out for the PR *number* (the canonical predicate plus two
+    literals, each to be found and updated by the next person).
+    """
+    return core.recorded_pr_repo(entry)
+
+
+#: ``_entries_for_pr_identity`` が返す「リポジトリの一致具合」。
+#:
+#: 3 値なのは、**「違うリポジトリだと分かった」と「どのリポジトリか分からない」を
+#: 混ぜてはいけない** から (ms-166 e-6972 AC3)。前者は登録を通してよいが、後者は
+#: 同じ PR かどうかを機械で決められないので通してはいけない。2 値 (同じ / 違う) に
+#: 畳むと、url 欄が壊れた記録 17 件 (e-6902) が「違うリポジトリ」側に落ちて、
+#: 二重登録ガードが黙って効かなくなる。
+REPO_SAME = "same"
+REPO_DIFFERENT = "different"
+REPO_UNKNOWN = "unknown"
+
+
+def _classify_repo_match(recorded_repo: str, new_repo: str) -> str:
+    """既存記録のリポジトリと、これから足す PR のリポジトリを突き合わせる。
+
+    どちらかが空 (= 不明) なら ``REPO_UNKNOWN``。推測で埋めない。
+    """
+    if not recorded_repo or not new_repo:
+        return REPO_UNKNOWN
+    return REPO_SAME if recorded_repo == new_repo else REPO_DIFFERENT
+
+
+def _entries_for_pr_identity(data: dict, pr_number: str, pr_repo: str) -> list:
     """Return existing PR entries that point at ``pr_number`` (ms-166 e-6903).
 
     Terminal records are **excluded**: a record the human cancelled with a
@@ -337,6 +424,21 @@ def _entries_for_pr_number(data: dict, pr_number: str) -> list:
     was not found, and so were the 17 records whose url field holds flag text
     or prose (ms-166 e-6902). A refusal that silently does not fire is worse
     than no refusal — the caller believes the number is protected.
+
+    **The identity is (repository, number), not the number alone** (ms-166
+    e-6972). Keying on the number alone was measured refusing a legitimate
+    record: a project that keeps one milestone's code in a second repository
+    could not register that repo's PR#3 because *this* repo's PR#3 was already
+    recorded, and since the other repo is numbered #1..#129 as well, the whole
+    milestone's PRs became unrecordable with no flag to get past it. The
+    information needed to tell them apart was in the url all along.
+
+    Each returned row therefore carries ``repo`` and ``repo_match`` (one of
+    ``REPO_SAME`` / ``REPO_DIFFERENT`` / ``REPO_UNKNOWN``). This function stays
+    a **reporter**: it does not decide what blocks. The caller does, because
+    "different repository" and "repository undeterminable" need different
+    answers, and folding that choice in here would hide it from the one place
+    the user sees a refusal.
     """
     if not pr_number:
         return []
@@ -349,9 +451,12 @@ def _entries_for_pr_number(data: dict, pr_number: str) -> list:
             if e.get("type") == "pr" and not work_model.is_cancelled(e):
                 num = _recorded_pr_number(e)
                 if num and num == pr_number:
+                    repo = _recorded_pr_repo(e)
                     out.append({"eid": e.get("id", ""),
                                 "status": e.get("status", ""),
-                                "title": e.get("description", "")})
+                                "title": e.get("description", ""),
+                                "repo": repo,
+                                "repo_match": _classify_repo_match(repo, pr_repo)})
             _walk(e.get("entries"))
 
     for ms in data.get("milestones", []) or []:
@@ -523,7 +628,9 @@ def cmd_pr_close():
     save_project(data)
     # ms-119 e-4003: the interface-change 節目 is resolved — stop re-surfacing the
     # AX review nudge for this PR.
-    _clear_pr_open_review_triggers(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
+    _clear_pr_open_review_triggers(
+        _pr_number_from_url(entry.get("meta", {}).get("url", "")),
+        pr_repo=_recorded_pr_repo(entry))
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "closed"}, ensure_ascii=False))
@@ -826,6 +933,7 @@ def cmd_pr_approve():
     # exit). This is the GATE half of closing the review loop — firing a review
     # trigger is meaningless unless approve/merge structurally wait on it.
     _review_gate_check(_pr_number_from_url(entry.get("meta", {}).get("url", "")),
+                       pr_repo=_recorded_pr_repo(entry),
                        action="approve")
 
     # ms-95 / e-2369 — auto-done tasks bound to this PR's commits via
@@ -1099,10 +1207,13 @@ def cmd_pr_merge():
     # persists nothing. The Trek-finalize / user-override escape hatches above
     # are orthogonal (they gate the AI-merge-autonomy boundary, not the review).
     _review_gate_check(_pr_number_from_url(entry.get("meta", {}).get("url", "")),
+                       pr_repo=_recorded_pr_repo(entry),
                        action="merge")
     save_project(data)
     # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
-    _clear_pr_open_review_triggers(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
+    _clear_pr_open_review_triggers(
+        _pr_number_from_url(entry.get("meta", {}).get("url", "")),
+        pr_repo=_recorded_pr_repo(entry))
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
     else:

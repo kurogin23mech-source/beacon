@@ -115,6 +115,78 @@ def clear_failure(meta: dict, *, key: str = "fire") -> None:
     meta.pop(f"{key}_last_failed_at", None)
 
 
+#: envelope (= 事前承認) の有無。**「無い」と「確認できない」を分ける** のが要点
+#: (ms-166 e-5980、独立保守性レビュー high)。CLI 側の取得関数は local モード /
+#: 認証失敗 / 未到達 / 本当に無い の 4 つを全部 None に畳んでいるので、それを
+#: そのまま「無い」と読むと、確認できていないことを断定したことになる。
+ENVELOPE_PRESENT = "present"
+ENVELOPE_ABSENT = "absent"
+ENVELOPE_UNKNOWN = "unknown"
+
+
+def firing_blockers(*, status: str, server_tick, envelope_state: str) -> tuple:
+    """定期ティックでの自律発火を止めている **設定上の理由** を全部返す。
+
+    返り値は ``(blockers, undetermined)`` の 2 つのリスト。``blockers`` が空かつ
+    ``undetermined`` が空なら、設定は揃っている (= あとは cadence が来れば発火する)。
+
+    **なぜここに 1 つだけ置くか** (ms-166 e-5980、独立保守性レビュー high):
+    本番の発火には 3 つの前提が要る —— status が open / ``meta.server_tick`` が真 /
+    **active な envelope が在る**。ところが前の版の CLI は前 2 つだけを見て
+    「→ 発火します」と報告していた。envelope の関門は ``server/app.py``
+    ``_fire_operation`` の中に手で書かれており、CLI 側のコピーはそれを知らなかった。
+    **「名乗りと実態を合わせる」ために足した報告自体が、新しい名乗りのズレだった。**
+
+    だから前提の一覧をここに 1 つ置き、**報告する側 (CLI) と実際に発火する側
+    (server) の両方がこれを通る**。4 つ目の前提を足す人は、この関数を直せば
+    両方に効く (片方だけ直して食い違う形にできない)。
+
+    ``envelope_state`` は上の 3 値。``ENVELOPE_UNKNOWN`` は blockers ではなく
+    ``undetermined`` に入る —— 確認できないことを「無い」と断定しない。
+    """
+    blockers = []
+    undetermined = []
+    if (status or "") != "open":
+        blockers.append(
+            f"status が open ではありません (いまは {status or '(不明)'})。"
+            f"`beacon operation activate <op-id>` で open にしてください")
+    if not truthy(server_tick):
+        blockers.append(
+            "server_tick が off です。"
+            "`beacon operation server-tick <op-id> --on` で opt-in してください")
+    if envelope_state == ENVELOPE_ABSENT:
+        blockers.append(
+            "active な envelope (事前承認) が在りません。"
+            "`beacon operation approve <op-id> --spec <doc-id>` で発行してください")
+    elif envelope_state != ENVELOPE_PRESENT:
+        undetermined.append(
+            "envelope の有無を確認できませんでした (local モード / 認証 / サーバ未到達)。"
+            "cloud モードで `beacon operation show <op-id>` を見てください")
+    return (blockers, undetermined)
+
+
+def validate_cadence_minutes(value) -> int:
+    """書き込む前に cadence を検証して int で返す。不正なら ValueError。
+
+    ms-166 e-5980 (独立 AX レビュー high): 書き込み側がゼロ / 負値を素通ししていた。
+    ``cadence_minutes`` (下の読み取り側) は非正値を既定 60 分に読み替えるので、
+    **CLI が「cadence_minutes=0 にした」と成功を名乗りながら、実際には 60 分で
+    動く** という名乗りと実態のズレになっていた。ゼロは毎ティック発火して bus を
+    焼き、負値は意味を持たない。
+
+    検証をこの module に置くのは、**同じ値を読む側がここに居る** から。
+    ``lib/trek.py:_validate_cadence_minutes`` が同じ規則を独自に持っていたが、
+    Operation 側はそれを知らずに素通りしていた (= 同じ 1 つのフィールドについて
+    兄弟機能が別々の規則を持つと、片方だけ緩いまま残る)。trek 側もここを呼ぶ。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"cadence_minutes must be int, got {type(value).__name__}")
+    if value <= 0:
+        raise ValueError(f"cadence_minutes must be > 0, got {value}")
+    return value
+
+
 def cadence_minutes(descriptor: dict,
                     default: int = DEFAULT_CADENCE_MINUTES) -> int:
     """The descriptor's effective cadence in minutes (non-positive / unparseable
