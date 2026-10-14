@@ -374,35 +374,49 @@ def test_asking_for_the_operation_usage_still_succeeds(tmp_path):
     assert "server-tick" in proc.stdout, "一覧に新しい動詞が出ていない"
 
 
-def test_no_subprocess_in_this_file_runs_from_the_repo_root():
-    """この file の subprocess が **この repo を cwd にしない** こと。
+def test_every_subprocess_in_this_file_runs_in_a_throwaway_project():
+    """この file の subprocess が **使い捨てプロジェクトを cwd にする** こと。
 
     CI が実測した退行: 3 件が `cwd=ROOT` で走っており、ローカルには `.beacon/` が
     在るのに CI のチェックアウトには無いため `ensure_project` が先に落ちて
     「No Beacon project found here」になった —— **ローカル緑 / CI 赤** の
-    非 hermetic な試験。測りたいのは引数処理 / 経路なので、project の有無に
-    依存させない。
+    非 hermetic な試験。
 
-    構文木で `subprocess.run(..., cwd=...)` の実引数を見る (文字列一致では
-    docstring やコメントの言及に反応する)。
+    **禁止リストではなく許可リストで書く** (独立保守性レビュー medium)。最初の版は
+    「`cwd=` の式に ROOT という綴りが含まれていたら赤」という denylist で、judge が
+    等価な 5 つの綴りが素通りすることを実測した: ``__file__`` からの相対計算 /
+    ROOT を含まない名前への代入 / ヘルパー関数経由 / ``check_output`` / ``Popen``。
+    **綴りの変種は後から追いかけられない** (狭すぎるガードは破れる)。
+
+    だから「使ってよい cwd の出どころ」を 1 つだけ決める: ``tmp_path`` 由来
+    (= ``_op_project`` の戻り値か ``tmp_path`` そのもの)。``cwd`` を渡さない形も
+    赤にする —— 渡さなければ pytest の cwd (= この repo) を継ぐので、同じ欠陥になる。
     """
     import ast as _ast
+    #: subprocess を起動する呼び出しの名前。1 つの綴りだけ見る形にしない。
+    SPAWN = {"run", "call", "check_call", "check_output", "Popen"}
+    #: cwd の式に現れてよい名前 (= 使い捨てプロジェクト由来だけ)。
+    ALLOWED_NAMES = {"proj", "tmp_path", "str"}
+
     with open(__file__, encoding="utf-8") as f:
         tree = _ast.parse(f.read())
     offenders = []
     for node in _ast.walk(tree):
         if not isinstance(node, _ast.Call):
             continue
-        name = getattr(node.func, "attr", "")
-        if name != "run":
+        if getattr(node.func, "attr", "") not in SPAWN:
             continue
-        for kw in node.keywords:
-            if kw.arg != "cwd":
-                continue
-            # 許されるのは tmp_path 由来 (= 使い捨てプロジェクト) だけ。
-            src = _ast.unparse(kw.value)
-            if "ROOT" in src:
-                offenders.append(f"line {node.lineno}: cwd={src}")
+        cwd = next((k.value for k in node.keywords if k.arg == "cwd"), None)
+        if cwd is None:
+            offenders.append(f"line {node.lineno}: cwd 未指定 "
+                             f"(pytest の cwd = この repo を継いでしまう)")
+            continue
+        names = {n.id for n in _ast.walk(cwd) if isinstance(n, _ast.Name)}
+        extra = names - ALLOWED_NAMES
+        if extra or not names:
+            offenders.append(
+                f"line {node.lineno}: cwd={_ast.unparse(cwd)} "
+                f"(許可された出どころは {sorted(ALLOWED_NAMES)} だけ)")
     assert offenders == [], (
-        "この repo を cwd にして beacon を叩いている (ローカルだけ緑になる): "
-        + repr(offenders))
+        "使い捨てプロジェクト以外を cwd にして beacon を叩いている "
+        "(ローカルだけ緑になる): " + repr(offenders))
