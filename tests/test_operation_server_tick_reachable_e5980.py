@@ -78,11 +78,19 @@ def test_the_sub_verb_passes_the_env_contract_the_python_side_reads():
         assert env in py, f"python が {env} を読んでいない"
 
 
-def test_running_it_without_an_op_id_explains_itself():
-    """op-id 無しで叩いたら Usage を出して非 0 で終わること (黙って成功しない)。"""
+def test_running_it_without_an_op_id_explains_itself(tmp_path):
+    """op-id 無しで叩いたら Usage を出して非 0 で終わること (黙って成功しない)。
+
+    **使い捨てプロジェクトの中で走らせる。** cwd をこの repo にした版は、ローカルには
+    `.beacon/` が在るのに CI のチェックアウトには無いため、`ensure_project` が先に
+    落ちて「No Beacon project found here」になった (= ローカル緑 / CI 赤の
+    非 hermetic な試験)。測りたいのは sub-verb の引数処理なので、project の有無に
+    依存しない形にする。
+    """
+    proj = _op_project(tmp_path, ("op-1", "open"))
     proc = subprocess.run(
         [os.path.join(ROOT, "bin", "beacon"), "operation", "server-tick"],
-        capture_output=True, text=True, cwd=ROOT)
+        capture_output=True, text=True, cwd=str(proj))
     assert proc.returncode != 0, proc.stdout + proc.stderr
     combined = proc.stdout + proc.stderr
     assert "server-tick <op-id>" in combined, combined
@@ -334,7 +342,7 @@ def test_every_operation_positional_arm_uses_the_one_shared_guard():
         "共通ガードを通る位置引数の腕が少なすぎる: " + repr(len(arms)))
 
 
-def test_an_unknown_operation_sub_verb_exits_non_zero():
+def test_an_unknown_operation_sub_verb_exits_non_zero(tmp_path):
     """知らない sub-verb で exit 0 を返さないこと (独立 AX レビュー high)。
 
     judge が実測: 他の noun の作法 (`channel opt-in`) から類推した
@@ -342,23 +350,59 @@ def test_an_unknown_operation_sub_verb_exits_non_zero():
     終わり、終了コードだけを見る script / AI には「成功した」と読めた。
     兄弟 (`beacon review <知らない語>`) は exit 1。
     """
+    proj = _op_project(tmp_path, ("op-1", "open"))
     for guess in ("opt-in", "opt-out", "server-tick-on", "bogus"):
         proc = subprocess.run(
             [os.path.join(ROOT, "bin", "beacon"), "operation", guess, "op-1"],
-            capture_output=True, text=True, cwd=ROOT)
+            capture_output=True, text=True, cwd=str(proj))
         assert proc.returncode != 0, f"{guess}: exit 0 で黙って成功した"
         assert guess in proc.stderr, (
             f"{guess}: 何が知らない語だったのか名指ししていない:\n" + proc.stderr)
 
 
-def test_asking_for_the_operation_usage_still_succeeds():
+def test_asking_for_the_operation_usage_still_succeeds(tmp_path):
     """一覧を見たいだけの呼び出しは成功のままであること。
 
     知らない語を非 0 にした副作用で、help 要求まで失敗扱いにしない
     (`[ -n "" ] && exit 1` が偽のとき終了コード 1 を残す罠を一度踏んだ)。
     """
+    proj = _op_project(tmp_path, ("op-1", "open"))
     proc = subprocess.run(
         [os.path.join(ROOT, "bin", "beacon"), "operation"],
-        capture_output=True, text=True, cwd=ROOT)
+        capture_output=True, text=True, cwd=str(proj))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "server-tick" in proc.stdout, "一覧に新しい動詞が出ていない"
+
+
+def test_no_subprocess_in_this_file_runs_from_the_repo_root():
+    """この file の subprocess が **この repo を cwd にしない** こと。
+
+    CI が実測した退行: 3 件が `cwd=ROOT` で走っており、ローカルには `.beacon/` が
+    在るのに CI のチェックアウトには無いため `ensure_project` が先に落ちて
+    「No Beacon project found here」になった —— **ローカル緑 / CI 赤** の
+    非 hermetic な試験。測りたいのは引数処理 / 経路なので、project の有無に
+    依存させない。
+
+    構文木で `subprocess.run(..., cwd=...)` の実引数を見る (文字列一致では
+    docstring やコメントの言及に反応する)。
+    """
+    import ast as _ast
+    with open(__file__, encoding="utf-8") as f:
+        tree = _ast.parse(f.read())
+    offenders = []
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        name = getattr(node.func, "attr", "")
+        if name != "run":
+            continue
+        for kw in node.keywords:
+            if kw.arg != "cwd":
+                continue
+            # 許されるのは tmp_path 由来 (= 使い捨てプロジェクト) だけ。
+            src = _ast.unparse(kw.value)
+            if "ROOT" in src:
+                offenders.append(f"line {node.lineno}: cwd={src}")
+    assert offenders == [], (
+        "この repo を cwd にして beacon を叩いている (ローカルだけ緑になる): "
+        + repr(offenders))
