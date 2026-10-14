@@ -450,11 +450,14 @@ case "${1:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
                         --pr)                   _need_flag_value "$#" "$1"; _rd_pr="$2";      shift 2 ;;
+                        # ms-166 e-6971: どのリポジトリの PR 番号に対する実施か。
+                        # 関門を外す記録がどの差分のものか辿れるようにするため。
+                        --repo)                 _need_flag_value "$#" "$1"; _rd_repo="$2";    shift 2 ;;
                         --adjudication-summary) _need_flag_value "$#" "$1"; _rd_summary="$2"; shift 2 ;;
                         --adjudications)        _need_flag_value "$#" "$1"; _rd_adj="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
@@ -462,29 +465,32 @@ case "${1:-}" in
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rd_type" BEACON_PR_NUMBER="$_rd_pr" \
+                    BEACON_PR_REPO="$_rd_repo" \
                     BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
                     python3 "$COMMANDS_PY" review_done ;;
             skip)
                 shift 2
-                _rs_type="" _rs_pr="" _rs_target="" _rs_reason="" _rs_json=""
+                _rs_type="" _rs_pr="" _rs_target="" _rs_reason="" _rs_json="" _rs_repo=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)   _rs_type="${2:-}";   shift 2 ;;
                         --pr)     _rs_pr="${2:-}";      shift 2 ;;
+                        --repo)   _rs_repo="${2:-}";    shift 2 ;;
                         --target) _rs_target="${2:-}";  shift 2 ;;
                         --reason) _rs_reason="${2:-}";  shift 2 ;;
                         --json)   _rs_json="1";         shift ;;
                         -?*)      _guard_flag "$1" ;;
-                        *)        _guard_positional "$1" "Usage: beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (このコマンドは flag のみを取ります)" ;;
+                        *)        _guard_positional "$1" "Usage: beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason \"...\"  (このコマンドは flag のみを取ります)" ;;
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rs_type" BEACON_PR_NUMBER="$_rs_pr" \
+                    BEACON_PR_REPO="$_rs_repo" \
                     BEACON_TARGET_ID="$_rs_target" BEACON_REASON="$_rs_reason" \
                     BEACON_JSON="$_rs_json" python3 "$COMMANDS_PY" review_skip ;;
-            *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力)" >&2
-                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--adjudication-summary <text>] [--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,\"rationale\":..}]']  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--adjudication-summary/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
-                      echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
+            *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> [--repo <owner/name>] | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力。--repo は PR 番号の属するリポジトリ、省略時は cwd; ms-166 e-6971)" >&2
+                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--repo <owner/name>] [--adjudication-summary <text>] [--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,\"rationale\":..}]']  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--adjudication-summary/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
+                      echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac

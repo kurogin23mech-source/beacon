@@ -2239,6 +2239,13 @@ def pr_add(data: dict, *, ms_id: str = "", url: str, author: str = "",
         "url": url,
         "author": author,
         "pr_number": pr_number,
+        # ms-166 e-6972: **どのリポジトリの** その番号か。番号だけを識別子にすると、
+        # 1 プロジェクトで複数リポジトリを扱ったとき別リポジトリの同番号と衝突する
+        # (実測: 別リポの PR#3 が sales-dashboards の PR#3 と衝突して登録できず、
+        # その MS の PR が一切記録できなくなった)。url からは取れるので、url の
+        # 再解析に頼らず **保存時に構造化フィールドへ落とす** (番号について
+        # meta.pr_number が果たしている役割と対)。取れなければ空文字 = 「不明」。
+        "pr_repo": extract_pr_repo_from_url(url),
         "pr_status": "in_review",
         "review_status": "pending",
         "intent": intent,
@@ -2768,6 +2775,75 @@ def _extract_pr_number_from_url(url: str) -> int | None:
     return None
 
 
+def extract_pr_repo_from_url(url: str) -> str:
+    """GitHub の PR URL から ``owner/repo`` を取る。取れなければ空文字。
+
+    PR の識別に **番号だけ** を使うと、1 つのプロジェクトで複数のリポジトリを扱って
+    いるときに別リポジトリの同じ番号と混ざる。2026-10-13 に 2 件を実測している
+    (ms-166 e-6971 / e-6972):
+
+    * ``beacon review context --pr 3`` が、見たかった別リポジトリではなく cwd の
+      リポジトリの PR#3 の差分を **成功として** 返した。
+    * ``beacon pr add`` の二重登録ガードが、別リポジトリの PR#3 を「既に在る」と
+      判定して登録そのものを拒んだ。
+
+    どちらも区別する情報 (= リポジトリ名) は渡された URL に入っているのに、識別子が
+    それを捨てていたのが原因。だから取り出す場所を 1 箇所にする
+    (``_extract_pr_number_from_url`` が番号について果たしている役割と対になる)。
+
+    取れないときに ``""`` を返すのは、「分からない」を呼び出し側に **分かる形で**
+    渡すため。推測で埋めてはいけない —— url 欄が壊れている記録がこのリポジトリに
+    実在する (ms-166 e-6902 の 17 件: 旗の文字列や説明文が入っている)。それらを
+    「どこかのリポジトリ」と決めつけると、衝突していないという判定を捏造する。
+
+    scheme と host を必須にしているのは、同じ理由で **足りない入力を通さない** ため。
+    ``github.com/beacon/pull/3`` のような段数の足りない文字列を受けると owner に
+    ``github.com`` が入り、もっともらしいが誤ったリポジトリ名を名乗ってしまう。
+    """
+    if not url:
+        return ""
+    m = re.search(
+        r"^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s]+/([^/\s]+)/([^/\s]+)/pull/\d+"
+        r"(?:[/?#].*)?$",
+        str(url).strip())
+    if not m:
+        return ""
+    return f"{m.group(1)}/{m.group(2)}"
+
+
+def recorded_pr_repo(entry: dict) -> str:
+    """この PR 記録が指すリポジトリ (``owner/repo``)。分からなければ空文字。
+
+    **構造化フィールドを先に読む。** ``pr_add`` が ``meta.pr_repo`` を正準として
+    書き、url は表示用の文字列として実際に drift している (GitHub 自身が出す
+    ``.diff`` / ``.patch`` / REST の ``pulls/N`` の形、さらに url 欄に旗の文字列や
+    説明文が入った記録が 17 件実在する = ms-166 e-6902)。url から取り直すと、
+    きちんと識別できている記録を取りこぼす —— 番号について同じ誤りを 1 度やって
+    独立レビューに実測で指摘された (PR #793)。
+
+    url の解析は構造化フィールドが無かった時代の記録のための **後退経路**。
+    """
+    meta = entry.get("meta") or {} if isinstance(entry, dict) else {}
+    repo = str(meta.get("pr_repo") or "").strip()
+    if repo:
+        return repo
+    return extract_pr_repo_from_url(
+        str((entry or {}).get("url") or meta.get("url") or ""))
+
+
+#: ``owner/repo`` の形かどうか (リポジトリ指定の入口で使う)。
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+$")
+
+
+def is_repo_slug(value: str) -> bool:
+    """``owner/repo`` の形なら True。入口の検査を 1 箇所に置くための述語。
+
+    ``gh`` に渡す値なので、形が違うものを黙って渡すと gh 側の見慣れないエラーに
+    なる (= 利用者が自分の入力を疑えない)。受け付ける形をここで決めておく。
+    """
+    return bool(_REPO_SLUG_RE.match(str(value or "").strip()))
+
+
 def identify_pr(ref: str) -> tuple:
     """「この文字列はどの PR か」を 1 箇所で決める (= PR の識別の単一真実源)。
 
@@ -2952,9 +3028,14 @@ def plan_pr_sync(data: dict, gh_prs: list, *, fetched_floor: int | None = None) 
         gh_by_number[num] = ((row.get("state") or "").upper(), row.get("url") or "")
 
     actions: list = []
-    # 同じ PR 番号が 2 つ以上の記録に入っている状態を検出するための台帳。
+    # 同じ PR が 2 つ以上の記録に入っている状態を検出するための台帳。
     # 実測: e-6748 (done) と e-6751 (in_review) が両方 PR 775 を指していた。
     # 登録時に既存を検出できておらず、片方が古い状態で残り続ける (ms-166 e-6871)。
+    #
+    # ms-166 e-6972: 鍵は **番号だけでなくリポジトリも** 含む
+    # (``{番号: {リポジトリ: [記録 id]}}``、リポジトリ不明は ``""`` に集める)。
+    # 番号だけで数えると、1 プロジェクトで複数リポジトリを扱ったときに別リポジトリの
+    # 同番号を重複として報告し続け、しかもその記録の自動遷移を止めてしまう。
     seen_numbers: dict = {}
 
     def _walk(entries: list):
@@ -2983,7 +3064,8 @@ def plan_pr_sync(data: dict, gh_prs: list, *, fetched_floor: int | None = None) 
                 # 推測をやり直すことになる。
                 needs_repair = (not isinstance(meta.get("pr_number"), int)
                                 or _extract_pr_number_from_url(raw_url) is None)
-                seen_numbers.setdefault(pr_num, []).append(e.get("id", ""))
+                seen_numbers.setdefault(pr_num, {}).setdefault(
+                    recorded_pr_repo(e), []).append(e.get("id", ""))
                 gh_row = gh_by_number.get(pr_num)
                 gh_state, gh_url = gh_row if gh_row else ("", "")
                 # canonical が未判明なら GitHub が言う URL を採る (推測ではなく実値)。
@@ -3055,11 +3137,27 @@ def plan_pr_sync(data: dict, gh_prs: list, *, fetched_floor: int | None = None) 
     # いないので、片方が古い状態のまま残り「並列で open な PR が 2 件ある」という
     # 誤報の種にもなる (実測: e-6748 done / e-6751 in_review が両方 PR 775)。
     duplicated_ids: set = set()
-    for num, ids in sorted(seen_numbers.items()):
-        if len(ids) > 1:
+    for num, by_repo in sorted(seen_numbers.items()):
+        unknown = list(by_repo.get("", []))
+        known = {r: ids for r, ids in by_repo.items() if r}
+        # (a) リポジトリまで一致している組 = **確実な重複**。
+        for repo, ids in sorted(known.items()):
+            if len(ids) > 1:
+                duplicated_ids |= set(ids)
+                actions.append(_pr_sync_action(
+                    "duplicate", entry_id=ids[0], pr_number=num, from_status="", to_status="", reason=f"同じ {repo} の PR#{num} を指す記録が {len(ids)} 件: {', '.join(ids)}", duplicate_entry_ids=ids))
+        # (b) リポジトリが分からない記録が混ざっている組 = **判定できない**。
+        #
+        # 推測で埋めない (ms-166 e-6972 AC3)。url 欄が壊れた記録が実在するので
+        # (e-6902 の 17 件)、それを「どこかのリポジトリ」と決めつけると、別リポジトリ
+        # だから衝突していない / 同じリポジトリだから衝突している のどちらも捏造に
+        # なる。分からないものは「同じ番号を指す候補」として全部まとめて出し、
+        # **決まるまで自動では動かさない** (既存の方針と同じ: 人が決める)。
+        if unknown and (len(unknown) + sum(len(i) for i in known.values())) > 1:
+            ids = unknown + [i for _r, lst in sorted(known.items()) for i in lst]
             duplicated_ids |= set(ids)
             actions.append(_pr_sync_action(
-                "duplicate", entry_id=ids[0], pr_number=num, from_status="", to_status="", reason=f"同じ PR#{num} を指す記録が {len(ids)} 件: {', '.join(ids)}", duplicate_entry_ids=ids))
+                "duplicate", entry_id=ids[0], pr_number=num, from_status="", to_status="", reason=f"PR#{num} を指す記録が {len(ids)} 件あるが、うち {len(unknown)} 件はどのリポジトリの PR か判定できない (url が壊れている / 構造化フィールドが無い) ため、別リポジトリの同番号かどうかを機械で決められない: {', '.join(ids)}", duplicate_entry_ids=ids))
 
     # **二重登録の組に入っている記録は自動で状態を動かさない。**
     #

@@ -88,6 +88,13 @@ def proj(tmp_path, monkeypatch):
         if argv[:3] == ["gh", "pr", "diff"]:
             return types.SimpleNamespace(returncode=0, stdout="@@ -1 +1 @@\n-x\n+y\n",
                                          stderr="")
+        # ms-166 e-6971: the bundle now names WHICH repository the PR number
+        # belongs to, so the repo lookup must be stubbed too — otherwise this
+        # test reads the real cwd repository and its expected value changes with
+        # wherever it is run from (a non-hermetic test that passes locally and
+        # fails elsewhere).
+        if argv[:3] == ["gh", "repo", "view"]:
+            return types.SimpleNamespace(returncode=0, stdout="o/r\n", stderr="")
         return real_run(argv, *a, **k)
     monkeypatch.setattr(commands.subprocess, "run", fake_run)
     # no application-map in the store.
@@ -100,7 +107,9 @@ def test_batch_context_emits_pair_over_shared_diff(proj, monkeypatch, capsys):
     commands.cmd_review_batch_context()
     out = json.loads(capsys.readouterr().out)
     assert out["node"] == "pr-open"
-    assert out["target_ref"] == "PR #42"
+    # ms-166 e-6971: リポジトリ込みの表記。"PR #42" だけでは、別リポジトリの同じ
+    # 番号の差分を渡されても judge と利用者が気づけない。
+    assert out["target_ref"] == "o/r#42"
     rtypes = {r["review_type"] for r in out["reviews"]}
     assert {"ax", "maintainability"} <= rtypes
     # every bundle shares the one diff and carries the independence contract.

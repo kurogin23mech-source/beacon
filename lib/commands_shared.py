@@ -2939,11 +2939,20 @@ def _clear_pr_open_review_triggers(pr_number: str) -> None:
 
 _REVIEW_DUE_SUFFIX = "-review-due-"
 
-def _pending_review_types_for_pr(pr_number: str) -> list:
+def _pending_review_types_for_pr(pr_number: str, pr_repo: str = "") -> list:
     """Return the review types whose review-due trigger is still present for this
     PR — i.e. independent reviews (AX / maintainability) that fired at PR-open
     and have NOT been run/cleared yet. Empty when none outstanding. This is the
-    single gate signal beacon pr approve/merge read (ms-119 e-4060)."""
+    single gate signal beacon pr approve/merge read (ms-119 e-4060).
+
+    ``pr_repo`` (ms-166 e-6971): which repository this number belongs to. When
+    given, a ledger record for a **different** repository does not count as
+    "already reviewed" — otherwise a project that tracks two repositories would
+    have PR#3 of one lift the gate for PR#3 of the other. Records written before
+    the repository was captured carry no repo and **still count**: tightening a
+    gate silently against existing records would turn reviews that really were
+    performed into un-performed ones, with no way for the operator to tell why.
+    """
     pr_number = str(pr_number or "").strip()
     if not pr_number:
         return []
@@ -2972,6 +2981,15 @@ def _pending_review_types_for_pr(pr_number: str) -> list:
     # 回復手段が「親で打ち直す (= 判断記録が重複する)」か
     # 「override で飛ばしたことにする (= 記録が嘘になる)」しか無くなる。
     done = _read_review_done_ledger().get(pr_number) or []
+    pr_repo = str(pr_repo or "").strip()
+    if pr_repo:
+        # ms-166 e-6971: 台帳の記録が **どのリポジトリの** PR に対する実施かを見る。
+        # repo を持たない古い記録は従来どおり差し引く (= 黙って厳しくしない)。
+        _repo_of = {str(r.get("review_type") or ""): str(r.get("repo") or "").strip()
+                    for r in review_done_provenance(pr_number)
+                    if isinstance(r, dict)}
+        done = [t for t in done
+                if not _repo_of.get(t) or _repo_of.get(t) == pr_repo]
     subtracted = [t for t in out if t in done]
     if subtracted:
         # **何を誰の記録で差し引いたかを開示する** (独立レビュー AX high)。
@@ -2996,7 +3014,10 @@ def _announce_review_ledger_subtraction(pr_number: str, subtracted: list) -> Non
         who = rec.get("recorded_by") or "(出自不明)"
         when = rec.get("recorded_at") or "(時刻不明)"
         where = rec.get("recorded_in_cwd") or "(場所不明)"
-        lines.append(f"    {t}: {who} / {when} / {where}")
+        # ms-166 e-6971: **どのリポジトリの差分に対する実施か** も開示する。
+        # これが無いと、関門を外した記録がどの差分のものか後から辿れない。
+        repo = rec.get("repo") or "(リポジトリ未記録)"
+        lines.append(f"    {t}: {repo} / {who} / {when} / {where}")
         if not rec:
             lines.append(f"      ⚠ この種別の記録に出自がありません "
                          f"(台帳ファイルが手で書かれた可能性)")
@@ -3194,8 +3215,15 @@ def review_done_provenance(pr_number: str) -> list:
     return found
 
 
-def record_review_done_across_worktrees(review_type: str, pr_number: str) -> str:
+def record_review_done_across_worktrees(review_type: str, pr_number: str,
+                                        pr_repo: str = "") -> str:
     """「この PR のこのレビューを実施した」を横断台帳に記録する。
+
+    ``pr_repo`` (ms-166 e-6971): **どのリポジトリの** その番号か。関門を外す記録が
+    どの差分に対する実施なのかを辿れるようにするために持つ。この docstring の
+    末尾が元々「同じ PR 番号を再利用する別リポジトリで誤って『実施済み』と読まれる
+    余地が残る」と自分で書いていた穴がこれで閉じる (番号だけでは閉じられない)。
+    空文字は「不明」—— 推測で埋めない。
 
     Returns:
         ``RECORDED_SHARED`` (全 worktree に効く置き場に書けた) /
@@ -3218,6 +3246,7 @@ def record_review_done_across_worktrees(review_type: str, pr_number: str) -> str
     path = os.path.join(directory, _review_done_marker_name(review_type, pr_number))
     record = {
         "pr": pr_number,
+        "repo": str(pr_repo or "").strip(),
         "review_type": review_type,
         "recorded_at": _now_iso_for_review_ledger(),
         "recorded_by": _actor_for_review_ledger(),
