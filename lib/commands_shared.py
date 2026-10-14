@@ -2993,7 +2993,8 @@ def _fire_review_due_for_pr(review_type: str, label: str, pr_number: str,
         return
 
 def _clear_review_due_for_pr(review_type: str, pr_number: str,
-                             pr_repo: str = "") -> None:
+                             pr_repo: str = "",
+                             repo_confirmed: bool = False) -> None:
     """Remove a '<type>-review-due' trigger once the PR closes / merges — the
     interface / code-change 節目 is resolved (ms-119). Best-effort.
 
@@ -3011,14 +3012,33 @@ def _clear_review_due_for_pr(review_type: str, pr_number: str,
 
     ``pr_repo`` が空 (= 呼び出し側もどのリポジトリか分からない) とき: 旧式のファイル
     だけを消し、リポジトリ付きのファイルは **残す**。関門は残す側に倒す。
+
+    ``repo_confirmed`` (独立 AX レビュー high): ``pr_repo`` が **確かな出自**
+    (明示の ``--repo`` / 記録の構造化フィールド) から来たかどうか。cwd のリポジトリ
+    から **推測した** 値では、リポジトリ無しの旧式トリガーを引退させない。
+    judge の実測: 無関係な cwd で ``beacon review done --pr 42`` (``--repo`` 無し) を
+    打つと、cwd のリポジトリを名乗って共有された旧式トリガーを消し、別リポジトリの
+    同番号の PR が **一度もレビューされずに** 承認可能になった。
+    「推測した身元で曖昧な印を引退させてはならない」が規則。
     """
     if not pr_number:
         return
     repo = str(pr_repo or "").strip()
     triggers_dir = _get_triggers_dir()
-    targets = [review_due_filename(review_type, pr_number, "")]  # 旧式 (repo 無し)
+    legacy = review_due_filename(review_type, pr_number, "")
+    targets = []
     if repo:
-        targets.insert(0, review_due_filename(review_type, pr_number, repo))
+        targets.append(review_due_filename(review_type, pr_number, repo))
+    # 旧式を消すのは「リポジトリを特定できていない (= 旧式しか手掛かりが無い) 」
+    # か「確かな出自の repo で来た」ときだけ。推測した repo では触らない。
+    if (not repo) or repo_confirmed:
+        targets.append(legacy)
+    elif os.path.isfile(os.path.join(triggers_dir, legacy)):
+        print(f"ℹ リポジトリを持たない旧式のレビュー未実施トリガー ({legacy}) は"
+              f"残しました。この実行の {repo} は cwd から **推測した** 値なので、"
+              f"旧式の印がこのリポジトリのものだと確かめられません。確かなら "
+              f"`--repo {repo}` を明示して打ち直してください (ms-166 e-6971)。",
+              file=sys.stderr)
     for name in targets:
         path = os.path.join(triggers_dir, name)
         try:
@@ -3027,7 +3047,7 @@ def _clear_review_due_for_pr(review_type: str, pr_number: str,
             os.remove(path)
         except OSError:
             continue
-        if repo and name == review_due_filename(review_type, pr_number, ""):
+        if repo and name == legacy:
             print(f"ℹ リポジトリを持たない旧式のレビュー未実施トリガー "
                   f"({name}) を消しました。どのリポジトリの PR #{pr_number} に対して"
                   f"発火したものか記録が無いため、{repo} のものかは機械で区別でき"
@@ -3055,7 +3075,8 @@ def _fire_pr_open_review_triggers(pr_number: str, pr_title: str, pr_url: str,
                                 pr_url, pr_repo=pr_repo)
 
 
-def _clear_pr_open_review_triggers(pr_number: str, pr_repo: str = "") -> None:
+def _clear_pr_open_review_triggers(pr_number: str, pr_repo: str = "",
+                                   repo_confirmed: bool = True) -> None:
     """Clear all PR-open review-due triggers for a PR (ms-119). Mirror of
     _fire_pr_open_review_triggers over the same registry set. ms-127 e-4859:
     promoted here alongside its fire counterpart so the fire/clear pair shares a
@@ -3067,7 +3088,8 @@ def _clear_pr_open_review_triggers(pr_number: str, pr_repo: str = "") -> None:
     for tid, desc in review_spine.judge_run_review_types().items():
         if desc.get("fires_on") != "pr-open":
             continue
-        _clear_review_due_for_pr(tid, pr_number, pr_repo=pr_repo)
+        _clear_review_due_for_pr(tid, pr_number, pr_repo=pr_repo,
+                                 repo_confirmed=repo_confirmed)
     # ms-166 e-6899: 横断台帳からも落とす (育ち続けないように)。
     forget_review_done_across_worktrees(pr_number)
     # ms-119 e-4060: PR resolved (merged/closed) → drop the reviewed done-marker

@@ -225,6 +225,22 @@ def cmd_pr_add():
     #     推測で通すと二重登録ガードが黙って効かなくなるので止めるが、「二重登録
     #     です」とは言わない (それは確定していない)。何が分からないかを言う。
     # 別リポジトリだと **分かった** 組だけが通る。
+    # ms-166 e-6971 (独立 AX レビュー high): **完全な URL なのにリポジトリが取れない**
+    # 入力を受け付けない。番号だけ取れてリポジトリが取れない記録は「リポジトリ不明」の
+    # トリガーを発火させ、そのトリガーは移行互換のためどのリポジトリからでも消せるので、
+    # 別リポジトリの同番号の PR の関門が一度もレビューせずに開く経路になる。
+    # 不明の記録を **移行の名残に限定する** ために、作り続ける口をここで閉じる。
+    if core.url_has_unparseable_repo(url):
+        print(
+            f"Error: {url!r} は PR の URL の形 "
+            f"(https://<host>/<owner>/<repo>/pull/<番号>) ではありません。\n"
+            f"  番号は読めますが、どのリポジトリの PR かが読めません。\n"
+            f"  リポジトリが分からない記録は、レビュー未実施の印をリポジトリ無しで\n"
+            f"  発火させ、その印は別リポジトリの同じ番号からも消せてしまうため、\n"
+            f"  一度もレビューしていない PR の取り込み関門が開く経路になります\n"
+            f"  (ms-166 e-6971)。正しい形の URL を渡してください。",
+            file=sys.stderr)
+        sys.exit(1)
     _new_repo = core.extract_pr_repo_from_url(url)
     existing = _entries_for_pr_identity(data, _pr_number_from_url(url), _new_repo)
     _same = [e for e in existing if e["repo_match"] == REPO_SAME]

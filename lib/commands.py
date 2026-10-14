@@ -488,6 +488,7 @@ from commands_shared import (  # noqa: F401
     RECORDED_CWD_ONLY,
     RECORDED_SHARED,
     record_review_done_across_worktrees,
+    _read_review_done_ledger,
     _fire_review_due_for_pr,
     review_due_filename,
 )
@@ -3666,6 +3667,16 @@ def cmd_review_skip():
               "そのものです。", file=sys.stderr)
         sys.exit(1)
 
+    # ms-166 e-6971 (独立 AX レビュー misleading): 兄弟の `review done` は --repo
+    # 省略時に cwd のリポジトリを解決するのに、こちらは生の値を使っていた。同じ
+    # `--pr [--repo]` の形を取る 2 兄弟で既定の読み方が割れていると、done で覚えた
+    # 挙動を skip に持っていった人に「一致する review-due が無い」と返り、しかも
+    # 「PR 番号の typo を確認せよ」と **誤った原因** を案内することになる
+    # (judge が実測: 実在する ax-review-due-3@o~r.json に対し --repo 省略で
+    #  waived_obligation=false + typo 案内。--repo o/r を付けると即座に見つかる)。
+    _skip_repo_confirmed = bool(pr_repo)
+    if pr_number and not pr_repo:
+        pr_repo = _resolve_review_pr_repo("", [])
     import review_spine
     import datetime
     # e-4124 AX/maint review: reject an unknown --type. Without this a typo'd type
@@ -3715,7 +3726,8 @@ def cmd_review_skip():
         sys.exit(1)
     if pr_number:
         # One file per (type, PR); removing it waives exactly this type.
-        _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo)
+        _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo,
+                                 repo_confirmed=_skip_repo_confirmed)
     else:
         # The target review-due trigger is ONE file carrying ALL bindings that
         # fired at the completion 節目 (e.g. philosophy + attainment). A per-type
@@ -3893,6 +3905,11 @@ def cmd_review_done():
               "[--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,"
               "\"rationale\":..}]']", file=sys.stderr)
         sys.exit(1)
+    # 明示の --repo かどうかを覚えておく (独立 AX レビュー high)。cwd から推測した
+    # 値で、リポジトリを持たない旧式の印を引退させてはならない —— judge の実測では
+    # 無関係な cwd からの `review done --pr 42` が、別リポジトリの同番号の PR の
+    # 関門を一度もレビューせずに開けた。
+    _repo_confirmed = bool(pr_repo)
     if not pr_repo:
         # 明示が無ければ cwd のリポジトリを解決する。**記録を書く前に** 決めるのが
         # 要点 — 後で決めると、先に書かれる判断記録 (decision arm) だけリポジトリを
@@ -3905,7 +3922,13 @@ def cmd_review_done():
     # ことを言ってしまう (実機で踏んだ: 誤った --repo を渡すと、この PR 番号の
     # 記録が 2 件とも依然 block されているのに「通過できます」と出た)。
     _owed_before = _pending_review_types_for_pr(pr_number, pr_repo)
-    _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo)
+    # 「既に台帳に在るか」も **この実行が書く前に** 見る。後で見ると、この実行自身の
+    # 記録で必ず真になり、下の「義務が無かったので非 0 で終える」分岐が死ぬ
+    # (自分の試験がこれを捕まえた —— _owed_before と同じ「変える前に測る」の話)。
+    _already_recorded = review_type in (
+        _read_review_done_ledger().get(pr_number) or [])
+    _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo,
+                             repo_confirmed=_repo_confirmed)
     _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
     _adjudications = _adjudications_from_env()
     _record_review_adjudication_decision(
@@ -3962,11 +3985,23 @@ def cmd_review_done():
             # 発火していない。**「全て実施済み」と言ってはいけない** —— 同じ番号の
             # 別リポジトリの PR は依然 block されていることがあり、その gate を
             # 通過できるかは何も言えていない。--repo の指定間違いが最も疑わしい。
+            #
+            # 終了コードでも言う (独立 AX レビュー medium): 兄弟の `review skip` は
+            # 同じ意味 (解消すべき義務が無かった) で非 0 を返すのに、こちらは 0 を
+            # 返していた。`$?` だけを見る script / AI が「何も起きなかった」を
+            # 「関門が外れた」と取り違える。
+            #
+            # ただし **冪等な打ち直しは 0 のまま**。台帳に同じ (種別, PR) の記録が
+            # 既にあるなら「さっき実施して解消した」のであって、間違った指定では
+            # ない。ここを分けないと /beacon-review-run の再実行が失敗に見える。
             print(f"  ℹ {_where} には未実施のレビューが元から在りませんでした "
                   f"(review-due が発火していない)。この記録は残りますが、"
                   f"どの PR の gate も新たに外れていません。"
                   f"--repo の指定が意図と合っているか確認してください "
                   f"(ms-166 e-6971)。", file=sys.stderr)
+            if not _already_recorded:
+                # CI の関門も倒さずに終える (何も解消していないので)。
+                sys.exit(3)
         # ms-119 e-4073 (scaffold, opt-in): flip the CI gate status to success so
         # a branch-protection required check unblocks the merge button on ALL
         # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by

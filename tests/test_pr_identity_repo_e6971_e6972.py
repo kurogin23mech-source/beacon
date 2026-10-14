@@ -652,8 +652,9 @@ def test_clearing_without_a_repository_leaves_repo_qualified_triggers(
     assert [p.name for p in triggers.iterdir()] == ["ax-review-due-3@o~r.json"]
 
 
-def test_clearing_a_legacy_trigger_is_disclosed(tmp_path, monkeypatch):
-    """旧式 (リポジトリ無し) を消すときは、区別できないことを開示すること。
+def test_a_confirmed_repo_retires_the_legacy_trigger_with_disclosure(
+        tmp_path, monkeypatch):
+    """**確かな出自** の repo なら旧式を消す。ただし開示する。
 
     黙って消すと、どのリポジトリのものか分からない関門が外れたことに気づけない。
     """
@@ -662,9 +663,30 @@ def test_clearing_a_legacy_trigger_is_disclosed(tmp_path, monkeypatch):
     _fire(tmp_path, monkeypatch, "ax", "3")          # 旧式
     err = io.StringIO()
     with redirect_stderr(err):
-        cs._clear_review_due_for_pr("ax", "3", pr_repo="o/r")
+        cs._clear_review_due_for_pr("ax", "3", pr_repo="o/r",
+                                    repo_confirmed=True)
     assert list(triggers.iterdir()) == []
     assert "旧式" in err.getvalue() and "区別でき" in err.getvalue(), err.getvalue()
+
+
+def test_a_guessed_repo_does_not_retire_the_legacy_trigger(
+        tmp_path, monkeypatch):
+    """**推測した** repo では旧式を引退させないこと (独立 AX レビュー high)。
+
+    judge の実測: 無関係な cwd から `beacon review done --pr 42` (--repo 無し) を
+    打つと、cwd のリポジトリを名乗って共有された旧式トリガーを消し、別リポジトリの
+    同番号の PR が **一度もレビューされずに** 承認可能になった。推測した身元で
+    曖昧な印を引退させてはならない。
+    """
+    triggers = tmp_path / "triggers"
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    _fire(tmp_path, monkeypatch, "ax", "3")          # 旧式
+    err = io.StringIO()
+    with redirect_stderr(err):
+        cs._clear_review_due_for_pr("ax", "3", pr_repo="guessed/repo")
+    assert [p.name for p in triggers.iterdir()] == ["ax-review-due-3.json"], (
+        "推測した repo で旧式の印を引退させた")
+    assert "推測" in err.getvalue() and "--repo" in err.getvalue(), err.getvalue()
 
 
 def test_pending_ignores_another_known_repositorys_trigger(
@@ -708,8 +730,11 @@ def test_a_wrong_repo_review_done_does_not_lift_any_other_repos_gate(
     monkeypatch.setenv("BEACON_PR_REPO", "yet-another/repo")
     for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
         monkeypatch.delenv(k, raising=False)
+    # この経路は「この repo には義務が無かった」なので非 0 で終える (medium 修正)。
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        commands.cmd_review_done()
+        with pytest.raises(SystemExit) as _ei:
+            commands.cmd_review_done()
+    assert _ei.value.code == 3
 
     with redirect_stderr(io.StringIO()):
         assert cs._pending_review_types_for_pr("3", "o/r") == ["ax"], (
@@ -881,9 +906,13 @@ def _run_review_done(tmp_path, monkeypatch, *, pr, repo, triggers_seed):
     for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
         monkeypatch.delenv(k, raising=False)
     out, err = io.StringIO(), io.StringIO()
-    with redirect_stdout(out), redirect_stderr(err):
-        commands.cmd_review_done()
-    return out.getvalue(), err.getvalue()
+    code = None
+    try:
+        with redirect_stdout(out), redirect_stderr(err):
+            commands.cmd_review_done()
+    except SystemExit as e:
+        code = e.code
+    return out.getvalue(), err.getvalue(), code
 
 
 def test_review_done_does_not_claim_gate_passage_when_nothing_was_owed(
@@ -895,10 +924,12 @@ def test_review_done_does_not_claim_gate_passage_when_nothing_was_owed(
     できます」と出た。番号だけで名乗る文面が、リポジトリで絞った判定に
     追いついていなかった (名乗りと実態のズレ = この MS が掃除している型)。
     """
-    out, err = _run_review_done(
+    out, err, code = _run_review_done(
         tmp_path, monkeypatch, pr="3", repo="yet-another/repo",
         triggers_seed=[("ax", "o/r"), ("ax", "other/app")])
     combined = out + err
+    # 義務が無かったので終了コードでも言う (独立 AX レビュー medium)
+    assert code == 3, f"義務ゼロなのに exit={code}"
     assert "全て実施済み" not in combined, (
         "義務が無いのに全件実施済みと名乗った:\n" + combined)
     assert "gate を通過できます" not in combined, combined
@@ -909,10 +940,11 @@ def test_review_done_does_not_claim_gate_passage_when_nothing_was_owed(
 def test_review_done_does_claim_gate_passage_when_it_really_cleared_the_last_one(
         tmp_path, monkeypatch):
     """効く側も測る (でないと報告を丸ごと消しても緑になる)。"""
-    out, err = _run_review_done(
+    out, err, code = _run_review_done(
         tmp_path, monkeypatch, pr="3", repo="o/r",
         triggers_seed=[("ax", "o/r")])
     combined = out + err
+    assert code is None, f"最後の義務を解消したのに exit={code}"
     assert "o/r#3 の独立レビューは全て実施済み" in combined, combined
     assert "gate を通過できます" in combined, combined
 
@@ -1083,3 +1115,181 @@ def test_the_legacy_tolerance_decision_lives_in_one_place():
         doc = inspect.getdoc(getattr(cs, fn)) or ""
         assert "LEGACY_REVIEW_DUE_TOLERANCE" in doc, (
             f"{fn} が旧式許容の判断を独自の散文で持っている (1 箇所に寄せる)")
+
+
+# --- 10. 旧式許容を「移行の名残」に本当に限定する (AX 2 周目の high) ----------
+#
+# judge は「旧式のトリガーは日常操作で作り続けられる」ことを突いた。3 段の連鎖:
+#   (1) 段数の違う URL (`host/org/team/subproj/pull/42`) は番号は取れて repo は
+#       取れないので、repo 無しのトリガーが発火する
+#   (2) tick anchor は repo 無しの印を「その番号は発火済み」のワイルドカードとして
+#       扱い、別リポジトリの同番号に自分の印を発火させない
+#   (3) 無関係な cwd からの `review done --pr 42` が cwd の repo を **推測して名乗り**、
+#       共有された repo 無しの印を消す
+# → 一度もレビューしていない PR の関門が開く。
+
+def test_a_url_whose_repo_cannot_be_read_is_refused(monkeypatch):
+    """(1) を閉じる: 完全な URL で repo が読めないなら受け付けないこと。
+
+    番号だけ取れて repo が取れない記録を作らせない = 旧式の印を作り続ける口を塞ぐ。
+    GitHub の PR の URL は必ず host/owner/repo/pull/<数字> なので、段数が違うものは
+    PR の URL ではない。
+    """
+    assert core.url_has_unparseable_repo(
+        "https://github.com/org/team/subproj/pull/42")
+    assert not core.url_has_unparseable_repo("https://github.com/o/r/pull/3")
+    # 裸の番号は別物 (repo を持たないのが正しい形、呼び出し側が gh に聞く)
+    assert not core.url_has_unparseable_repo("772")
+
+    data = _data()
+    code, err, saved = _run_pr_add(
+        monkeypatch, data, "https://github.com/org/team/subproj/pull/42")
+    assert code == 1, f"段数の違う URL を受け付けた (exit={code})"
+    assert saved is None
+    assert "PR の URL の形" in err, err
+
+
+def test_the_anchor_does_not_treat_a_repo_less_trigger_as_a_wildcard():
+    """(2) を閉じる: 一致は (番号, リポジトリ) の完全一致で見ること。
+
+    repo 無しは「単一リポジトリ時代の略記」であって「どのリポジトリでも」ではない。
+    ワイルドカードとして扱うと、別リポジトリの同番号の open PR に **自分の印が
+    一度も発火せず**、その PR の関門が最初から空になる。
+
+    **コードだけを見る。** 生のソースへの部分一致で書いた版は、この欠陥を説明する
+    **コメント** が `not p[2]` という文字列を含むために落ちた (= 緩い一致)。
+    構文木を unparse してコメントと docstring を落としてから測る。
+    """
+    import ast as _ast
+    import cmd_trigger
+    tree = _ast.parse(inspect.getsource(cmd_trigger))
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, _ast.FunctionDef)
+              and n.name == "_auto_fire_pr_open_review_triggers_for_open_prs")
+    code = _ast.unparse(fn)          # コメントは構文木に無い
+    assert "not p[2]" not in code and "not _repo" not in code, (
+        "repo 無しをワイルドカードとして扱う形が残っている:\n" + code)
+    assert "p[2] == _repo" in code, "完全一致で見ていない"
+
+
+def test_a_never_reviewed_pr_keeps_its_gate_shut(tmp_path, monkeypatch):
+    """(3) を閉じる: judge の連鎖の到達点が成立しないこと。
+
+    repoA の review done が、repoB の同番号の PR の唯一の印 (= 旧式) を消して
+    しまわないこと。**実コマンドを走らせて測る**。
+    """
+    import commands
+    triggers = tmp_path / "triggers"
+    triggers.mkdir()
+    ledger = tmp_path / "ledger"
+    for mod in (cs, commands):
+        monkeypatch.setattr(mod, "_get_triggers_dir", lambda: str(triggers),
+                            raising=False)
+    monkeypatch.setattr(cs, "_review_done_dir", lambda: (str(ledger), True))
+    monkeypatch.setattr(commands, "_record_review_adjudication_decision",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "_ci_flip_review_gate_success",
+                        lambda *a, **k: None)
+    # repoB の PR#9 の唯一の印が旧式 (移行前に発火したもの) の状態
+    (triggers / cs.review_due_filename("ax", "9")).write_text(
+        json.dumps({"review": "ax"}), encoding="utf-8")
+    # repoA から --repo 無しで review done (= cwd の repo を推測して名乗る経路)
+    monkeypatch.setattr(commands, "_resolve_review_pr_repo",
+                        lambda explicit, gaps: explicit or "repoA/x")
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "9")
+    monkeypatch.delenv("BEACON_PR_REPO", raising=False)
+    for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
+        monkeypatch.delenv(k, raising=False)
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        try:
+            commands.cmd_review_done()
+        except SystemExit:
+            pass
+    with redirect_stderr(io.StringIO()):
+        assert cs._pending_review_types_for_pr("9", "repoB/y") == ["ax"], (
+            "一度もレビューしていない repoB の PR#9 の関門が開いた")
+
+
+# --- 11. 兄弟の既定の読み方を揃える (AX 2 周目の misleading) ------------------
+
+def test_skip_finds_the_obligation_without_an_explicit_repo(
+        tmp_path, monkeypatch):
+    """`review skip` が `review done` と同じ既定の読み方をすること。
+
+    2 兄弟で割れていると、done で覚えた挙動を skip に持っていった人に
+    「一致する review-due が無い / PR 番号の typo を確認せよ」と **誤った原因** が
+    案内される (実際の原因は --repo の省略)。judge が実測した形。
+
+    **挙動で測る。** 構文木で「``_resolve_review_pr_repo`` を呼んでいるか」を見た版は
+    反転で緑になった —— skip は監査記録の repo 欄を埋めるためにも同じ関数を呼ぶので、
+    義務の照合に使うのをやめても呼び出しは残る (= 緩い構造一致)。実際に義務を
+    見つけられるかを測る。
+    """
+    import commands
+    triggers = tmp_path / "triggers"
+    triggers.mkdir()
+    (triggers / cs.review_due_filename("ax", "3", "o/r")).write_text(
+        json.dumps({"review": "ax"}), encoding="utf-8")
+    for mod in (cs, commands):
+        monkeypatch.setattr(mod, "_get_triggers_dir", lambda: str(triggers),
+                            raising=False)
+    monkeypatch.setattr(commands, "_resolve_review_pr_repo",
+                        lambda explicit, gaps: explicit or "o/r")
+    monkeypatch.setattr(commands, "_review_skips_log_path",
+                        lambda: str(tmp_path / "skips.jsonl"))
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "3")
+    monkeypatch.delenv("BEACON_PR_REPO", raising=False)   # --repo を省く
+    monkeypatch.delenv("BEACON_TARGET_ID", raising=False)
+    monkeypatch.setenv("BEACON_REASON", "理由")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    out, err = io.StringIO(), io.StringIO()
+    code = None
+    try:
+        with redirect_stdout(out), redirect_stderr(err):
+            commands.cmd_review_skip()
+    except SystemExit as e:
+        code = e.code
+    combined = out.getvalue() + err.getvalue()
+    assert code is None, (
+        "--repo を省いただけで『一致する review-due が無い』と返した "
+        f"(exit={code}):\n" + combined)
+    record = json.loads((tmp_path / "skips.jsonl").read_text(encoding="utf-8")
+                        .strip().splitlines()[-1])
+    assert record["waived_obligation"] is True, (
+        "実在する義務を見つけられていない: " + repr(record))
+    assert record.get("repo") == "o/r", record
+
+
+# --- 12. 終了コードで言う (AX 2 周目の medium) --------------------------------
+
+def test_review_done_exits_non_zero_when_nothing_was_owed(
+        tmp_path, monkeypatch):
+    """義務が無かったとき `$?` でも分かること。
+
+    兄弟の `review skip` は同じ意味で非 0 を返すのに done は 0 だった。
+    `$?` だけを見る script / AI が「何も起きなかった」を「関門が外れた」と
+    取り違える。
+    """
+    _out, _err, code = _run_review_done(tmp_path, monkeypatch, pr="3",
+                                        repo="o/r", triggers_seed=[])
+    assert code == 3, f"義務ゼロなのに exit={code}"
+
+
+def test_an_idempotent_re_run_still_exits_zero(tmp_path, monkeypatch):
+    """ただし **冪等な打ち直しは 0**。
+
+    台帳に記録があるなら「さっき実施して解消した」のであって指定間違いではない。
+    ここを分けないと /beacon-review-run の再実行が失敗に見える。
+    """
+    out, err, code = _run_review_done(tmp_path, monkeypatch, pr="3",
+                                      repo="o/r",
+                                      triggers_seed=[("ax", "o/r")])
+    assert "全て実施済み" in (out + err)
+    assert code is None, code
+    # 2 回目: 義務は無いが台帳に記録が在る → 0 で終わる (冪等)
+    out2, err2, code2 = _run_review_done(tmp_path, monkeypatch, pr="3",
+                                         repo="o/r", triggers_seed=[])
+    assert "元から在りませんでした" in (out2 + err2)
+    assert code2 is None, f"冪等な打ち直しが失敗扱いになった (exit={code2})"

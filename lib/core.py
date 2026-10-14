@@ -2850,6 +2850,32 @@ def recorded_pr_repo(entry: dict) -> str:
 _REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+$")
 
 
+def url_has_unparseable_repo(ref: str) -> bool:
+    """「完全な URL なのに、どのリポジトリか取れない」なら True (ms-166 e-6971)。
+
+    番号を取る ``_extract_pr_number_from_url`` は ``/pull/<数字>`` を **どこでも**
+    拾うが、リポジトリを取る ``extract_pr_repo_from_url`` は scheme + host + 2 段を
+    要求する。この非対称のせいで ``https://github.com/org/team/subproj/pull/42``
+    (段数が 1 つ多い) は **番号は取れてリポジトリは取れない** —— つまり「リポジトリ
+    不明」の記録が、移行の名残ではなく **日常の操作で作り続けられる**。
+
+    独立 AX レビューがここを突いた: 不明の記録はリポジトリを持たないトリガーを
+    発火させ、そのトリガーは (移行互換のため) どのリポジトリからでも消せるので、
+    別リポジトリの同番号の PR の関門が、一度もレビューせずに開く。
+
+    GitHub の PR の URL は必ず ``host/owner/repo/pull/<数字>`` なので、完全な URL で
+    リポジトリが取れないものは **PR の URL ではない**。裸の番号 (``"772"``) は別物
+    なので False を返す —— あちらはリポジトリを持たないのが正しい形で、呼び出し側が
+    gh に聞いて補う。
+    """
+    ref = str(ref or "").strip()
+    if "://" not in ref:
+        return False
+    if _extract_pr_number_from_url(ref) is None:
+        return False
+    return not extract_pr_repo_from_url(ref)
+
+
 def is_repo_slug(value: str) -> bool:
     """``owner/repo`` の形なら True。入口の検査を 1 箇所に置くための述語。
 
