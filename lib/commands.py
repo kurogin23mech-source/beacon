@@ -489,7 +489,7 @@ from commands_shared import (  # noqa: F401
     RECORDED_SHARED,
     record_review_done_across_worktrees,
     _fire_review_due_for_pr,
-    _REVIEW_DUE_SUFFIX,
+    review_due_filename,
 )
 # ms-127 e-4849: 4 helpers promoted to commands_shared during the milestone
 # split. They are shared across families: the milestone handlers (cmd_milestone.py,
@@ -3451,13 +3451,14 @@ def _review_skip_gate_record() -> dict:
     }
 
 
-def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> None:
+def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str,
+                                pr_repo: str = "") -> None:
     _fire_review_due_for_pr("ax", "AX (AI-Experience interface drift)",
-                            pr_number, pr_title, pr_url)
+                            pr_number, pr_title, pr_url, pr_repo=pr_repo)
 
 
-def _clear_ax_review_due_trigger(pr_number: str) -> None:
-    _clear_review_due_for_pr("ax", pr_number)
+def _clear_ax_review_due_trigger(pr_number: str, pr_repo: str = "") -> None:
+    _clear_review_due_for_pr("ax", pr_number, pr_repo=pr_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -3675,8 +3676,12 @@ def cmd_review_skip():
     # Peek BEFORE mutating: does a matching owed review actually exist? A skip of a
     # non-existent obligation (wrong PR / target id) must not look successful.
     if pr_number:
-        owed = os.path.isfile(os.path.join(
-            _get_triggers_dir(), f"{review_type}-review-due-{pr_number}.json"))
+        # ms-166 e-6971: 名前の組み立ては review_due_filename に一本化する
+        # (ここで手組みすると、リポジトリ付きの名前になった後も旧式だけを見て
+        #  「免除する義務が無い」と誤報する)。repo 付きと旧式の両方を見る。
+        owed = any(os.path.isfile(os.path.join(_get_triggers_dir(), _n))
+                   for _n in {review_due_filename(review_type, pr_number, pr_repo),
+                              review_due_filename(review_type, pr_number, "")})
     else:
         owed = _target_review_due_has_binding(target_id, review_type)
 
@@ -3703,7 +3708,7 @@ def cmd_review_skip():
         sys.exit(1)
     if pr_number:
         # One file per (type, PR); removing it waives exactly this type.
-        _clear_review_due_for_pr(review_type, pr_number)
+        _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo)
     else:
         # The target review-due trigger is ONE file carrying ALL bindings that
         # fired at the completion 節目 (e.g. philosophy + attainment). A per-type
@@ -3881,7 +3886,13 @@ def cmd_review_done():
         # 持たない形になり、2 つの記録が同じ実施について違うことを言う。
         # 解決できなければ空のまま = 「不明」を記録し、推測で埋めない。
         pr_repo = _resolve_review_pr_repo("", [])
-    _clear_review_due_for_pr(review_type, pr_number)
+    # ms-166 e-6971: **消す前に** この (リポジトリ, 番号) に義務が在ったかを見る。
+    # 後から数えると「元から無かった」と「いま解消した」を区別できず、下の報告が
+    # 「全て実施済み — gate を通過できます」と、別リポジトリの PR には成り立たない
+    # ことを言ってしまう (実機で踏んだ: 誤った --repo を渡すと、この PR 番号の
+    # 記録が 2 件とも依然 block されているのに「通過できます」と出た)。
+    _owed_before = _pending_review_types_for_pr(pr_number, pr_repo)
+    _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo)
     _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
     _adjudications = _adjudications_from_env()
     _record_review_adjudication_decision(
@@ -3924,13 +3935,25 @@ def cmd_review_done():
         # anchor does NOT re-fire review-due for this (now review-less) PR.
         try:
             os.makedirs(_get_triggers_dir(), exist_ok=True)
-            with open(_pr_open_reviewed_marker_path(pr_number), "w",
+            with open(_pr_open_reviewed_marker_path(pr_number, pr_repo), "w",
                       encoding="utf-8") as f:
                 f.write(review_type)
         except OSError:
             pass
-        print(f"  PR #{pr_number} の独立レビューは全て実施済み "
-              f"— approve/merge の gate を通過できます。")
+        _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
+        if _owed_before:
+            print(f"  {_where} の独立レビューは全て実施済み "
+                  f"— approve/merge の gate を通過できます。")
+        else:
+            # 元から義務が無かった = この (リポジトリ, 番号) に review-due が
+            # 発火していない。**「全て実施済み」と言ってはいけない** —— 同じ番号の
+            # 別リポジトリの PR は依然 block されていることがあり、その gate を
+            # 通過できるかは何も言えていない。--repo の指定間違いが最も疑わしい。
+            print(f"  ℹ {_where} には未実施のレビューが元から在りませんでした "
+                  f"(review-due が発火していない)。この記録は残りますが、"
+                  f"どの PR の gate も新たに外れていません。"
+                  f"--repo の指定が意図と合っているか確認してください "
+                  f"(ms-166 e-6971)。", file=sys.stderr)
         # ms-119 e-4073 (scaffold, opt-in): flip the CI gate status to success so
         # a branch-protection required check unblocks the merge button on ALL
         # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by

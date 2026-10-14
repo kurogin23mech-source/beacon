@@ -46,7 +46,7 @@ def ledger_in_tmp(tmp_path, monkeypatch):
 
 def _fire_due(triggers, review_type, pr_number):
     """review-due トリガーファイルを 1 件置く (PR-open の発火を模す)。"""
-    path = triggers / f"{review_type}{cs._REVIEW_DUE_SUFFIX}{pr_number}.json"
+    path = triggers / cs.review_due_filename(review_type, pr_number)
     path.write_text(json.dumps({"review": review_type}), encoding="utf-8")
     return path
 
@@ -154,7 +154,7 @@ class TestParentSeesTheForksReview:
         cs.record_review_done_across_worktrees("maintainability", "787")
         # 親のトリガーファイルは依然として在る —— ここが肝
         assert (ledger_in_tmp["triggers"]
-                / f"ax{cs._REVIEW_DUE_SUFFIX}787.json").exists()
+                / cs.review_due_filename("ax", "787")).exists()
         assert cs._pending_review_types_for_pr("787") == []
 
     def test_partial_fork_review_still_blocks_on_the_rest(self, ledger_in_tmp):

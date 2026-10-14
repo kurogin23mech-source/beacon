@@ -455,7 +455,7 @@ def test_the_review_ledger_records_which_repository(tmp_path, monkeypatch):
         "ax", "797", "o/r") == cs.RECORDED_SHARED
     recs = cs.review_done_provenance("797")
     assert len(recs) == 1, recs
-    assert recs[0]["repo"] == "o/r", recs[0]
+    assert recs[0]["pr_repo"] == "o/r", recs[0]
 
 
 def test_a_different_repositorys_review_does_not_lift_this_gate(
@@ -588,3 +588,330 @@ def test_a_malformed_repo_value_is_refused_at_the_entrance(bad):
             commands._resolve_review_pr_repo(bad, [])
     assert ei.value.code == 1
     assert "owner/name" in err.getvalue(), err.getvalue()
+
+
+# --- 8. 関門を外す **主経路** もリポジトリで絞る (独立 AX レビュー high) ----------
+#
+# 上の §6 は横断台帳の差し引きを測っていたが、**それは関門の第 2 経路**だった。
+# 関門の主経路は cwd の review-due トリガーファイルで、`cmd_review_done` はそれを
+# 番号だけで消していた。つまり台帳側に足した repo 判定は、その手前で一覧が空になる
+# ため **一度も評価されない**。独立 AX レビューがサンドボックスで 3 段
+# (pr add → 誤 repo で review done → pr approve) を実際に走らせ、別リポジトリの
+# PR#3 の承認が両方 exit 0 で通ることを実測した。
+#
+# §6 の試験がこれを見逃したのは、`cmd_review_done` を呼ばず
+# `record_review_done_across_worktrees` を直叩きしてトリガーを残したから。
+# **helper を測って live な経路を測らない**形で、同じファイルの別の試験で自分が
+# 構造チェックしていた型をここで踏んでいた。だからここは **実コマンドを走らせる**。
+
+def test_the_trigger_filename_carries_the_repository():
+    assert cs.review_due_filename("ax", "3", "o/r") == "ax-review-due-3@o~r.json"
+    # リポジトリ不明は従来と同じ形 = 既存トリガーを孤児にしない
+    assert cs.review_due_filename("ax", "3") == "ax-review-due-3.json"
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("ax-review-due-3@o~r.json", ("ax", "3", "o/r")),
+    ("maintainability-review-due-798@kurogin23mech-source~beacon.json",
+     ("maintainability", "798", "kurogin23mech-source/beacon")),
+    ("ax-review-due-3.json", ("ax", "3", "")),          # 旧式 = 不明
+    ("review-due-ms-166.json", None),                   # target 用は別物
+    ("spec-needed-ms-9.json", None),
+    ("not-json", None),
+])
+def test_the_trigger_filename_parses_back(name, expected):
+    assert cs.parse_review_due_filename(name) == expected, name
+
+
+def _fire(tmp_path, monkeypatch, review_type, pr, repo=""):
+    cs._fire_review_due_for_pr(review_type, review_type, pr, "t",
+                               f"https://github.com/{repo or 'o/r'}/pull/{pr}",
+                               pr_repo=repo)
+
+
+def test_clearing_one_repos_trigger_leaves_the_other_repos_alone(
+        tmp_path, monkeypatch):
+    triggers = tmp_path / "triggers"
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    _fire(tmp_path, monkeypatch, "ax", "3", "o/r")
+    _fire(tmp_path, monkeypatch, "ax", "3", "other/app")
+    with redirect_stderr(io.StringIO()):
+        cs._clear_review_due_for_pr("ax", "3", pr_repo="o/r")
+    left = sorted(p.name for p in triggers.iterdir())
+    assert left == ["ax-review-due-3@other~app.json"], left
+
+
+def test_clearing_without_a_repository_leaves_repo_qualified_triggers(
+        tmp_path, monkeypatch):
+    """呼び出し側が repo を知らないときは、関門を **残す** 側に倒すこと。"""
+    triggers = tmp_path / "triggers"
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    _fire(tmp_path, monkeypatch, "ax", "3", "o/r")
+    with redirect_stderr(io.StringIO()):
+        cs._clear_review_due_for_pr("ax", "3")
+    assert [p.name for p in triggers.iterdir()] == ["ax-review-due-3@o~r.json"]
+
+
+def test_clearing_a_legacy_trigger_is_disclosed(tmp_path, monkeypatch):
+    """旧式 (リポジトリ無し) を消すときは、区別できないことを開示すること。
+
+    黙って消すと、どのリポジトリのものか分からない関門が外れたことに気づけない。
+    """
+    triggers = tmp_path / "triggers"
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    _fire(tmp_path, monkeypatch, "ax", "3")          # 旧式
+    err = io.StringIO()
+    with redirect_stderr(err):
+        cs._clear_review_due_for_pr("ax", "3", pr_repo="o/r")
+    assert list(triggers.iterdir()) == []
+    assert "旧式" in err.getvalue() and "区別でき" in err.getvalue(), err.getvalue()
+
+
+def test_pending_ignores_another_known_repositorys_trigger(
+        tmp_path, monkeypatch):
+    triggers = tmp_path / "triggers"
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    monkeypatch.setattr(cs, "_review_done_dir",
+                        lambda: (str(tmp_path / "ledger"), True))
+    _fire(tmp_path, monkeypatch, "ax", "3", "other/app")
+    with redirect_stderr(io.StringIO()):
+        assert cs._pending_review_types_for_pr("3", "o/r") == []
+        assert cs._pending_review_types_for_pr("3", "other/app") == ["ax"]
+        # repo を知らない呼び出しは絞り込めないので残す (関門を残す側)
+        assert cs._pending_review_types_for_pr("3") == ["ax"]
+
+
+def test_a_wrong_repo_review_done_does_not_lift_any_other_repos_gate(
+        tmp_path, monkeypatch):
+    """**独立 AX レビュー high の再現**: 誤った --repo で関門が外れないこと。
+
+    実コマンド (`cmd_review_done`) を走らせて測る。helper を直叩きすると、
+    コマンドが無条件にトリガーを消す副作用を踏まないので緑のままになる
+    —— それが見逃した原因そのもの。
+    """
+    import commands
+    triggers = tmp_path / "triggers"
+    ledger = tmp_path / "ledger"
+    for mod in (cs, commands):
+        monkeypatch.setattr(mod, "_get_triggers_dir", lambda: str(triggers),
+                            raising=False)
+    monkeypatch.setattr(cs, "_review_done_dir", lambda: (str(ledger), True))
+    monkeypatch.setattr(commands, "_record_review_adjudication_decision",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "_ci_flip_review_gate_success",
+                        lambda *a, **k: None)
+    _fire(tmp_path, monkeypatch, "ax", "3", "o/r")
+    _fire(tmp_path, monkeypatch, "ax", "3", "other/app")
+
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "3")
+    monkeypatch.setenv("BEACON_PR_REPO", "yet-another/repo")
+    for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
+        monkeypatch.delenv(k, raising=False)
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        commands.cmd_review_done()
+
+    with redirect_stderr(io.StringIO()):
+        assert cs._pending_review_types_for_pr("3", "o/r") == ["ax"], (
+            "無関係なリポジトリの review done で o/r の関門が外れた")
+        assert cs._pending_review_types_for_pr("3", "other/app") == ["ax"], (
+            "無関係なリポジトリの review done で other/app の関門が外れた")
+
+
+def test_the_right_repos_review_done_does_lift_its_own_gate(
+        tmp_path, monkeypatch):
+    """緩めた側だけでなく **効く側** も測る (でないと丸ごと壊しても緑)。"""
+    import commands
+    triggers = tmp_path / "triggers"
+    ledger = tmp_path / "ledger"
+    for mod in (cs, commands):
+        monkeypatch.setattr(mod, "_get_triggers_dir", lambda: str(triggers),
+                            raising=False)
+    monkeypatch.setattr(cs, "_review_done_dir", lambda: (str(ledger), True))
+    monkeypatch.setattr(commands, "_record_review_adjudication_decision",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "_ci_flip_review_gate_success",
+                        lambda *a, **k: None)
+    _fire(tmp_path, monkeypatch, "ax", "3", "o/r")
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "3")
+    monkeypatch.setenv("BEACON_PR_REPO", "o/r")
+    for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
+        monkeypatch.delenv(k, raising=False)
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        commands.cmd_review_done()
+    with redirect_stderr(io.StringIO()):
+        assert cs._pending_review_types_for_pr("3", "o/r") == []
+
+
+def test_every_review_due_caller_passes_the_repository():
+    """関門に関わる 4 つの口すべてが repo を渡していること。
+
+    1 つでも渡し忘れると、その経路から関門がリポジトリ非依存で外れる
+    (= 独立 AX レビューが実測した穴)。構文木で実引数を見る。
+    """
+    import ast as _ast
+    import importlib
+    watched = {"_clear_review_due_for_pr", "_fire_review_due_for_pr",
+               "_fire_pr_open_review_triggers", "_clear_pr_open_review_triggers"}
+    offenders = []
+    for modname in ("commands", "commands_shared", "cmd_pr", "cmd_trigger"):
+        mod = importlib.import_module(modname)
+        tree = _ast.parse(inspect.getsource(mod))
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            name = (getattr(node.func, "id", None)
+                    or getattr(node.func, "attr", ""))
+            if name not in watched:
+                continue
+            kw = {k.arg for k in node.keywords}
+            # _fire_review_due_for_pr は位置引数 6 個目でも渡せるが、この repo では
+            # どの呼び出しも keyword で渡す規約にしている (読み手が取り違えない)。
+            if "pr_repo" not in kw:
+                offenders.append(f"{modname}:{node.lineno} {name}")
+    assert offenders == [], (
+        "関門に関わる呼び出しがリポジトリを渡していない (配線はあるが効かない): "
+        + repr(offenders))
+
+
+def test_the_review_due_filename_is_built_and_parsed_in_one_place_each():
+    """名前の組み立て / 解析が 1 箇所に収まっていること。
+
+    以前この名前は 5 箇所で手組みされていた (fire / clear / pending / tick anchor /
+    skip の義務確認)。1 箇所だけ repo 対応にしても、残り 4 箇所で同じ取り違えが
+    起き続ける —— 実際そうなっていた。
+
+    **構文木で数える。** 行の部分一致で `{pr_number}` を探す版を一度書いたが、
+    変数名が `{num}` の手組み (tick anchor に実在した形) を素通りさせる。緩い一致で
+    偽の緑を作るのはこの repo で何度も踏んでいる型なので、f-string の中に
+    リテラル "-review-due-" を持つ式を構文木から拾って数える。
+    """
+    import ast as _ast
+    import importlib
+    inline, via_const = [], []
+    for modname in ("commands", "commands_shared", "cmd_pr", "cmd_trigger"):
+        mod = importlib.import_module(modname)
+        tree = _ast.parse(inspect.getsource(mod))
+        # 正準の 2 関数 (組み立て / 解析) の行範囲。ここでの使用だけが許される。
+        canonical = [(n.lineno, getattr(n, "end_lineno", n.lineno))
+                     for n in _ast.walk(tree)
+                     if isinstance(n, _ast.FunctionDef)
+                     and n.name in ("review_due_filename",
+                                    "parse_review_due_filename")]
+
+        def _ok(lineno):
+            return any(a <= lineno <= b for a, b in canonical)
+
+        for node in _ast.walk(tree):
+            # (a) f-string の中に "-review-due-" のリテラルを持つ = 直接の手組み
+            if isinstance(node, _ast.JoinedStr) and any(
+                    isinstance(v, _ast.Constant) and isinstance(v.value, str)
+                    and "-review-due-" in v.value for v in node.values):
+                if not _ok(node.lineno):
+                    inline.append(f"{modname}:{node.lineno}")
+            # (b) 接尾辞の定数を使って名前を組む / 突き合わせる形。**これを見ないと
+            #     緩い**: tick anchor の `f"{_REVIEW_DUE_SUFFIX}{num}.json"` は
+            #     リテラルが定数の中に在るので (a) では捕まらず、反転 U25 が緑に
+            #     なった (実測)。定数の参照そのものを数える。
+            if (isinstance(node, _ast.Name)
+                    and node.id == "_REVIEW_DUE_SUFFIX"
+                    and isinstance(node.ctx, _ast.Load)
+                    and not _ok(node.lineno)):
+                via_const.append(f"{modname}:{node.lineno}")
+    assert inline == [] and via_const == [], (
+        "PR のレビュー未実施トリガー名を正準の 2 関数の外で組み立て / 突き合わせて"
+        " いる箇所がある (1 箇所だけ直しても残りで同じ取り違えが起きる): "
+        f"inline={inline!r} / via_const={via_const!r}")
+
+
+def test_the_subtraction_headline_does_not_blame_only_worktrees(
+        tmp_path, monkeypatch):
+    """リポジトリ未記録の記録で差し引いたときは、見出しでそう言うこと。
+
+    独立 AX レビュー medium: 見出しが常に「別の作業フォルダで実施済み」と名乗ると、
+    読み手は「同じコードベースの別チェックアウトなら安全」と読み、repo 行の値を
+    worktree の識別子だと誤読しうる。
+    """
+    triggers = tmp_path / "triggers"
+    triggers.mkdir()
+    (triggers / "ax-review-due-3@o~r.json").write_text(
+        json.dumps({"review": "ax"}), encoding="utf-8")
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    monkeypatch.setattr(cs, "_review_done_dir", lambda: (str(ledger), True))
+    # repo を持たない旧式の台帳記録で差し引かれる状態
+    (ledger / "pr-3-ax.json").write_text(
+        json.dumps({"pr": "3", "review_type": "ax", "recorded_by": "x"}),
+        encoding="utf-8")
+    err = io.StringIO()
+    with redirect_stderr(err):
+        assert cs._pending_review_types_for_pr("3", "o/r") == []
+    out = err.getvalue()
+    # **見出しの行だけを見る。** 出力全体への部分一致で測った版は、種別ごとの
+    # 明細行が "(リポジトリ未記録)" を必ず出すので、見出しを固定文に戻しても緑に
+    # なった (反転 U24 で実測)。測りたいのは見出しが原因を言い切っていないこと。
+    headline = out.strip().splitlines()[0]
+    assert "リポジトリ未記録" in headline, (
+        "リポジトリ未記録の記録で差し引いたのに、見出しが作業フォルダだけを"
+        "原因として名乗っている:\n" + headline)
+
+
+def _run_review_done(tmp_path, monkeypatch, *, pr, repo, triggers_seed):
+    """`cmd_review_done` を隔離して走らせ、``(stdout, stderr)`` を返す。"""
+    import commands
+    triggers = tmp_path / "triggers"
+    triggers.mkdir(exist_ok=True)
+    for rtype, trepo in triggers_seed:
+        (triggers / cs.review_due_filename(rtype, pr, trepo)).write_text(
+            json.dumps({"review": rtype, "pr_repo": trepo}), encoding="utf-8")
+    for mod in (cs, commands):
+        monkeypatch.setattr(mod, "_get_triggers_dir", lambda: str(triggers),
+                            raising=False)
+    monkeypatch.setattr(cs, "_review_done_dir",
+                        lambda: (str(tmp_path / "ledger"), True))
+    monkeypatch.setattr(commands, "_record_review_adjudication_decision",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "_ci_flip_review_gate_success",
+                        lambda *a, **k: None)
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv("BEACON_PR_NUMBER", pr)
+    monkeypatch.setenv("BEACON_PR_REPO", repo)
+    for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
+        monkeypatch.delenv(k, raising=False)
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        commands.cmd_review_done()
+    return out.getvalue(), err.getvalue()
+
+
+def test_review_done_does_not_claim_gate_passage_when_nothing_was_owed(
+        tmp_path, monkeypatch):
+    """義務が元から無いリポジトリに対して「gate を通過できます」と言わないこと。
+
+    実機で踏んだ: 誤った ``--repo`` を渡すと、その番号の PR 記録 2 件は依然
+    block されているのに「PR #3 の独立レビューは全て実施済み — gate を通過
+    できます」と出た。番号だけで名乗る文面が、リポジトリで絞った判定に
+    追いついていなかった (名乗りと実態のズレ = この MS が掃除している型)。
+    """
+    out, err = _run_review_done(
+        tmp_path, monkeypatch, pr="3", repo="yet-another/repo",
+        triggers_seed=[("ax", "o/r"), ("ax", "other/app")])
+    combined = out + err
+    assert "全て実施済み" not in combined, (
+        "義務が無いのに全件実施済みと名乗った:\n" + combined)
+    assert "gate を通過できます" not in combined, combined
+    assert "元から在りませんでした" in combined, combined
+    assert "--repo" in combined, "原因として最も疑わしい指定に触れていない"
+
+
+def test_review_done_does_claim_gate_passage_when_it_really_cleared_the_last_one(
+        tmp_path, monkeypatch):
+    """効く側も測る (でないと報告を丸ごと消しても緑になる)。"""
+    out, err = _run_review_done(
+        tmp_path, monkeypatch, pr="3", repo="o/r",
+        triggers_seed=[("ax", "o/r")])
+    combined = out + err
+    assert "o/r#3 の独立レビューは全て実施済み" in combined, combined
+    assert "gate を通過できます" in combined, combined

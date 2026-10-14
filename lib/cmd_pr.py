@@ -279,7 +279,8 @@ def cmd_pr_add():
     # every PR-bound review (AX + maintainability, data-driven from the registry)
     # so they fire structurally at the 節目 (not only when a human remembers
     # /beacon-review-run). Advisory, non-blocking.
-    _fire_pr_open_review_triggers(_pr_number_from_url(url), title, url)
+    _fire_pr_open_review_triggers(_pr_number_from_url(url), title, url,
+                                  pr_repo=_new_repo)
 
     # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
     # を author に知らせる (= 警告のみ、block しない)。
@@ -611,7 +612,9 @@ def cmd_pr_close():
     save_project(data)
     # ms-119 e-4003: the interface-change 節目 is resolved — stop re-surfacing the
     # AX review nudge for this PR.
-    _clear_pr_open_review_triggers(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
+    _clear_pr_open_review_triggers(
+        _pr_number_from_url(entry.get("meta", {}).get("url", "")),
+        pr_repo=_recorded_pr_repo(entry))
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "closed"}, ensure_ascii=False))
@@ -1192,7 +1195,9 @@ def cmd_pr_merge():
                        action="merge")
     save_project(data)
     # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
-    _clear_pr_open_review_triggers(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
+    _clear_pr_open_review_triggers(
+        _pr_number_from_url(entry.get("meta", {}).get("url", "")),
+        pr_repo=_recorded_pr_repo(entry))
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
     else:

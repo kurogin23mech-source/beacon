@@ -37,10 +37,10 @@ from commands_shared import (
     _spec_exists_for_ms,
     _fire_review_due_for_pr,
     _clear_review_due_for_pr,
+    parse_review_due_filename,
     _fire_pr_open_review_triggers,
     _pending_review_types_for_pr,
     _pr_open_reviewed_marker_path,
-    _REVIEW_DUE_SUFFIX,
     _get_cloud_config_path,
     _resolve_active_api_url,
     _extract_token,
@@ -730,20 +730,34 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
             existing = os.listdir(_get_triggers_dir())
         except OSError:
             existing = []
-        if any(fn.endswith(f"{_REVIEW_DUE_SUFFIX}{num}.json") for fn in existing):
+        # ms-166 e-6971: 名前は (リポジトリ, 番号) なので suffix 一致では拾えない。
+        # 読み取りは parse_review_due_filename に一本化する。この anchor は gh が
+        # 答えた cwd のリポジトリの open PR を見ているので、repo は URL から採る。
+        _repo = core.extract_pr_repo_from_url(pr.get("url") or "")
+        if any((lambda p: p is not None and p[1] == num
+                and (not p[2] or not _repo or p[2] == _repo))(
+                    parse_review_due_filename(fn))
+               for fn in existing):
             continue
         # Fresh open PR with no review-due yet → fire the pr-open set.
-        if _pr_open_reviewed_marker_exists(num):
+        if _pr_open_reviewed_marker_exists(num, _repo):
             continue
         _fire_pr_open_review_triggers(num, pr.get("title") or "",
-                                      pr.get("url") or "")
+                                      pr.get("url") or "", pr_repo=_repo)
 
 
-def _pr_open_reviewed_marker_exists(pr_number: str) -> bool:
+def _pr_open_reviewed_marker_exists(pr_number: str, pr_repo: str = "") -> bool:
     """True when this PR's reviews were already run once (a done-marker exists),
     so the anchor must NOT re-fire review-due for it. `beacon review done`
-    stamps this marker the first time all of a PR's reviews clear."""
-    return os.path.exists(_pr_open_reviewed_marker_path(pr_number))
+    stamps this marker the first time all of a PR's reviews clear.
+
+    ms-166 e-6971: リポジトリ別のマーカーと旧式 (リポジトリ無し) の **両方** を見る。
+    片方だけ見ると、既存のマーカーを無視して再発火する / 逆に別リポジトリの
+    「実施済み」でこのリポジトリの発火を止める、のどちらかになる。
+    """
+    return any(os.path.exists(p) for p in {
+        _pr_open_reviewed_marker_path(pr_number, pr_repo),
+        _pr_open_reviewed_marker_path(pr_number)})
 
 
 def _cleanup_spec_needed_triggers() -> None:
