@@ -3864,6 +3864,59 @@ def _adjudications_from_env() -> list:
     return []
 
 
+def _emit_review_done_for_target(review_type: str, target_id: str) -> None:
+    """target (PR を作らない作業) のレビュー実施を記録して関門を外す (ms-166 e-6918).
+
+    PR 側と分けてあるのは、PR 側の経路が端から端まで PR 固有だから: 横断台帳の鍵は
+    PR 番号、``beacon-review-gate`` の印は PR head の commit、identity はリポジトリ。
+    target にはそのどれも無い。1 つの関数に混ぜると「どちらの対象か」の分岐が増え、
+    片方だけ直して食い違う形を作る (この MS で何度も直した型)。
+
+    **残る限界を名乗る**: 作業フォルダ横断の台帳 (ms-166 e-6899) は PR 番号を鍵に
+    しているので、fork で打った target のレビューは親から実施済みとして見えない。
+    PR 側と同等にするには台帳の鍵の一般化 (= 移行を伴う判断) が要るので、ここでは
+    **その事実を出力で開示する** に留める。
+    """
+    import review_spine
+    valid = (set(review_spine.load_review_types().keys())
+             | {review_spine.REVIEW_ATTAINMENT})
+    if review_type not in valid:
+        print(f"Error: 未知の review type: {review_type!r} "
+              f"(有効: {', '.join(sorted(valid))})。typo は義務を消さないのに"
+              f"成功に見える silent no-op になるため拒否します。", file=sys.stderr)
+        sys.exit(1)
+    # **消す前に** 義務が在ったかを見る (後で数えると「元から無かった」と
+    # 「いま解消した」を区別できない — PR 側で踏んだのと同じ話)。
+    owed = _target_review_due_has_binding(target_id, review_type)
+    cleared = _remove_binding_from_target_review_due(target_id, review_type)
+    _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
+    _adjudications = _adjudications_from_env()
+    _record_review_adjudication_decision(
+        review_type, target_id, _adj_summary, _adjudications)
+    if not _adj_summary and not _adjudications:
+        print("  ℹ 採否 (adjudication) は未記録です。findings があったなら "
+              "--adjudication-summary / --adjudications 付きで再実行すると判断軌跡が "
+              "decision arm に残ります。", file=sys.stderr)
+    print(f"レビュー実施を記録: {review_type} / {target_id} (review-due 解消)")
+    print("  ℹ この記録は **この作業フォルダ限り** です。作業フォルダ横断の台帳は "
+          "PR 番号を鍵にしているため、fork で打った target のレビューは親から"
+          "実施済みとして見えません (ms-166 e-6918 の残る限界)。", file=sys.stderr)
+    if owed and cleared:
+        print(f"  {target_id} の {review_type} の義務を解消しました "
+              f"— 完了の関門を通過できます。")
+    elif owed and not cleared:
+        print(f"  ⚠ 義務は在りましたが印を書き換えられませんでした (IO エラー)。"
+              f"関門は依然 {review_type} を要求します。", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(f"  ℹ {target_id} に {review_type} の未実施レビューは元から"
+              f"在りませんでした (review-due が発火していない)。この記録は"
+              f"残りますが、どの関門も新たに外れていません。--type / --target の"
+              f"指定が意図と合っているか確認してください (ms-166 e-6918)。",
+              file=sys.stderr)
+        sys.exit(3)
+
+
 def cmd_review_done():
     """Mark an independent review as RUN for a PR — clears its review-due trigger
     so beacon pr approve/merge no longer blocks on it (ms-119 e-4060).
@@ -3899,12 +3952,26 @@ def cmd_review_done():
         print(f"Error: --repo は owner/name の形で渡してください "
               f"(受け取った値: {pr_repo!r})。", file=sys.stderr)
         sys.exit(1)
-    if not review_type or not pr_number:
-        print("Usage: beacon review done --type <ax|maintainability|...> --pr <N> "
-              "[--repo <owner/name>] [--adjudication-summary <text>] "
+    # ms-166 e-6918: PR を作らない作業にも実施を記録できるようにする。兄弟の
+    # `review skip` は最初から --pr / --target の両対応だったのに done だけ --pr
+    # しか無く、PR を作る前に branch でレビューを走らせると **関門を外す経路が
+    # 存在しなかった** (別プロジェクトのセッションが実際に踏み、後から PR を作って
+    # 帳尻を合わせた)。gate を扱う 2 兄弟で対象の指定方法が割れていた。
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    if pr_number and target_id:
+        print("Error: --pr と --target は同時に指定できません (どちらか一方)。",
+              file=sys.stderr)
+        sys.exit(1)
+    if not review_type or not (pr_number or target_id):
+        print("Usage: beacon review done --type <ax|maintainability|...> "
+              "(--pr <N> [--repo <owner/name>] | --target <ms-XX|op-X>) "
+              "[--adjudication-summary <text>] "
               "[--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,"
               "\"rationale\":..}]']", file=sys.stderr)
         sys.exit(1)
+    if target_id:
+        _emit_review_done_for_target(review_type, target_id)
+        return
     # 明示の --repo かどうかを覚えておく (独立 AX レビュー high)。cwd から推測した
     # 値で、リポジトリを持たない旧式の印を引退させてはならない —— judge の実測では
     # 無関係な cwd からの `review done --pr 42` が、別リポジトリの同番号の PR の
@@ -6775,6 +6842,12 @@ def _help_registry():
         {"command": "beacon target reject <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Reject a pending target transition (= transition does NOT execute; --reason alias of --rationale, e-3906)"},
         {"command": "beacon target list", "flags": ["--target <id>", "--pending", "--json"], "description": "List target transition-approval requests"},
         {"command": "beacon review context --type <ax|philosophy>", "flags": ["--pr <n>", "--repo <owner/name>", "--diff-ref <base...head>", "--origin-doc <doc-id>", "--mode diff"], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)。--repo は --pr の番号がどのリポジトリのものかを指す (省略時は cwd のリポジトリ; ms-166 e-6971)"},
+        # ms-166 e-6918: done / skip を単一ソースに載せる。載っていなかったため
+        # `beacon review done --help` が「`beacon review --help` を見よ」と案内し、
+        # その `review --help` は context の 1 行しか出さない **閉じたループ** に
+        # なっていた (案内に従うと情報が無い場所に着く)。
+        {"command": "beacon review done --type <ax|maintainability|...>", "flags": ["--pr <n>", "--repo <owner/name>", "--target <ms-XX|op-X>", "--adjudication-summary <text>", "--adjudications <json>"], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。--adjudication-summary / --adjudications は findings の採否を decision arm に構造記録 (ms-166 e-5971)"},
+        {"command": "beacon review skip --type <ax|maintainability|...>", "flags": ["--pr <n>", "--repo <owner/name>", "--target <ms-XX|op-X>", "--reason <text>", "--json"], "description": "人間が意図的にレビューを省く一級経路。--reason 必須で監査ログ (.beacon/review-skips.jsonl) に理由を残す (ms-119 e-4124)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac-verdict <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac-verdict を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},
         {"command": "beacon task cancel <entry-id>", "flags": ["--reason <text>", "--acknowledge"], "description": "Cancel (取消) a task. `task update --status cancelled` は拒否されるのでこちらが唯一の経路。終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)"},
