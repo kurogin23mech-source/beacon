@@ -839,6 +839,32 @@ case "${1:-}" in
                 BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="open" \
                     python3 "$COMMANDS_PY" operation_set_status
                 ;;
+            server-tick)
+                # ms-166 e-5980: この Operation をサーバ側の定期ティックの発火対象に
+                # する / しない。python 側の動詞は在ったが **どのフロントからも
+                # 到達できなかった** (bin/beacon 未 route + Skill からの呼び出しゼロ)。
+                # 「内部専用だから出さない」という元の意図が、結果として
+                # 「誰も opt-in できない機能」を作っていた (ms-166 の主題)。
+                shift 2
+                _ost_id="" _ost_mode="on" _ost_cadence=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --on)      _ost_mode="on";  shift ;;
+                        --off)     _ost_mode="off"; shift ;;
+                        --cadence) _need_flag_value "$#" "$1"; _ost_cadence="$2"; shift 2 ;;
+                        -?*)       _guard_flag "$1" ;;
+                        *)         _ost_id="$1"; shift ;;
+                    esac
+                done
+                if [ -z "$_ost_id" ]; then
+                    echo "Usage: beacon operation server-tick <op-id> [--on|--off] [--cadence <分>]" >&2
+                    echo "       サーバ側の定期ティックで自律発火させるかを切り替える (既定 --on)。" >&2
+                    exit 1
+                fi
+                BEACON_OP_ID="$_ost_id" BEACON_SERVER_TICK="$_ost_mode" \
+                    BEACON_CADENCE="$_ost_cadence" \
+                    python3 "$COMMANDS_PY" operation_server_tick
+                ;;
             status)
                 # ms-120 e-3907: deprecated write form. `activate` (→open) and
                 # `close` (→closed) are the canonical named verbs; `status` now
