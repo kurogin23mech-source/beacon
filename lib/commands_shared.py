@@ -2850,6 +2850,29 @@ def _spec_exists_for_ms(ms_id: str) -> bool:
 _REVIEW_DUE_REPO_SEP = "@"
 _REVIEW_DUE_OWNER_SEP = "~"
 
+#: 旧式 (リポジトリを名前に持たない) トリガー / マーカーを受け続ける判断と、
+#: **その廃止条件** —— 1 箇所に書く (独立保守性レビュー low)。
+#:
+#: 以前はこの判断の理由が 4 つの関数の docstring に別々の散文で書かれており、
+#: 廃止してよいかを後から読む人が「同じ判断が 4 回繰り返されている」ことに
+#: 気づけなかった (= 4 箇所を手で見直さないと廃止できない)。
+#:
+#: **なぜ受け続けるか**: この変更より前に発火したトリガーは番号だけの名前で
+#: ディスクに在る。読み取り側が受けなければ、実施済み / 未実施の判定から静かに
+#: 外れて関門が壊れる (既存のトリガーを孤児にする)。
+#:
+#: **廃止してよい条件**: 対象プロジェクトの ``.beacon/triggers/`` に
+#: ``@`` を含まない ``*-review-due-<数字>.json`` が 1 つも無くなったとき。
+#: open な PR の寿命 (= 数日〜数週) を超えれば自然に満たされる。
+#: 廃止するときに直す場所は ``review_due_filename`` /
+#: ``parse_review_due_filename`` / ``_clear_review_due_for_pr`` /
+#: ``_pending_review_types_for_pr`` / ``_pr_open_reviewed_marker_path`` /
+#: ``cmd_review_skip`` の義務確認 —— この一覧がここに在ることが要点。
+LEGACY_REVIEW_DUE_TOLERANCE = (
+    "リポジトリを名前に持たない旧式のトリガー / マーカーも受ける "
+    "(既存のトリガーを孤児にしないため)。廃止条件は "
+    "commands_shared.LEGACY_REVIEW_DUE_TOLERANCE の注記を参照 (ms-166 e-6971)。")
+
 
 def review_due_filename(review_type: str, pr_number: str,
                         pr_repo: str = "") -> str:
@@ -2863,9 +2886,9 @@ def review_due_filename(review_type: str, pr_number: str,
     台帳の差し引き側に repo の判定を足してあったが、その手前でトリガー一覧が空に
     なるため **一度も評価されなかった** —— 「足した」と「配線されている」は別。
 
-    リポジトリが不明なときは番号だけの名前 (= 従来と同じ) を返す。これは
-    **この変更より前に発火した既存トリガーと同じ形** なので、移行で孤児にならない。
-    読み取り側 (``parse_review_due_filename``) が両方の形を受ける。
+    リポジトリが不明なときは番号だけの名前 (= 従来と同じ) を返す。両形を受ける
+    判断とその廃止条件は ``LEGACY_REVIEW_DUE_TOLERANCE`` に 1 箇所だけ書いてある
+    (ここで再論しない —— 同じ判断を 4 箇所に散文で書いていたのが保守性レビュー low)。
 
     組み立てと読み取りがこの 2 関数に閉じているのは、以前この名前が 5 箇所で手組み
     されていて、1 箇所だけ直しても残り 4 箇所で同じ取り違えが起き続ける形だったため
@@ -2873,6 +2896,13 @@ def review_due_filename(review_type: str, pr_number: str,
     """
     base = f"{review_type}-review-due-{pr_number}"
     repo = str(pr_repo or "").strip()
+    # 形が違う repo は **名前に入れない** (独立保守性レビュー high)。入れると区切り
+    # 文字と衝突して、書いた名前と読み戻した repo が一致しなくなる (= その PR 自身の
+    # 関門が空になる)。値が入る場所 (core.extract_pr_repo_from_url /
+    # core.recorded_pr_repo) でも検査しているが、ここでも閉じる —— この関数は
+    # 「どんな値でも安全な名前を返す」と名乗っているので、名乗りを実装で守る。
+    if repo and not core.is_repo_slug(repo):
+        repo = ""
     if not repo:
         return f"{base}.json"
     return (f"{base}{_REVIEW_DUE_REPO_SEP}"
@@ -2892,13 +2922,22 @@ def parse_review_due_filename(filename: str):
     if _REVIEW_DUE_REPO_SEP in stem:
         stem, _sep, encoded = stem.partition(_REVIEW_DUE_REPO_SEP)
         repo = encoded.replace(_REVIEW_DUE_OWNER_SEP, "/")
+    # 両形 (repo 付き / 旧式) を受ける: ``LEGACY_REVIEW_DUE_TOLERANCE``。
     marker = _REVIEW_DUE_SUFFIX  # "-review-due-"
-    idx = stem.rfind(marker)
+    # **最初の出現**で割り、番号は数字だけを受ける (独立保守性レビュー high)。
+    #
+    # 旧実装は `rfind` (最後の出現) で割り、番号の形を見ていなかった。judge が実測
+    # した通り、番号に `-review-due-` を含む値が入ると
+    # `ax-review-due-5-review-due-9` が「種別 ax-review-due-5 / 番号 9」と読まれ、
+    # **無関係な PR#9 の関門に誤帰属**する (しかも元の番号では消せないので永久に残る)。
+    # 最初の出現で割れば種別は `ax`、番号は `5-review-due-9` となり数字でないので
+    # **None を返して拒否する** —— 誤った対象に帰属させるより、読めないと言う。
+    idx = stem.find(marker)
     if idx <= 0:
         return None
     review_type = stem[:idx]
     pr_number = stem[idx + len(marker):]
-    if not review_type or not pr_number:
+    if not review_type or not pr_number.isdigit():
         return None
     return (review_type, pr_number, repo)
 
@@ -2914,6 +2953,13 @@ def _fire_review_due_for_pr(review_type: str, label: str, pr_number: str,
     PR never fails over a trigger write.
     """
     if not pr_number:
+        return
+    # 番号が数字でないと、書いた名前を読み戻せない / 別の PR に誤帰属する
+    # (独立保守性レビュー high)。best-effort の経路なので落とさず、書かずに戻る。
+    if not str(pr_number).strip().isdigit():
+        print(f"Warning: PR 番号が数字ではないため review-due トリガーを書きません "
+              f"({pr_number!r})。名前を読み戻せず、別の PR の関門に誤帰属する"
+              f"ためです (ms-166 e-6971)。", file=sys.stderr)
         return
     try:
         triggers_dir = _get_triggers_dir()
@@ -2957,7 +3003,7 @@ def _clear_review_due_for_pr(review_type: str, pr_number: str,
     リポジトリ非依存なら、台帳側に repo 判定を足しても意味がない。
 
     ``pr_repo`` が分かっているとき: そのリポジトリ用のファイルと、**リポジトリを
-    持たない旧式のファイル** を消す。旧式はどのリポジトリのものか記録が無いので
+    持たない旧式のファイル** (``LEGACY_REVIEW_DUE_TOLERANCE``) を消す。旧式はどのリポジトリのものか記録が無いので
     repo で区別できない —— 区別できないことを黙って「別リポジトリだから残す」と
     決めるのも「同じだから消す」と決めるのも推測なので、**消した事実を開示する**
     (関門が外れたことに気づけるようにする)。他の **既知の** リポジトリのファイルは
@@ -3027,8 +3073,7 @@ def _clear_pr_open_review_triggers(pr_number: str, pr_repo: str = "") -> None:
     # ms-119 e-4060: PR resolved (merged/closed) → drop the reviewed done-marker
     # too, so the trigger dir does not accumulate stale markers.
     try:
-        for marker in (_pr_open_reviewed_marker_path(pr_number, pr_repo),
-                       _pr_open_reviewed_marker_path(pr_number)):
+        for marker in reviewed_marker_paths(pr_number, pr_repo):
             if os.path.exists(marker):
                 os.remove(marker)
     except OSError:
@@ -3047,7 +3092,8 @@ def _pending_review_types_for_pr(pr_number: str, pr_repo: str = "") -> list:
     given, a ledger record for a **different** repository does not count as
     "already reviewed" — otherwise a project that tracks two repositories would
     have PR#3 of one lift the gate for PR#3 of the other. Records written before
-    the repository was captured carry no repo and **still count**: tightening a
+    the repository was captured carry no repo and **still count**
+    (``LEGACY_REVIEW_DUE_TOLERANCE``): tightening a
     gate silently against existing records would turn reviews that really were
     performed into un-performed ones, with no way for the operator to tell why.
     """
@@ -3139,13 +3185,27 @@ def _announce_review_ledger_subtraction(pr_number: str, subtracted: list) -> Non
                          f"(台帳ファイルが手で書かれた可能性)")
     print("\n".join(lines), file=sys.stderr)
 
+def reviewed_marker_paths(pr_number: str, pr_repo: str = "") -> set:
+    """再発火抑止マーカーの **全ての住所** を返す (ms-166 e-6971)。
+
+    リポジトリ別の名前と旧式 (リポジトリ無し) の名前の 2 つ。独立保守性レビュー
+    medium: この 2 要素の集合が 2 箇所で手組みされていた
+    (``cmd_trigger._pr_open_reviewed_marker_exists`` と
+    ``_clear_pr_open_review_triggers``)。3 つ目の形を足す / 旧式を廃止するときに
+    片方だけ直すと、**再発火の抑止と merge 時の後片付けが「レビュー済みか」で
+    食い違う** —— この MS が直している欠陥の再発そのもの。数える場所を 1 つにする。
+    """
+    return {_pr_open_reviewed_marker_path(pr_number, pr_repo),
+            _pr_open_reviewed_marker_path(pr_number)}
+
+
 def _pr_open_reviewed_marker_path(pr_number: str, pr_repo: str = "") -> str:
     """再発火抑止マーカーの path。``pr_repo`` を渡すとリポジトリ別になる。
 
     ms-166 e-6971: 関門には使わない印 (= tick anchor が review-due を再発火させない
     ための抑止) だが、番号だけだと 2 リポジトリの同番号で片方の「実施済み」が
     もう片方の発火を止める。リポジトリが分かるなら分ける。読み取り側は旧式
-    (リポジトリ無し) も見る (既存マーカーを孤児にしない)。
+    (リポジトリ無し) も見る —— 判断と廃止条件は ``LEGACY_REVIEW_DUE_TOLERANCE``。
     """
     repo = str(pr_repo or "").strip()
     if not repo:

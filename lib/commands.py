@@ -3643,6 +3643,12 @@ def cmd_review_skip():
         print("Error: --repo は --pr と一緒に使ってください (PR 番号を解決する先を"
               "指す指定なので、--target では意味を持ちません)。", file=sys.stderr)
         sys.exit(1)
+    if pr_number and not pr_number.isdigit():
+        print(f"Error: --pr は PR 番号 (数字) を渡してください "
+              f"(受け取った値: {pr_number!r})。数字以外を通すと、レビュー未実施の"
+              f"印の名前を読み戻せず、別の PR の関門に誤帰属します "
+              f"(ms-166 e-6971)。", file=sys.stderr)
+        sys.exit(1)
 
     if not review_type or not (pr_number or target_id):
         print("Usage: beacon review skip --type <ax|maintainability|philosophy|...> "
@@ -3678,7 +3684,8 @@ def cmd_review_skip():
     if pr_number:
         # ms-166 e-6971: 名前の組み立ては review_due_filename に一本化する
         # (ここで手組みすると、リポジトリ付きの名前になった後も旧式だけを見て
-        #  「免除する義務が無い」と誤報する)。repo 付きと旧式の両方を見る。
+        #  「免除する義務が無い」と誤報する)。両形を見る判断と廃止条件は
+        # commands_shared.LEGACY_REVIEW_DUE_TOLERANCE に 1 箇所だけ書いてある。
         owed = any(os.path.isfile(os.path.join(_get_triggers_dir(), _n))
                    for _n in {review_due_filename(review_type, pr_number, pr_repo),
                               review_due_filename(review_type, pr_number, "")})
@@ -3870,6 +3877,12 @@ def cmd_review_done():
     # どの差分に対するものか辿れない状態を残さないために記録する。明示が無ければ
     # cwd のリポジトリ (= review context が既定で差分を採る先と同じ) を解決する。
     pr_repo = os.environ.get("BEACON_PR_REPO", "").strip()
+    if pr_number and not pr_number.isdigit():
+        print(f"Error: --pr は PR 番号 (数字) を渡してください "
+              f"(受け取った値: {pr_number!r})。数字以外を通すと、レビュー未実施の"
+              f"印の名前を読み戻せず、別の PR の関門に誤帰属します "
+              f"(ms-166 e-6971)。", file=sys.stderr)
+        sys.exit(1)
     if pr_repo and not core.is_repo_slug(pr_repo):
         print(f"Error: --repo は owner/name の形で渡してください "
               f"(受け取った値: {pr_repo!r})。", file=sys.stderr)

@@ -38,6 +38,7 @@ from commands_shared import (
     _fire_review_due_for_pr,
     _clear_review_due_for_pr,
     parse_review_due_filename,
+    reviewed_marker_paths,
     _fire_pr_open_review_triggers,
     _pending_review_types_for_pr,
     _pr_open_reviewed_marker_path,
@@ -755,9 +756,10 @@ def _pr_open_reviewed_marker_exists(pr_number: str, pr_repo: str = "") -> bool:
     片方だけ見ると、既存のマーカーを無視して再発火する / 逆に別リポジトリの
     「実施済み」でこのリポジトリの発火を止める、のどちらかになる。
     """
-    return any(os.path.exists(p) for p in {
-        _pr_open_reviewed_marker_path(pr_number, pr_repo),
-        _pr_open_reviewed_marker_path(pr_number)})
+    # 住所の列挙は commands_shared.reviewed_marker_paths が唯一の場所
+    # (独立保守性レビュー medium: 同じ 2 要素集合が 2 箇所で手組みされていた)。
+    return any(os.path.exists(p)
+               for p in reviewed_marker_paths(pr_number, pr_repo))
 
 
 def _cleanup_spec_needed_triggers() -> None:

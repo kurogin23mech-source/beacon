@@ -2808,7 +2808,20 @@ def extract_pr_repo_from_url(url: str) -> str:
         str(url).strip())
     if not m:
         return ""
-    return f"{m.group(1)}/{m.group(2)}"
+    candidate = f"{m.group(1)}/{m.group(2)}"
+    # **形の検査をここで通す** (ms-166 e-6971、独立保守性レビュー high)。
+    #
+    # 以前は検査が ``--repo`` 旗の 3 箇所だけに在り、**この url 経路 (= 通常の
+    # `beacon pr add <url>` が meta.pr_repo を埋める経路) には無かった**。正規表現が
+    # 段を `[^/\s]+` で取るので、`https://github.com/o~r/x/pull/5` から `o~r/x` が
+    # そのまま通り、トリガー名の区切り文字 (`~`) と衝突して関門が空になる —— judge が
+    # 本番の入口 (`cmd_pr_add`) を走らせて実測した。
+    #
+    # 「この文字は repo 名に現れない」という不変条件を docstring で主張しながら、
+    # 守っているのが一部の入口だけ、という形をやめる。**値が系に入る場所で閉じる**。
+    if not is_repo_slug(candidate):
+        return ""
+    return candidate
 
 
 def recorded_pr_repo(entry: dict) -> str:
@@ -2825,7 +2838,9 @@ def recorded_pr_repo(entry: dict) -> str:
     """
     meta = entry.get("meta") or {} if isinstance(entry, dict) else {}
     repo = str(meta.get("pr_repo") or "").strip()
-    if repo:
+    # 手で書かれた記録は何でも入りうるので、読み戻しでも形を検査する (同 high)。
+    # 形が違うものは「不明」として扱う —— 不明の扱いは既に全経路で閉じている。
+    if repo and is_repo_slug(repo):
         return repo
     return extract_pr_repo_from_url(
         str((entry or {}).get("url") or meta.get("url") or ""))

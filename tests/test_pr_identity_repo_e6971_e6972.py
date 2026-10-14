@@ -915,3 +915,171 @@ def test_review_done_does_claim_gate_passage_when_it_really_cleared_the_last_one
     combined = out + err
     assert "o/r#3 の独立レビューは全て実施済み" in combined, combined
     assert "gate を通過できます" in combined, combined
+
+
+# --- 9. 不変条件は「主張」でなく「コード」で閉じる (独立保守性レビュー high 2 件) ---
+#
+# 初版は review_due_filename の docstring で「`@` と `~` は repo slug に使えない
+# 文字なので境目を取り違えない」と主張していた。だが形の検査 (core.is_repo_slug) は
+# `--repo` 旗の 3 箇所にしか配線しておらず、**meta.pr_repo を埋める url 経路
+# (= 通常の `beacon pr add <url>` 全件) には無かった**。judge が本番の入口を走らせて
+# 実測: `https://github.com/o~r/x/pull/5` を登録すると、その PR 自身の関門が空になる。
+#
+# 同じ形で PR 番号も検証していなかった。番号に `-review-due-` を含む値が入ると、
+# 名前が **無関係な PR の関門** に誤帰属し、しかも元の番号では消せない。
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/o~r/x/pull/5",     # 区切り文字 ~ を含む
+    "https://github.com/o@r/x/pull/5",     # 区切り文字 @ を含む
+    "https://github.com/o r/x/pull/5",     # 空白
+])
+def test_a_repo_that_would_break_the_encoding_is_not_accepted(url):
+    """名前の区切りと衝突する repo は、値が入る場所で落とすこと。
+
+    ここで落とさないと、書いた名前と読み戻した repo が一致しなくなる
+    (= 発火したのに自分の関門から見えない)。
+    """
+    assert core.extract_pr_repo_from_url(url) == "", url
+
+
+def test_a_hand_written_record_with_a_bad_repo_reads_as_unknown():
+    """手で書かれた ``meta.pr_repo`` も読み戻しで検査すること。
+
+    url 経路を閉じても、記録を直接書く経路 (手編集 / 別ツール) が残る。
+    「不明」の扱いは全経路で既に閉じているので、不明に倒すのが安全。
+    """
+    assert core.recorded_pr_repo({"meta": {"pr_repo": "o~r/x"}}) == ""
+    assert core.recorded_pr_repo({"meta": {"pr_repo": "o/r"}}) == "o/r"
+
+
+def test_the_filename_builder_refuses_a_repo_that_breaks_the_encoding():
+    """組み立て側でも閉じること (名乗りを実装で守る)。
+
+    値が入る場所で検査していても、この関数は「どんな値でも安全な名前を返す」と
+    名乗っているので、ここでも守る。旧式 (リポジトリ無し) の名前に落とす。
+    """
+    assert cs.review_due_filename("ax", "5", "o~r/x") == "ax-review-due-5.json"
+    assert cs.review_due_filename("ax", "5", "o/r") == "ax-review-due-5@o~r.json"
+
+
+def test_the_gate_sees_the_triggers_it_just_fired(tmp_path, monkeypatch):
+    """**judge が実測した迂回の再現**: 発火した関門が自分から見えること。
+
+    judge は本番の入口 (`cmd_pr_add`) を走らせ、`o~r/x` の PR#5 で
+    `_pending_review_types_for_pr('5','o~r/x')` が `[]` を返すことを実測した
+    (= 発火直後なのに approve/merge の関門が空)。
+    """
+    triggers = tmp_path / "triggers"
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    monkeypatch.setattr(cs, "_review_done_dir",
+                        lambda: (str(tmp_path / "ledger"), True))
+    url = "https://github.com/o~r/x/pull/5"
+    repo = core.extract_pr_repo_from_url(url)      # → "" (不明に倒れる)
+    cs._fire_review_due_for_pr("ax", "ax", "5", "t", url, pr_repo=repo)
+    with redirect_stderr(io.StringIO()):
+        assert cs._pending_review_types_for_pr("5", repo) == ["ax"], (
+            "発火したトリガーが自分の関門から見えない")
+        # 壊れた repo 値で引いても、不明として扱われるので見える (関門を残す側)
+        assert cs._pending_review_types_for_pr("5", "o~r/x") == ["ax"]
+
+
+def test_a_non_digit_pr_number_is_not_written_as_a_trigger(tmp_path, monkeypatch):
+    """番号が数字でないトリガーは書かないこと (誤帰属の種を作らない)。"""
+    triggers = tmp_path / "triggers"
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(triggers))
+    err = io.StringIO()
+    with redirect_stderr(err):
+        cs._fire_review_due_for_pr("ax", "ax", "5-review-due-9", "t", "u",
+                                   pr_repo="o/r")
+    assert not triggers.exists() or list(triggers.iterdir()) == []
+    assert "数字ではない" in err.getvalue(), err.getvalue()
+
+
+def test_a_malformed_filename_is_rejected_not_misattributed():
+    """読めない名前は None にすること。**別の PR に帰属させない**。
+
+    judge の実測: 旧実装は最後の ``-review-due-`` で割り番号の形を見なかったので、
+    ``ax-review-due-5-review-due-9@o~r.json`` を「種別 ax-review-due-5 / 番号 9」と
+    読み、無関係な PR#9 の関門に誤帰属した (しかも元の番号では消せない)。
+    """
+    assert cs.parse_review_due_filename(
+        "ax-review-due-5-review-due-9@o~r.json") is None
+    # 正常な形は従来どおり読める (拒否を広げすぎていないこと)
+    assert cs.parse_review_due_filename("ax-review-due-5@o~r.json") == (
+        "ax", "5", "o/r")
+    assert cs.parse_review_due_filename("ax-review-due-5.json") == (
+        "ax", "5", "")
+    # 番号が数字でない名前も拒否
+    assert cs.parse_review_due_filename("ax-review-due-abc.json") is None
+
+
+@pytest.mark.parametrize("verb,env", [
+    ("cmd_review_done", "BEACON_PR_NUMBER"),
+    ("cmd_review_skip", "BEACON_PR_NUMBER"),
+])
+def test_a_non_digit_pr_is_refused_at_the_user_facing_entrance(
+        verb, env, monkeypatch):
+    """利用者が触る入口で落とすこと (警告だけで書かずに戻る形に頼らない)。"""
+    import commands
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv(env, "5-review-due-9")
+    monkeypatch.setenv("BEACON_REASON", "r")
+    monkeypatch.delenv("BEACON_PR_REPO", raising=False)
+    monkeypatch.delenv("BEACON_TARGET_ID", raising=False)
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as ei:
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            getattr(commands, verb)()
+    assert ei.value.code == 1
+    assert "--pr は PR 番号 (数字)" in err.getvalue(), err.getvalue()
+
+
+def test_the_reviewed_marker_addresses_are_enumerated_in_one_place():
+    """再発火抑止マーカーの住所の列挙が 1 箇所であること (保守性 medium)。
+
+    同じ 2 要素集合が 2 箇所で手組みされていた。3 つ目の形を足す / 旧式を廃止する
+    ときに片方だけ直すと、再発火の抑止と merge 時の後片付けが「レビュー済みか」で
+    食い違う —— この MS が直している欠陥の再発そのもの。
+    """
+    import ast as _ast
+    import importlib
+    offenders = []
+    for modname in ("commands", "commands_shared", "cmd_pr", "cmd_trigger"):
+        mod = importlib.import_module(modname)
+        tree = _ast.parse(inspect.getsource(mod))
+        enumerator = [(n.lineno, getattr(n, "end_lineno", n.lineno))
+                      for n in _ast.walk(tree)
+                      if isinstance(n, _ast.FunctionDef)
+                      and n.name == "reviewed_marker_paths"]
+        calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
+                 and (getattr(n.func, "id", None)
+                      or getattr(n.func, "attr", ""))
+                 == "_pr_open_reviewed_marker_path"]
+        for c in calls:
+            # 列挙器の中 (= 唯一の正準な場所) 以外で 2 回以上組むのが問題。
+            if not any(a <= c.lineno <= b for a, b in enumerator):
+                offenders.append(f"{modname}:{c.lineno}")
+    # 残っていてよいのは「1 つの住所だけ要る」書き込み側 1 箇所
+    # (review done が自分の repo のマーカーを押す経路)。
+    assert len(offenders) <= 1, (
+        "マーカー住所の列挙が複数箇所で手組みされている: " + repr(offenders))
+
+
+def test_the_legacy_tolerance_decision_lives_in_one_place():
+    """旧式を受け続ける判断と廃止条件が 1 箇所にあること (保守性 low)。
+
+    以前は同じ判断の理由が 4 つの関数の散文に散っており、廃止してよいかを読む人が
+    「同じ判断が 4 回繰り返されている」ことに気づけなかった (= 4 箇所を手で見直さ
+    ないと廃止できない)。定数が在り、廃止条件が書かれ、各所がそれを指すこと。
+    """
+    assert hasattr(cs, "LEGACY_REVIEW_DUE_TOLERANCE")
+    src = inspect.getsource(cs)
+    head = src[:src.index("LEGACY_REVIEW_DUE_TOLERANCE = (")]
+    anchor = head[head.rindex("#: 旧式"):]
+    assert "廃止してよい条件" in anchor, "廃止条件が書かれていない"
+    # 旧式を扱う各所が、理由を再論せず定数を指していること
+    for fn in ("review_due_filename", "_clear_review_due_for_pr",
+               "_pending_review_types_for_pr", "_pr_open_reviewed_marker_path"):
+        doc = inspect.getdoc(getattr(cs, fn)) or ""
+        assert "LEGACY_REVIEW_DUE_TOLERANCE" in doc, (
+            f"{fn} が旧式許容の判断を独自の散文で持っている (1 箇所に寄せる)")
