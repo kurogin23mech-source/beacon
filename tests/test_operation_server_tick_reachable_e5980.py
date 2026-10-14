@@ -197,6 +197,63 @@ def test_the_rule_for_cadence_lives_in_one_place():
         + repr(sorted(calls)))
 
 
+def test_the_firing_preconditions_live_in_one_place():
+    """発火の前提の一覧が 1 箇所であること (独立保守性レビュー high)。
+
+    初版はここ (CLI) に status + server_tick だけの独自コピーを書き、**envelope
+    (事前承認) の関門を見ていなかった** ので envelope 無しの Operation に
+    「→ 発火します」と言っていた。envelope の関門は server/app.py の
+    `_fire_operation` に手で書かれていた = 前提の知識が 2 箇所に割れていた。
+    **報告する側と実際に発火する側の両方が同じ関数を通る** ことを構造で固定する。
+    """
+    import ast as _ast
+    import inspect
+    import cmd_operation
+    import tick_scheduler
+    assert hasattr(tick_scheduler, "firing_blockers")
+    calls = {(getattr(c.func, "id", None) or getattr(c.func, "attr", ""))
+             for c in _ast.walk(_ast.parse(inspect.getsource(
+                 cmd_operation.cmd_operation_server_tick)))
+             if isinstance(c, _ast.Call)}
+    assert "firing_blockers" in calls, (
+        "報告する側が共通の前提判定を通っていない: " + repr(sorted(calls)))
+    # 実際に発火する側も同じ関数を通ること (片方だけ直して食い違う形を塞ぐ)。
+    #
+    # **構文木で実際の呼び出しを見る。** ソースへの部分一致で書いた版は、この欠陥を
+    # 説明する **コメント** が `tick_scheduler.firing_blockers` という文字列を含む
+    # ために、呼び出しを消しても緑のままだった (反転 U59 で実測)。緩い一致。
+    with open(os.path.join(ROOT, "server", "app.py"), encoding="utf-8") as f:
+        app_tree = _ast.parse(f.read())
+    fire_fn = next((n for n in _ast.walk(app_tree)
+                    if isinstance(n, _ast.FunctionDef)
+                    and n.name == "_fire_operation"), None)
+    assert fire_fn is not None, "_fire_operation が見つからない"
+    fire_calls = {(getattr(c.func, "id", None) or getattr(c.func, "attr", ""))
+                  for c in _ast.walk(fire_fn) if isinstance(c, _ast.Call)}
+    assert "firing_blockers" in fire_calls, (
+        "実際に発火する側が共通の前提判定を通っていない (= CLI の報告と食い違う): "
+        + repr(sorted(fire_calls)))
+
+
+@pytest.mark.parametrize("state,expect_blocked", [
+    ("present", False), ("absent", True), ("unknown", False),
+])
+def test_the_envelope_gate_is_part_of_the_preconditions(state, expect_blocked):
+    """envelope の関門が前提の一覧に入っていること。
+
+    「無い」と「確認できない」を分ける: 確認できないものを blocker と断定しない
+    (local モード / 認証 / 未到達 を全部 None に畳む取得関数に引きずられない)。
+    """
+    import tick_scheduler
+    blockers, undetermined = tick_scheduler.firing_blockers(
+        status="open", server_tick=True, envelope_state=state)
+    assert bool(blockers) is expect_blocked, (state, blockers)
+    if state == "unknown":
+        assert undetermined, "確認できないことを黙って無視した"
+    else:
+        assert not undetermined, (state, undetermined)
+
+
 def test_it_says_whether_firing_will_actually_happen(tmp_path):
     """**実際に発火するか** を報告すること (独立 AX レビュー high)。
 
@@ -205,15 +262,19 @@ def test_it_says_whether_firing_will_actually_happen(tmp_path):
     open でない Operation に opt-in しても発火しない。
     """
     proj = _op_project(tmp_path, ("op-1", "open"), ("op-2", "todo"))
+    # local モードなので envelope は「確認できない」 = 断定しないこと
     ok = _run(proj, "op-1", "--on")
     assert ok.returncode == 0, ok.stderr
-    assert "発火します" in ok.stdout, ok.stdout
+    combined_ok = ok.stdout + ok.stderr
+    assert "確認できていません" in combined_ok, combined_ok
+    assert "発火します" not in combined_ok, (
+        "envelope を確認できていないのに発火すると断定した:\n" + combined_ok)
 
     not_yet = _run(proj, "op-2", "--on")
     assert not_yet.returncode == 0, not_yet.stderr
     combined = not_yet.stdout + not_yet.stderr
     assert "まだ発火しません" in combined, combined
-    assert "status=todo" in combined, combined
+    assert "status が open ではありません" in combined, combined
     assert "activate" in combined, "open にする手順を案内していない"
 
 
@@ -221,7 +282,8 @@ def test_turning_it_off_says_it_will_not_fire(tmp_path):
     proj = _op_project(tmp_path, ("op-1", "open"))
     proc = _run(proj, "op-1", "--off")
     assert proc.returncode == 0, proc.stderr
-    assert "発火しません" in proc.stdout, proc.stdout
+    combined = proc.stdout + proc.stderr
+    assert "server_tick が off" in combined, combined
 
 
 def test_a_stray_second_op_id_is_refused(tmp_path):
@@ -235,8 +297,41 @@ def test_a_stray_second_op_id_is_refused(tmp_path):
     proj = _op_project(tmp_path, ("op-1", "open"), ("op-2", "open"))
     proc = _run(proj, "op-1", "op-2", "--on")
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "余分な位置引数" in proc.stderr, proc.stderr
+    assert "余分な引数" in proc.stderr, proc.stderr
     assert "op-1" in proc.stderr and "op-2" in proc.stderr, proc.stderr
+
+
+def test_every_operation_positional_arm_uses_the_one_shared_guard():
+    """operation noun の中で位置引数の作法が 1 つに揃っていること。
+
+    独立保守性レビュー medium: 新設の `server-tick` だけ「2 つ目を拒否」で、兄弟
+    (`create` / `update` 等) は「最初が勝ち 2 つ目を黙って捨てる」形だった。同じ
+    case の中で答えが予測できないと、次に sub-verb を足す人がどちらを真似ればよいか
+    局所からは判断できない。
+
+    さらに私は **引数順の違う重複定義** を足しかけた (bash は後の定義が勝つので、
+    呼び出しが黙って逆順になる)。既存の `_guard_extra_positional` が唯一の定義で
+    あること、operation の各腕がそれを通ることを構造で固定する。
+    """
+    import re as _re
+    with open(os.path.join(ROOT, "bin", "beacon"), encoding="utf-8") as f:
+        src = f.read()
+    assert src.count("\n_guard_extra_positional() {") == 1, (
+        "位置引数ガードの定義が 1 つでない (bash は後の定義が勝つので、"
+        "引数順の違う重複は呼び出しを黙って壊す)")
+    start = src.index("\n    operation)")
+    nxt = _re.search(r"^    [a-z][a-z0-9|_-]*\)",
+                     src[src.index("\n", start + 1) + 1:], _re.M)
+    case = src[start: start + nxt.start()] if nxt else src[start:]
+    # 「最初が勝ち 2 つ目を黙って捨てる」旧作法が残っていないこと
+    silent = _re.findall(r'\*\) \[\[ -z "\$\w+" \]\] && \w+="\$1"; shift ;;', case)
+    assert silent == [], (
+        "余分な位置引数を黙って捨てる腕が残っている: " + repr(silent))
+    # 位置引数を受ける腕は共通ガードを通ること
+    arms = [ln for ln in case.splitlines()
+            if _re.search(r'\*\)\s*_guard_extra_positional', ln)]
+    assert len(arms) >= 6, (
+        "共通ガードを通る位置引数の腕が少なすぎる: " + repr(len(arms)))
 
 
 def test_an_unknown_operation_sub_verb_exits_non_zero():

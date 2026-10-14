@@ -160,23 +160,28 @@ def cmd_operation_server_tick():
     save_project(data, op={"type": "operation_update", "op_id": op_id})
     state = "on" if meta["server_tick"] else "off"
     cad = meta.get("cadence_minutes", "default 60")
-    # ms-166 e-5980 (独立 AX レビュー high): **実際に発火するか** を一緒に言う。
-    # サーバ側 (_operation_schedule_descriptor) の発火条件は
-    # `status == "open" AND truthy(meta.server_tick)` の AND なので、
-    # server_tick=on だけを報告すると「これで自律発火する」と読まれる。
-    # status が open でない Operation に opt-in しても発火しない。
-    _status = op.get("status", "")
-    _firing = meta["server_tick"] and _status == "open"
+    # ms-166 e-5980: **実際に発火するか** を一緒に言う。前提の一覧は
+    # tick_scheduler.firing_blockers に 1 つだけ置き、報告する側 (ここ) と実際に
+    # 発火する側 (server/app.py) の両方がそれを通る。
+    #
+    # 初版はここに status + server_tick だけの独自コピーを書いており、**envelope
+    # (事前承認) の関門を見ていなかった** ので、envelope 無しの Operation に
+    # 「→ 発火します」と言っていた (独立保守性レビュー high が実測)。
+    # 「名乗りと実態を合わせる」ために足した報告自体が、新しい名乗りのズレだった。
+    import tick_scheduler
     print(f"Operation {op_id}: server_tick={state}, cadence_minutes={cad}")
-    if _firing:
-        print(f"  → 発火します (status={_status})")
-    elif meta["server_tick"]:
-        print(f"  ⚠ まだ発火しません: status={_status or '(不明)'} で、"
-              f"サーバ側の発火条件は status=open かつ server_tick=on の両方です。"
-              f"`beacon operation activate {op_id}` で open にしてください。",
-              file=sys.stderr)
+    _blockers, _undetermined = tick_scheduler.firing_blockers(
+        status=op.get("status", ""), server_tick=meta["server_tick"],
+        envelope_state=_active_envelope_state(op_id))
+    if not _blockers and not _undetermined:
+        print("  → 発火します (設定は揃っています。あとは cadence が来れば発火)")
     else:
-        print(f"  → 発火しません (server_tick=off)")
+        if _blockers:
+            print(f"  ⚠ まだ発火しません ({len(_blockers)} 件):", file=sys.stderr)
+            for b in _blockers:
+                print(f"      - {b}", file=sys.stderr)
+        for u in _undetermined:
+            print(f"  ℹ 確認できていません: {u}", file=sys.stderr)
 
 
 def cmd_operation_open():
@@ -453,6 +458,26 @@ def _fetch_active_operation_envelope(op_id: str):
     except Exception:
         return None
     return records[0] if records else None
+
+
+def _active_envelope_state(op_id: str) -> str:
+    """envelope の有無を **3 値** で返す (ms-166 e-5980、独立保守性レビュー high)。
+
+    ``_fetch_active_operation_envelope`` は local モード / 認証失敗 / 未到達 /
+    本当に無い の 4 つを全部 None に畳むので、それをそのまま「無い」と読むと
+    確認できていないことを断定することになる。ここで「確認できない」を分ける。
+    """
+    import tick_scheduler
+    if not _is_cloud_mode():
+        return tick_scheduler.ENVELOPE_UNKNOWN
+    try:
+        client, config = _get_api_client()
+        records = client.list_operation_envelopes(
+            config["project_id"], op_id, status="active")
+    except Exception:
+        return tick_scheduler.ENVELOPE_UNKNOWN
+    return (tick_scheduler.ENVELOPE_PRESENT if records
+            else tick_scheduler.ENVELOPE_ABSENT)
 
 
 def cmd_operation_show():

@@ -788,7 +788,8 @@ case "${1:-}" in
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                        *) _guard_extra_positional "$title" "$1" "Usage: beacon operation open|create \"<title>\" [...]"
+                           title="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_TITLE="$title" \
@@ -816,7 +817,8 @@ case "${1:-}" in
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$title" ]] && title="$1"; shift ;;
+                        *) _guard_extra_positional "$title" "$1" "Usage: beacon operation open|create \"<title>\" [...]"
+                           title="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_TITLE="$title" \
@@ -854,23 +856,14 @@ case "${1:-}" in
                         --cadence) _need_flag_value "$#" "$1"; _ost_cadence="$2"; shift 2 ;;
                         -?*)       _guard_flag "$1" ;;
                         *)
-                            # ms-166 e-5980 (独立 AX レビュー medium): 余分な位置
-                            # 引数を黙って受けない。初版は無条件代入で **最後の語が
-                            # 勝つ** 形だったので、`server-tick op-1 op-2 --on` が
-                            # op-2 に適用され、明示した op-1 が黙って捨てられた
-                            # (judge が実測)。同ファイルの兄弟 (operation create /
-                            # update) は最初の語が勝つ形なので、作法が逆だった。
-                            # どちらに揃えるかではなく **拒否** を選ぶ: 2 つ目の
-                            # id は打ち間違いであって、どちらを採っても誤った
-                            # Operation に適用されうる。
-                            if [ -z "$_ost_id" ]; then
-                                _ost_id="$1"; shift
-                            else
-                                echo "Error: 余分な位置引数です: $1 (op-id は 1 つだけ渡してください)" >&2
-                                echo "  受け取った 1 つ目: $_ost_id / 2 つ目: $1" >&2
-                                echo "  どちらを採っても誤った Operation に適用されうるため拒否します (ms-166 e-5980)。" >&2
-                                exit 1
-                            fi
+                            # ms-166 e-5980: 余分な位置引数は打ち間違い。
+                            # 共通の _guard_extra_positional に揃える
+                            # (独立保守性レビュー medium: operation noun の中に
+                            #  「最初が勝つ」と「拒否」の 2 流儀が並存していた。
+                            #  拒否側に全部揃えた)。
+                            _guard_extra_positional "$_ost_id" "$1" \
+                                "Usage: beacon operation server-tick <op-id> [--on|--off] [--cadence <分>]"
+                            _ost_id="$1"; shift
                             ;;
                     esac
                 done
@@ -904,7 +897,8 @@ case "${1:-}" in
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_ID="$op_id" BEACON_TITLE="$title" \
@@ -929,7 +923,8 @@ case "${1:-}" in
                         --reason) reason="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
                         -?*) _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_ID="$op_id" BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
@@ -952,7 +947,8 @@ case "${1:-}" in
                         --ttl-seconds) ttl_seconds="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 # Translate --expires-at YYYY-MM-DD into ttl_seconds (the API expects seconds).
@@ -986,7 +982,8 @@ except ValueError as e:
                         -r|--reason) reason="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
                         -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                        *) _guard_extra_positional "$op_id" "$1" "Usage: beacon operation <sub-verb> <op-id> [...]"
+                           op_id="$1"; shift ;;
                     esac
                 done
                 BEACON_OPERATION_ID="$op_id" BEACON_ENVELOPE_ID="$env_id" \
@@ -1030,7 +1027,8 @@ except ValueError as e:
                                 --motivation|--why) motivation="${2:-}"; shift 2 ;;
                                 --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                                 -?*)           _guard_flag "$1" ;;
-                                *) [[ -z "$desc" ]] && desc="$1"; shift ;;
+                                *) _guard_extra_positional "$desc" "$1" "Usage: beacon operation task add \"<desc>\" -o <op-id> [...]"
+                                   desc="$1"; shift ;;
                             esac
                         done
                         BEACON_OPERATION_ID="$op_id" BEACON_DESCRIPTION="$desc" \
@@ -1046,7 +1044,8 @@ except ValueError as e:
                             case "$1" in
                                 -r|--reason) reason="${2:-}"; shift 2 ;;
                                 -?*)           _guard_flag "$1" ;;
-                                *) [[ -z "$entry_id" ]] && entry_id="$1"; shift ;;
+                                *) _guard_extra_positional "$entry_id" "$1" "Usage: beacon operation task done <entry-id> [--reason R]"
+                                   entry_id="$1"; shift ;;
                             esac
                         done
                         BEACON_ENTRY_ID="$entry_id" BEACON_REASON="$reason" \

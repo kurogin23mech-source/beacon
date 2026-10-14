@@ -4684,9 +4684,20 @@ def _fire_operation(pid: str, project: dict, op: dict, now_iso: str) -> dict:
             envelope = (envs[0] or {}).get("envelope")
     except Exception:
         envelope = None
-    if not envelope:
+    # ms-166 e-5980 (独立保守性レビュー high): 発火の前提の一覧は
+    # ``tick_scheduler.firing_blockers`` に 1 つだけ置く。ここに手で書いていた
+    # ため、CLI 側が足した「発火しますか」の報告がこの関門を知らずに
+    # 「発火します」と嘘をついた。4 つ目の前提を足す人が片方だけ直して
+    # 食い違う形にできないよう、**実際に発火する側もそれを通る**。
+    _blockers, _ = tick_scheduler.firing_blockers(
+        status=op.get("status", ""),
+        server_tick=(op.get("meta") or {}).get("server_tick"),
+        envelope_state=(tick_scheduler.ENVELOPE_PRESENT if envelope
+                        else tick_scheduler.ENVELOPE_ABSENT))
+    if _blockers:
         return {"project_id": pid, "op_id": op_id, "fired": False,
-                "skipped": "no active envelope (approve first)"}
+                "skipped": "; ".join(_blockers),
+                "blockers": _blockers}
     meta = op.get("meta") or {}
     recipient = meta.get("claimer_session_id") or meta.get("open_by") or ""
     # ms-106 e-3504 — per-Operation fire target. An Operation is the periodic-
