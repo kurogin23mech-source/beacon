@@ -3356,8 +3356,20 @@ def _review_done_dir() -> Tuple[str, bool]:
     return os.path.join(_get_triggers_dir(), _REVIEW_DONE_DIR), False
 
 
-def _review_done_marker_name(review_type: str, pr_number: str) -> str:
-    return f"pr-{pr_number}-{review_type}.json"
+#: 台帳の鍵が指すものの種別。``pr`` = PR 番号 / ``target`` = ms-XX / op-X。
+#:
+#: ms-166 e-6918: 初版は PR 番号だけを鍵にしていたので、PR を作らない作業
+#: (target の完了節目) のレビューを横断台帳に載せられず、fork で打った実施が親から
+#: 見えなかった。種別を 1 つ足すだけで両方を同じ機構に載せられる (鍵の形を
+#: ``<種別>-<ref>-<レビュー種別>.json`` に一般化する)。``pr-`` 始まりの既存ファイルは
+#: そのままの形なので、移行で読めなくならない。
+REF_KIND_PR = "pr"
+REF_KIND_TARGET = "target"
+
+
+def _review_done_marker_name(review_type: str, ref: str,
+                             ref_kind: str = REF_KIND_PR) -> str:
+    return f"{ref_kind}-{ref}-{review_type}.json"
 
 
 def _read_review_done_ledger() -> dict:
@@ -3375,7 +3387,10 @@ def _read_review_done_ledger() -> dict:
     except OSError:
         return {}
     for name in names:
-        if not name.startswith("pr-") or not name.endswith(".json"):
+        if not name.endswith(".json"):
+            continue
+        if not any(name.startswith(f"{k}-")
+                   for k in (REF_KIND_PR, REF_KIND_TARGET)):
             continue
         try:
             with open(os.path.join(directory, name), encoding="utf-8") as f:
@@ -3384,7 +3399,9 @@ def _read_review_done_ledger() -> dict:
             continue
         if not isinstance(rec, dict):
             continue
-        pr = str(rec.get("pr") or "").strip()
+        # ms-166 e-6918: 鍵は ``ref`` (PR 番号 / target id)。旧形式は ``pr`` だけを
+        # 持つので後退経路として読む (既存の記録を孤児にしない)。
+        pr = str(rec.get("ref") or rec.get("pr") or "").strip()
         rtype = str(rec.get("review_type") or "").strip()
         if not pr or not rtype:
             continue
@@ -3414,7 +3431,10 @@ def review_done_provenance(pr_number: str) -> list:
     except OSError:
         return []
     for name in names:
-        if not name.startswith(f"pr-{pr_number}-") or not name.endswith(".json"):
+        if not name.endswith(".json"):
+            continue
+        if not any(name.startswith(f"{k}-{pr_number}-")
+                   for k in (REF_KIND_PR, REF_KIND_TARGET)):
             continue
         try:
             with open(os.path.join(directory, name), encoding="utf-8") as f:
@@ -3427,7 +3447,8 @@ def review_done_provenance(pr_number: str) -> list:
 
 
 def record_review_done_across_worktrees(review_type: str, pr_number: str,
-                                        pr_repo: str = "") -> str:
+                                        pr_repo: str = "",
+                                        ref_kind: str = REF_KIND_PR) -> str:
     """「この PR のこのレビューを実施した」を横断台帳に記録する。
 
     ``pr_repo`` (ms-166 e-6971): **どのリポジトリの** その番号か。関門を外す記録が
@@ -3454,9 +3475,14 @@ def record_review_done_across_worktrees(review_type: str, pr_number: str,
     if not review_type or not pr_number:
         return RECORDED_FAILED
     directory, shared = _review_done_dir()
-    path = os.path.join(directory, _review_done_marker_name(review_type, pr_number))
+    path = os.path.join(
+        directory, _review_done_marker_name(review_type, pr_number, ref_kind))
     record = {
-        "pr": pr_number,
+        # ms-166 e-6918: ``ref`` / ``ref_kind`` が正。``pr`` は旧形式の読み手
+        # (この変更より前に書かれた記録を読むコード) のために残す。
+        "ref": pr_number,
+        "ref_kind": ref_kind,
+        "pr": pr_number if ref_kind == REF_KIND_PR else "",
         # ms-166 e-6971 (独立 AX レビュー low): フィールド名は層をまたいで **1 つ**。
         # PR エントリの `meta.pr_repo` / トリガー payload の `pr_repo` と同じ綴りに
         # する (ここだけ bare な `repo` にしていたので、ある層で覚えた名前を別の層へ
@@ -3501,7 +3527,8 @@ def forget_review_done_across_worktrees(pr_number: str) -> None:
     except OSError:
         return
     for name in names:
-        if not name.startswith(f"pr-{pr_number}-"):
+        if not any(name.startswith(f"{k}-{pr_number}-")
+                   for k in (REF_KIND_PR, REF_KIND_TARGET)):
             continue
         try:
             os.remove(os.path.join(directory, name))

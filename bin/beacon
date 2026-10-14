@@ -38,20 +38,8 @@ _guard_positional() {
             echo "$2"
             exit 0
             ;;
-        -*)
-            echo "Error: '$1' looks like a flag, not a value." >&2
-            echo "$2" >&2
-            exit 1
-            ;;
         *)
-            # ms-166 e-6918: この helper は docstring 上「`-?*` に一致した flag 風
-            # トークン専用」だが、実際には `review context` / `review skip` /
-            # (今回の) `review done` が **非 flag の位置引数** を弾くためにも呼んで
-            # いる。その経路で「looks like a flag」と出すと、`beacon review done
-            # ms-166` に対して **事実でない診断** を返す (利用者は旗の綴りを疑い、
-            # 本当の原因 = このコマンドは flag のみを取る、に辿り着けない)。
-            # token の形で文面を分ける。
-            echo "Error: '$1' は位置引数ですが、このコマンドは flag のみを取ります。" >&2
+            echo "Error: '$1' looks like a flag, not a value." >&2
             echo "$2" >&2
             exit 1
             ;;
@@ -479,12 +467,18 @@ case "${1:-}" in
                         --adjudication-summary) _need_flag_value "$#" "$1"; _rd_summary="$2"; shift 2 ;;
                         --adjudications)        _need_flag_value "$#" "$1"; _rd_adj="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
-                        # ms-166 e-6918: 位置引数を黙って捨てない。兄弟
-                        # (`review context` / `review skip`) は _guard_positional を
-                        # 通すのに done だけ `*) shift ;;` で捨てており、
-                        # `beacon review done ms-166` が無言で何もしなかった
-                        # (既出の e-6762 と同じ型)。
-                        *)      _guard_positional "$1" "Usage: beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) [--adjudication-summary <text>] [--adjudications '[...]']  (このコマンドは flag のみを取ります)" ;;
+                        # ms-166 e-6918: 位置引数を黙って捨てない。done だけ
+                        # `*) shift ;;` で捨てており `beacon review done ms-166` が
+                        # 無言で何もしなかった (既出の e-6762 と同じ型)。
+                        #
+                        # 専用の `_guard_no_positional` を使う。最初は
+                        # `_guard_positional` を「非 flag でも使えるよう」広げたが、
+                        # **その用途の helper は既に在った** (しかもその関数の
+                        # コメントに「以前 _guard_positional を兼用しようとして
+                        # 4 箇所を壊した」経緯が書いてある)。独立 AX レビュー medium。
+                        # 文面も Usage を手で再掲せず --help へ誘導する
+                        # (= 文法の写しを 3 箇所に増やさない)。
+                        *)      _guard_no_positional "review done" "$1" ;;
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rd_type" BEACON_PR_NUMBER="$_rd_pr" \
