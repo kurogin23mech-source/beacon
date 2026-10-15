@@ -280,13 +280,18 @@ def cmd_recap_projects():
 
     if not _is_cloud_mode():
         rows, scanned, source = _scan_local_only(lo, hi)
+        result = _pw.aggregate(rows, from_date=lo, to_date=hi)
+        result["projects_scanned"] = scanned
+        result["source"] = source
     else:
-        rows, scanned, source = _scan_owned_projects(lo, hi)
-
-    result = _pw.aggregate(rows, from_date=lo, to_date=hi)
+        result = _server_recap(lo, hi)
+        if result is None:
+            rows, scanned, source = _scan_owned_projects(lo, hi)
+            result = _pw.aggregate(rows, from_date=lo, to_date=hi)
+            result["projects_scanned"] = scanned
+            result["source"] = source
+    result.setdefault("window", {"from": lo, "to": hi})
     result["window"]["spec"] = label
-    result["projects_scanned"] = scanned
-    result["source"] = source
     if limit > 0:
         result["projects"] = result["projects"][:limit]
 
@@ -295,6 +300,36 @@ def cmd_recap_projects():
         return
 
     _print_projects(result)
+
+
+def _server_recap(lo: str, hi: str) -> Optional[dict]:
+    """Ask the server for the whole sweep in one call, or ``None`` to fall back.
+
+    SPEC 方針 3: the truth for every project the caller owns already lives in
+    one store, so the right shape is one period query there — not a mechanism
+    that makes projects publish summaries. ``None`` means the endpoint is not
+    available (a server predating it), and the caller then reads each project
+    itself. Both paths call the SAME ``progress_window.derive``, so they cannot
+    disagree about what counts as progress; the only difference is how many
+    round-trips it took, which the rendered ``source`` field states outright
+    rather than leaving the reader to guess.
+    """
+    try:
+        client, _config = _get_api_client()
+    except SystemExit:
+        raise
+    except _REMOTE_ERRORS:
+        return None
+    try:
+        out = client.me_recap(from_date=lo, to_date=hi)
+    except _REMOTE_ERRORS:
+        return None
+    if not isinstance(out, dict) or "projects" not in out:
+        return None
+    out.setdefault("source", "server")
+    out.setdefault("projects_scanned", 0)
+    out.setdefault("unavailable", [])
+    return out
 
 
 def _scan_local_only(lo: str, hi: str) -> tuple:
@@ -363,9 +398,13 @@ def _print_projects(result: dict) -> None:
     scanned = result.get("projects_scanned", 0)
     print(f"{w['from']}..{w['to']} [{w.get('spec', '')}] — "
           f"動いたプロジェクト {result['project_count']} 件 / 調べた {scanned} 件")
-    if result.get("source") == "local":
+    source = result.get("source", "")
+    if source == "local":
         print("  ※ local mode: このプロジェクト 1 件しか読めません "
               "(横断には cloud mode が必要)")
+    elif source == "cloud":
+        print("  ※ サーバの横断クエリが無いため 1 件ずつ読みました "
+              "(結果は同じ導出、往復回数だけが違います)")
     if not result["projects"]:
         print("  この期間に動いたプロジェクトはありません。")
     for p in result["projects"]:

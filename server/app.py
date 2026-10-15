@@ -6309,6 +6309,11 @@ app.include_router(
         stamp_session_liveness=_stamp_session_liveness,
         session_is_live=_session_is_live,
         is_member=_is_member,
+        # ms-184 e-7017: /api/me/recap reads each of the caller's projects with
+        # the SAME auth rule every other project read uses (_load delegates to
+        # _require_project_role), so the cross-project sweep cannot see a
+        # project the per-project endpoints would refuse.
+        load_project=_load,
     )
 )
 

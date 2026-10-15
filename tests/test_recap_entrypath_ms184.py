@@ -159,3 +159,62 @@ def test_skill_requires_reporting_what_could_not_be_judged():
         assert key in text, f"the Skill never mentions `{key}`"
     assert "読めなかった分を 0 件側に混ぜない" in text
     assert "横断したふりをしない" in text
+
+
+# ---------------------------------------------------------------------------
+# 受入条件 10 — one derivation, and a flag spelled like the write side's
+# ---------------------------------------------------------------------------
+
+def test_project_flag_matches_the_write_sides_spelling():
+    """The read side must not invent a second spelling for "that project".
+
+    The write side already says `--project <id>` (`beacon dm send --project`,
+    `beacon dm audit --project`). `--as-project` exists too but means something
+    ELSE — "what would project P be allowed to see", a disclosure view — so
+    reusing it here would give one flag two meanings.
+    """
+    dispatch = _read("beacon_cli/dispatch.py")
+    assert 'p_recap_targets.add_argument("--project", dest="recap_project"' in dispatch
+    assert "--as-project" not in _python_flags("targets"), \
+        "--as-project means a disclosure view, not 'read that project'"
+
+    # The spelling is shared with the write side, in the same parser file.
+    assert '.add_argument("--project", dest="dm_project_id"' in dispatch, \
+        ("the write side's --project spelling moved; re-check that the read "
+         "side still matches it rather than silently diverging")
+
+
+def test_the_derivation_lives_in_exactly_one_module():
+    """受入条件 10: no second copy of "progressed" for the cross-project path.
+
+    Both verbs, and the server endpoint, must call ``progress_window`` rather
+    than re-deriving. Checked structurally: the CLI family and the server
+    router may not contain their own date comparison against the window
+    arguments, and both handlers must reach ``derive``.
+    """
+    import ast
+
+    recap = _read("lib/cmd_recap.py")
+    tree = ast.parse(recap)
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "derive" in called, "cmd_recap does not call progress_window.derive"
+    assert "aggregate" in called, "cmd_recap does not call progress_window.aggregate"
+
+    # A re-implementation would compare timestamps itself. The period bounds
+    # only ever travel INTO progress_window / date_window from here.
+    for module in ("lib/cmd_recap.py", "server/routers_me.py"):
+        src = _read(module)
+        for banned in ("created_at <", "created_at >", "< from_date", "> to_date"):
+            assert banned not in src, (
+                f"{module} compares timestamps itself ({banned!r}) — the period "
+                "rule belongs to lib/date_window.py alone")
+
+
+def test_server_and_cli_share_the_same_derivation_import():
+    """Both sweep paths import the same module, so they cannot disagree."""
+    assert "import progress_window" in _read("server/routers_me.py")
+    assert "import progress_window" in _read("lib/cmd_recap.py")
