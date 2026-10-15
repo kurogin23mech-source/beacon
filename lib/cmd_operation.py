@@ -296,7 +296,10 @@ def cmd_operation_task_done():
         sys.exit(1)
     data = load_project()
     try:
-        entry = core.operation_task_done(data, entry_id, reason=reason)
+        # ms-166 e-6997: この経路の保存は commands_shared.save_project なので
+        # decision_outbox は flush される (= 積んでよい)。
+        entry = core.operation_task_done(data, entry_id, reason=reason,
+                                         capture_decision=True)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

@@ -900,6 +900,32 @@ def _derive_pr_intent_decision(pr_number, title: str, intent: str) -> None:
             client.record_decision(project_id, payload)
 
 
+def _auto_done_evidence(pr_entry: dict, judgement: dict) -> list:
+    """自動完了の判断記録に載せる **実 link** (ms-166 e-6997)。
+
+    この done は「この PR の commit がこのタスクを解決した」という機械の推定なので、
+    推定に使った材料そのものが根拠になる: PR 番号と、紐づけに使った commit のハッシュ。
+    自己参照 (``task:<自分>``) は積まない — 実 link を持たない決定を非空に見せかける
+    旧挙動 (e-5650 で廃止) の再演になる。材料が取れなければ空で返す (= 裏付けの無い
+    判断として正直に残す)。
+    """
+    out = []
+    pr_num = _pr_number_from_url((pr_entry.get("meta") or {}).get("url", ""))
+    if pr_num:
+        out.append(f"pr:{pr_num}")
+    # commit は **PR の子として記録されているもの** から取る。judgement dict には
+    # ハッシュが無い (task_id / confidence / description / ac_matched / reason だけ) ——
+    # 最初に書いた版は judgement.get("hashes") を読んでおり、**存在しない鍵なので常に
+    # 空**になる形だった。推定の材料は PR の commit 群なので、そこから読む。
+    for child in (pr_entry.get("entries") or []):
+        if not isinstance(child, dict) or child.get("type") != "commit":
+            continue
+        h = ((child.get("meta") or {}).get("hash") or "")[:7]
+        if h:
+            out.append(f"commit:{h}")
+    return out
+
+
 def cmd_pr_approve():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     rationale = os.environ.get("BEACON_RATIONALE", "")
@@ -955,6 +981,16 @@ def cmd_pr_approve():
                 try:
                     core.task_done(
                         data, j["task_id"], reason=j["reason"],
+                        # ms-166 e-6997: この done は **機械が PR の解決を推定して**
+                        # 下した判断なので、帰属は autonomous-AI。根拠は推定の materials
+                        # そのもの (この PR と、紐づけに使った commit) を実 link で渡す。
+                        # 以前はこの経路が判断記録を 1 件も残さず、本番の task-done 39 件に
+                        # PR 承認由来が 0 件だった (独立 judge 実測)。
+                        decided_by="autonomous-AI",
+                        evidence=_auto_done_evidence(entry, j),
+                        # この経路の保存も commands_shared.save_project (下の
+                        # save_project) なので flush される。
+                        capture_decision=True,
                         # ms-166 e-6898: この経路は機械が「PR が解決した」と
                         # 判断して閉じるので、受入条件の各節が満たされたかは
                         # 判定できない。黙って素通りさせず、判定を出さずに通した

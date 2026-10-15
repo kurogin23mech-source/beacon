@@ -13,7 +13,9 @@
 3 経路に残っていた** (e-6757 が名指しした承認ゲートの処分記録だけではない):
 
   ``lib/cmd_target.py::_record_disposition_decision``   kind=disposition
-  ``lib/cmd_task.py::_record_task_done_decision``       kind=task-done
+  ``lib/core.py::_stage_task_done_decision`` (+ outbox flush)  kind=task-done
+      (ms-166 e-6997 で ``lib/cmd_task.py::_record_task_done_decision`` から移動。
+       1 つの入口にだけ置いた記録が、兄弟の経路 (PR 承認の自動完了) で落ちていた)
   ``lib/cmd_pr.py::_record_review_decision``            kind=review-adjudication
 
 1 経路だけ塞いで「構造で閉じた」と言わないために、このファイルは **全 writer を機械で
@@ -279,7 +281,22 @@ def _call_disposition():
 
 
 def _call_task_done():
-    cmd_task._record_task_done_decision("e-1", "全 AC 達成")
+    """ms-166 e-6997: 記録はデータ層の継ぎ目 (core.task_done → decision_outbox) が出す。
+
+    以前は CLI の handler が書いており、同じ状態に到達する PR 承認の自動完了が記録を
+    残さなかった。失敗契約 (WARNING で可視化して飲む / SystemExit も同様 /
+    KeyboardInterrupt は伝播) は **flush 側** が
+    ``commands_shared.best_effort_decision_write`` で担うので、ここでは積んで flush
+    するところまでを 1 つの呼び出しとして扱う。
+    """
+    import core, decision_outbox
+    data = {"name": "p", "summary": "", "milestones": [
+        {"id": "ms-9", "title": "t", "status": "in_progress", "progress": 0,
+         "entries": [{"id": "e-1", "type": "task", "status": "todo",
+                      "description": "a", "date": ""}]}]}
+    decision_outbox.discard()
+    core.task_done(data, "e-1", reason="全 AC 達成")
+    decision_outbox.flush(data)
 
 
 def _call_review():

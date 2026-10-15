@@ -3785,7 +3785,8 @@ def cmd_review_skip():
 def _record_review_adjudication_decision(review_type: str, pr_number: str,
                                          summary: str, adjudications: list,
                                          pr_repo: str = "",
-                                         ref_kind: str = "pr") -> None:
+                                         ref_kind: str = "pr",
+                                         no_findings: bool = False) -> None:
     """ms-166 e-5971 — weld the finding-level review adjudication onto the decision
     arm at the SAME choke point that clears the review gate (``beacon review done``),
     so recording a review structurally captures WHAT was decided about its findings —
@@ -3799,8 +3800,15 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
     from the synthesized count). Nothing is recorded when both are empty. ``decided_by``
     follows the session kind via the single source ``commands_shared.decided_by_for_review``.
     cloud-only; best-effort but LOGGED on failure (with a re-run recovery hint) so it
-    never breaks ``review done``."""
-    if not summary and not adjudications:
+    never breaks ``review done``.
+
+    ``no_findings`` (ms-166 e-6997): 「レビューを走らせたが findings が 0 件だった」の
+    明示。以前は採否が空のとき **何も書かずに戻っていた** ので、「0 件だった」と
+    「書き忘れた」が記録上まったく同じ (どちらも行ゼロ) で、後から区別できなかった。
+    0 件も判断の結果なので 1 行残す。呼び出し側 (``cmd_review_done``) が
+    default-deny で「採否か 0 件の明示のどちらか」を要求するので、両方空でここに
+    来ることはもう無い (= 下の早期 return は最後の受け皿)。"""
+    if not summary and not adjudications and not no_findings:
         return
     from commands_shared import (best_effort_decision_write, _is_cloud_mode,
                                  _get_api_client, ADJUDICATION_DISPOSITIONS,
@@ -3837,8 +3845,13 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
                 parts.append(seg)
         rationale = " / ".join(parts) or None
         # what (decision) = 明示 summary、無ければ採否件数から合成 (全 disposition を含む)。
+        # ms-166 e-6997: findings 0 件の明示は、件数合成 (全部 0) ではなく **そう宣言
+        # された事実** を書く。「0 件だった」と「採否を書き忘れた」を記録で区別できる
+        # ようにするのがこの行の目的なので、0 が並ぶだけの文面にはしない。
         if summary:
             decision = summary
+        elif no_findings and not adjudications:
+            decision = f"{review_type}: findings 0 件 (採否なしと明示)"
         else:
             decision = f"{review_type}: " + " / ".join(
                 f"{counts[d]} {d}" for d in ADJUDICATION_DISPOSITIONS)
@@ -3881,8 +3894,14 @@ def _adjudications_from_env() -> list:
     try:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
+        # ms-166 e-6997 (独立 AX レビュー misleading): 旧文言は「review gate は解消
+        # します」と断定していたが、default-deny の下では **事実と逆**。実測: この
+        # 警告の数行後に「採否が未記録のままでは関門を開けません」で exit 1 になり、
+        # トリガーは消えない。AI はエラー文から次の一手を決めるので、1 回の実行の中で
+        # 前半の約束が後半に覆る文言は誤診ループを作る。
         print("  ⚠ --adjudications の JSON 解析に失敗しました "
-              "(review gate は解消しますが adjudication decision は記録しません)",
+              "— 採否 0 件として扱います。--adjudication-summary も --no-findings も "
+              "無ければ、この後 **関門は開きません** (ms-166 e-6997)。",
               file=sys.stderr)
         return []
     if isinstance(parsed, dict):
@@ -3891,11 +3910,15 @@ def _adjudications_from_env() -> list:
         return parsed
     print(f"  ⚠ --adjudications は list または object である必要があります "
           f"(受け取り: {type(parsed).__name__}) "
-          "— review gate は解消しますが adjudication decision は記録しません", file=sys.stderr)
+          "— 採否 0 件として扱います。--adjudication-summary も --no-findings も "
+          "無ければ、この後 **関門は開きません** (ms-166 e-6997)。", file=sys.stderr)
     return []
 
 
-def _emit_review_done_for_target(review_type: str, target_id: str) -> None:
+def _emit_review_done_for_target(review_type: str, target_id: str, *,
+                                 adj_summary: str = "",
+                                 adjudications: list = None,
+                                 no_findings: bool = False) -> None:
     """target (PR を作らない作業) のレビュー実施を記録して関門を外す (ms-166 e-6918).
 
     PR 側と分けてあるのは、PR 側が持つ 2 つの道具 (``beacon-review-gate`` の印は
@@ -3969,18 +3992,21 @@ def _emit_review_done_for_target(review_type: str, target_id: str) -> None:
               f"書き換えられませんでした (IO エラー)。関門は依然 {review_type} を"
               f"要求します。", file=sys.stderr)
         sys.exit(1)
-    _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
-    _adjudications = _adjudications_from_env()
+    # ms-166 e-6997: 採否は呼び出し側 (cmd_review_done) の default-deny を通っている。
+    # env をここで読み直さない —— 2 箇所で読むと、関門を要求する側と記録する側が
+    # 違う値を見る形が作れる (片方だけ直す事故の温床)。
+    _adj_summary = adj_summary
+    _adjudications = adjudications or []
     _record_review_adjudication_decision(
         review_type, target_id, _adj_summary, _adjudications,
-        ref_kind="target")
+        ref_kind="target", no_findings=no_findings)
     _ledger_state = record_review_done_across_worktrees(
         review_type, target_id, "", ref_kind="target")
     print(f"レビュー実施を記録: {review_type} / {target_id} (review-due 解消)")
-    if not _adj_summary and not _adjudications:
-        print("  ℹ 採否 (adjudication) は未記録です。findings があったなら "
-              "--adjudication-summary / --adjudications 付きで再実行すると判断軌跡が "
-              "decision arm に残ります。", file=sys.stderr)
+    if no_findings:
+        # ms-166 e-6997: 0 件は正当な結果だが、**宣言された事実として** 出す
+        # (黙って通る形を無くしたので、ここは「無記録」の警告ではなく確認の 1 行)。
+        print("  (findings 0 件として記録しました)")
     if _ledger_state == RECORDED_SHARED:
         print("  (この実施は作業フォルダ横断で記録したので、fork / 親のどちらから"
               "でも実施済みとして見えます)")
@@ -4053,8 +4079,46 @@ def cmd_review_done():
         # **排他でも必須でもないように読めた**。文法は registry を単一ソースにする。
         print("Usage: " + _registry_usage_line("review done"), file=sys.stderr)
         sys.exit(1)
+    # ms-166 e-6997: **採否を渡さない限り関門を開けない** (= default-deny)。
+    #
+    # 独立思想レビュー high: この溶接は正しい漏斗に在ったが **中身が空でも通った**。
+    # --adjudications は任意旗で、空なら判断記録を書かずに早期 return する一方、
+    # review-due の印は消え「approve/merge の gate を通過できます」と exit 0 で言って
+    # いた。実測 (throwaway project): 採否を一切渡さずに関門が開き、残るのは stderr の
+    # ℹ 1 行だけ。つまり捕獲は「AI が旗を渡すこと」に依存し、依存先は Skill の散文
+    # ——  この MS が消すと宣言した「お願い依存」そのものだった。実践として毎回渡して
+    # いても、それは構造の証明にならない。
+    #
+    # 「findings が無かった」は正当な状態なので、黙って省略させるのではなく
+    # **明示して記録に残す** (--no-findings)。これで decision arm には必ず 1 行載り、
+    # 「レビューを走らせたが findings 0 件だった」と「採否を書き忘れた」が後から
+    # 区別できる (旧: どちらも記録ゼロで見分けが付かなかった)。
+    #
+    # ここは --pr / --target の **分岐より前**。片方だけに関門を置くと、同じ状態
+    # (関門が開く) に到達する兄弟の経路が素通りする —— この MS が何度も直している型。
+    _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
+    _adjudications = _adjudications_from_env()
+    _no_findings = os.environ.get("BEACON_REVIEW_NO_FINDINGS", "") == "1"
+    if _no_findings and (_adj_summary or _adjudications):
+        print("Error: --no-findings は「findings が 0 件だった」の明示なので、"
+              "--adjudication-summary / --adjudications と同時には使えません "
+              "(どちらが本当かを機械が決められません)。", file=sys.stderr)
+        sys.exit(1)
+    if not _no_findings and not _adj_summary and not _adjudications:
+        print("Error: 採否 (adjudication) が未記録のままでは関門を開けません "
+              "(ms-166 e-6997)。judge の findings をどう採否したかは、最も監査が"
+              "要る AI の判断です。次のどちらかを付けて再実行してください:\n"
+              "  findings があった: --adjudication-summary \"<総括 1 行>\" "
+              "[--adjudications '<json>']\n"
+              "  findings が 0 件だった: --no-findings\n"
+              "関門はまだ開いていません (この呼び出しは何も変えていません)。",
+              file=sys.stderr)
+        sys.exit(1)
     if target_id:
-        _emit_review_done_for_target(review_type, target_id)
+        _emit_review_done_for_target(review_type, target_id,
+                                     adj_summary=_adj_summary,
+                                     adjudications=_adjudications,
+                                     no_findings=_no_findings)
         return
     # 明示の --repo かどうかを覚えておく (独立 AX レビュー high)。cwd から推測した
     # 値で、リポジトリを持たない旧式の印を引退させてはならない —— judge の実測では
@@ -4084,17 +4148,12 @@ def cmd_review_done():
             (REF_KIND_PR, pr_number)) or [])
     _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo,
                              repo_confirmed=_repo_confirmed)
-    _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
-    _adjudications = _adjudications_from_env()
+    # ms-166 e-6997: 採否は上の default-deny を通っているので、ここに来た時点で
+    # 「findings の採否が在る」か「0 件だと明示された」のどちらか。どちらの場合も
+    # decision arm に 1 行載せる (= 省略で記録が消える形を無くした)。
     _record_review_adjudication_decision(
-        review_type, pr_number, _adj_summary, _adjudications, pr_repo)
-    if not _adj_summary and not _adjudications:
-        # ms-166 e-5971 (AX review): the weld is opt-in and the command cannot know
-        # how many findings the judge produced — so make the OMISSION visible rather
-        # than let the採否 judgment-trail vanish silently.
-        print("  ℹ 採否 (adjudication) は未記録です。findings があったなら "
-              "--adjudication-summary / --adjudications 付きで再実行すると判断軌跡が "
-              "decision arm に残ります。", file=sys.stderr)
+        review_type, pr_number, _adj_summary, _adjudications, pr_repo,
+        no_findings=_no_findings)
     # ms-166 e-6899: 実施した事実を作業フォルダ横断の台帳に足す。これを足すのは
     # トリガーファイルを消した **後** で、かつ remaining を数える **前**。
     # fork で打ったときに親からも実施済みとして見えるようにするのが目的。
@@ -6949,7 +7008,7 @@ def _help_registry():
         # `beacon review done --help` が「`beacon review --help` を見よ」と案内し、
         # その `review --help` は context の 1 行しか出さない **閉じたループ** に
         # なっていた (案内に従うと情報が無い場所に着く)。
-        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>)", "flags": ["--adjudication-summary <text>", "--adjudications <json>"], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。--adjudication-summary / --adjudications は findings の採否を decision arm に構造記録 (ms-166 e-5971)"},
+        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings)", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
         {"command": "beacon review skip --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason <text>", "flags": ["--json"], "description": "人間が意図的にレビューを省く一級経路。--reason 必須で監査ログ (.beacon/review-skips.jsonl) に理由を残す (ms-119 e-4124)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac-verdict <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac-verdict を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},
