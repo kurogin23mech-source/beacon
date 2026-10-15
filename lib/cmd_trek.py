@@ -47,7 +47,6 @@ from commands_shared import (
     _get_api_client,
     _is_cloud_mode,
     _bus_auto_execute_channels,
-    _mirror_auto_execute_channels_to_local,
     _write_bus_budget,
     _current_project_id,
     _get_docs_dir,
@@ -1029,7 +1028,6 @@ def _arm_for_trek(trek_id: str) -> dict:
             "trek_id": trek_id,
             "channels_added": added,
         })
-        _mirror_auto_execute_channels_to_local(channels)
     budget_data = {
         "total": TREK_AUTO_ARM_DEFAULT_BUDGET,
         "used": 0,

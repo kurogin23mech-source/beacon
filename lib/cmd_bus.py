@@ -19,9 +19,8 @@ those fixtures stub 3 namespaces: cmd_bus + commands_shared + commands).
 
 The budget / recipient / identity leaf helpers this family shares with commands.py
 callers (_read_bus_budget / _write_bus_budget / _get_bus_budget_path /
-_resolve_recipient_live / _bus_auto_execute_channels /
-_mirror_auto_execute_channels_to_local, and the identity/swap helpers those pull
-in) were promoted to commands_shared in this same change (e-4803-foundation) so
+_resolve_recipient_live / _bus_auto_execute_channels, and the identity/swap
+helpers those pull in) were promoted to commands_shared in this same change (e-4803-foundation) so
 _arm_for_trek / cmd_acquisition_attack_list_send / _check_recipient_live_health
 can keep using them without importing cmd_bus (which would form a cycle).
 """
@@ -45,7 +44,6 @@ from commands_shared import (
     _write_bus_budget,
     _get_bus_budget_path,
     _bus_auto_execute_channels,
-    _mirror_auto_execute_channels_to_local,
     _resolve_recipient_live,
     _make_notice,
     _read_bus_sent_log,
@@ -478,7 +476,6 @@ def cmd_bus_auto_execute_add():
         "op": "bus_auto_execute_add",
         "channel": channel,
     })
-    _mirror_auto_execute_channels_to_local(channels)
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps({"channels": channels, "added": True},
                           ensure_ascii=False))
@@ -510,7 +507,6 @@ def cmd_bus_auto_execute_remove():
         "op": "bus_auto_execute_remove",
         "channel": channel,
     })
-    _mirror_auto_execute_channels_to_local(channels)
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps({"channels": channels, "removed": True},
                           ensure_ascii=False))

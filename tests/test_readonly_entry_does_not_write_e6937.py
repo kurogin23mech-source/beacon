@@ -58,7 +58,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import store_api as store_api_mod
 from store_api import (MIRROR_ORIGIN_READ, MIRROR_ORIGIN_SAVE,
-                       MIRROR_REASON_CREATED, MIRROR_REASON_REFRESHED, StoreApi)
+                       MIRROR_REASON_CREATED, MIRROR_REASON_FAILED,
+                       MIRROR_REASON_REFRESHED, StoreApi)
 
 LIB = os.path.join(os.path.dirname(__file__), "..", "lib")
 STORE_API_PATH = os.path.join(LIB, "store_api.py")
@@ -85,7 +86,7 @@ class FakeClient:
 
 
 def _make_store(doc, cache_path):
-    s = StoreApi("http://test", "pid", "", local_cache_path=str(cache_path))
+    s = StoreApi("http://test", "pid", "", mirror_path=str(cache_path))
     s._client = FakeClient(doc)
     StoreApi._load_baseline.pop("pid", None)
     return s
@@ -161,36 +162,52 @@ def test_a_second_read_of_the_same_document_does_not_touch_the_mirror(tmp_path):
         "クラウドの内容が同じなのに、読み取りがミラーを書き直している")
 
 
-def test_a_second_read_leaves_no_temp_file_behind(tmp_path):
-    """同じ内容のときは一時ファイルを **作らない**。
+def test_a_second_read_does_not_reach_the_write_path_at_all(tmp_path, monkeypatch):
+    """同じ内容のときは **原子的置き換えの口に触らない**。
 
-    「作って消す」では全件テスト中の誤報の窓が残る (実害 2)。消えたかではなく、
-    作られる契機自体を消したことを測りたいので、書き込み口を踏んだら落ちる形に
-    する。
+    「作って消す」では全件テスト中の誤報の窓が残るので、消えたかではなく書き込みの
+    契機そのものが無いことを測る。
+
+    最初の版は ``builtins.open`` を見張っていた。だが書き込みを共有の primitive に
+    寄せた時点で、そこは ``tempfile.mkstemp`` + ``os.fdopen`` を使うので
+    ``builtins.open`` には現れない —— **その版はこの PR の途中で偽の緑に変わって
+    いた** (独立レビューが同じ型を警告していた)。書き込みを行う 1 つの関数を直接
+    見張る形にして、実装の下回りの選び方に依存しないようにする。
     """
+    import local_writer
+
     cache = tmp_path / ".beacon" / "project.json"
     s = _make_store(DOC, cache)
     s.load_project()
 
-    opened_for_write = []
-    real_open = io.open
+    calls = []
+    real = local_writer._atomic_replace_bytes
+    monkeypatch.setattr(local_writer, "_atomic_replace_bytes",
+                        lambda path, out: calls.append(path) or real(path, out))
 
-    def watching_open(path, mode="r", *a, **kw):
-        if "w" in str(mode) or "a" in str(mode):
-            opened_for_write.append(str(path))
-        return real_open(path, mode, *a, **kw)
+    s.load_project()
 
-    import builtins
-    builtins_open = builtins.open
-    builtins.open = watching_open
-    try:
-        s.load_project()
-    finally:
-        builtins.open = builtins_open
-
-    assert opened_for_write == [], (
-        f"同じ内容なのに書き込み用に開いたファイルがある: {opened_for_write}")
+    assert calls == [], f"同じ内容なのに書き込み経路に入っている: {calls}"
     assert list(cache.parent.glob("*.tmp")) == []
+
+
+def test_the_write_path_is_reached_when_the_content_differs(tmp_path, monkeypatch):
+    """空振り防止: 上の見張りが「何も見ていない」のではないことを固定する。"""
+    import local_writer
+
+    cache = tmp_path / ".beacon" / "project.json"
+    s = _make_store(DOC, cache)
+    s.load_project()
+
+    calls = []
+    real = local_writer._atomic_replace_bytes
+    monkeypatch.setattr(local_writer, "_atomic_replace_bytes",
+                        lambda path, out: calls.append(path) or real(path, out))
+
+    s._client.remote_write({"name": "p", "summary": "v2", "milestones": []})
+    s.load_project()
+
+    assert calls == [str(cache)]
 
 
 def test_a_read_that_finds_the_mirror_behind_refreshes_it_and_says_why(tmp_path, capsys):
@@ -266,7 +283,7 @@ def test_a_save_that_changes_nothing_also_does_not_touch_the_mirror(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_every_mirror_call_site_states_its_origin():
-    """``_write_local_cache`` の全ての呼び出し口が ``origin=`` を明示する。
+    """``_write_mirror`` の全ての呼び出し口が ``origin=`` を明示する。
 
     ここを既定値で済ませると、読み側の新しい口が「黙って更新してよい」挙動を
     相続して、この課題が消した穴が黙って戻る。守る状態への **全ての書き手を
@@ -281,7 +298,7 @@ def test_every_mirror_call_site_states_its_origin():
             continue
         fn = node.func
         name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-        if name == "_write_local_cache":
+        if name == "_write_mirror":
             calls.append(node)
 
     assert len(calls) >= 3, (
@@ -290,7 +307,7 @@ def test_every_mirror_call_site_states_its_origin():
     for node in calls:
         kw = {k.arg for k in node.keywords}
         assert "origin" in kw, (
-            f"lib/store_api.py:{node.lineno} の _write_local_cache 呼び出しが "
+            f"lib/store_api.py:{node.lineno} の _write_mirror 呼び出しが "
             "origin= を明示していない")
 
 
@@ -298,7 +315,7 @@ def test_the_origin_argument_has_no_default():
     """既定値を置かない = 書き忘れが実行時に落ちる (黙って片側に倒れない)。"""
     tree = ast.parse(io.open(STORE_API_PATH, encoding="utf-8").read())
     fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "_write_local_cache")
+              if isinstance(n, ast.FunctionDef) and n.name == "_write_mirror")
     names = [a.arg for a in fn.args.kwonlyargs]
     assert "origin" in names, "origin はキーワード専用引数であること"
     default = fn.args.kw_defaults[names.index("origin")]
@@ -310,7 +327,7 @@ def test_an_unknown_origin_is_refused(tmp_path):
     cache = tmp_path / ".beacon" / "project.json"
     s = _make_store(DOC, cache)
     with pytest.raises(ValueError) as exc:
-        s._write_local_cache(DOC, origin="readonly")
+        s._write_mirror(DOC, origin="readonly")
     assert MIRROR_ORIGIN_READ in str(exc.value)
     assert MIRROR_ORIGIN_SAVE in str(exc.value)
 
@@ -412,3 +429,203 @@ def test_listing_without_a_target_names_the_candidates(monkeypatch, capsys):
     assert "ms-1" in message and "ms-2" in message, (
         f"候補を名指ししていない: {message!r}")
     assert capsys.readouterr().out == "", "止まるべき呼び出しが一覧を出している"
+
+
+# --------------------------------------------------------------------------
+# 独立 AX レビュー (misleading): 開示文が測っていない原因を断定していた
+# --------------------------------------------------------------------------
+
+def test_the_disclosure_does_not_blame_an_external_writer(tmp_path, capsys):
+    """保存の直後に同じコマンドが読み戻しても「別の誰かが書いた」と言わない。
+
+    ``commands_shared.verify_cloud_write_persisted`` は書き込みが本当に残ったかを
+    確かめるため、``save_project`` の直後に *同じコマンドの中で* ``load_project``
+    する (``milestone add`` / ``doc add`` が採用済み)。そしてサーバは PUT した本文を
+    書き換えて保存する (owner 自動付与等 —— その関数の docstring が明記している)。
+    つまり **自分の保存だけが原因で** ミラーとクラウドが食い違う。
+
+    初版の文面は「クラウドより古かったので追従しました」で、これは測っていない
+    原因 (= 外部の書き手) の断定だった。読み手は別セッションの書き込みを疑って
+    無用な待ちや再実行に入る。言ってよいのは「最新ではなかった」までで、誰が
+    書いたかは知らない。
+    """
+    cache = tmp_path / ".beacon" / "project.json"
+    s = _make_store(DOC, cache)
+
+    # サーバ側の正規化を再現する: PUT した本文に owner を足して保存する。
+    class NormalisingClient(FakeClient):
+        def put_project(self, project_id, data):
+            stored = copy.deepcopy(data)
+            stored["owner"] = "auto-stamped-by-server"
+            self._doc = stored
+            return {"status": "ok"}
+
+    s._client = NormalisingClient(DOC)
+    s.load_project()
+    capsys.readouterr()
+
+    s.save_project({"name": "p", "summary": "v2", "milestones": []})
+    s.load_project()          # = verify_cloud_write_persisted の読み戻し
+
+    err = capsys.readouterr().err
+    assert MIRROR_REASON_REFRESHED in err, (
+        f"追従したのに何も述べていない: {err!r}")
+    for blame in ("クラウドより古", "別のセッション", "他の端末"):
+        assert blame not in err, (
+            f"測っていない原因を断定している ({blame}): {err!r}")
+
+
+# --------------------------------------------------------------------------
+# 独立 AX レビュー (low): 置き換えが失敗したとき一時ファイルを残さない
+# --------------------------------------------------------------------------
+
+def test_a_failed_replace_leaves_no_temp_file(tmp_path, capsys):
+    """ミラーのパスが普通のファイルでないとき、`.tmp` を残さず・毎回作らない。
+
+    置き場がディレクトリ等だと ``os.replace`` が失敗する。以前はその経路で
+    作りかけの一時ファイルをそのまま残し、読み取りのたびに作り直していた ——
+    この PR が「一時ファイルの誤報の窓を閉じた」と名乗った実害が、その前提下では
+    戻っていた。
+    """
+    cache = tmp_path / ".beacon" / "project.json"
+    cache.parent.mkdir(parents=True)
+    cache.mkdir()                      # ← 普通のファイルでない
+    s = _make_store(DOC, cache)
+
+    s.load_project()
+    s.load_project()
+
+    strays = [p.name for p in cache.parent.iterdir() if p.name != "project.json"]
+    assert strays == [], f"置き換えに失敗した一時ファイルが残っている: {strays}"
+    assert MIRROR_REASON_FAILED in capsys.readouterr().err, (
+        "ミラーを更新できなかったことが黙って消えている")
+
+
+# --------------------------------------------------------------------------
+# 独立保守性レビュー (high): ミラーを書く口を 1 つに数える
+# --------------------------------------------------------------------------
+
+# project.json を書く口の台帳。ミラーの書き込み (write_mirror_if_changed) と、
+# ローカルモードでは project.json 自身が真値源になる本書き込み (atomic_apply) の
+# 2 つで、どちらも lib/local_writer.py に在る —— **書く作法を知っている場所は
+# 1 モジュール** という形。新しい書き手が別の file に生えたら下の census が赤くなる。
+MIRROR_WRITERS = {("local_writer", "write_mirror_if_changed"),
+                  ("local_writer", "atomic_apply"),
+                  ("local_writer", "_atomic_replace_bytes")}
+
+
+def test_the_mirror_has_exactly_one_writer():
+    """``.beacon/project.json`` を書き換える口が 1 つであることを数える。
+
+    独立レビューが実測した: この PR はクラウド側の書き込み口だけを硬くしたが、
+    同じ物理ファイルを書く **2 つ目の口** が既に在った
+    (``commands_shared._mirror_auto_execute_channels_to_local`` —— 原子的でもなく、
+    内容比較も開示も通らない)。しかも私の AST 検査は ``lib/store_api.py`` だけを
+    歩いていたので、その 2 つ目が見えなかった。**守る状態への全ての書き手を
+    列挙する** という既出の教訓を、同じ形でまた踏んだ。
+
+    数え方: 本番コード (lib/ と server/) の中で「project.json を指す式」を書き込み用
+    に開く / 原子的に置き換える呼び出しを構文木から拾い、台帳に載っている関数の外に
+    無いことを見る。
+
+    **この検査が見ていないもの** (= 残る限界、名乗りを広げないために明記する):
+    置き場の綴りがここに挙げた名前のどれでもない場合 (例えば文字列リテラルを
+    その場で組み立てる形) は見えない。綴りの列挙は狭すぎて破れる側の失敗なので、
+    「ミラーの置き場を保持しうる名前」を下に列挙し、**その列挙自体が実表面を
+    捉えていること** を件数で固定する。
+    """
+    import ast as _ast
+
+    # ミラーの置き場を保持しうる名前。増えたら census が 0 件側に倒れないよう、
+    # 下で「実際に 1 件以上見えている」ことを確かめる。
+    PATH_NAMES = {"project_file", "cache_path", "mirror_path", "_mirror_path",
+                  "_project_file", "pj_path", "project_json"}
+    WRITE_CALLS = {"replace", "_atomic_replace_bytes", "mkstemp", "open"}
+
+    roots = []
+    for d in ("lib", "server"):
+        base = os.path.join(os.path.dirname(__file__), "..", d)
+        for name in sorted(os.listdir(base)):
+            if name.endswith(".py"):
+                roots.append((d + "/" + name, os.path.join(base, name)))
+
+    def _mentions_mirror_path(node):
+        for sub in _ast.walk(node):
+            if isinstance(sub, _ast.Name) and sub.id in PATH_NAMES:
+                return True
+            if isinstance(sub, _ast.Attribute) and sub.attr in PATH_NAMES:
+                return True
+        return False
+
+    offenders = []
+    seen_any = 0
+    for rel, path in roots:
+        tree = _ast.parse(io.open(path, encoding="utf-8").read())
+        stack = []
+
+        def visit(node, chain):
+            for child in _ast.iter_child_nodes(node):
+                nxt = chain
+                if isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    nxt = chain + [child.name]
+                if isinstance(child, _ast.Call):
+                    fn = child.func
+                    nm = fn.attr if isinstance(fn, _ast.Attribute) else getattr(fn, "id", "")
+                    if nm in WRITE_CALLS and child.args and _mentions_mirror_path(child.args[0]):
+                        writes = (nm != "open" or any(
+                            isinstance(a, _ast.Constant) and isinstance(a.value, str)
+                            and ("w" in a.value or "a" in a.value)
+                            for a in child.args[1:]) or any(
+                            k.arg == "mode" and isinstance(k.value, _ast.Constant)
+                            and ("w" in str(k.value.value) or "a" in str(k.value.value))
+                            for k in child.keywords))
+                        if writes:
+                            stack.append((rel, nxt[-1] if nxt else "", child.lineno))
+                visit(child, nxt)
+
+        visit(tree, [])
+        for rel_, fname, lineno in stack:
+            seen_any += 1
+            if (rel_.split("/")[-1][:-3], fname) in MIRROR_WRITERS:
+                continue
+            offenders.append(f"{rel_}:{lineno} ({fname})")
+
+    assert seen_any >= 1, (
+        "ミラーへの書き込みを 1 件も見ていない — この検査が実表面を捉えていない "
+        "(置き場の名前の列挙が古い可能性)")
+    assert offenders == [], (
+        "ミラーを書く口が台帳の外にある (原子性・内容比較・開示を通らない):\n  "
+        + "\n  ".join(offenders))
+
+
+def test_the_sqlite_sibling_also_skips_an_unchanged_mirror(tmp_path, monkeypatch):
+    """ローカルの SQLite 側も同じ primitive を通る (= 毎回書かない)。
+
+    独立保守性レビュー medium: 元の実害 (一時ファイルと更新時刻の churn) は
+    「読みで書く」ではなく **「毎回書く」** という性質なので、クラウド側だけ直すと
+    同じ症状を追う人が真似る先を失う。
+    """
+    import local_writer
+    from store_sqlite import SqliteStore
+
+    proj = tmp_path / ".beacon" / "project.json"
+    proj.parent.mkdir(parents=True)
+    doc = {"name": "p", "summary": "v1", "milestones": []}
+    proj.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+
+    store = SqliteStore(str(proj))
+    store.populate_if_empty(doc)
+    store.load_project()          # 保存の baseline を取る (= lost-update 検出用)
+
+    calls = []
+    real = local_writer._atomic_replace_bytes
+    monkeypatch.setattr(local_writer, "_atomic_replace_bytes",
+                        lambda path, out: calls.append(path) or real(path, out))
+
+    store.save_project(copy.deepcopy(doc))      # 内容は同じ
+    assert calls == [], f"同じ内容の保存でミラーを書き直している: {calls}"
+
+    doc2 = dict(store.load_project(), summary="v2")
+    store.save_project(doc2)                     # 内容が違う
+    assert calls == [str(proj)], "内容が変わったのにミラーを書いていない"

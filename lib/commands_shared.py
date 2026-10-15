@@ -1535,46 +1535,30 @@ def _bus_auto_execute_channels(data: dict) -> list:
     return [c for c in raw if isinstance(c, str) and c]
 
 
-def _mirror_auto_execute_channels_to_local(channels: list) -> None:
-    """Write-through mirror of the auto-execute allowlist into local
-    ``.beacon/project.json``.
-
-    Why: in cloud mode, ``save_project`` PUTs to the cloud only — the local
-    file is a stale snapshot from ``beacon init`` time and is never refreshed
-    on writes (StoreApi.save_project doesn't mirror). The inbox hook
-    (``bin/beacon-bus-inbox-hook.py``) reads ``bus_auto_execute_channels``
-    from the local file directly (= cheap, no subprocess), so without this
-    mirror the hook always sees an empty allowlist and degrades every
-    opted-in ``operation-trigger`` event to ``propose-to-ai`` — silently
-    breaking the autonomous loop even when the CLI shows the channel as
-    allowed.
-
-    Scoped to this single config field on purpose: a full local mirror is
-    ms-36 territory (cloud-first cache rethink). This is a targeted patch
-    that closes the autonomous-loop UX gap without changing wider semantics.
-
-    Fail-soft: any error (cwd not a beacon project, file unwritable, etc.)
-    is swallowed — the cloud-side write already succeeded, so the user-
-    facing operation is still correct; only the inbox hook's local read
-    stays stale, which is the pre-existing (broken) baseline.
-    """
-    try:
-        project_file = os.environ.get("BEACON_PROJECT_FILE") or os.path.join(
-            ".beacon", "project.json")
-        if not os.path.exists(project_file):
-            return
-        with open(project_file, "r", encoding="utf-8") as f:
-            local = json.load(f)
-        local["bus_auto_execute_channels"] = list(channels)
-        with open(project_file, "w", encoding="utf-8") as f:
-            json.dump(local, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-    except Exception as exc:
-        sys.stderr.write(
-            f"[beacon] local mirror of bus_auto_execute_channels failed "
-            f"(cloud write succeeded; inbox hook may read stale value): "
-            f"{type(exc).__name__}: {exc}\n"
-        )
+# ms-166 e-6937: ``_mirror_auto_execute_channels_to_local`` を撤去した。
+#
+# これは bus の自動実行許可リストだけを ``.beacon/project.json`` に部分的に書き戻す
+# ヘルパで、その存在理由は docstring にこう書かれていた: 「cloud mode では
+# save_project はクラウドにしか PUT せず、ローカルのファイルは init 時の古い写しの
+# まま更新されない (StoreApi.save_project doesn't mirror)」。
+#
+# **その前提は e-746 (ms-95) の時点で失効していた** —— StoreApi.save_project は
+# それ以降、書き込みのたびに文書全体をローカルへ写している。3 箇所の呼び出しは
+# すべて ``data["bus_auto_execute_channels"] = channels`` を入れた直後の
+# ``save_project(data)`` の後に置かれていたので、同じ値を 2 度書いていた。
+#
+# 残っていた害は 3 つ:
+#   * 原子的でない (``open(..., "w")`` で直書き) —— 他のミラー書き込みはすべて
+#     一時ファイル + ``os.replace`` なのに、ここだけ途中で落ちると壊れた JSON が残る
+#   * 置き場の解決が cwd 相対 (``.beacon/project.json``) なので、サブディレクトリから
+#     叩くと **別の場所に書いていた** (store 側は root を上に辿って解決する)
+#   * 「ミラーを書く口」が 2 つあるため、片方を安全にしても、もう片方が同じファイルを
+#     別の作法で触る形が残った (独立保守性レビュー high)
+#
+# ミラーを書く口は :func:`local_writer.write_mirror_if_changed` 1 つだけになった。
+# 「許可リストを書いたら hook が読める」という契約は、ヘルパではなく **実際の
+# 書き込み経路** (save_project → ミラー) で測っている
+# (tests/test_bus_auto_execute_allowlist.py)。
 
 
 def _row_owner_identity(row: dict) -> Tuple[str, str]:

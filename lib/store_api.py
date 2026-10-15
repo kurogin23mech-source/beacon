@@ -33,8 +33,20 @@ MIRROR_ORIGIN_SAVE = "save"
 
 # 読み取り中にミラーを触った事情。文面そのものを定数にしているのは、開示を測る試験が
 # 文言を手で写さずに済むようにするため (写すと片方だけ直して試験が黙る)。
+#
+# **原因を断定しない** (ms-166 e-6937 独立 AX レビュー misleading)。初版は
+# 「クラウドより古かったので」と書いていたが、それは **測っていない原因の断定**
+# だった: ``commands_shared.verify_cloud_write_persisted`` は保存の直後に *同じ
+# コマンドの中で* 読み戻すので、サーバが保存時に本文を書き換える (owner 自動付与
+# 等、その関数の docstring が明記している) と、**自分の保存だけが原因で** ミラーと
+# クラウドが食い違う。そこで「クラウドより古かった」と出ると、読み手は「別の
+# セッションが書いた」と誤診して無用な待ちや再実行に入る。
+#
+# 私たちが実際に知っているのは「手元の控えの内容がクラウドと違った」だけ。誰が
+# 書いたかは測っていないので、言わない。
 MIRROR_REASON_CREATED = "が無かったので作成しました"
-MIRROR_REASON_REFRESHED = "がクラウドより古かったので追従しました"
+MIRROR_REASON_REFRESHED = "が最新ではなかったので追従しました"
+MIRROR_REASON_FAILED = "を更新できませんでした"
 
 
 class ConflictError(RuntimeError):
@@ -68,7 +80,7 @@ class StoreApi:
     _WS_RECONNECT_MAX = 30.0
 
     def __init__(self, api_url: str, project_id: str, token: str = "",
-                 local_cache_path: str | None = None):
+                 mirror_path: str | None = None):
         from api_client import ApiClient
         self._client = ApiClient(api_url, token)
         self._api_url = api_url
@@ -86,17 +98,22 @@ class StoreApi:
         self._ws_reconnect_attempts = 0
         # HTTP polling throttle
         self._last_poll_time = 0.0
-        # ms-95 / e-746: write-back cache path. When set, every successful
-        # API read / write also writes the canonical document to this local
-        # file, keeping ``.beacon/project.json`` as an up-to-date read-only
-        # mirror of the cloud truth. This addresses the original ms-36
-        # "cloud mode はローカル .beacon を読み取り専用キャッシュ" contract
-        # that ms-84 Phase 3 (e-2037) deferred. Tauri's ``load_project_json``
-        # still reads this file at startup; without write-back the first
-        # render shows stale data until the WS push arrives (= e-723 era).
-        # The write is best-effort and never raises — any I/O failure is
-        # swallowed so a flaky disk cannot break the CLI command itself.
-        self._local_cache_path = local_cache_path
+        # ms-95 / e-746: ミラー (= 手元の控え) の置き場。設定されていれば、
+        # 成功した API の読み / 書きのあとに正本をこのファイルへ写し、
+        # ``.beacon/project.json`` をクラウドの真値の **読み取り専用ミラー** として
+        # 保つ。ms-36 の「cloud mode はローカル .beacon を読み取り専用キャッシュ」
+        # という契約のうち、ms-84 Phase 3 (e-2037) が先送りした脚。Tauri の
+        # ``load_project_json`` は起動時にこのファイルを読むので、写しが無いと
+        # WS の push が来るまで古い世界を描く (= e-723 の頃)。
+        #
+        # ms-166 e-6937: 名前を "cache" から "mirror" に揃えた (独立保守性
+        # レビュー low)。同じ 1 つのものを、この file の中で "cache" と "mirror" の
+        # 2 つの語彙で呼んでいたため、どちらで grep しても片方しか見つからなかった。
+        # docstring が既に "mirror" を使っていたので、そちらに寄せた。
+        #
+        # 書き込みは :func:`local_writer.write_mirror_if_changed` に 1 つだけ置く。
+        # 失敗しても例外にしない (ミラーは真値源ではない) が、黙って消さない。
+        self._mirror_path = mirror_path
         # ms-166 e-6937: 読み取り中にミラーを触った事情のうち、既に述べたもの。
         self._mirror_write_disclosed = set()
 
@@ -108,12 +125,12 @@ class StoreApi:
                 self._ws_data = None
                 self._last_hash = self._hash(data)
                 StoreApi._load_baseline[self._project_id] = self._last_hash
-                self._write_local_cache(data, origin=MIRROR_ORIGIN_READ)
+                self._write_mirror(data, origin=MIRROR_ORIGIN_READ)
                 return data
         data = self._client.get_project(self._project_id)
         self._last_hash = self._hash(data)
         StoreApi._load_baseline[self._project_id] = self._last_hash
-        self._write_local_cache(data, origin=MIRROR_ORIGIN_READ)
+        self._write_mirror(data, origin=MIRROR_ORIGIN_READ)
         return data
 
     def apply(self, op, *, validate: bool = True):
@@ -147,103 +164,74 @@ class StoreApi:
         self._client.put_project(self._project_id, data)
         self._last_hash = self._hash(data)
         StoreApi._load_baseline[self._project_id] = self._last_hash
-        self._write_local_cache(data, origin=MIRROR_ORIGIN_SAVE)
+        self._write_mirror(data, origin=MIRROR_ORIGIN_SAVE)
 
-    def _write_local_cache(self, data: dict, *, origin: str) -> None:
-        """Mirror the just-loaded/saved cloud document into the local cache.
+    def _write_mirror(self, data: dict, *, origin: str) -> None:
+        """Mirror the just-loaded/saved cloud document into the local file.
 
         ms-95 / e-746 — Cloud mode previously left ``.beacon/project.json``
         as a stale snapshot from initial cloud-join (or a pre-cut-over local
         install), causing Tauri's ``load_project_json`` to render a
         ms-22-era world for several seconds until the WS push arrived.
-        Writing back here keeps the local file as a read-only mirror of the
-        cloud truth. Direction is cloud→local only (= we never PUT from this
-        file back to cloud), which preserves the ms-84 Phase 3 (e-2037)
-        invariant that the cloud document is the single source of truth
-        for writes.
+        Keeping the local file in step makes it a usable read-only mirror.
+        Direction is cloud→local only (= we never PUT from this file back to
+        cloud), which preserves the ms-84 Phase 3 (e-2037) invariant that the
+        cloud document is the single source of truth for writes.
 
         **ms-166 e-6937 — 同じ内容を書き直さない。** 以前はここが無条件に
         書いていたので、**読み取りを名乗る入口が必ずファイルを触っていた**。実測
         (2026-10-15): ``beacon task list`` を 2 回続けて叩くと内容の md5 は 3 回とも
-        同一なのに mtime は毎回動いた。実害は 2 つ:
+        同一なのに mtime は毎回動いた。実害は 2 つ: (1) ``beacon pr sync --dry-run``
+        は「下見であって何も変えない」ことを名前で約束しているのに更新時刻が動く
+        (2) 原子的書き込みの途中半分が、全件テスト中に「テストがゴミを残した」と
+        誤報される窓を作る。
 
-        1. ``beacon pr sync --dry-run`` は「下見であって何も変えない」ことを名前で
-           約束しているのに、保存ファイルの更新時刻が動く (= 名乗りと実態のズレ)。
-        2. 原子的書き込みの途中半分 (``project.json.tmp``) が、全件テスト中に
-           「テストがゴミを残した」と誤報される窓を作る。
+        書き込みそのものは :func:`local_writer.write_mirror_if_changed` に 1 つだけ
+        置いた。同じファイルを触る口が 3 つあり作法が揃っていなかったため
+        (独立保守性レビュー high — 経緯はその関数の冒頭コメント)。ここに残るのは
+        **読み取り中に触ったときに述べるかどうか** の判断だけ。
 
-        対になる事実: ローカル側の :class:`store_sqlite.SqliteStore` はミラーを
-        **保存のときだけ** 書く (読みでは書かない)。クラウド側だけが非対称だった。
-
-        そこで **測る → 決める → 書く** 順に直した。手元のミラーが既に同じ内容なら
-        一時ファイルも作らずそのまま戻る。読み側で実際に古かったときだけ追従し、
-        その場合は **なぜ触ったのかを述べる** (``origin`` を参照)。
-
-        読み側のミラー追従を全廃する案は採らなかった: それは e-746 (Tauri の初回
-        描画が古い世界を映す) を退行させる。他の端末が書いた後に手元で読んだとき、
-        ミラーが追いつく経路はここしかない。
-
-        The write is intentionally best-effort: any OS / filesystem error
-        is swallowed so a non-writable disk cannot break the CLI command
-        itself.
+        読み側のミラー追従を全廃する案は採らなかった: それは e-746 を退行させる。
+        他の端末が書いた後に手元で読んだとき、ミラーが追いつく経路はここしかない。
         """
         if origin not in (MIRROR_ORIGIN_READ, MIRROR_ORIGIN_SAVE):
             raise ValueError(
-                "_write_local_cache(origin=...) must be one of "
+                "_write_mirror(origin=...) must be one of "
                 f"{MIRROR_ORIGIN_READ!r} / {MIRROR_ORIGIN_SAVE!r}, got {origin!r}")
         # ``getattr`` default protects test fixtures that build StoreApi via
         # ``__new__`` + manual attribute seeding (= avoids ApiClient / auth /
         # WS construction in unit tests; see tests/test_cmd_purge_cloud.py).
-        # Those fixtures may not seed ``_local_cache_path``; we treat that
-        # the same as the explicit ``None`` case (= no cache write).
-        cache_path = getattr(self, "_local_cache_path", None)
-        if not cache_path:
+        # Those fixtures may not seed ``_mirror_path``; we treat that
+        # the same as the explicit ``None`` case (= no mirror write).
+        mirror_path = getattr(self, "_mirror_path", None)
+        if not mirror_path:
             return
-        payload = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        # 測る: 手元のミラーが既に同じ内容なら、何も触らない (一時ファイルも作らない)。
-        existed = True
-        try:
-            with open(cache_path, "rb") as f:
-                if f.read() == payload:
-                    return
-        except OSError:
-            # 読めない / 無い (= 初回の cloud-join 直後) は「違う」として扱い、下で書く。
-            # 「無かったので作った」と「古かったので追従した」は利用者への説明が
-            # 違うので、ここで区別しておく (下の開示で使う)。
-            existed = os.path.exists(cache_path)
-        try:
-            cache_dir = os.path.dirname(cache_path)
-            if cache_dir:
-                os.makedirs(cache_dir, exist_ok=True)
-            # Write atomically via a temp file in the same directory so a
-            # partial write cannot leave a truncated project.json on disk.
-            tmp_path = f"{cache_path}.tmp"
-            with open(tmp_path, "wb") as f:
-                f.write(payload)
-            os.replace(tmp_path, cache_path)
-        except OSError:
-            # Best-effort cache; never block the CLI on a disk hiccup.
+        import local_writer
+        outcome = local_writer.write_mirror_if_changed(mirror_path, data)
+        if outcome == local_writer.MIRROR_UNCHANGED:
+            return
+        if outcome == local_writer.MIRROR_FAILED:
+            # ミラーは真値源ではないので本体の読み書きは成立している。だが
+            # **黙って消えない**: 兄弟の SqliteStore._write_mirror は以前から
+            # stderr に出しており、片方だけ黙る非対称を作らない。
+            self._disclose_mirror_write(mirror_path, MIRROR_REASON_FAILED)
             return
         if origin == MIRROR_ORIGIN_READ:
-            self._disclose_read_time_mirror_write(
-                cache_path, MIRROR_REASON_REFRESHED if existed
-                else MIRROR_REASON_CREATED)
+            self._disclose_mirror_write(
+                mirror_path,
+                MIRROR_REASON_CREATED if outcome == local_writer.MIRROR_CREATED
+                else MIRROR_REASON_REFRESHED)
 
-    def _disclose_read_time_mirror_write(self, cache_path: str, reason: str) -> None:
-        """読み取りの最中にミラーを触ったら、**なぜ触ったのかを述べる**。
+    def _disclose_mirror_write(self, mirror_path: str, reason: str) -> None:
+        """ミラーを触った / 触れなかったら、**何が起きたのかを述べる**。
 
         黙って更新すると、``--dry-run`` のように「何も変えない」と名乗る入口が
         ファイルを変えたことを利用者が説明できない。stdout ではなく stderr に出す
         (``--json`` を機械で読む側の出力を汚さない)。
 
-        この行が出るのは「手元のミラーが無かった」「他の端末 / Web UI がクラウドを
-        書き換えた後にここで初めて読んだ」のどちらかのときだけ。手元のミラーが既に
-        最新なら上で早期に戻っているので出ない。
-
-        2 つの事情を **同じ文面に畳まない** (利用者への説明が違う: 前者は初回作成、
-        後者は追従)。黙る単位も事情ごとにする — 1 プロセスで両方が起きることは
-        実際には無いが、片方の出力が他方を黙らせる形にしておくと、後から「出たはず
-        の行が出ていない」を説明できなくなる。
+        事情を **同じ文面に畳まない** (初回作成 / 追従 / 書けなかった は説明が違う)。
+        黙る単位も事情ごとにする — 片方の出力が他方を黙らせる形にすると、後から
+        「出たはずの行が出ていない」を説明できなくなる。
         """
         said = getattr(self, "_mirror_write_disclosed", None)
         if said is None:
@@ -253,7 +241,7 @@ class StoreApi:
             return
         said.add(reason)
         import sys
-        print(f"[beacon] 手元のミラー ({cache_path}) {reason} "
+        print(f"[beacon] 手元のミラー ({mirror_path}) {reason} "
               f"(記録は変更していません)。", file=sys.stderr)
 
     def has_changed(self) -> bool:

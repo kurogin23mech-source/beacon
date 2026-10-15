@@ -189,17 +189,26 @@ def test_remove_writes_through_to_local_project_json(project_dir, monkeypatch):
     assert local.get("bus_auto_execute_channels") == []
 
 
-def test_local_mirror_no_ops_when_local_file_absent(monkeypatch, capsys):
-    """The mirror helper is best-effort: missing local file → silent no-op,
-    no exception bubbles up. The CLI's cloud write is what's load-bearing
-    for correctness; mirror failure just leaves the inbox hook reading the
-    pre-existing stale value (the broken-baseline fallback)."""
-    monkeypatch.chdir("/tmp")  # no .beacon dir here
-    monkeypatch.delenv("BEACON_PROJECT_FILE", raising=False)
-    # Should not raise even though .beacon/project.json doesn't exist.
-    cmd_bus._mirror_auto_execute_channels_to_local(["operation-trigger"])
-    err = capsys.readouterr().err
-    assert "Traceback" not in err
+def test_local_mirror_write_failure_does_not_raise(tmp_path):
+    """ミラーが書けなくても例外にしない (= 本体の書き込みは成立している)。
+
+    ms-166 e-6937: ここは以前 ``_mirror_auto_execute_channels_to_local`` という
+    **2 つ目のミラー書き込み口** を測っていた。その口は撤去され (存在理由だった
+    「save はミラーしない」が e-746 で失効していた)、ミラーを書くのは
+    :func:`local_writer.write_mirror_if_changed` の 1 つだけになった。best-effort の
+    契約はそちらで測る —— 書けない状況でも例外を投げず、``MIRROR_FAILED`` を返して
+    呼び出し側に「述べるかどうか」を委ねる (黙って消えない)。
+    """
+    import local_writer
+
+    unwritable = tmp_path / "not-a-dir" / "project.json"
+    (tmp_path / "not-a-dir").write_text("I am a file, not a directory",
+                                        encoding="utf-8")
+
+    outcome = local_writer.write_mirror_if_changed(
+        str(unwritable), {"bus_auto_execute_channels": ["operation-trigger"]})
+
+    assert outcome == local_writer.MIRROR_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -527,8 +536,8 @@ def test_client_and_server_agree_after_trek_auto_arm_local_write(
     """End-to-end shape of the 2026-06-29 dogfood failure mode:
 
     1. trek auto-arm writes 4 trek channels into local project.json
-       (= the CLI `_arm_trek_channels_and_budget` path, via
-       _mirror_auto_execute_channels_to_local).
+       (= the CLI `_arm_trek_channels_and_budget` path, whose local write now
+       goes through local_writer.write_mirror_if_changed).
     2. Inbox hook reads the local file.
     3. The hook MUST see all 4 channels — otherwise the trek-progress-check /
        trek-leader-digest events get downgraded to propose-to-ai and the
@@ -549,10 +558,16 @@ def test_client_and_server_agree_after_trek_auto_arm_local_write(
     )
     monkeypatch.chdir(root)
 
-    # Simulate the trek auto-arm local mirror write — same code path the
-    # `beacon trek join` flow exercises.
+    # Write through the ONE mirror writer every store uses (ms-166 e-6937 —
+    # the bespoke per-field helper this used to call was removed; its reason
+    # for existing had lapsed and it wrote non-atomically to a cwd-relative
+    # path).
+    import local_writer
     trek_channels = list(cmd_trek.TREK_AUTO_ARM_CHANNELS)
-    cmd_bus._mirror_auto_execute_channels_to_local(trek_channels)
+    local_writer.write_mirror_if_changed(
+        str(root / ".beacon" / "project.json"),
+        {"name": "t", "milestones": [],
+         "bus_auto_execute_channels": trek_channels})
 
     # Now ask both readers what they see.
     server_view = hook_module._read_auto_execute_channels(root)
@@ -573,14 +588,15 @@ def test_arm_for_trek_writes_local_mirror_visible_to_hook(
     """Direct call into the trek auto-arm helper MUST leave the local
     project.json with all 4 trek channels, and the inbox hook's reader MUST
     see exactly that. This pins the
-    `_arm_for_trek → _mirror_auto_execute_channels_to_local → hook reads
-    local` chain end-to-end without spinning up the CLI subprocess (= test
+    `_arm_for_trek → save_project → ミラー → hook reads local` chain end-to-end without spinning up the CLI subprocess (= test
     runs in-process, no `_run` overhead, no fixture mocking around bin/beacon).
     """
     _clear_ae_env(monkeypatch)
-    # _arm_for_trek calls load_project + save_project + mirror. In this
-    # local-store fixture (no cloud.json) save_project writes to the same
-    # file the hook reads, so the contract is end-to-end visible.
+    # _arm_for_trek calls load_project + save_project. In this local-store
+    # fixture (no cloud.json) save_project writes SQLite AND refreshes the
+    # project.json mirror the hook reads, so the contract is end-to-end
+    # visible WITHOUT the bespoke per-field helper that used to sit here
+    # (removed in ms-166 e-6937 — this test is now its replacement guard).
     result = cmd_trek._arm_for_trek("trek-test-arm")
 
     expected = set(cmd_trek.TREK_AUTO_ARM_CHANNELS)
@@ -613,16 +629,20 @@ def test_inbox_hook_does_not_downgrade_trek_channels_after_auto_arm(
     would have caught the "auto-arm reports covered, hook reports not in
     allowlist" symptom before it shipped."""
     # Use the existing fake_project (= has .beacon/{project,session,cloud}.json
-    # plus credentials) and seed it via the same mirror helper the trek
-    # auto-arm path uses, so we exercise the real write code, not a hand-
-    # crafted JSON.
+    # plus credentials) and seed it through the ONE mirror writer every store
+    # uses, so we exercise the real write code, not a hand-crafted JSON
+    # (ms-166 e-6937: the bespoke per-field helper this used to call was
+    # removed — see test_local_mirror_write_failure_does_not_raise).
+    import local_writer
     monkeypatch.chdir(fake_project.root)
     monkeypatch.setenv(
         "BEACON_PROJECT_FILE",
         str(fake_project.root / ".beacon" / "project.json"),
     )
-    cmd_bus._mirror_auto_execute_channels_to_local(
-        list(cmd_trek.TREK_AUTO_ARM_CHANNELS))
+    _pj = fake_project.root / ".beacon" / "project.json"
+    _doc = json.loads(_pj.read_text())
+    _doc["bus_auto_execute_channels"] = list(cmd_trek.TREK_AUTO_ARM_CHANNELS)
+    local_writer.write_mirror_if_changed(str(_pj), _doc)
 
     events = [
         _make_event("ev-progress", channel="trek-progress-check",

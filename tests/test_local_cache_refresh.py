@@ -63,7 +63,7 @@ def _reset_baseline():
 def _make_store(doc, cache_path):
     s = StoreApi(
         "http://test", "pid", "",
-        local_cache_path=str(cache_path),
+        mirror_path=str(cache_path),
     )
     s._client = FakeClient(doc)
     _reset_baseline()
@@ -153,10 +153,10 @@ def test_cache_write_is_atomic_via_temp_file(tmp_path):
 
 
 def test_no_cache_path_means_no_write(tmp_path, monkeypatch):
-    """When the caller does not pass local_cache_path (= legacy test
+    """When the caller does not pass mirror_path (= legacy test
     constructions, or contexts where there is no project file), the
     StoreApi must not invent a path to write to."""
-    s = StoreApi("http://test", "pid", "")  # no local_cache_path
+    s = StoreApi("http://test", "pid", "")  # no mirror_path
     s._client = FakeClient({"name": "p", "summary": "v", "milestones": []})
     _reset_baseline()
     # Chdir so a stray "" or "." path can't accidentally write into the
@@ -170,7 +170,7 @@ def test_no_cache_path_means_no_write(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_cache_write_failure_does_not_break_load(tmp_path, monkeypatch):
+def test_cache_write_failure_does_not_break_load(tmp_path, monkeypatch, capsys):
     """Best-effort contract: when the cache path is unwritable (= read-only
     mount, missing parent perms), the load must still succeed and return
     the cloud truth. The CLI command itself must not crash."""
@@ -178,20 +178,22 @@ def test_cache_write_failure_does_not_break_load(tmp_path, monkeypatch):
     fresh_doc = {"name": "p", "summary": "fresh", "milestones": []}
     s = _make_store(fresh_doc, cache)
 
-    def boom(*args, **kwargs):
+    # ms-166 e-6937: 失敗の注入先を **実際に書く 1 関数** に変えた。以前は
+    # ``builtins.open`` の ".tmp" 呼び出しを落としていたが、書き込みを共有の
+    # primitive に寄せた時点でそこは ``tempfile.mkstemp`` + ``os.fdopen`` を使うので
+    # ``builtins.open`` には現れず、**何も注入しないまま緑になる** 形だった。
+    import local_writer
+
+    def boom(path, out):
         raise OSError("read-only filesystem")
 
-    # Patch the open() used inside the helper so the disk write fails.
-    import builtins
-    real_open = builtins.open
-    monkeypatch.setattr(
-        builtins, "open",
-        lambda *a, **kw: (boom() if str(a[0]).endswith(".tmp") else real_open(*a, **kw)),
-    )
+    monkeypatch.setattr(local_writer, "_atomic_replace_bytes", boom)
 
     # Should not raise.
     result = s.load_project()
     assert result["summary"] == "fresh"
+    # そして「書けなかった」ことは黙って消えない (= stderr に出る)。
+    assert "更新できませんでした" in capsys.readouterr().err
 
 
 def test_save_writes_after_conflict_recovery(tmp_path):
@@ -215,13 +217,13 @@ def test_save_writes_after_conflict_recovery(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Integration: get_store() wires local_cache_path through automatically.
+# Integration: get_store() wires mirror_path through automatically.
 # ---------------------------------------------------------------------------
 
 
-def test_get_store_passes_local_cache_path(tmp_path, monkeypatch):
+def test_get_store_passes_mirror_path(tmp_path, monkeypatch):
     """End-to-end wiring: a real get_store() call in cloud mode must
-    construct a StoreApi whose local_cache_path equals the project_file
+    construct a StoreApi whose mirror_path equals the project_file
     path, so the AC #1 write-back actually engages from the CLI entry
     point (not just in unit-test fixtures)."""
     proj = tmp_path / "proj"
@@ -240,4 +242,4 @@ def test_get_store_passes_local_cache_path(tmp_path, monkeypatch):
     store_obj = store_mod.get_store()
 
     assert isinstance(store_obj, StoreApi)
-    assert store_obj._local_cache_path == str(beacon_dir / "project.json")
+    assert store_obj._mirror_path == str(beacon_dir / "project.json")

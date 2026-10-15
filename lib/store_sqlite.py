@@ -342,36 +342,30 @@ class SqliteStore:
 
         This is NOT a second source of truth or a concurrency path: SQLite is the
         sole writer, and this only overwrites the mirror with the latest
-        committed state via an atomic replace. Any failure is swallowed — a flaky
-        mirror must never break a command whose real write already succeeded.
-        Skipped when this store isn't backed by a real project.json (e.g. tests
-        that pass a bare .db path)."""
+        committed state. Any failure is surfaced on stderr but never raised — a
+        flaky mirror must never break a command whose real write already
+        succeeded. Skipped when this store isn't backed by a real project.json
+        (e.g. tests that pass a bare .db path).
+
+        **ms-166 e-6937**: 書き込みは :func:`local_writer.write_mirror_if_changed`
+        に一本化した。それまでは「保存のたびに内容が同じでも必ず書く」形で、
+        クラウド側 (``StoreApi``) が内容比較を入れたあともここだけ無条件に
+        一時ファイルを作って置き換えていた (独立保守性レビュー medium: 元の実害は
+        「読みで書く」ではなく「毎回書く」という性質なので、片側だけ直すと同じ症状を
+        追う人が真似る先を失う)。
+        """
         if not self._project_file.endswith(".json"):
             return
-        try:
-            import tempfile
-            out = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode()
-            target_dir = os.path.dirname(self._project_file) or "."
-            fd, tmp = tempfile.mkstemp(dir=target_dir,
-                                       prefix=os.path.basename(self._project_file) + ".",
-                                       suffix=".mirror")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(out)
-                os.replace(tmp, self._project_file)
-                tmp = None
-            finally:
-                if tmp is not None and os.path.exists(tmp):
-                    os.unlink(tmp)
-        except OSError as e:
-            # Best-effort: a flaky mirror must not break a command whose SQLite
-            # write already succeeded. But do NOT vanish silently — a persistent
-            # failure (permissions, full disk) means the Tauri desktop app reads
-            # stale data, so leave a trace on stderr rather than a hidden divergence.
-            print(f"[beacon] warning: could not refresh the project.json mirror "
-                  f"({e}); the SQLite store is current but the desktop app may "
-                  f"show stale data until the next successful write.",
-                  file=sys.stderr)
+        import local_writer
+        outcome = local_writer.write_mirror_if_changed(self._project_file, data)
+        if outcome == local_writer.MIRROR_FAILED:
+            # Do NOT vanish silently — a persistent failure (permissions, full
+            # disk) means the Tauri desktop app reads stale data, so leave a
+            # trace on stderr rather than a hidden divergence.
+            print("[beacon] warning: could not refresh the project.json mirror "
+                  f"({self._project_file}); the SQLite store is current but the "
+                  "desktop app may show stale data until the next successful "
+                  "write.", file=sys.stderr)
 
     def _write_diff(self, conn: sqlite3.Connection,
                     old_rows: list[tuple[str, str, str]], data: dict) -> None:
