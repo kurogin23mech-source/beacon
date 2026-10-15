@@ -1306,6 +1306,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_tool.add_argument("--record", dest="record", default="")
     p_tool.add_argument("--no-record", dest="no_record", default="")
     p_tool.add_argument("--grain", default="")
+    p_tool.add_argument("--summary", default="")
+    p_tool.add_argument("--recorder", default="")
+    p_tool.add_argument("--target", default="")
+    p_tool.add_argument("--url", default="")
+    p_tool.add_argument("--no-ledger-check", dest="no_ledger_check",
+                        action="store_true")
     p_tool.add_argument("--undecided", action="store_true")
     p_tool.add_argument("--clear", action="store_true")
     p_tool.add_argument("--json", action="store_true")
@@ -4280,6 +4286,9 @@ _TOOL_USAGE = (
     "       beacon tool show <道具名> [--json]\n"
     "       beacon tool remove <道具名> [--json]\n"
     "       beacon tool lookup \"<用途>\" [--json]          (用途から道具を引く; ms-180 e-7006)\n"
+    "       beacon tool used <道具名> [--summary \"<1 回分>\"] [--recorder <save|evidence>]\n"
+    "                        [--target <id>] [--url <url>] [--no-ledger-check] [--json]\n"
+    "                        (利用 1 回を証跡として記録する職種中立の口; ms-180 e-7004)\n"
     "       beacon tool unregistered [--clear] [--json]  (台帳に無いまま使われた道具; ms-180 e-7002)\n"
     "  真値は .beacon/tools.json (ローカル)。読み取りはネットワークを伴わず、クラウドへは\n"
     "  一方向ミラー (doc: tool-ledger) として同期する。Bash / Write / Edit / WebFetch / Task は\n"
@@ -4319,6 +4328,16 @@ def _handle_tool(root: Path, args: argparse.Namespace) -> int:
     if subc == "lookup":
         return _run_commands_py(root, "tool_lookup", {
             "BEACON_TOOL_QUERY": args.name or "", "BEACON_JSON": json_flag})
+    if subc == "used":
+        return _run_commands_py(root, "tool_used", {
+            "BEACON_TOOL_NAME": args.name or "",
+            "BEACON_TOOL_SUMMARY": args.summary or "",
+            "BEACON_TOOL_RECORDER": args.recorder or "",
+            "BEACON_TOOL_TARGET": args.target or "",
+            "BEACON_TOOL_URL": args.url or "",
+            "BEACON_TOOL_NO_LEDGER_CHECK": "1" if args.no_ledger_check else "",
+            "BEACON_JSON": json_flag,
+        })
     if subc == "unregistered":
         return _run_commands_py(root, "tool_unregistered", {
             "BEACON_TOOL_CLEAR": "1" if args.clear else "",

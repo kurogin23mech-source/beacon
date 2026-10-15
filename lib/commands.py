@@ -314,7 +314,7 @@ from cmd_retro import (  # noqa: F401
 from cmd_deliverable import cmd_deliverable_list  # noqa: F401
 from cmd_tool import (cmd_tool_add, cmd_tool_list, cmd_tool_show,  # noqa: F401  (ms-180 e-7000/e-7002/e-7006)
                       cmd_tool_remove, cmd_tool_lookup,
-                      cmd_tool_unregistered)
+                      cmd_tool_unregistered, cmd_tool_used)
 # ms-161 e-5902/e-5903: deliverable-changelog curation surface (add/retire/
 # supersede) + derived-map render (map).
 from cmd_deliverable import (  # noqa: F401
@@ -11713,6 +11713,7 @@ if __name__ == "__main__":
         "tool_remove": cmd_tool_remove,             # ms-180 e-7000
         "tool_lookup": cmd_tool_lookup,             # ms-180 e-7006
         "tool_unregistered": cmd_tool_unregistered,  # ms-180 e-7002
+        "tool_used": cmd_tool_used,                 # ms-180 e-7004
         "decision_record": cmd_decision_record,
         "decision_list": cmd_decision_list,
         "decision_derive": cmd_decision_derive,

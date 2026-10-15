@@ -3453,8 +3453,15 @@ def check_duplicate_save(entries: list, source: str, url: str, revision_id: str)
 def save_entry(data: dict, *, ms_id: str = "", description: str,
                source: str, date: str, url: str = "",
                revision_id: str = "", hash: str = "",
-               progress: str = "") -> dict:
-    """Record a save entry to the target milestone. Returns result info dict."""
+               progress: str = "", tool: str = "") -> dict:
+    """Record a save entry to the target milestone. Returns result info dict.
+
+    ``tool`` (ms-180 e-7004) names the instrument the recorded act was performed
+    with, stamped as ``meta.tool``. It is a STRUCTURED field rather than text in
+    the description because the question it answers — 「何でやったか」 — has to be
+    answerable by a query, and recovering it by substring-matching prose is the
+    kind of loose match this repo has repeatedly been burned by. Omitted for every
+    pre-existing caller, so entries that were not tool-attributed stay byte-identical."""
     target = find_target_milestone(data, ms_id)
     entries = target.setdefault("entries", [])
 
@@ -3481,6 +3488,8 @@ def save_entry(data: dict, *, ms_id: str = "", description: str,
         entry["meta"]["revision_id"] = revision_id
     if hash:
         entry["meta"]["hash"] = hash
+    if tool:
+        entry["meta"]["tool"] = tool
     entries.append(entry)
     update_progress(target, progress)
 

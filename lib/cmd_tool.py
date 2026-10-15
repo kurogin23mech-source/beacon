@@ -277,5 +277,128 @@ def cmd_tool_unregistered():
     print("消すだけなら `beacon tool unregistered --clear`。")
 
 
+# ---------------------------------------------------------------------------
+# tool used — 道具の利用 1 回を証跡として書く、職種中立の口 (e-7004)
+# ---------------------------------------------------------------------------
+
+def cmd_tool_used():
+    """Record ONE use of a tool against the worked Target — dev or sales alike.
+
+    This is the writer the ``PostToolUse`` interrupt calls. The JUDGMENT (record
+    or not, and at what grain) is made once, by ``tool_ledger.record_plan``, in
+    the hook — this verb carries it out. ``--recorder`` is how the hook passes the
+    already-resolved decision; omitted, this verb consults the ledger itself, so a
+    human or AI can run it by hand and get the same routing (one judgment
+    function, two entry points, never two policies).
+
+    ``--no-ledger-check`` exists for the explicitly manual case: record a use even
+    though the tool is not in the ledger. It never fires from the hook, because a
+    hook that recorded unregistered tools anyway would make the ledger's promise
+    ("what is listed gets recorded") untestable in the other direction.
+    """
+    name = os.environ.get("BEACON_TOOL_NAME", "").strip()
+    summary = os.environ.get("BEACON_TOOL_SUMMARY", "").strip()
+    recorder = os.environ.get("BEACON_TOOL_RECORDER", "").strip()
+    target = os.environ.get("BEACON_TOOL_TARGET", "").strip()
+    url = os.environ.get("BEACON_TOOL_URL", "").strip()
+    force = os.environ.get("BEACON_TOOL_NO_LEDGER_CHECK", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not name:
+        print("Error: 道具の名前が必要です "
+              "(例: beacon tool used mcp__gmail__send_email --summary \"1 通送った\")",
+              file=sys.stderr)
+        sys.exit(1)
+
+    ledger = _load()
+    row = tl.lookup(ledger, name)
+    effect = (row or {}).get("effect", "")
+    if not recorder:
+        plan = tl.record_plan(ledger, name)
+        if plan["action"] == "record":
+            recorder = plan["recorder"]
+        elif not force:
+            # Report WHICH of the three non-recording states this is. Collapsing
+            # them would hide the one that is a debt (undecided) behind the two
+            # that are answers (declined / unregistered).
+            reasons = {
+                "skip": f"記録しないと決めた道具です ({plan.get('reason')})",
+                "undecided": "記録先が未判断の道具です "
+                             "(`beacon tool add <道具名> --record ...` か "
+                             "`--no-record \"<理由>\"` で閉じてください)",
+                "unregistered": "台帳に無い道具です "
+                                "(`beacon tool add <道具名> ...` で登録してください)",
+            }
+            msg = reasons.get(plan["action"], plan["action"])
+            if json_mode:
+                print(json.dumps({"recorded": False, "reason": plan["action"],
+                                  "message": msg, "tool": name},
+                                 ensure_ascii=False))
+            else:
+                print(f"記録しませんでした: {msg}", file=sys.stderr)
+            sys.exit(0)
+        else:
+            recorder = tl.RECORDER_EVIDENCE
+
+    if recorder not in tl.RECORDERS:
+        print(f"Error: --recorder は {list(tl.RECORDERS)} のいずれかです "
+              f"(指定: {recorder!r})", file=sys.stderr)
+        sys.exit(1)
+
+    text = summary or f"{name} を使用"
+    if recorder == tl.RECORDER_SAVE:
+        result = _record_via_save(name, text, target, url)
+    else:
+        result = _record_via_evidence(name, text, effect, target, url)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    if result.get("recorded"):
+        print(f"記録: {name} → {result.get('target') or '(project)'} "
+              f"[{result.get('arm') or recorder}]")
+    else:
+        print(f"記録しませんでした: {result.get('reason')}", file=sys.stderr)
+
+
+def _record_via_evidence(name, text, effect, target, url):
+    """Write through the profession-neutral evidence door (occupation.record_evidence).
+    Dev records onto the milestone's declared evidence arm, sales onto the
+    opportunity's — same call, dispatched by the class's declaration (e-7004)."""
+    import occupation
+    from commands_shared import load_project, save_project
+    data = load_project()
+    result = occupation.record_evidence(
+        data, target, summary=text, tool=name, effect=effect,
+        created_at=_now_iso(), url=url)
+    if result.get("recorded"):
+        save_project(data, op={"op": "tool_used", "tool": name,
+                               "target": result.get("target", "")})
+    return result
+
+
+def _record_via_save(name, text, target, url):
+    """Write through the external-artifact recorder (`beacon save`'s core path).
+
+    Kept distinct from the evidence door because the two answer different
+    questions: ``save`` records that an ARTIFACT now exists somewhere outside
+    Beacon (a Drive doc, a sheet) and carries its url; evidence records that an
+    ACT happened once. The ledger picks per tool, which is why both exist here
+    rather than one being folded into the other."""
+    import occupation
+    from commands_shared import load_project, save_project
+    data = load_project()
+    result = occupation.record_target_entry(
+        data, target, description=f"{text} [tool: {name}]", source="auto",
+        date=_now_iso(), url=url)
+    if result.get("recorded"):
+        save_project(data, op={"op": "tool_used", "tool": name,
+                               "target": result.get("target", "")})
+        return {"recorded": True, "target": result.get("target", ""),
+                "arm": "entries", "via": "save"}
+    return {"recorded": False, "reason": result.get("reason", ""),
+            "target": target, "arm": ""}
+
+
 __all__ = ["cmd_tool_add", "cmd_tool_list", "cmd_tool_show", "cmd_tool_remove",
-           "cmd_tool_lookup", "cmd_tool_unregistered"]
+           "cmd_tool_lookup", "cmd_tool_unregistered", "cmd_tool_used"]

@@ -154,6 +154,7 @@ VERB_LEDGER = {
     "tool_list": {"cls": "Q", "secondary": [], "note": "台帳を read-only 一覧 (--undecided で記録先が未判断の行だけ) [post-memo]"},
     "tool_show": {"cls": "Q", "secondary": [], "note": "道具 1 件の宣言を read-only 表示 [post-memo]"},
     "tool_lookup": {"cls": "Q", "secondary": [], "note": "用途から道具を引く read-only 検索 (ms-180 e-7006、正典化の材料; 使用強制はしない) [post-memo]"},
+    "tool_used": {"cls": "R", "secondary": [], "note": "道具の利用 1 回を証跡として記録する職種中立の口 (開発=MS の、営業=商談の宣言済み証跡アーム)。証跡の記帳=R。PostToolUse 割り込みが呼ぶ writer で、記録するか否かの判定は台帳 (record_plan) 側 [post-memo]"},
     "tool_unregistered": {"cls": "Q", "secondary": [], "note": "台帳に無いまま使われた道具 (= 記録が残らなかった分) を read-only 一覧。--clear は観測記録の破棄で宣言は触らない [post-memo]"},
     "decision_record": {"cls": "R", "secondary": [], "note": "AI の非自明な決定を decision arm (統一 decision stream) に自己申告記録 (log-time backstop)。生の判断記録=R"},
     "decision_list": {"cls": "Q", "secondary": [], "note": "decision arm を read-only 一覧 (独立検証: 別 AI が宣言 rationale を実コードに照合する読み口、ms-154 e-5595)"},

@@ -54,6 +54,11 @@
         "linux": "~/.local/bin/beacon-save-hook.sh",
         "windows": null
       },
+      "bin/beacon-tool-record-hook.py": {
+        "darwin": "~/.local/bin/beacon-tool-record-hook.py",
+        "linux": "~/.local/bin/beacon-tool-record-hook.py",
+        "windows": "~/.local/bin/beacon-tool-record-hook.py"
+      },
       "bin/beacon-session-heartbeat-hook.sh": {
         "darwin": "~/.local/bin/beacon-session-heartbeat-hook.sh",
         "linux": "~/.local/bin/beacon-session-heartbeat-hook.sh",
@@ -78,6 +83,7 @@
       "bin/beacon-post-commit-hook.sh": "exec",
       "bin/beacon-postcompact.sh": "exec",
       "bin/beacon-save-hook.sh": "exec",
+      "bin/beacon-tool-record-hook.py": "exec",
       "bin/beacon-session-heartbeat-hook.sh": "exec",
       "bin/context-usage-monitor.py": "exec",
       "bin/context-usage-monitor.sh": "exec"
