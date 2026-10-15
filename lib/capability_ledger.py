@@ -1080,7 +1080,11 @@ DECISION_CAPTURE_PRODUCERS = {
     # PR 承認の自動完了は記録を 1 件も残さなかった (本番の task-done 39 件に PR 承認
     # 由来が 0 件 — 独立 judge 実測)。server route 側の builder と **両方** 要る。
     "task-done": frozenset({"decision_event_from_task_done",
-                            "_stage_task_done_decision"}),
+                            "_stage_task_done_decision",
+                            # ms-166 e-6997 (独立 AX レビュー medium): operation 配下の
+                            # タスク完了も同じ形の done 判断。台帳に無いと「producer
+                            # 全数必須」の checker が原理的にこの穴を見られない。
+                            "_stage_operation_task_done_decision"}),
     "completion-verdict": frozenset({"decision_event_from_completion_verdict",
                                      "_record_completion_verdict_decision"}),
     "scope-approval": frozenset({"decision_event_from_scope_approval"}),
@@ -1122,6 +1126,32 @@ DECISION_CAPTURE_ALTERNATE_PRODUCERS: dict = {
     "halt": "1 つの builder (decision_event_from_halt) が kind を切り替える",
     "resume": "同上 (halt と同じ builder)",
 }
+
+
+# ms-166 e-6997 (独立保守性レビュー medium) — 判断記録の実装の流儀を 1 箇所で宣言する。
+#
+# この repo には判断を記録する形が 2 通り併存している:
+#
+#   (A) **データ層 seam が outbox に積み、保存 seam が flush する**
+#       (``core.task_done`` → ``decision_outbox.stage`` → ``commands_shared.save_project``
+#        の flush)。``sales_entities.settle_current_gate`` も同じ形。
+#   (B) **CLI handler が ``client.record_decision`` を直に呼ぶ**
+#       (``cmd_target._record_completion_verdict_decision`` / ``_record_disposition_decision``
+#        / ``cmd_pr._record_review_decision``)。
+#
+# 指摘の芯は「どちらに倣うべきかが局所では分からない」こと。基準はこう:
+#
+#   **同じ状態に到達する経路が 2 つ以上あるなら (A)。1 つしかないなら (B) でよい。**
+#
+# (A) が要るのは、記録を「どの入口から来ても通る場所」に置く必要があるときだけ。
+# task-done は CLI と PR 承認と server の 3 経路があったので (A) に移した (e-6997)。
+# 逆に ``beacon target approve`` の完遂判定は押印層 1 本しか無いので (B) で足りる
+# (経路が 1 つなら handler がその経路そのもの)。
+#
+# 新しい種別を足すときは、まず ``COMPLETION_TERMINAL_PRIMITIVES`` / この台帳で
+# 「その状態へ到達する経路がいくつあるか」を数える。2 つ以上なら (A)。
+DECISION_CAPTURE_IDIOM_RULE = (
+    "2 経路以上が同じ状態に到達するなら decision_outbox (A)、1 経路なら handler 直書き (B)")
 
 
 def decision_capture_requires_all(kind: str) -> bool:

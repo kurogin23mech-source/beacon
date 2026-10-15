@@ -1396,6 +1396,7 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
               ac_verdicts: list = None, ac_waive: str = "",
               ac_flag_names: tuple = (),
               decided_by: str = "", evidence: list = None,
+              capture_decision: bool = True,
               author: dict | None = None) -> tuple[dict, dict]:
     """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
     containing milestone first, the entry second (review finding #5: stated
@@ -1445,9 +1446,10 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     author_clean = _clean_author(author)
     if author_clean:
         entry.setdefault("meta", {})["done_by_user"] = author_clean
-    _stage_task_done_decision(entry_id, entry, reason=reason,
-                              ac_verdicts=ac_verdicts, ac_waive=ac_waive,
-                              decided_by=decided_by, evidence=evidence)
+    if capture_decision:
+        _stage_task_done_decision(entry_id, entry, reason=reason,
+                                  ac_verdicts=ac_verdicts, ac_waive=ac_waive,
+                                  decided_by=decided_by, evidence=evidence)
     return ms, entry
 
 
@@ -1473,6 +1475,20 @@ def _stage_task_done_decision(entry_id: str, entry: dict, *, reason: str = "",
     なっていること**を述語で確認してからになる。途中で例外が出て保存に至らなかった
     完了は保存 seam を通らないので decision も残らない (= 「判断したことになっているが
     タスクは閉じていない」記録が構造的に作れない)。
+
+    **どの経路が積むかは呼び出し側が宣言する** (``capture_decision``)。初版はここで
+    無条件に積んでいたが、それは **嘘だった**: server の ``POST /entries/{id}/done`` は
+    ``core.task_done`` を呼ぶものの、保存は ``operations.apply_operation`` 経由で
+    ``commands_shared.save_project`` を通らないため ``flush`` が一度も走らず、積んだ
+    payload がプロセスグローバルに溜まり続けていた (独立 AX / 保守性レビューが
+    **独立に同じ high** を挙げ、こちらでも実測)。server は自前の seam で
+    ``decision_event_from_task_done`` を書いているので記録自体は在り、症状は
+    「メモリだけが無言で伸びる」だった。
+
+    なので ``capture_decision`` は「この保存経路は flush するか」を呼び出し側が
+    述べる旗にした。``lib/`` と ``server/`` の呼び出し口が **明示している** ことは
+    tests/test_task_done_decision_seam_e6997.py が構文木で数えるので、次の呼び出し元が
+    黙って片側を相続することはない。
 
     受入条件の判定 (``ac_verdicts``) と、判定を出さずに通したこと (``ac_waive``) も
     一緒に載せる。節ごとの判定は「なぜ done と言えるのか」の核心であり、記録に
@@ -4260,8 +4276,21 @@ def operation_task_add(data: dict, op_id: str, description: str, *,
     return op, entry
 
 
-def operation_task_done(data: dict, entry_id: str, *, reason: str = "") -> dict:
-    """Mark an operation_task as done. Returns the entry."""
+def operation_task_done(data: dict, entry_id: str, *, reason: str = "",
+                        capture_decision: bool = True) -> dict:
+    """Mark an operation_task as done. Returns the entry.
+
+    **ms-166 e-6997 (独立 AX レビュー medium)**: ここも ``task_done`` と同じ形の
+    完了判断 (AI が単独で下しうる done) なのに、判断記録を 1 件も出していなかった。
+    しかも対応する kind が台帳に無いので、新しい「producer 全数必須」の checker は
+    **原理的にこの穴を検出できない** (宣言されていない種別は検査の外)。この MS が
+    繰り返し直している「兄弟の経路に関門を置かない」型そのもの。
+
+    kind は ``task-done`` のまま (operation 配下でもタスクの完了判断である点は同じ)。
+    ``context`` に operation の id を載せて、どの対象の下のタスクかを区別できるように
+    する。``capture_decision`` の意味は ``task_done`` と同じ (= この保存経路が
+    ``decision_outbox.flush`` を通るかを呼び出し側が述べる)。
+    """
     for op in data.get("operations", []):
         for e in op.get("entries", []):
             if e.get("id") == entry_id and e.get("type") == "operation_task":
@@ -4269,8 +4298,43 @@ def operation_task_done(data: dict, entry_id: str, *, reason: str = "") -> dict:
                 e["done_at"] = _now_iso()
                 if reason:
                     e["done_reason"] = reason
+                if capture_decision:
+                    _stage_operation_task_done_decision(
+                        entry_id, op.get("id", ""), reason=reason)
                 return e
     raise ValueError(f"operation_task not found: {entry_id}")
+
+
+def _stage_operation_task_done_decision(entry_id: str, op_id: str, *,
+                                        reason: str = "") -> dict:
+    """operation 配下のタスク完了の判断を積む (ms-166 e-6997)。
+
+    ``task_done`` 側と同じ契約: 書かずに積み、保存後の ``data`` でそのタスクが本当に
+    done かを述語で確認してから書く。
+    """
+    import decision_outbox
+    payload = {
+        "kind": "task-done",
+        "decision": "done",
+        "context": f"operation-task={entry_id or '?'} operation={op_id or '?'}",
+        "rationale": (reason or None),
+        "decided_by": decision_outbox.decided_by_for_actor(_get_actor()),
+        "evidence": [],
+        "related": {"task_id": entry_id or None},
+    }
+    return decision_outbox.stage(
+        payload, verify=lambda d, _id=entry_id: _operation_task_is_done(d, _id))
+
+
+def _operation_task_is_done(data: dict, entry_id: str) -> bool:
+    """``entry_id`` の operation task が保存後の ``data`` で done か (検証述語)。"""
+    if not entry_id:
+        return False
+    for op in data.get("operations", []) or []:
+        for e in (op.get("entries") or []):
+            if isinstance(e, dict) and e.get("id") == entry_id:
+                return e.get("status") == "done"
+    return False
 
 
 def run_record_add(data: dict, op_id: str, *,

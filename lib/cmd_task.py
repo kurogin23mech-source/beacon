@@ -295,7 +295,10 @@ def cmd_task_done():
         ms, entry = core.task_done(data, entry_id, date=today, reason=reason,
                                    outcome=outcome, ac_verdicts=ac_verdicts,
                                    ac_waive=ac_waive, decided_by=_decided_by,
-                                   evidence=_evidence)
+                                   evidence=_evidence,
+                                   # この経路の保存は commands_shared.save_project
+                                   # なので flush される (= 積んでよい)。
+                                   capture_decision=True)
     except _tg.AcceptanceAdjudicationRequired as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

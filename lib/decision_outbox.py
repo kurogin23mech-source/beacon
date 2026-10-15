@@ -52,6 +52,22 @@ GATE_JUDGEMENT_KIND = "gate-judgement"
 # (payload, verify) の待ち行列。プロセス内 (= CLI 1 実行分) のみ生存する。
 _staged: list = []
 
+# ms-166 e-6997 (独立 AX / 保守性レビューが **独立に同じ high** を挙げた):
+# 積んだのに flush されない経路があると、待ち行列が **無言で伸び続ける**。
+#
+# 実測された形: server の ``POST /entries/{id}/done`` は ``core.task_done`` を呼ぶが、
+# 保存は ``operations.apply_operation`` 経由で ``commands_shared.save_project`` を
+# 通らないので ``flush`` が一度も走らない。server は自前で decision を書いている
+# ので記録自体は在り、**症状はメモリだけが伸びること** だった = 例外もログも出ない。
+# 長寿命プロセス (Cloud Run) では遅延障害になる。
+#
+# そこで待ち行列に **上限** を置き、超えたら「flush されない経路から積まれている」と
+# 述べて古い方から捨てる。黙って伸びるより、うるさく捨てる方が良い (記録は監査の
+# 副作用で、呼び出し元のフローより優先しない)。この上限は 1 コマンドで現実的に
+# 積まれる件数 (PR 承認が複数タスクを閉じる形でも 10 件程度) より十分大きい。
+_STAGE_LIMIT = 64
+_overflow_disclosed = False
+
 
 def stage(payload: dict, *, verify: Optional[Callable[[dict], bool]]) -> dict:
     """decision の発行意図を積む (I/O なし)。積んだ payload をそのまま返す。
@@ -76,7 +92,31 @@ def stage(payload: dict, *, verify: Optional[Callable[[dict], bool]]) -> dict:
     if not (payload.get("decision") or "").strip():
         raise ValueError("decision payload requires a non-empty 'decision'")
     _staged.append((dict(payload), verify))
+    _warn_if_never_flushed()
     return payload
+
+
+def _warn_if_never_flushed() -> None:
+    """待ち行列が上限を超えたら、述べてから古い方を捨てる (ms-166 e-6997)。
+
+    「flush を呼ぶはず」というお願いに依存しないためのトリップワイヤー。超えた時点で
+    その process は **積むが書かない経路** を持っていると分かるので、それを名指しする
+    (黙って伸ばさない / 無制限に伸ばさない)。
+    """
+    global _overflow_disclosed
+    if len(_staged) <= _STAGE_LIMIT:
+        return
+    dropped = len(_staged) - _STAGE_LIMIT
+    del _staged[:dropped]
+    if _overflow_disclosed:
+        return
+    _overflow_disclosed = True
+    import sys
+    print(f"[beacon] warning: 判断記録の待ち行列が上限 {_STAGE_LIMIT} 件を超えました "
+          f"— この実行経路は decision を積んでいますが flush していません "
+          f"(flush は commands_shared.save_project が行います)。古い {dropped} 件を "
+          f"捨てました。server のように別の保存経路を持つ呼び出し元は、積まずに "
+          f"自分の seam で記録してください。", file=sys.stderr)
 
 
 def staged() -> tuple:
@@ -86,8 +126,10 @@ def staged() -> tuple:
 
 def discard() -> int:
     """積まれた意図を書かずに捨て、捨てた件数を返す (テストの後片付け用)。"""
+    global _overflow_disclosed
     n = len(_staged)
     _staged.clear()
+    _overflow_disclosed = False
     return n
 
 

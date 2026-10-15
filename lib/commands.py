@@ -3894,8 +3894,14 @@ def _adjudications_from_env() -> list:
     try:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
+        # ms-166 e-6997 (独立 AX レビュー misleading): 旧文言は「review gate は解消
+        # します」と断定していたが、default-deny の下では **事実と逆**。実測: この
+        # 警告の数行後に「採否が未記録のままでは関門を開けません」で exit 1 になり、
+        # トリガーは消えない。AI はエラー文から次の一手を決めるので、1 回の実行の中で
+        # 前半の約束が後半に覆る文言は誤診ループを作る。
         print("  ⚠ --adjudications の JSON 解析に失敗しました "
-              "(review gate は解消しますが adjudication decision は記録しません)",
+              "— 採否 0 件として扱います。--adjudication-summary も --no-findings も "
+              "無ければ、この後 **関門は開きません** (ms-166 e-6997)。",
               file=sys.stderr)
         return []
     if isinstance(parsed, dict):
@@ -3904,7 +3910,8 @@ def _adjudications_from_env() -> list:
         return parsed
     print(f"  ⚠ --adjudications は list または object である必要があります "
           f"(受け取り: {type(parsed).__name__}) "
-          "— review gate は解消しますが adjudication decision は記録しません", file=sys.stderr)
+          "— 採否 0 件として扱います。--adjudication-summary も --no-findings も "
+          "無ければ、この後 **関門は開きません** (ms-166 e-6997)。", file=sys.stderr)
     return []
 
 
@@ -7001,7 +7008,7 @@ def _help_registry():
         # `beacon review done --help` が「`beacon review --help` を見よ」と案内し、
         # その `review --help` は context の 1 行しか出さない **閉じたループ** に
         # なっていた (案内に従うと情報が無い場所に着く)。
-        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> [--adjudications <json>] | --no-findings)", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
+        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings)", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
         {"command": "beacon review skip --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason <text>", "flags": ["--json"], "description": "人間が意図的にレビューを省く一級経路。--reason 必須で監査ログ (.beacon/review-skips.jsonl) に理由を残す (ms-119 e-4124)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac-verdict <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac-verdict を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},

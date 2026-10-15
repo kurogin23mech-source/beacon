@@ -217,3 +217,56 @@ def test_the_bash_front_accepts_no_findings():
     arm = arm[:arm.index('            skip)')]
     assert "--no-findings)" in arm, "bash の review done が --no-findings を受けない"
     assert "BEACON_REVIEW_NO_FINDINGS=" in arm, "python 側へ渡していない"
+
+
+def test_broken_adjudication_json_does_not_promise_the_gate_opens(tmp_path):
+    """壊れた JSON の警告が「関門は解消する」と約束しないこと (ms-166 e-6997)。
+
+    独立 AX レビュー misleading: 旧文言は「(review gate は解消しますが adjudication
+    decision は記録しません)」で、default-deny の下では **事実と逆**。実測すると、
+    この警告の数行後に「採否が未記録のままでは関門を開けません」で exit 1 になり、
+    トリガーは消えない。AI はエラー文から次の一手を決めるので、1 回の実行の中で前半の
+    約束が後半に覆る文言は、根本原因 (JSON 壊れ) から遠い場所でのリトライを誘う。
+    """
+    proj = _project(tmp_path)
+    before = _triggers(proj)
+
+    r = _run(proj, "done", "--type", "ax", "--pr", "4242", "--repo", "o/r",
+             "--adjudications", "{壊れた json")
+
+    assert r.returncode != 0, r.stdout
+    assert "解析に失敗" in r.stderr, r.stderr
+    assert "関門は開きません" in r.stderr, (
+        f"この後どうなるかを述べていない: {r.stderr!r}")
+    assert "gate は解消します" not in r.stderr, (
+        f"事実と逆の約束が残っている: {r.stderr!r}")
+    assert _triggers(proj) == before, "拒否したのに印を消している"
+
+
+def test_an_adjudications_payload_alone_opens_the_gate(tmp_path):
+    """``--adjudications`` 単体でも関門が開くこと = Usage の文法と一致 (AX low)。
+
+    文法を `(--adjudication-summary <text> [--adjudications <json>] | --no-findings)` と
+    入れ子で書いていたので「summary が無いと adjudications も使えない」と読めたが、
+    実装は単体で通る。文法を独立した 3 択に直したうえで、実際に単体で通ることを測る。
+    """
+    proj = _project(tmp_path)
+
+    r = _run(proj, "done", "--type", "ax", "--pr", "4242", "--repo", "o/r",
+             "--adjudications",
+             '[{"finding":"x","disposition":"accepted","rationale":"y"}]')
+
+    assert r.returncode == 0, r.stderr
+
+
+def test_the_usage_grammar_does_not_nest_the_two_adjudication_means():
+    """文法が 2 つの採否手段を **独立した選択肢** として書いていること。"""
+    import commands
+    rows = [r for r in commands._help_registry()
+            if r.get("command", "").startswith("beacon review done")]
+    grammar = rows[0]["command"]
+    tail = grammar.split("--adjudication-summary", 1)[1]
+    assert "[--adjudications" not in tail, (
+        f"--adjudications が従属オプションとして書かれている: {grammar}")
+    assert "| --adjudications" in tail, (
+        f"2 つの手段が独立した選択肢になっていない: {grammar}")

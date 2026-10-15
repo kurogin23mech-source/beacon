@@ -251,3 +251,61 @@ def test_an_excluded_kind_stays_out_of_the_default_read(kind, ddb_store):
     named = ddb.list_decision_events("p1", kind=kind, limit=DEFAULT_LIMIT)
     assert new_id in [r.get("decision_id") for r in named], (
         f"{kind} が名指しでも読めない = 隠蔽になっている")
+
+
+# --------------------------------------------------------------------------
+# 手組みではなく **実際の producer** を通した往復 (独立保守性レビュー low)
+# --------------------------------------------------------------------------
+
+def test_the_real_producer_output_shows_up_in_the_default_read(ddb_store, monkeypatch):
+    """台帳が宣言する producer を **実際に呼んで** 書き、既定の読みで読み返す。
+
+    独立保守性レビュー low: 上の往復は ``append_decision_event`` に手組みの payload を
+    渡しているので、「台帳の producer が実際にこの kind を書いて、それが既定の読みに
+    載る」という主張を検証している箇所がどこにも無かった。producer が kind 文字列を
+    打ち間違えていても、到達不能な分岐に置かれていても、静的な配線検査と手組みの往復は
+    それぞれ独立に緑になりうる。
+
+    そこで監査要求が最も高い ``task-done`` について、実物 (core.task_done →
+    decision_outbox.flush) を通す。flush の書き込み先だけを偽のクライアントに差し替え、
+    その payload を本物の backend に積んで読み返す。
+    """
+    import core
+    import decision_outbox
+    import commands_shared
+
+    written = []
+
+    class _Client:
+        def record_decision(self, project_id, payload):
+            # 本物の read 経路で読み返せるよう、偽ストアに積む。
+            payload = dict(payload)
+            payload.setdefault("created_at", "2026-09-01T00:00:00.000000Z")
+            written.append(ddb.append_decision_event(project_id, payload))
+            return {"decision_id": written[-1]}
+
+    monkeypatch.setattr(commands_shared, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands_shared, "_get_api_client",
+                        lambda: (_Client(), {"project_id": "p1"}))
+
+    decision_outbox.discard()
+    data = {"name": "p", "summary": "", "milestones": [
+        {"id": "ms-9", "title": "t", "status": "in_progress", "progress": 0,
+         "entries": [{"id": "e-1", "type": "task", "status": "todo",
+                      "description": "a", "date": ""}]}]}
+    core.task_done(data, "e-1", reason="実物を通す", capture_decision=True)
+    assert decision_outbox.flush(data) == 1, "producer の出力が書かれていない"
+    decision_outbox.discard()
+
+    # その後に流れが進んでも、種別で引ける。
+    pad = _pad_kind_for("task-done")
+    for i in range(BACKLOG):
+        ddb.append_decision_event("p1", {
+            "kind": pad, "decision": "later",
+            "created_at": f"2026-10-{(i % 28) + 1:02d}T12:00:{i % 60:02d}.000000Z"})
+
+    rows = ddb.list_decision_events("p1", kind="task-done", limit=DEFAULT_LIMIT)
+    ids = [r.get("decision_id") for r in rows]
+    assert written and written[0] in ids, (
+        f"実物の producer が書いた task-done が既定の読みで引けない "
+        f"(written={written}, got={ids[:5]})")

@@ -988,6 +988,9 @@ def cmd_pr_approve():
                         # PR 承認由来が 0 件だった (独立 judge 実測)。
                         decided_by="autonomous-AI",
                         evidence=_auto_done_evidence(entry, j),
+                        # この経路の保存も commands_shared.save_project (下の
+                        # save_project) なので flush される。
+                        capture_decision=True,
                         # ms-166 e-6898: この経路は機械が「PR が解決した」と
                         # 判断して閉じるので、受入条件の各節が満たされたかは
                         # 判定できない。黙って素通りさせず、判定を出さずに通した

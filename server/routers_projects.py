@@ -1645,6 +1645,14 @@ def make_router(
                                            ac_verdicts=list(ac or []),
                                            ac_waive=ac_waive,
                                            ac_flag_names=("?ac=", "?ac_waive="),
+                                           # ms-166 e-6997: server はこの下で自前の
+                                           # seam (decision_event_from_task_done) に
+                                           # 書く。保存は operations.apply_operation
+                                           # 経由で commands_shared.save_project を
+                                           # 通らないので decision_outbox の flush は
+                                           # 走らない —— 積むと書かれないまま
+                                           # プロセスに溜まるだけなので積まない。
+                                           capture_decision=False,
                                            author=author)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
