@@ -106,6 +106,32 @@ def _classify_by_verb(name: str) -> str:
     return SIDE_EFFECT  # no recognisable verb → default-deny
 
 
+def has_write_verb(name: str) -> bool:
+    """True when ``name`` carries a token from ``WRITE_VERBS``.
+
+    A POSITIVE signal that the call writes or sends — as opposed to the absence
+    of a read verb, which is merely unknown. ``tool_ledger`` consumes this to
+    refuse a ``read-only`` declaration that contradicts it (ms-180 e-7003
+    受入条件3: the ledger must not pass a lie), while leaving a name with no
+    recognisable verb fully declarable, since there a declaration replaces a
+    guess instead of overriding evidence.
+
+    For an ``mcp__server__tool`` name only the TOOL segment is considered, the
+    same part ``classify_tool`` classifies — otherwise a server whose NAME
+    contains a write verb (``mcp__google-drive__read_file``: ``drive`` is not a
+    verb, but a hypothetical ``mcp__updater__get_status`` would be) would make
+    every one of its read tools undeclarable.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return False
+    target = name.strip()
+    if target.startswith("mcp__"):
+        target = target.split("__", 2)[2] if target.count("__") >= 2 else ""
+        if not target:
+            return False
+    return bool(set(_tokens(target)) & WRITE_VERBS)
+
+
 def _skill_name(tool_input) -> str:
     """Extract the skill name from a Skill tool invocation's input.
 
@@ -220,5 +246,6 @@ __all__ = [
     "WRITE_VERBS",
     "READ_VERBS",
     "classify_tool",
+    "has_write_verb",
     "is_side_effect",
 ]

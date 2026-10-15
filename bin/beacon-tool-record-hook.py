@@ -170,9 +170,13 @@ def main() -> None:
             if turn.current_epoch(turn_file, session_key) is not None:
                 if not turn.claim_fold(turn_file, session_key, tool_name):
                     return  # already recorded once this turn → fold
-            # No epoch ever observed → the turn boundary is not wired here, so
-            # `turn` degrades to `each` (lib/tool_turn explains why the
-            # degradation goes toward MORE recording, not less).
+            else:
+                # No epoch ever observed → the turn boundary is not wired here,
+                # so `turn` degrades to `each`. NOTE it rather than just doing
+                # it: a silent fall to one of the two grains would leave nobody
+                # able to tell that a tool declared `turn` is recording every
+                # call (受入条件3). `beacon tool list` reads this back.
+                turn.note_degraded(turn_file, tool_name, at=_now())
 
         _record(root, tool_name, plan["recorder"],
                 _summary(tool_name, tool_input),

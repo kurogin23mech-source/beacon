@@ -82,7 +82,7 @@ def cmd_tool_add():
     effect = os.environ.get("BEACON_TOOL_EFFECT", "").strip()
     recorder = os.environ.get("BEACON_TOOL_RECORD", "").strip()
     no_record = os.environ.get("BEACON_TOOL_NO_RECORD", "")
-    grain = os.environ.get("BEACON_TOOL_GRAIN", "").strip() or tl.GRAIN_EACH
+    grain = os.environ.get("BEACON_TOOL_GRAIN", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not name:
@@ -93,6 +93,12 @@ def cmd_tool_add():
     if not effect:
         print(f"Error: --effect が必要です ({', '.join(tl.EFFECTS)} のいずれか)。"
               "作用は推測ではなく宣言するものなので既定値は置きません。",
+              file=sys.stderr)
+        sys.exit(1)
+    if not purpose.strip():
+        print("Error: --purpose が必要です "
+              "(例: --purpose \"顧客にメールを送る\")。用途は後から「何のために"
+              "登録したのか」を読む唯一の列なので、空のままは登録できません。",
               file=sys.stderr)
         sys.exit(1)
 
@@ -116,6 +122,13 @@ def cmd_tool_add():
         return
     verb = "更新" if existed else "登録"
     print(f"{verb}: {name} [{effect}] — {_record_label(row)}")
+    # 受入条件4: say out loud that the grain was DEFAULTED, not chosen. The row
+    # records it too; echoing it here is what stops the default from being
+    # invisible at the moment it is taken.
+    if row["record"].get("grain_source") == "default":
+        print(f"  ℹ 粒度 (--grain) 未指定なので {tl.GRAIN_EACH} "
+              f"(毎回記録) にしました。1 ターン分を 1 件に畳むなら "
+              f"`--grain {tl.GRAIN_TURN}`。", file=sys.stderr)
     if row["record"]["sink"] == tl.SINK_UNDECIDED:
         print("  ℹ 記録先は未判断です。使ったことを証跡として残すかは未決のまま"
               "台帳に載りました (`beacon tool unregistered` ではなく "
@@ -161,10 +174,37 @@ def cmd_tool_list():
               f"{_record_label(row)}")
         if row.get("purpose"):
             print(f"      用途: {row['purpose']}")
+    if only_undecided:
+        return
     undecided = tl.undecided_tools(ledger)
-    if undecided and not only_undecided:
+    if undecided:
         print(f"\n⚠ 記録先が未判断: {len(undecided)} 件 "
               f"(`beacon tool list --undecided`)")
+    # 用途が空の行 (= build_record が拒否するので、旧ファイルか手編集だけ)。
+    # 片方の writer にしか効かない規則は規則ではない (ms-174 の教訓)。
+    purposeless = tl.purposeless_tools(ledger)
+    if purposeless:
+        print(f"\n⚠ 用途が空の行: {len(purposeless)} 件 "
+              f"— {', '.join(str(r.get('name')) for r in purposeless[:5])}")
+        print("   用途は今は登録時に必須なので、これは古いファイルか手編集です。"
+              "`beacon tool add <道具名> --purpose ...` で埋め直してください。")
+    # 受入条件3: a `turn` grain that silently became `each` because no turn
+    # boundary was observable. Saying nothing here would make the degradation
+    # indistinguishable from a working fold.
+    try:
+        import tool_turn
+        degraded = tool_turn.degraded_tools(tool_turn.turn_path(_beacon_dir()))
+    except Exception:
+        degraded = []
+    if degraded:
+        print(f"\n⚠ ターン境界が観測できず、粒度 {tl.GRAIN_TURN} が "
+              f"{tl.GRAIN_EACH} に縮退した道具: {len(degraded)} 件")
+        for row in degraded[:5]:
+            print(f"   {row['name']} — {row['count']} 回 "
+                  f"(最後 {row['last_seen']})")
+        print("   記録は毎回残っています (取り落ちではなく重複側に倒しています)。"
+              "畳みを効かせるには UserPromptSubmit で "
+              "beacon-save-hook.sh が呼ばれる設定が必要です。")
 
 
 def cmd_tool_show():

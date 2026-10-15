@@ -456,3 +456,69 @@ def test_an_unknown_reason_is_refused_rather_than_stored(tmp_path):
     path = str(tmp_path / "d.json")
     assert tdebt.record_no_record_use(path, "t", reason="whatever") is None
     assert tdebt.load_debt(path) == []
+
+
+# ---------------------------------------------------------------------------
+# e-7014 受入条件3 — when the turn boundary is NOT observable, that fact is
+# recorded, not just acted on.
+#
+# "Degrades to each" written only in a docstring is still a silent fall to one of
+# the two grains at runtime: nobody reading the records could tell that a tool
+# declared `turn` was recording every call. These pin that the degradation is
+# readable back.
+# ---------------------------------------------------------------------------
+
+def test_a_degraded_turn_grain_is_recorded_as_degraded(project):
+    _declare(project, tl.build_record(
+        "mcp__gmail__search_emails", purpose="確認する",
+        effect=tl.EFFECT_READ_ONLY, recorder=tl.RECORDER_EVIDENCE,
+        grain=tl.GRAIN_TURN))
+    # NOTE: no UserPromptSubmit, so no epoch was ever observed.
+    for _ in range(3):
+        _fire(project, "mcp__gmail__search_emails", {"query": "x"})
+    turn_file = tt.turn_path(str(project / ".beacon"))
+    rows = tt.degraded_tools(turn_file)
+    assert [r["name"] for r in rows] == ["mcp__gmail__search_emails"]
+    assert rows[0]["count"] == 3
+    assert len(_entries(project)) == 3  # and it really did record every call
+
+
+def test_a_working_turn_boundary_records_no_degradation(project):
+    """The signal must be absent when the fold works, or it is noise and gets
+    ignored — the same reason `declined` tools stay out of the debt list."""
+    _declare(project, tl.build_record(
+        "mcp__gmail__search_emails", purpose="確認する",
+        effect=tl.EFFECT_READ_ONLY, recorder=tl.RECORDER_EVIDENCE,
+        grain=tl.GRAIN_TURN))
+    _fire(project, "", event="UserPromptSubmit")
+    for _ in range(3):
+        _fire(project, "mcp__gmail__search_emails", {"query": "x"})
+    assert tt.degraded_tools(tt.turn_path(str(project / ".beacon"))) == []
+    assert len(_entries(project)) == 1
+
+
+def test_an_each_grain_tool_never_reports_degradation(project):
+    """`each` has no boundary to miss, so it must not appear in the list."""
+    _declare(project, tl.build_record(
+        "mcp__gmail__send_email", purpose="送る", effect=tl.EFFECT_OUTWARD,
+        recorder=tl.RECORDER_EVIDENCE, grain=tl.GRAIN_EACH))
+    for _ in range(3):
+        _fire(project, "mcp__gmail__send_email", {"subject": "x"})
+    assert tt.degraded_tools(tt.turn_path(str(project / ".beacon"))) == []
+    assert len(_entries(project)) == 3
+
+
+def test_degradation_is_tracked_per_install_not_per_session(project):
+    """The condition is a property of the INSTALL (the UserPromptSubmit hook is
+    not wired), so a reader must not need to know which session ids to look
+    under to find out whether their turn grain works."""
+    _declare(project, tl.build_record(
+        "mcp__gmail__search_emails", purpose="確認する",
+        effect=tl.EFFECT_READ_ONLY, recorder=tl.RECORDER_EVIDENCE,
+        grain=tl.GRAIN_TURN))
+    _fire(project, "mcp__gmail__search_emails", {"query": "x"},
+          session="sess-A")
+    _fire(project, "mcp__gmail__search_emails", {"query": "y"},
+          session="sess-B")
+    rows = tt.degraded_tools(tt.turn_path(str(project / ".beacon")))
+    assert len(rows) == 1 and rows[0]["count"] == 2

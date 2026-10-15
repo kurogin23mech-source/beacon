@@ -166,12 +166,34 @@ NON_SOFTENABLE_EFFECT = {
 
 
 def is_softening(name: str, effect: str) -> bool:
-    """True when declaring ``effect`` for ``name`` would weaken a pinned tool.
+    """True when declaring ``effect`` for ``name`` would weaken what is already
+    POSITIVELY known about it.
 
-    Only ``read-only`` softens: it is the one value that makes the ms-169 gate
-    let a call through. Declaring ``outward`` for ``Bash`` (stricter than its
-    pinned ``state-change``) is fine and stays allowed."""
-    return name in NON_SOFTENABLE_EFFECT and effect == EFFECT_READ_ONLY
+    Only ``read-only`` can soften: it is the one value that makes the ms-169 gate
+    let a call through. Declaring ``outward`` for ``Bash`` — stricter than its
+    pinned ``state-change`` — is fine and stays allowed.
+
+    Two kinds of positive knowledge are protected, and the distinction is what
+    keeps this guard from eating the ledger's whole purpose:
+
+      1. the PINNED built-ins (``Bash`` / ``Write`` / ``WebFetch`` / …), whose
+         effect is known from the harness, not guessed; and
+      2. a name carrying a WRITE VERB (``mcp__gmail__send_email`` → ``send``).
+         A write verb is a positive signal, not an absence of one — so a row
+         saying 「読み取りだけ」 about it is a detectable lie, and the ledger must
+         not pass it (ms-180 e-7004 受入条件3).
+
+    What stays declarable is exactly the case the ledger exists for: a name with
+    NO recognisable verb (``mcp__weird__frobnicate``), which the heuristic can
+    only default-deny. There, the declaration replaces a guess rather than
+    contradicting evidence — so over-gating gets fixed while under-gating cannot
+    be introduced.
+    """
+    if effect != EFFECT_READ_ONLY:
+        return False
+    if name in NON_SOFTENABLE_EFFECT:
+        return True
+    return _tool_effect.has_write_verb(name)
 
 
 def ledger_path(root: "str | os.PathLike" = ".") -> str:
@@ -235,7 +257,7 @@ def save_ledger(path: str, ledger: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def build_record(name: str, *, purpose: str, effect: str,
-                 recorder: str = "", grain: str = GRAIN_EACH,
+                 recorder: str = "", grain: str = "",
                  decline_reason: str = "",
                  sink: str = "", at: str = "", by: str = "") -> dict:
     """Validate one registration and return the row to store.
@@ -246,20 +268,54 @@ def build_record(name: str, *, purpose: str, effect: str,
     "undecided" out loud. Validate-before-mutate: every check runs here, so a
     caller cannot half-write a row (same contract as ``target_engine``'s
     child-field writers).
+
+    ``purpose`` is REQUIRED (ms-180 e-7006 受入条件2). The criterion asked to be
+    able to tell an intentionally-blank 用途 from a forgotten one, and the honest
+    way to answer that is to make the ambiguous state unreachable rather than to
+    add a third value for it: every tool is used FOR something, so a row without
+    a purpose is always an omission. The read side still reports a blank one
+    (an older or hand-edited file can hold it), because a rule enforced on only
+    one of two writers is not enforced.
+
+    ``grain`` defaults to ``each`` when omitted, and the row RECORDS that the
+    value was defaulted rather than chosen (``grain_source``) — 受入条件4: an
+    unspecified grain must not silently become one of the two.
     """
     tool = str(name or "").strip()
     if not tool:
         raise ToolLedgerError("道具の名前が必要です (例: mcp__gmail__send_email)")
+    purpose_txt = str(purpose or "").strip()
+    if not purpose_txt:
+        raise ToolLedgerError(
+            "用途が必要です (--purpose \"<何のために使うか>\")。"
+            "用途は後から「何のために登録したのか」を読む唯一の列なので、"
+            "空のまま登録できる形にしていません "
+            "(空欄だと『用途なし』と『書き忘れ』が区別できなくなります)。")
     if effect not in EFFECTS:
         raise ToolLedgerError(
             f"作用は {list(EFFECTS)} のいずれかです (指定: {effect!r})")
     if is_softening(tool, effect):
+        # Say WHICH kind of positive knowledge is being contradicted: a pinned
+        # built-in, or a write verb in the name. A single generic message would
+        # leave the author guessing which rule they hit (and the two have
+        # different right answers — one is "you cannot", the other is often
+        # "you meant state-change / outward").
+        if tool in NON_SOFTENABLE_EFFECT:
+            why = (f"この道具はハーネス側で作用が既知で "
+                   f"({NON_SOFTENABLE_EFFECT[tool]})、推測ではありません")
+        else:
+            why = ("この名前は書き込み / 送信を表す動詞を含んでいます "
+                   "(= 作用の積極的な証拠)。宣言が「読み取りだけ」と言っても"
+                   "それは検知できる嘘になります")
         raise ToolLedgerError(
-            f"『{tool}』を {EFFECT_READ_ONLY} として登録できません。"
-            f"この道具は作用が既知で ({NON_SOFTENABLE_EFFECT[tool]})、"
-            "ms-169 の承認ゲートがこの判定に依っています。台帳の宣言で"
-            "ゲートを緩めることはできません (厳しくする方向の宣言は可能)。")
-    if grain not in GRAINS:
+            f"『{tool}』を {EFFECT_READ_ONLY} として登録できません。{why}。"
+            "ms-169 の承認ゲートがこの判定に依っているため、台帳の宣言で"
+            "ゲートを緩めることはできません。厳しくする方向 "
+            f"({EFFECT_STATE_CHANGE} / {EFFECT_OUTWARD}) の宣言は可能です。")
+    grain_given = str(grain or "").strip()
+    grain_source = "declared" if grain_given else "default"
+    resolved_grain = grain_given or GRAIN_EACH
+    if resolved_grain not in GRAINS:
         raise ToolLedgerError(
             f"粒度は {list(GRAINS)} のいずれかです (指定: {grain!r})")
 
@@ -294,7 +350,12 @@ def build_record(name: str, *, purpose: str, effect: str,
             "記録しないと決めた場合は理由が必要です "
             "(--no-record は理由とセットで指定してください)")
 
-    record_block = {"sink": resolved_sink, "grain": grain}
+    # ``grain_source`` makes the defaulting VISIBLE in the stored row (受入条件4).
+    # Without it, "nobody chose a grain" and "someone chose 毎回" are the same
+    # bytes on disk — the same collapse of *unexamined* into a value that the
+    # 3-valued record sink exists to prevent, just one field over.
+    record_block = {"sink": resolved_sink, "grain": resolved_grain,
+                    "grain_source": grain_source}
     if resolved_sink == SINK_SPECIFIED:
         record_block["recorder"] = rec_name
     if resolved_sink == SINK_DECLINED:
@@ -302,7 +363,7 @@ def build_record(name: str, *, purpose: str, effect: str,
 
     row = {
         "name": tool,
-        "purpose": str(purpose or "").strip(),
+        "purpose": purpose_txt,
         "effect": effect,
         "record": record_block,
     }
@@ -361,9 +422,10 @@ def effect_of(ledger: dict, name: str) -> Optional[str]:
 
     ``None`` means "the ledger has no answer" and sends the caller to its own
     fallback — it never means read-only. A row whose stored effect is outside the
-    vocabulary, or one that softens a pinned tool, also yields ``None``: this is
-    the read-side half of the guard, so hand-editing the file cannot do what the
-    CLI refuses to do."""
+    vocabulary, or one that contradicts positive knowledge about the tool
+    (a pinned built-in, or a write verb in the name), also yields ``None``: this
+    is the read-side half of the guard, so hand-editing the file cannot do what
+    the CLI refuses to do."""
     row = lookup(ledger, name)
     if row is None:
         return None
@@ -413,6 +475,28 @@ def record_plan(ledger: dict, name: str) -> dict:
     if sink == SINK_DECLINED:
         return {"action": "skip", "reason": str(block.get("reason") or "")}
     return {"action": "undecided"}
+
+
+def purposeless_tools(ledger: dict) -> list:
+    """Rows whose 用途 is blank. ``build_record`` refuses to create one, so this
+    only catches an older file or a hand edit — and that is exactly why it
+    exists: a rule enforced on one writer and not the other is not enforced
+    (the ms-174 lesson)."""
+    return [row for row in (ledger.get("tools") or [])
+            if not str(row.get("purpose") or "").strip()]
+
+
+def grain_defaulted_tools(ledger: dict) -> list:
+    """Rows whose grain was DEFAULTED rather than chosen (受入条件4), so "nobody
+    decided" stays readable after the fact. A row from before ``grain_source``
+    existed is reported as defaulted — it predates the choice being recorded, so
+    claiming it was declared would be an invention."""
+    out = []
+    for row in ledger.get("tools") or []:
+        block = row.get("record") if isinstance(row.get("record"), dict) else {}
+        if block.get("grain_source") != "declared":
+            out.append(row)
+    return out
 
 
 def undecided_tools(ledger: dict) -> list:
@@ -465,5 +549,6 @@ __all__ = [
     "ToolLedgerError",
     "ledger_path", "empty_ledger", "load_ledger", "save_ledger",
     "build_record", "upsert", "remove",
-    "lookup", "effect_of", "record_plan", "undecided_tools", "find_by_purpose",
+    "lookup", "effect_of", "record_plan", "undecided_tools",
+    "purposeless_tools", "grain_defaulted_tools", "find_by_purpose",
 ]

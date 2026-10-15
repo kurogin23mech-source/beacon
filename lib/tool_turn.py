@@ -25,6 +25,13 @@ So the absence is detected and the grain DEGRADES TO ``each``
 degradation direction is deliberate: duplicates are visible and removable,
 whereas missing records are invisible. Degrading toward MORE recording keeps the
 failure loud.
+
+And the degradation itself is RECORDED, not just chosen (受入条件3: 境界が取れない
+状況では、取れないことが分かる形にする). "Degrades to each" written only in this
+docstring would still be a silent fall to one of the two grains at runtime —
+nobody reading the records could tell that a tool declared ``turn`` was actually
+recording every call. ``note_degraded`` marks it and ``degraded_tools`` reads it
+back, so ``beacon tool list`` can say so.
 """
 
 from __future__ import annotations
@@ -153,5 +160,47 @@ def claim_fold(path: str, session_key: str, tool_name: str) -> bool:
     return True if _write(path, data) else True
 
 
+def note_degraded(path: str, tool_name: str, at: str = "") -> bool:
+    """Record that ``tool_name`` was recorded at ``each`` grain even though its
+    row declares ``turn``, because no turn boundary was observable.
+
+    Kept OUTSIDE the per-session map on purpose: the condition is a property of
+    the INSTALL (the UserPromptSubmit hook is not wired here), not of one
+    session, and a reader asking "is my turn grain actually working" should get
+    an answer without having to know which session ids to look under.
+
+    Best-effort: a failure to note it must not disturb the record it describes.
+    """
+    tool = str(tool_name or "").strip()
+    if not tool:
+        return False
+    try:
+        data = _read(path)
+        degraded = data.get("degraded")
+        if not isinstance(degraded, dict):
+            degraded = {}
+        row = degraded.get(tool) if isinstance(degraded.get(tool), dict) else {}
+        degraded[tool] = {"count": int(row.get("count") or 0) + 1,
+                          "last_seen": at or row.get("last_seen") or ""}
+        data["degraded"] = degraded
+        return _write(path, data)
+    except Exception:
+        return False
+
+
+def degraded_tools(path: str) -> list:
+    """Tools whose ``turn`` grain silently became ``each``, most recent first.
+    Empty when the boundary is working (or nothing has used a ``turn`` tool)."""
+    degraded = _read(path).get("degraded")
+    if not isinstance(degraded, dict):
+        return []
+    rows = [{"name": name, "count": int((v or {}).get("count") or 0),
+             "last_seen": str((v or {}).get("last_seen") or "")}
+            for name, v in degraded.items()
+            if isinstance(v, dict) and name]
+    rows.sort(key=lambda r: r["last_seen"], reverse=True)
+    return rows
+
+
 __all__ = ["TURN_FILENAME", "MAX_SESSIONS", "turn_path", "begin_turn",
-           "current_epoch", "claim_fold"]
+           "current_epoch", "claim_fold", "note_degraded", "degraded_tools"]

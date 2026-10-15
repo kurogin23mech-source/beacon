@@ -296,7 +296,11 @@ def test_find_by_purpose_ranks_by_shared_tokens():
 
 
 def test_find_by_purpose_matches_camel_and_snake_spellings_alike():
-    led = _ledger(tl.build_record("mcp__drive__createGoogleDoc", purpose="",
+    """The NAME is matched too, not only the 用途, so a camelCase tool is findable
+    by its snake_case spelling. (A blank purpose is no longer registrable — see
+    ``test_a_blank_purpose_is_refused`` — so this row carries one.)"""
+    led = _ledger(tl.build_record("mcp__drive__createGoogleDoc",
+                                  purpose="資料を保管する",
                                   effect=tl.EFFECT_STATE_CHANGE))
     assert [r["name"] for r in tl.find_by_purpose(led, "create google doc")] == \
         ["mcp__drive__createGoogleDoc"]
@@ -306,3 +310,126 @@ def test_find_by_purpose_with_an_empty_query_returns_nothing():
     led = _ledger(tl.build_record("t", purpose="p", effect=tl.EFFECT_READ_ONLY))
     assert tl.find_by_purpose(led, "") == []
     assert tl.find_by_purpose(led, "   ") == []
+
+
+
+# ---------------------------------------------------------------------------
+# 用途 is required (e-7006 受入条件2) — the ambiguous state is made unreachable
+# rather than given a third value. Every tool is used FOR something, so a blank
+# 用途 is always an omission, never a meaningful "no purpose".
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n", "\t "])
+def test_a_blank_purpose_is_refused(blank):
+    with pytest.raises(tl.ToolLedgerError):
+        tl.build_record("t", purpose=blank, effect=tl.EFFECT_READ_ONLY)
+
+
+def test_a_hand_edited_blank_purpose_is_reported_on_read():
+    """The write rule covers one of two writers. A rule enforced on only the CLI
+    is not enforced (ms-174), so the read side reports what it cannot prevent."""
+    led = {"version": 1, "tools": [
+        {"name": "old-row", "purpose": "", "effect": tl.EFFECT_READ_ONLY,
+         "record": {"sink": tl.SINK_UNDECIDED, "grain": tl.GRAIN_EACH}},
+        {"name": "fine", "purpose": "ちゃんと書いてある",
+         "effect": tl.EFFECT_READ_ONLY,
+         "record": {"sink": tl.SINK_UNDECIDED, "grain": tl.GRAIN_EACH}}]}
+    assert [r["name"] for r in tl.purposeless_tools(led)] == ["old-row"]
+
+
+# ---------------------------------------------------------------------------
+# The grain default is RECORDED, not just taken (e-7014 受入条件4).
+# ---------------------------------------------------------------------------
+
+def test_an_omitted_grain_is_marked_as_defaulted():
+    """"nobody chose a grain" and "someone chose 毎回" must not be the same bytes
+    on disk — the same collapse the 3-valued sink exists to prevent."""
+    row = tl.build_record("t", purpose="p", effect=tl.EFFECT_READ_ONLY)
+    assert row["record"]["grain"] == tl.GRAIN_EACH
+    assert row["record"]["grain_source"] == "default"
+
+
+def test_an_explicit_grain_is_marked_as_declared():
+    for grain in tl.GRAINS:
+        row = tl.build_record("t", purpose="p", effect=tl.EFFECT_READ_ONLY,
+                              grain=grain)
+        assert row["record"]["grain_source"] == "declared"
+        assert row["record"]["grain"] == grain
+
+
+def test_grain_defaulted_tools_lists_exactly_the_unchosen_rows():
+    led = _ledger(
+        tl.build_record("chosen", purpose="p", effect=tl.EFFECT_READ_ONLY,
+                        grain=tl.GRAIN_TURN),
+        tl.build_record("unchosen", purpose="p", effect=tl.EFFECT_READ_ONLY))
+    assert [r["name"] for r in tl.grain_defaulted_tools(led)] == ["unchosen"]
+
+
+def test_a_row_predating_grain_source_counts_as_defaulted():
+    """Claiming an older row's grain was DECLARED would be an invention — the
+    choice was not recorded then, so "not declared" is the only honest reading."""
+    led = {"version": 1, "tools": [
+        {"name": "legacy", "purpose": "p", "effect": tl.EFFECT_READ_ONLY,
+         "record": {"sink": tl.SINK_UNDECIDED, "grain": tl.GRAIN_TURN}}]}
+    assert [r["name"] for r in tl.grain_defaulted_tools(led)] == ["legacy"]
+
+
+# ---------------------------------------------------------------------------
+# A declaration may not contradict POSITIVE evidence (e-7003 受入条件3).
+#
+# The guard grew beyond the 8 pinned built-ins: a name carrying a WRITE VERB is
+# positive evidence of effect, so 「読み取りだけ」 about it is a detectable lie.
+# What stays declarable is the case the ledger exists for — a name with no
+# recognisable verb, which the heuristic can only default-deny.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    "mcp__gmail__send_email", "mcp__drive__createGoogleDoc",
+    "mcp__slack__post_message", "mcp__sf__dml_records",
+    "mcp__drive__deleteItem", "mcp__cal__update-event",
+])
+def test_a_write_verb_name_cannot_be_declared_read_only(name):
+    with pytest.raises(tl.ToolLedgerError):
+        tl.build_record(name, purpose="p", effect=tl.EFFECT_READ_ONLY)
+    led = {"version": 1, "tools": [
+        {"name": name, "purpose": "p", "effect": tl.EFFECT_READ_ONLY,
+         "record": {"sink": tl.SINK_UNDECIDED, "grain": tl.GRAIN_EACH}}]}
+    assert tl.effect_of(led, name) is None, "read side must refuse it too"
+
+
+@pytest.mark.parametrize("name", [
+    "mcp__weird__frobnicate", "mcp__x__thing", "mcp__y__zzz",
+])
+def test_a_verbless_name_remains_declarable_read_only(name):
+    """This is the ledger's whole point: the heuristic default-denies an
+    unrecognised name, and a declaration is allowed to replace that GUESS. If
+    this went away, the ledger could only ever add gating."""
+    row = tl.build_record(name, purpose="状態を見るだけ",
+                          effect=tl.EFFECT_READ_ONLY)
+    assert tl.effect_of(_ledger(row), name) == tl.EFFECT_READ_ONLY
+
+
+@pytest.mark.parametrize("name", [
+    "mcp__gmail__send_email", "mcp__drive__createGoogleDoc", "Bash", "Write",
+])
+def test_declaring_a_write_verb_name_MORE_dangerous_is_allowed(name):
+    """One-directional: tightening must always be possible."""
+    for effect in (tl.EFFECT_STATE_CHANGE, tl.EFFECT_OUTWARD):
+        row = tl.build_record(name, purpose="p", effect=effect)
+        assert tl.effect_of(_ledger(row), name) == effect
+
+
+def test_a_read_verb_name_is_not_treated_as_positive_write_evidence():
+    """Over-reach check: if the guard fired on read names too, declaring a
+    genuinely read-only tool would be impossible and the feature would be dead."""
+    for name in ("mcp__gmail__search_emails", "mcp__x__list_things",
+                 "mcp__y__get_status"):
+        assert tl.is_softening(name, tl.EFFECT_READ_ONLY) is False
+
+
+def test_the_write_verb_check_looks_at_the_tool_segment_not_the_server():
+    """A server whose NAME contained a write verb would otherwise make every one
+    of its read tools undeclarable."""
+    import tool_effect as te
+    assert te.has_write_verb("mcp__sender-service__get_status") is False
+    assert te.has_write_verb("mcp__x__send_thing") is True
