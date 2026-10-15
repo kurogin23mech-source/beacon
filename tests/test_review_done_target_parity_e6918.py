@@ -261,6 +261,22 @@ def test_the_shared_flag_guard_was_not_widened():
         src = f.read()
     fn = src[src.index("_guard_positional() {"):]
     fn = fn[:fn.index("\n}") + 2]
+
+    # 性質で見る: 分岐の対象が **加工していない** ``"$1"`` であること。
+    #
+    # 最初の版はこの下の文言 ("位置引数ですが") の不在だけを見ていた。だがそれは
+    # 「私が過去に書いた広げ方の綴り」を 1 つ覚えているだけで、**同じ広げ方を別の
+    # 書き方でやると素通りする**。反転ハーネスが実測した: case の対象を
+    # ``"${1#-}"`` に変えてパターンを ``h|help`` にすると、guard は裸の語にも
+    # 反応するようになるのに試験は緑だった (= 偽の安全)。
+    #
+    # token を剥いだり畳んだりした瞬間に、この guard は「flag 風の token だけを
+    # 止める」という docstring の前提を失う。だから加工の有無で測る。
+    case_lines = [ln.strip() for ln in fn.splitlines()
+                  if ln.strip().startswith("case ")]
+    assert case_lines == ['case "$1" in'], (
+        "共有 helper の分岐対象が加工された値になっている (flag 専用の前提が"
+        "崩れる):\n" + "\n".join(case_lines))
     assert "位置引数ですが" not in fn, (
         "共有 helper に非 flag 用の分岐が残っている:\n" + fn)
 
