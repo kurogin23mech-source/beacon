@@ -278,7 +278,7 @@ from cmd_operation import (  # noqa: F401
 # driving cmd_bus_* patch at cmd_bus._X (monkeypatch-trap note above).
 from commands_shared import (  # noqa: F401
     _read_bus_budget, _write_bus_budget, _bus_auto_execute_channels,
-    _mirror_auto_execute_channels_to_local, _resolve_recipient_live,
+    _resolve_recipient_live,
 )
 # Public bus handlers only (family-private helpers stay canonical in cmd_bus,
 # patched there — see the e-4320 rule above).

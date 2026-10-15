@@ -390,14 +390,15 @@ def get_store(project_file: str | None = None) -> Store:
             return (creds.id_token or creds.token) if creds else ""
 
         # ms-95 / e-746: pass the local project.json path so StoreApi can
-        # mirror each cloud read/write back to the local cache. This keeps
+        # mirror each cloud read/write back to it. This keeps
         # ``.beacon/project.json`` fresh as a read-only mirror so Tauri's
         # ``load_project_json`` no longer renders a stale ms-22-era world
         # for the first few seconds before the WS push arrives (e-723).
-        # The write-back is best-effort and never raises.
+        # ms-166 e-6937: the mirror is only rewritten when its content
+        # actually differs, so a read-only verb leaves the file untouched.
         return StoreApi(
             api_url, project_id, _token_provider,
-            local_cache_path=project_file,
+            mirror_path=project_file,
         )
 
     # ms-148 e-5414: local project state lives in SQLite (serialised writes,
