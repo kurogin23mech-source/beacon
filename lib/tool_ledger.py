@@ -380,8 +380,8 @@ def upsert(ledger: dict, row: dict) -> dict:
     the tool's name, so two rows for one name would make every reader's answer
     depend on list order."""
     name = str(row.get("name") or "")
-    tools = [t for t in (ledger.get("tools") or [])
-             if str(t.get("name") or "") != name]
+    tools = [t for t in _rows(ledger)
+             if isinstance(t, dict) and str(t.get("name") or "") != name]
     tools.append(row)
     ledger["tools"] = tools
     ledger.setdefault("version", LEDGER_VERSION)
@@ -390,7 +390,7 @@ def upsert(ledger: dict, row: dict) -> dict:
 
 def remove(ledger: dict, name: str) -> bool:
     """Drop a tool's row. True when a row was actually removed."""
-    before = list(ledger.get("tools") or [])
+    before = list(_rows(ledger))
     after = [t for t in before if str(t.get("name") or "") != str(name)]
     ledger["tools"] = after
     return len(after) != len(before)
@@ -399,6 +399,25 @@ def remove(ledger: dict, name: str) -> bool:
 # ---------------------------------------------------------------------------
 # Lookup (the read side) — what the two interrupts call.
 # ---------------------------------------------------------------------------
+
+def _rows(ledger) -> list:
+    """The ledger's rows, tolerant of ANY shape.
+
+    Every read path funnels through here so a malformed ledger reads as "no
+    declarations" rather than raising. This tolerance used to live in
+    ``tool_effect._declared_effect``'s try/except; moving the translation to this
+    module (to break the import cycle) dropped it, and ``gate_classification``
+    began raising ``AttributeError`` on a non-dict. The hooks happen to always
+    pass ``load_ledger``'s output (always a dict), so nothing would have failed in
+    production — which is exactly why it needed a test rather than a reading.
+    The property belongs HERE, at the one place every reader goes through, not in
+    each caller's except clause.
+    """
+    if not isinstance(ledger, dict):
+        return []
+    rows = ledger.get("tools")
+    return rows if isinstance(rows, list) else []
+
 
 def lookup(ledger: dict, name: str) -> Optional[dict]:
     """The row declared for ``name``, or ``None`` when the tool is unregistered.
@@ -411,8 +430,8 @@ def lookup(ledger: dict, name: str) -> Optional[dict]:
     target = str(name or "").strip()
     if not target:
         return None
-    for row in ledger.get("tools") or []:
-        if str(row.get("name") or "").strip() == target:
+    for row in _rows(ledger):
+        if isinstance(row, dict) and str(row.get("name") or "").strip() == target:
             return row
     return None
 
@@ -435,6 +454,33 @@ def effect_of(ledger: dict, name: str) -> Optional[str]:
     if is_softening(str(name or "").strip(), effect):
         return None
     return effect
+
+
+def gate_classification(ledger: dict, name: str) -> str:
+    """The ledger's answer in the EFFECT GATE's own two-value vocabulary, or ""
+    when the ledger has no usable answer (ms-180 e-7003).
+
+    Returns ``tool_effect.READ_ONLY`` / ``tool_effect.SIDE_EFFECT`` / ``""``.
+    ``""`` means "no declaration" and sends the caller back to its fail-closed
+    heuristic — it never means read-only.
+
+    The translation lives HERE, not in ``tool_effect``, because the dependency
+    between the two modules runs one way: this module imports the classifier (to
+    derive the pinned set from its table), so the classifier must not import this
+    one. It previously did, via an import hidden inside a function body — a real
+    cycle whose crash was merely deferred to call time, found by an independent
+    maintainability review of PR #802. Keeping the translation on this side makes
+    the one-way direction true rather than asserted.
+
+    Safety is unchanged: it goes through ``effect_of``, which refuses to answer
+    for a row contradicting positive knowledge about the tool.
+    """
+    declared = effect_of(ledger, name)
+    if declared == EFFECT_READ_ONLY:
+        return _tool_effect.READ_ONLY
+    if declared in (EFFECT_STATE_CHANGE, EFFECT_OUTWARD):
+        return _tool_effect.SIDE_EFFECT
+    return ""
 
 
 def record_plan(ledger: dict, name: str) -> dict:
@@ -482,8 +528,8 @@ def purposeless_tools(ledger: dict) -> list:
     only catches an older file or a hand edit — and that is exactly why it
     exists: a rule enforced on one writer and not the other is not enforced
     (the ms-174 lesson)."""
-    return [row for row in (ledger.get("tools") or [])
-            if not str(row.get("purpose") or "").strip()]
+    return [row for row in _rows(ledger)
+            if isinstance(row, dict) and not str(row.get("purpose") or "").strip()]
 
 
 def grain_defaulted_tools(ledger: dict) -> list:
@@ -492,17 +538,38 @@ def grain_defaulted_tools(ledger: dict) -> list:
     existed is reported as defaulted — it predates the choice being recorded, so
     claiming it was declared would be an invention."""
     out = []
-    for row in ledger.get("tools") or []:
+    for row in _rows(ledger):
+        if not isinstance(row, dict):
+            continue
         block = row.get("record") if isinstance(row.get("record"), dict) else {}
         if block.get("grain_source") != "declared":
             out.append(row)
     return out
 
 
+#: ``record_plan`` actions that mean "the use left NO record, and that is a DEBT
+#: somebody has to clear" — as opposed to ``skip`` (declined = a decision, not a
+#: debt) and ``record`` (nothing owed).
+#:
+#: Defined ONCE here because both tool-call interrupts ask the same question and
+#: each used to hardcode the literal tuple. An independent maintainability review
+#: of PR #802 pointed out that this is the very duplication the same PR guards
+#: against for ``NON_SOFTENABLE_EFFECT`` (derived, never re-listed) — so if a
+#: fifth outcome is ever added, one hook could be updated and the other silently
+#: left behind, with nothing to say so.
+DEBT_ACTIONS = frozenset({"unregistered", "undecided"})
+
+
+def is_debt_action(action: str) -> bool:
+    """True when a ``record_plan`` action is a debt worth noting (see DEBT_ACTIONS)."""
+    return str(action or "") in DEBT_ACTIONS
+
+
 def undecided_tools(ledger: dict) -> list:
     """Rows whose record sink nobody has judged yet — the ledger's own debt list."""
-    return [row for row in (ledger.get("tools") or [])
-            if record_plan(ledger, row.get("name")).get("action") == "undecided"]
+    return [row for row in _rows(ledger)
+            if isinstance(row, dict)
+            and record_plan(ledger, row.get("name")).get("action") == "undecided"]
 
 
 def find_by_purpose(ledger: dict, query: str) -> list:
@@ -520,7 +587,9 @@ def find_by_purpose(ledger: dict, query: str) -> list:
     if not tokens:
         return []
     scored = []
-    for row in ledger.get("tools") or []:
+    for row in _rows(ledger):
+        if not isinstance(row, dict):
+            continue
         haystack = _normalize(
             f"{row.get('purpose') or ''} {row.get('name') or ''}")
         hits = sum(1 for t in tokens if t in haystack)
@@ -549,6 +618,7 @@ __all__ = [
     "ToolLedgerError",
     "ledger_path", "empty_ledger", "load_ledger", "save_ledger",
     "build_record", "upsert", "remove",
-    "lookup", "effect_of", "record_plan", "undecided_tools",
+    "lookup", "effect_of", "gate_classification", "record_plan",
+    "DEBT_ACTIONS", "is_debt_action", "undecided_tools",
     "purposeless_tools", "grain_defaulted_tools", "find_by_purpose",
 ]

@@ -186,18 +186,25 @@ def main() -> None:
         # unreadable ledger loads as EMPTY, which means "no declarations" and leaves
         # the original fail-closed heuristic in charge.
         ledger = tl.load_ledger(tl.ledger_path(root))
+        # Translated on the LEDGER side (``gate_classification``): the classifier
+        # is a leaf that imports nothing from the ledger, so the declaration is
+        # converted to its two-value vocabulary here rather than by reaching back
+        # into tool_ledger from inside tool_effect (which was a deferred cycle).
+        declared = tl.gate_classification(ledger, tool_name)
         # ms-180 e-7002 / 受入条件2: a use that leaves NO record is noted the
         # moment it happens, so "not declared ⇒ not recorded" never becomes a
         # silent hole (SPEC 方針6). Two reasons qualify and stay distinguishable —
         # ``unregistered`` (no row) and ``undecided`` (a row whose record sink
         # nobody judged); ``declined`` is a decision and is deliberately NOT
-        # noted. Best-effort: noting a debt must never interfere with the call.
+        # noted. The set lives in ``tool_ledger.DEBT_ACTIONS`` so this hook and the
+        # PostToolUse recorder cannot drift apart on what counts as a debt.
+        # Best-effort: noting a debt must never interfere with the call.
         if tool_name:
             try:
                 debt_lib = hb.import_lib("tool_usage_debt")
                 if debt_lib is not None:
                     plan = tl.record_plan(ledger, tool_name)
-                    if plan.get("action") in ("unregistered", "undecided"):
+                    if tl.is_debt_action(plan.get("action")):
                         import datetime
                         mod = debt_lib["tool_usage_debt"]
                         mod.record_no_record_use(
@@ -210,7 +217,7 @@ def main() -> None:
                 pass
         state = ut.is_armed(root, session_key)
         if state:
-            if not te.is_side_effect(tool_name, tool_input, ledger):
+            if not te.is_side_effect(tool_name, tool_input, declared):
                 return  # read-only call → passes even in an untrusted turn
             # Stamp that the gate actually asked, BEFORE emitting — the vet hook
             # requires this marker, so a side-effect that ran without a real ask
@@ -227,7 +234,7 @@ def main() -> None:
         # file, tilt a side-effect toward human confirmation instead of silently
         # passing; read-only calls still pass (no over-gating).
         if ut.state_file_health(root) == "corrupt" \
-                and te.is_side_effect(tool_name, tool_input, ledger):
+                and te.is_side_effect(tool_name, tool_input, declared):
             _emit_ask(_build_corrupt_reason(str(tool_name)))
     except Exception:
         # Never brick the harness on a gate bug — fail safe (tool proceeds).

@@ -424,10 +424,23 @@ def cmd_tool_used():
         sys.exit(1)
 
     text = summary or f"{name} を使用"
-    if recorder == tl.RECORDER_SAVE:
-        result = _record_via_save(name, text, target, url)
-    else:
-        result = _record_via_evidence(name, text, effect, target, url)
+    writer = _RECORDER_WRITERS.get(recorder)
+    if writer is None:
+        # Exhaustive dispatch, not a binary if/else over the current two values.
+        # ``tl.RECORDERS`` is a declared, validated vocabulary that `build_record`,
+        # the help text and `tool list` all treat as authoritative — so widening it
+        # is an invited change. With an `else` fallthrough, a third recorder passed
+        # validation and was then silently written through the EVIDENCE path while
+        # reporting ``recorded: true`` and exiting 0. An independent maintainability
+        # review of PR #802 reproduced exactly that by adding a `webhook` recorder.
+        # Failing loudly HERE — at the point that decides correctness — is what
+        # makes widening the vocabulary without wiring a writer impossible to miss.
+        print(f"Error: 記録先 {recorder!r} に対応する writer が配線されていません。"
+              f"tl.RECORDERS に値を足したら lib/cmd_tool._RECORDER_WRITERS にも "
+              f"writer を登録してください (配線済み: "
+              f"{sorted(_RECORDER_WRITERS)})。", file=sys.stderr)
+        sys.exit(1)
+    result = writer(name, text, effect, target, url)
 
     if json_mode:
         print(json.dumps(result, ensure_ascii=False))
@@ -455,8 +468,12 @@ def _record_via_evidence(name, text, effect, target, url):
     return result
 
 
-def _record_via_save(name, text, target, url):
+def _record_via_save(name, text, effect, target, url):
     """Write through the external-artifact recorder (`beacon save`'s core path).
+
+    Takes ``effect`` it does not use, so every writer in ``_RECORDER_WRITERS``
+    shares one signature and the registry can call them without per-recorder
+    argument knowledge (the thing that would reintroduce a branch).
 
     Kept distinct from the evidence door because the two answer different
     questions: ``save`` records that an ARTIFACT now exists somewhere outside
@@ -483,6 +500,16 @@ def _record_via_save(name, text, target, url):
                 "arm": "entries", "via": "save"}
     return {"recorded": False, "reason": result.get("reason", ""),
             "target": target, "arm": ""}
+
+
+#: Record sink -> the function that writes it. Exhaustive: a recorder in
+#: ``tl.RECORDERS`` with no entry here is a hard error at use time, never a
+#: silent fallthrough into whichever branch an ``else`` happened to catch.
+#: ``tests/test_tool_recorder_dispatch_ms180`` asserts the two sets agree.
+_RECORDER_WRITERS = {
+    tl.RECORDER_SAVE: _record_via_save,
+    tl.RECORDER_EVIDENCE: _record_via_evidence,
+}
 
 
 __all__ = ["cmd_tool_add", "cmd_tool_list", "cmd_tool_show", "cmd_tool_remove",

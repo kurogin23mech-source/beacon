@@ -156,8 +156,19 @@ def claim_fold(path: str, session_key: str, tool_name: str) -> bool:
     entry["folded"] = folded
     sessions[key] = entry
     data["sessions"] = sessions
-    # A write failure must not swallow the record: fall back to recording.
-    return True if _write(path, data) else True
+    # Best-effort persist; the return value is deliberately NOT conditional on it.
+    # A failed write must not swallow the record — the caller would read False as
+    # "already folded this turn" and skip recording, which is the opposite of this
+    # module's stated direction (degrade toward duplicates, never toward silence).
+    #
+    # This used to be written ``return True if _write(...) else True`` — a ternary
+    # whose branches are identical. An independent maintainability review of PR
+    # #802 flagged the SHAPE: two screens up, ``begin_turn`` has a load-bearing
+    # ``return epoch if _write(...) else 0``, so a reader comparing the siblings
+    # infers this one is conditional too, and a "simplification" to
+    # ``return _write(...)`` would silently invert the fail-safe.
+    _write(path, data)
+    return True
 
 
 def note_degraded(path: str, tool_name: str, at: str = "") -> bool:

@@ -151,6 +151,10 @@ def main() -> None:
         # Two of the three non-recording outcomes are DEBTS and must leave a
         # trace of the USE; the third is an answer and must stay silent
         # (SPEC 受入条件2 / 方針6):
+        # The debt set is ``tool_ledger.DEBT_ACTIONS`` — one definition, consumed
+        # by BOTH interrupts, rather than the literal tuple each used to hardcode
+        # (a fifth outcome would otherwise be added to one hook and silently
+        # forgotten in the other):
         #   unregistered → nobody declared this tool,
         #   undecided    → a row exists but its record sink is unjudged. Listing
         #                  the unjudged ROW was never enough — the question only
@@ -158,7 +162,7 @@ def main() -> None:
         #                  that is what was invisible until now.
         #   declined     → a decision was made. Noting it would turn a settled
         #                  answer into permanent noise.
-        if action in ("unregistered", "undecided"):
+        if tl.is_debt_action(action):
             debt.record_no_record_use(debt.debt_path(beacon_dir), tool_name,
                                       reason=action, at=_now())
             return

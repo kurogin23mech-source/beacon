@@ -68,7 +68,8 @@ def test_declaration_overrides_a_wrong_name_guess():
     assert te.classify_tool("mcp__weird__frobnicate") == te.SIDE_EFFECT
     led = _ledger(tl.build_record("mcp__weird__frobnicate", purpose="p",
                                   effect=tl.EFFECT_READ_ONLY))
-    assert te.classify_tool("mcp__weird__frobnicate", None, led) == te.READ_ONLY
+    assert te.classify_tool("mcp__weird__frobnicate", None,
+                              tl.gate_classification(led, "mcp__weird__frobnicate")) == te.READ_ONLY
 
 
 def test_declaration_can_tighten_a_tool_the_heuristic_called_read_only():
@@ -77,7 +78,8 @@ def test_declaration_can_tighten_a_tool_the_heuristic_called_read_only():
     assert te.classify_tool("mcp__x__list_things") == te.READ_ONLY
     led = _ledger(tl.build_record("mcp__x__list_things", purpose="p",
                                   effect=tl.EFFECT_OUTWARD))
-    assert te.classify_tool("mcp__x__list_things", None, led) == te.SIDE_EFFECT
+    assert te.classify_tool("mcp__x__list_things", None,
+                              tl.gate_classification(led, "mcp__x__list_things")) == te.SIDE_EFFECT
 
 
 @pytest.mark.parametrize("effect,expected", [
@@ -87,7 +89,8 @@ def test_declaration_can_tighten_a_tool_the_heuristic_called_read_only():
 ])
 def test_each_declared_effect_maps_to_one_gate_answer(effect, expected):
     led = _ledger(tl.build_record("mcp__srv__thing", purpose="p", effect=effect))
-    assert te.classify_tool("mcp__srv__thing", None, led) == expected
+    assert te.classify_tool("mcp__srv__thing", None,
+                              tl.gate_classification(led, "mcp__srv__thing")) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +108,8 @@ _SAMPLE_NAMES = [
 def test_unregistered_tools_classify_identically_with_and_without_a_ledger(name):
     led = _ledger(tl.build_record("something__else", purpose="p",
                                   effect=tl.EFFECT_READ_ONLY))
-    assert te.classify_tool(name, None, led) == te.classify_tool(name)
-    assert te.classify_tool(name, None, None) == te.classify_tool(name)
+    assert te.classify_tool(name, None, tl.gate_classification(led, name)) == te.classify_tool(name)
+    assert te.classify_tool(name, None, "") == te.classify_tool(name)
 
 
 def test_an_unreadable_ledger_leaves_the_heuristic_in_charge(tmp_path):
@@ -114,15 +117,67 @@ def test_an_unreadable_ledger_leaves_the_heuristic_in_charge(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     led = tl.load_ledger(str(path))
     for name in _SAMPLE_NAMES:
-        assert te.classify_tool(name, None, led) == te.classify_tool(name)
+        assert te.classify_tool(name, None, tl.gate_classification(led, name)) == te.classify_tool(name)
 
 
-def test_a_garbage_ledger_object_does_not_raise_into_the_classifier():
-    """The classifier is called from a hook. A malformed ledger must degrade to
-    the heuristic, never throw."""
-    for junk in ("not a ledger", 42, [1, 2, 3], {"tools": "nope"}):
-        assert te.classify_tool("Bash", None, junk) == te.SIDE_EFFECT
-        assert te.classify_tool("Read", None, junk) == te.READ_ONLY
+@pytest.mark.parametrize("junk", ["not a ledger", 42, [1, 2, 3],
+                                  {"tools": "nope"}, {}, None])
+def test_a_garbage_ledger_does_not_raise_on_the_translation_side(junk):
+    """The translation runs inside a hook, so a malformed ledger must degrade to
+    "no declaration" (letting the fail-closed heuristic decide) and never throw.
+    ``gate_classification`` is called with the junk directly — that is the real
+    call shape, and it must tolerate every one of these."""
+    declared = tl.gate_classification(junk, "Bash")
+    assert declared == ""
+    assert te.classify_tool("Bash", None, declared) == te.SIDE_EFFECT
+    assert te.classify_tool("Read", None, tl.gate_classification(junk, "Read")) \
+        == te.READ_ONLY
+
+
+@pytest.mark.parametrize("junk", [None, 42, [1, 2], {"a": 1}, "nonsense"])
+def test_a_non_vocabulary_declared_value_is_ignored_by_the_classifier(junk):
+    """``declared`` is a two-value vocabulary. Anything else must fall through to
+    the heuristic rather than being treated as an answer — this is what stops a
+    caller that accidentally passes the WRONG SHAPE (a ledger dict, say) from
+    silently disabling the declaration path while every test still passes, which
+    is exactly what happened mid-refactor."""
+    assert te.classify_tool("Bash", None, junk) == te.SIDE_EFFECT
+    assert te.classify_tool("Read", None, junk) == te.READ_ONLY
+    assert te.classify_tool("mcp__weird__frobnicate", None, junk) == \
+        te.SIDE_EFFECT
+
+
+def test_the_classifier_imports_nothing_from_the_ledger():
+    """The dependency runs ONE way: tool_ledger imports tool_effect (it derives
+    its pinned set from BUILTIN_SIDE_EFFECT), and tool_effect imports nothing
+    back. It previously reached back via an import hidden inside a function body
+    — a real cycle whose crash was deferred to call time, so hoisting that line
+    (an ordinary cleanup) raised ``partially initialized module`` from the OTHER
+    file. Pinned structurally, since a comment claiming "acyclic" is what was
+    there before and it was false."""
+    import ast
+    source = (REPO / "lib" / "tool_effect.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "tool_ledger" not in imported, (
+        "tool_effect must not import tool_ledger at module OR function scope — "
+        f"found imports: {sorted(imported)}")
+
+
+def test_importing_either_module_first_works():
+    """The cycle's symptom was order-dependent. Import each one first in a clean
+    subprocess and require both to succeed."""
+    import subprocess
+    for first in ("tool_effect", "tool_ledger"):
+        r = subprocess.run(
+            [sys.executable, "-c", f"import {first}"],
+            cwd=str(REPO / "lib"), capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, f"import {first} first failed: {r.stderr}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,13 +195,13 @@ def test_pinned_set_is_derived_from_the_classifier_table_not_copied():
 def test_hand_edited_read_only_row_cannot_soften_a_pinned_builtin(pinned):
     led = _raw_ledger(**{pinned: tl.EFFECT_READ_ONLY})
     assert tl.effect_of(led, pinned) is None
-    assert te.classify_tool(pinned, None, led) == te.SIDE_EFFECT
-    assert te.is_side_effect(pinned, None, led) is True
+    assert te.classify_tool(pinned, None, tl.gate_classification(led, pinned)) == te.SIDE_EFFECT
+    assert te.is_side_effect(pinned, None, tl.gate_classification(led, pinned)) is True
 
 
 def test_softening_every_pinned_builtin_at_once_still_gates_all_of_them():
     led = _raw_ledger(**{n: tl.EFFECT_READ_ONLY for n in te.BUILTIN_SIDE_EFFECT})
-    assert all(te.is_side_effect(n, None, led) for n in te.BUILTIN_SIDE_EFFECT)
+    assert all(te.is_side_effect(n, None, tl.gate_classification(led, n)) for n in te.BUILTIN_SIDE_EFFECT)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +218,7 @@ def test_inversion_removing_the_softening_guard_makes_the_gate_weaker(monkeypatc
     monkeypatch.setattr(tl, "is_softening", lambda name, effect: False)
     led = _raw_ledger(**{n: tl.EFFECT_READ_ONLY for n in te.BUILTIN_SIDE_EFFECT})
     leaked = [n for n in te.BUILTIN_SIDE_EFFECT
-              if not te.is_side_effect(n, None, led)]
+              if not te.is_side_effect(n, None, tl.gate_classification(led, n))]
     assert sorted(leaked) == sorted(te.BUILTIN_SIDE_EFFECT), (
         "with the guard disabled every pinned built-in should leak; if some did "
         "not, this inversion no longer exercises the guard and the tests above "
@@ -177,7 +232,8 @@ def test_inversion_a_copied_pin_set_would_miss_a_newly_added_builtin(monkeypatch
                   for n in te.BUILTIN_SIDE_EFFECT if n != "Bash"}
     monkeypatch.setattr(tl, "NON_SOFTENABLE_EFFECT", stale_copy)
     led = _raw_ledger(Bash=tl.EFFECT_READ_ONLY)
-    assert te.is_side_effect("Bash", None, led) is False, (
+    declared = tl.gate_classification(led, "Bash")
+    assert te.is_side_effect("Bash", None, declared) is False, (
         "a stale copy of the pin set should let Bash through — this is the "
         "failure mode deriving the set from BUILTIN_SIDE_EFFECT prevents")
 

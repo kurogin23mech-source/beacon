@@ -18,8 +18,15 @@ unknown tool, a name with no recognisable verb, or any name carrying a write
 verb — is a side effect (gate target). "When in doubt, gate."
 
 This module is pure classification: it holds NO policy about *when* to gate (that
-is the untrusted-turn condition, owned by e-6237) and performs no I/O. It answers
-one question: "is this call read-only or a side effect?"
+is the untrusted-turn condition, owned by e-6237), performs no I/O, and imports
+nothing from Beacon. It answers one question: "is this call read-only or a side
+effect?"
+
+Dependency direction (ms-180): ``tool_ledger`` imports THIS module — it derives
+its pinned-tool set from ``BUILTIN_SIDE_EFFECT`` rather than copying it — and this
+module imports nothing back. A caller that wants the ledger's declaration to win
+translates it first (``tool_ledger.gate_classification``) and passes the result as
+``declared``.
 """
 
 from __future__ import annotations
@@ -151,43 +158,30 @@ def _skill_name(tool_input) -> str:
     return ""
 
 
-def _declared_effect(ledger, name: str) -> str:
-    """Translate a ledger row's 作用 into this module's two-value answer, or ""
-    when the ledger has no usable answer (ms-180 e-7003).
-
-    The ledger is passed IN, never read from disk here: this module stays pure, and
-    the caller (the PreToolUse gate) owns the one local file read.
-
-    Safety: the translation is delegated to ``tool_ledger.effect_of``, which returns
-    ``None`` both for an unregistered tool and for a row that tries to declare a
-    PINNED built-in read-only — so a declaration can never demote ``Bash`` /
-    ``Write`` / ``WebFetch`` / ``Task`` and friends. Any exception also yields "",
-    which routes the call to the fail-closed heuristic below.
-    """
-    if ledger is None:
-        return ""
-    try:
-        import tool_ledger
-        declared = tool_ledger.effect_of(ledger, name)
-    except Exception:
-        return ""
-    if declared == tool_ledger.EFFECT_READ_ONLY:
-        return READ_ONLY
-    if declared in (tool_ledger.EFFECT_STATE_CHANGE, tool_ledger.EFFECT_OUTWARD):
-        return SIDE_EFFECT
-    return ""
-
-
 def classify_tool(tool_name: str, tool_input: object = None,
-                  ledger: object = None) -> str:
+                  declared: str = "") -> str:
     """Return ``READ_ONLY`` or ``SIDE_EFFECT`` for one tool invocation.
 
     Resolution order:
-      0. the DECLARED effect from the tool ledger, when a ``ledger`` is supplied
-         and it has a usable row (ms-180 e-7003). A declaration beats a guess —
-         that is the whole point of the ledger — but it can only ever REPLACE a
-         guess: ``tool_ledger.effect_of`` refuses to return ``read-only`` for the
-         built-ins the ms-169 approval gate depends on, so no row can soften them.
+      0. ``declared`` — an ALREADY-TRANSLATED answer (``READ_ONLY`` /
+         ``SIDE_EFFECT``) from the tool ledger, when the caller supplies one
+         (ms-180 e-7003). A declaration beats a guess; that is the whole point of
+         the ledger. Produce it with ``tool_ledger.gate_classification(ledger,
+         name)``, which applies the guard that refuses to answer ``read-only``
+         for the built-ins the ms-169 approval gate depends on — so no row can
+         soften them.
+
+         Why a pre-translated STRING rather than the ledger itself: this module
+         must not import ``tool_ledger``. ``tool_ledger`` imports THIS module (it
+         derives its pinned-tool set from ``BUILTIN_SIDE_EFFECT``), so taking a
+         ledger here meant reaching back the other way, which only worked because
+         the import was hidden inside the function body. That is a real cycle with
+         its crash deferred to call time: hoisting that lazy import to the top —
+         an utterly ordinary cleanup — raised ``partially initialized module``
+         from tool_ledger's file, nowhere near the edit. An independent
+         maintainability review of PR #802 reproduced exactly that, and the
+         comment here used to claim the pair was "acyclic". It is acyclic NOW,
+         because the dependency genuinely runs one way only.
       1. Skill tool → classify the *invoked skill* by its verb tokens
          (``beacon-dm-send`` → send → side-effect). A Skill with no resolvable
          name is default-deny.
@@ -207,8 +201,7 @@ def classify_tool(tool_name: str, tool_input: object = None,
         return SIDE_EFFECT
     name = tool_name.strip()
 
-    declared = _declared_effect(ledger, name)
-    if declared:
+    if declared in (READ_ONLY, SIDE_EFFECT):
         return declared
 
     if name == "Skill":
@@ -230,12 +223,13 @@ def classify_tool(tool_name: str, tool_input: object = None,
 
 
 def is_side_effect(tool_name: str, tool_input: object = None,
-                   ledger: object = None) -> bool:
+                   declared: str = "") -> bool:
     """True when the call changes state or sends outward (= a gate target).
 
-    ``ledger`` is optional and defaults to None, so every existing caller keeps
-    the pure-heuristic behaviour until it chooses to pass one."""
-    return classify_tool(tool_name, tool_input, ledger) == SIDE_EFFECT
+    ``declared`` is optional and defaults to "", so every existing caller keeps
+    the pure-heuristic behaviour until it chooses to pass a ledger answer
+    (see ``tool_ledger.gate_classification``)."""
+    return classify_tool(tool_name, tool_input, declared) == SIDE_EFFECT
 
 
 __all__ = [
