@@ -251,29 +251,52 @@ def cmd_tool_lookup():
 # ---------------------------------------------------------------------------
 
 def cmd_tool_unregistered():
+    """Uses that left NO record, split by WHY (ms-180 受入条件2).
+
+    Two reasons, kept apart because the fix differs: a tool nobody declared has
+    to be registered, while a declared-but-unjudged tool has an open question to
+    close. Merging them into one "no record" list would hide which action each
+    row needs — and merging *absent* with *unexamined* is the collapse the
+    3-valued record sink exists to prevent.
+
+    A ``declined`` tool never appears here: that is a decision, and listing it
+    would turn a settled answer into permanent noise.
+    """
     import tool_usage_debt as debt
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if os.environ.get("BEACON_TOOL_CLEAR", "") == "1":
         removed = debt.clear_debt(debt.debt_path(_beacon_dir()))
-        print(f"未登録の記録を {removed} 件消しました。" if not json_mode
+        print(f"記録が残らなかった使用の記録を {removed} 件消しました。"
+              if not json_mode
               else json.dumps({"cleared": removed}, ensure_ascii=False))
         return
     rows = debt.load_debt(debt.debt_path(_beacon_dir()))
+    unregistered = debt.debt_by_reason(rows, debt.REASON_UNREGISTERED)
+    undecided = debt.debt_by_reason(rows, debt.REASON_UNDECIDED)
     if json_mode:
-        print(json.dumps({"unregistered": rows, "count": len(rows)},
-                         ensure_ascii=False))
+        print(json.dumps({"unregistered": unregistered,
+                          "undecided": undecided,
+                          "count": len(rows)}, ensure_ascii=False))
         return
     if not rows:
-        print("台帳に無い道具が使われた記録はありません。")
+        print("記録が残らなかった道具の使用はありません。")
         return
-    print(f"⚠ 台帳に無いまま使われた道具 {len(rows)} 件 "
-          f"(= 使ったことが記録に残らなかった分):")
-    for row in rows:
-        print(f"  {row.get('name')} — {row.get('count')} 回 "
-              f"(最初 {row.get('first_seen')} / 最後 {row.get('last_seen')})")
+    print(f"⚠ 使ったのに記録が残らなかった道具 {len(rows)} 件:")
+    if unregistered:
+        print(f"\n  [台帳に無い] {len(unregistered)} 件 "
+              f"— `beacon tool add <道具名> ...` で登録して閉じる")
+        for row in unregistered:
+            print(f"    {row.get('name')} — {row.get('count')} 回 "
+                  f"(最初 {row.get('first_seen')} / 最後 {row.get('last_seen')})")
+    if undecided:
+        print(f"\n  [記録先が未判断] {len(undecided)} 件 "
+              f"— 台帳に在るが記録するかを誰も判断していない。"
+              f"`--record <recorder>` か `--no-record \"<理由>\"` で閉じる")
+        for row in undecided:
+            print(f"    {row.get('name')} — {row.get('count')} 回 "
+                  f"(最初 {row.get('first_seen')} / 最後 {row.get('last_seen')})")
     print("\n台帳は事前に全部埋める必要はありません (端末の走査はしない方針)。"
-          "使われた道具だけがここに出るので、上から順に "
-          "`beacon tool add <道具名> ...` で閉じてください。")
+          "実際に使われた道具だけがここに出ます。")
     print("消すだけなら `beacon tool unregistered --clear`。")
 
 

@@ -186,20 +186,26 @@ def main() -> None:
         # unreadable ledger loads as EMPTY, which means "no declarations" and leaves
         # the original fail-closed heuristic in charge.
         ledger = tl.load_ledger(tl.ledger_path(root))
-        # ms-180 e-7002: a tool nobody declared is noted as debt the moment it is
-        # used, so "not in the ledger ⇒ its use is not recorded" never becomes a
-        # silent hole (SPEC 方針6). Noting it must not interfere with the call, so
-        # the helper swallows its own failures and this stays best-effort.
-        if tl.lookup(ledger, tool_name) is None and tool_name:
+        # ms-180 e-7002 / 受入条件2: a use that leaves NO record is noted the
+        # moment it happens, so "not declared ⇒ not recorded" never becomes a
+        # silent hole (SPEC 方針6). Two reasons qualify and stay distinguishable —
+        # ``unregistered`` (no row) and ``undecided`` (a row whose record sink
+        # nobody judged); ``declined`` is a decision and is deliberately NOT
+        # noted. Best-effort: noting a debt must never interfere with the call.
+        if tool_name:
             try:
-                debt = hb.import_lib("tool_usage_debt")
-                if debt is not None:
-                    import datetime
-                    mod = debt["tool_usage_debt"]
-                    mod.record_unregistered(
-                        mod.debt_path(str(root / ".beacon")), str(tool_name),
-                        at=datetime.datetime.now(
-                            datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                debt_lib = hb.import_lib("tool_usage_debt")
+                if debt_lib is not None:
+                    plan = tl.record_plan(ledger, tool_name)
+                    if plan.get("action") in ("unregistered", "undecided"):
+                        import datetime
+                        mod = debt_lib["tool_usage_debt"]
+                        mod.record_no_record_use(
+                            mod.debt_path(str(root / ".beacon")),
+                            str(tool_name), reason=plan["action"],
+                            at=datetime.datetime.now(
+                                datetime.timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ"))
             except Exception:
                 pass
         state = ut.is_armed(root, session_key)

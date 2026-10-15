@@ -137,11 +137,18 @@ def test_repeated_unregistered_use_aggregates_rather_than_appending(project):
 
 def test_an_undecided_tool_is_not_counted_as_unregistered(project):
     """Registered-but-unjudged and never-registered are different debts and must
-    not be merged into one list."""
+    not be merged into one list.
+
+    Both ARE recorded (受入条件2 — the USE of an unjudged row has to be visible),
+    so what this pins is that they carry different reasons. An earlier version of
+    this test asserted the undecided use was recorded NOWHERE; that was the hole
+    found when re-reading 受入条件2, not the property worth keeping."""
     _declare(project, tl.build_record("mcp__a__thing", purpose="p",
                                       effect=tl.EFFECT_READ_ONLY))
     _fire(project, "mcp__a__thing", {})
-    assert tdebt.load_debt(tdebt.debt_path(str(project / ".beacon"))) == []
+    rows = tdebt.load_debt(tdebt.debt_path(str(project / ".beacon")))
+    assert [r["reason"] for r in rows] == [tdebt.REASON_UNDECIDED]
+    assert tdebt.debt_by_reason(rows, tdebt.REASON_UNREGISTERED) == []
 
 
 # ---------------------------------------------------------------------------
@@ -345,3 +352,107 @@ def test_hook_outside_a_beacon_project_is_a_clean_noop(tmp_path):
                           "tool_name": "mcp__x__y", "tool_input": {}}),
         capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0 and proc.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# 受入条件2 — an UNDECIDED tool's USE must be visible, not just its row.
+#
+# Listing an unjudged row was never the gap: `beacon tool list --undecided`
+# already did that. What was invisible is that the unjudged row was being USED,
+# which is what turns an open question into a lost record. These were added after
+# re-reading the acceptance criterion against the implementation and finding the
+# hole (the use left no trace at all).
+# ---------------------------------------------------------------------------
+
+def test_using_an_undecided_tool_is_recorded_as_a_debt(project):
+    _declare(project, tl.build_record("mcp__slack__channels_list",
+                                      purpose="一覧を見る",
+                                      effect=tl.EFFECT_READ_ONLY))
+    _fire(project, "mcp__slack__channels_list", {})
+    rows = tdebt.load_debt(tdebt.debt_path(str(project / ".beacon")))
+    assert [(r["name"], r["reason"]) for r in rows] == \
+        [("mcp__slack__channels_list", tdebt.REASON_UNDECIDED)]
+
+
+def test_the_two_debt_reasons_stay_distinguishable(project):
+    """The fix differs per reason — register it vs. close the open question — so
+    merging them into "no record" would hide which action each row needs."""
+    _declare(project, tl.build_record("mcp__a__declared_unjudged", purpose="p",
+                                      effect=tl.EFFECT_READ_ONLY))
+    _fire(project, "mcp__a__declared_unjudged", {})
+    _fire(project, "mcp__b__never_declared", {})
+    rows = tdebt.load_debt(tdebt.debt_path(str(project / ".beacon")))
+    assert [r["name"] for r in tdebt.debt_by_reason(
+        rows, tdebt.REASON_UNDECIDED)] == ["mcp__a__declared_unjudged"]
+    assert [r["name"] for r in tdebt.debt_by_reason(
+        rows, tdebt.REASON_UNREGISTERED)] == ["mcp__b__never_declared"]
+
+
+def test_using_a_declined_tool_is_NOT_recorded_as_a_debt(project):
+    """``declined`` is a decision, not a debt. Listing it would turn a settled
+    answer into permanent noise, and the list would stop being actionable."""
+    _declare(project, tl.build_record("Grep", purpose="下調べ",
+                                      effect=tl.EFFECT_READ_ONLY,
+                                      decline_reason="下調べは証跡ではない"))
+    for _ in range(3):
+        _fire(project, "Grep", {"pattern": "x"})
+    assert tdebt.load_debt(tdebt.debt_path(str(project / ".beacon"))) == []
+
+
+def test_using_a_recorded_tool_is_NOT_a_debt(project):
+    _declare(project, tl.build_record("mcp__gmail__send_email", purpose="送る",
+                                      effect=tl.EFFECT_OUTWARD,
+                                      recorder=tl.RECORDER_EVIDENCE))
+    _fire(project, "mcp__gmail__send_email", {"subject": "x"})
+    assert tdebt.load_debt(tdebt.debt_path(str(project / ".beacon"))) == []
+    assert len(_entries(project)) == 1
+
+
+def test_closing_the_open_question_stops_new_debt(project):
+    """The debt has to be clearable by DOING the thing it asks for, or it is just
+    a complaint. Declaring the sink must make later uses stop accumulating."""
+    _declare(project, tl.build_record("mcp__x__thing", purpose="p",
+                                      effect=tl.EFFECT_READ_ONLY))
+    _fire(project, "mcp__x__thing", {})
+    debt_file = tdebt.debt_path(str(project / ".beacon"))
+    assert tdebt.load_debt(debt_file)[0]["count"] == 1
+    _declare(project, tl.build_record("mcp__x__thing", purpose="p",
+                                      effect=tl.EFFECT_READ_ONLY,
+                                      decline_reason="証跡ではない"))
+    _fire(project, "mcp__x__thing", {})
+    assert tdebt.load_debt(debt_file)[0]["count"] == 1  # unchanged
+    assert _entries(project) == []
+
+
+def test_a_rows_reason_follows_the_latest_state(project):
+    """A tool used before it was registered, then used again while unjudged,
+    keeps ONE row showing what needs doing NOW."""
+    _declare(project)
+    _fire(project, "mcp__x__thing", {})
+    debt_file = tdebt.debt_path(str(project / ".beacon"))
+    assert tdebt.load_debt(debt_file)[0]["reason"] == tdebt.REASON_UNREGISTERED
+    _declare(project, tl.build_record("mcp__x__thing", purpose="p",
+                                      effect=tl.EFFECT_READ_ONLY))
+    _fire(project, "mcp__x__thing", {})
+    rows = tdebt.load_debt(debt_file)
+    assert len(rows) == 1
+    assert rows[0]["reason"] == tdebt.REASON_UNDECIDED
+    assert rows[0]["count"] == 2
+
+
+def test_an_older_debt_file_without_reasons_still_reads(tmp_path):
+    """Rows written before the reason field existed were all unregistered.
+    Dropping them would read as "no debt" — silently losing the very signal the
+    file exists to carry."""
+    path = str(tmp_path / "tool-unregistered.json")
+    Path(path).write_text(json.dumps({"unregistered": [
+        {"name": "mcp__old__row", "count": 2, "first_seen": "T1",
+         "last_seen": "T2"}]}), encoding="utf-8")
+    rows = tdebt.load_debt(path)
+    assert [r["reason"] for r in rows] == [tdebt.REASON_UNREGISTERED]
+
+
+def test_an_unknown_reason_is_refused_rather_than_stored(tmp_path):
+    path = str(tmp_path / "d.json")
+    assert tdebt.record_no_record_use(path, "t", reason="whatever") is None
+    assert tdebt.load_debt(path) == []

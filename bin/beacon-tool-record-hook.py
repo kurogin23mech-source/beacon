@@ -148,15 +148,22 @@ def main() -> None:
         plan = tl.record_plan(ledger, tool_name)
         action = plan.get("action")
 
-        if action == "unregistered":
-            # Note the debt and stop. Recording it anyway would make the ledger's
-            # promise untestable in the other direction, and declining to record
-            # is not the same as declining to NOTICE (SPEC 方針6).
-            debt.record_unregistered(debt.debt_path(beacon_dir), tool_name,
-                                     at=_now())
+        # Two of the three non-recording outcomes are DEBTS and must leave a
+        # trace of the USE; the third is an answer and must stay silent
+        # (SPEC 受入条件2 / 方針6):
+        #   unregistered → nobody declared this tool,
+        #   undecided    → a row exists but its record sink is unjudged. Listing
+        #                  the unjudged ROW was never enough — the question only
+        #                  becomes a loss when the tool is actually used, and
+        #                  that is what was invisible until now.
+        #   declined     → a decision was made. Noting it would turn a settled
+        #                  answer into permanent noise.
+        if action in ("unregistered", "undecided"):
+            debt.record_no_record_use(debt.debt_path(beacon_dir), tool_name,
+                                      reason=action, at=_now())
             return
         if action != "record":
-            return  # declined (an answer) / undecided (a debt the ledger lists)
+            return  # declined — an answer, deliberately silent
 
         if plan.get("grain") == tl.GRAIN_TURN:
             turn_file = turn.turn_path(beacon_dir)
