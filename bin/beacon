@@ -4940,6 +4940,66 @@ EOF
             BEACON_INCLUDE_TREK="$search_inc_trek" \
             python3 "$COMMANDS_PY" search
         ;;
+    recap)
+        # ms-184 — 「昨日って何やったっけ」/「あのプロジェクト直近どうだっけ」。
+        # 2 動詞に分けるのは SPEC 方針 6 (幅を訊く問いと深さを訊く問いは別物)。
+        ensure_project
+        shift
+        recap_sub="${1:-}"
+        case "$recap_sub" in
+            -h|--help|"")
+                echo "usage:"
+                echo "  beacon recap projects [--since <period>] [--from A --to B] [--limit N] [--json]"
+                echo "      期間に動いたプロジェクトだけを返す (動いていないものは返らない)。"
+                echo "  beacon recap targets  [--project <id>] [--since <period>] [--from A --to B]"
+                echo "                        [--evidence N] [--limit N] [--json]"
+                echo "      1 プロジェクトで進んだ対象と、その証跡。--project で別プロジェクトを"
+                echo "      cwd を変えずに読む。"
+                echo ""
+                echo "  <period>: today | yesterday | this-week | last-week | this-month |"
+                echo "            Nd | Nw | Nh | Nm | YYYY-MM-DD | YYYY-MM-DD..YYYY-MM-DD"
+                echo "            (既定 7d / --since と --from/--to は排他)"
+                exit 0
+                ;;
+            targets|projects) shift ;;
+            *) echo "beacon recap: unknown subcommand '$recap_sub' (expected: projects | targets)" >&2; exit 1 ;;
+        esac
+        recap_project=""; recap_since=""; recap_from=""; recap_to=""
+        recap_evidence=""; recap_limit=""; recap_json=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --project)   recap_project="${2:-}";  shift 2 ;;
+                --since)     recap_since="${2:-}";    shift 2 ;;
+                --from)      recap_from="${2:-}";     shift 2 ;;
+                --to)        recap_to="${2:-}";       shift 2 ;;
+                --evidence)  recap_evidence="${2:-}"; shift 2 ;;
+                --limit)     recap_limit="${2:-}";    shift 2 ;;
+                --json)      recap_json="1";          shift ;;
+                *) _guard_positional "$1" "Usage: beacon recap projects|targets [--since <period>] [--project <id>] [--json]" ;;
+            esac
+        done
+        if [ "$recap_sub" = "targets" ]; then
+            BEACON_RECAP_PROJECT="$recap_project" \
+                BEACON_SINCE="$recap_since" \
+                BEACON_FROM="$recap_from" \
+                BEACON_TO="$recap_to" \
+                BEACON_EVIDENCE="$recap_evidence" \
+                BEACON_LIMIT="$recap_limit" \
+                BEACON_JSON="$recap_json" \
+                python3 "$COMMANDS_PY" recap_targets
+        else
+            if [ -n "$recap_project" ]; then
+                echo "beacon recap projects: --project is not accepted (it already spans every project you own). Use: beacon recap targets --project $recap_project" >&2
+                exit 1
+            fi
+            BEACON_SINCE="$recap_since" \
+                BEACON_FROM="$recap_from" \
+                BEACON_TO="$recap_to" \
+                BEACON_LIMIT="$recap_limit" \
+                BEACON_JSON="$recap_json" \
+                python3 "$COMMANDS_PY" recap_projects
+        fi
+        ;;
     doctor)
         python3 "$COMMANDS_PY" doctor "${@:2}"
         ;;

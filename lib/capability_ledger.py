@@ -1285,6 +1285,11 @@ _NOUN_SCOPE = {
     # ms-170 e-6344 — 盤の閲覧。status と同じく occupation の投影越しに
     # Target を読むだけで、職種固有のコレクションを直読みしない。
     "view": "L2",
+    # ms-184 — 期間内に進捗した対象の導出 (recap projects / recap targets)。
+    # progress_window が occupation.target_collections + target_decomposition の
+    # 宣言越しに Target と その arm を読むだけで、職種固有のコレクション名や
+    # arm 名をコードに持たない。status / view / deliverable と同じ L2。
+    "recap": "L2",
     # deliverable: the produced-value projection of adopted target-classes via the
     # abstraction (occupation.project_deliverables + deliverable_resolve); rule is
     # profession-shared — dev surfaces milestone→機能, sales would surface

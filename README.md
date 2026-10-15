@@ -202,6 +202,8 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon init [--name n] [--objective o] [--storage local\|cloud]` | Initialize `.beacon/` (flags for non-interactive use) / プロジェクト作成 |
 | `beacon status [--json]` | Show project status / ステータス表示 |
 | `beacon view [--port n] [--host addr] [--expose] [--no-open] [--json]` | Open the board in a browser (local by default; `--host`+`--expose` to serve externally) / 盤をブラウザで見る (既定はローカル、外部公開は `--host`+`--expose`) |
+| `beacon recap projects [--since period] [--from a --to b] [--limit n] [--json]` | Which of your projects moved in a period — movers only, derived from the evidence attached in that window / 期間に動いたプロジェクトだけを横断で返す (「昨日って何やったっけ」) |
+| `beacon recap targets [--project id] [--since period] [--from a --to b] [--evidence n] [--limit n] [--json]` | Which Targets of one project progressed, with the evidence; `--project` reads another project without changing directory / 1 プロジェクトで進捗した対象と証跡 (別プロジェクトも cwd 非移動で読める) |
 | `beacon deadline due [--json]` | List due/overdue work items across ALL occupations (dev milestone target_date / task, sales activity — one profession-agnostic query) / 職種横断で期日 到達・超過 の作業を一覧 |
 | `beacon skill install` | Install Claude Code Skills / Skillインストール |
 | `beacon monitor context [--dry-run]` | Run the Stop hook context-usage threshold monitor (debug / 動作確認) |

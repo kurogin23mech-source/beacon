@@ -312,6 +312,7 @@ from cmd_retro import (  # noqa: F401
 )
 # ms-155 e-5602: deliverable family (produced-value projection resolver + list).
 from cmd_deliverable import cmd_deliverable_list  # noqa: F401
+from cmd_recap import cmd_recap_targets, cmd_recap_projects  # noqa: F401  (ms-184)
 # ms-161 e-5902/e-5903: deliverable-changelog curation surface (add/retire/
 # supersede) + derived-map render (map).
 from cmd_deliverable import (  # noqa: F401
@@ -6977,6 +6978,9 @@ def _help_registry():
         {"command": "beacon setup", "flags": [], "description": "First-time setup wizard (auth + hooks + project)"},
         {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
         {"command": "beacon view", "flags": ["--port <n>", "--host <addr>", "--expose", "--no-open", "--json"], "description": "Open the board in a browser (local by default; --host + --expose to serve externally)"},
+        # ms-184 — 期間に動いたものを返す 2 動詞 (幅 / 深さ)。
+        {"command": "beacon recap projects", "flags": ["--since <period>", "--from <date>", "--to <date>", "--limit <n>", "--json"], "description": "期間に動いたプロジェクトだけを横断で返す (動いていないものは返らない; 「昨日って何やったっけ」)"},
+        {"command": "beacon recap targets", "flags": ["--project <id>", "--since <period>", "--from <date>", "--to <date>", "--evidence <n>", "--limit <n>", "--json"], "description": "1 プロジェクトで期間内に進捗した対象と証跡 (--project で別プロジェクトを cwd 非移動で読む)"},
         {"command": "beacon milestone add", "flags": [], "description": "Add a new milestone (interactive)"},
         {"command": "beacon milestone list", "flags": ["--json"], "description": "List milestones"},
         {"command": "beacon milestone start <id>", "flags": ["--no-branch", "--no-assignee"], "description": "Activate milestone + auto-create ms-XX-<slug> branch + self-add as assignee"},
@@ -11643,6 +11647,8 @@ if __name__ == "__main__":
         "skill_install": cmd_skill_install,
         "update": cmd_update,
         "search": cmd_search,
+        "recap_targets": cmd_recap_targets,      # ms-184 e-7015 / e-7020
+        "recap_projects": cmd_recap_projects,    # ms-184 e-7017
         "cycle_status": cmd_cycle_status,
         "project_rename": cmd_project_rename,      # ms-122 e-4033
         "project_archive": cmd_project_archive,
