@@ -2613,6 +2613,27 @@ def record_evidence(data: dict, parent_id: str = "", *, summary: str,
     and NEVER raises for "nothing to record onto" — the caller (a PostToolUse
     interrupt) must not fail a tool call over attribution. A genuinely bad
     explicit id still raises, as everywhere else.
+
+    Boundary with ms-142 e-5308 (ms-180 e-7004 受入条件2 — no double implementation)
+    -------------------------------------------------------------------------------
+    e-5308 ("証跡の書き込み側を manifest 駆動化する") is still open and still
+    DISTINCT, because the two sit at different layers and neither contains the
+    other:
+
+      * THIS function is the canonical neutral ENTRY POINT: "one act happened,
+        record it against whatever Target this profession has". It owns the
+        dispatch — which writer owns the declared arm — and nothing else.
+      * e-5308 is about the INTERNALS of the sales writer this function routes
+        to: ``add_evidence``'s parent resolution
+        (``resolve_communication_target``), its id space (``comm-``), and its
+        vocabulary (``VALID_COMM_DIRECTION``) are still sales concretes. A brand
+        new profession that declares ``evidence_arms`` lights up the READ side
+        (``iter_evidence``) but would still land in those concretes on write.
+
+    So: ``record_evidence`` is the canonical door, and e-5308's work happens
+    BELOW it — when that lands, this function's branch 5 keeps the same contract
+    and simply stops being sales-specific underneath. Do NOT re-implement the
+    dispatch inside ``add_evidence``; route through here instead.
     """
     target_id = (parent_id or "").strip()
     if not target_id:
