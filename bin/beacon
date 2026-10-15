@@ -4943,7 +4943,11 @@ EOF
     recap)
         # ms-184 — 「昨日って何やったっけ」/「あのプロジェクト直近どうだっけ」。
         # 2 動詞に分けるのは SPEC 方針 6 (幅を訊く問いと深さを訊く問いは別物)。
-        ensure_project
+        #
+        # ensure_project は help / 動詞無しを裁いた「後」に置く。先に置くと、
+        # プロジェクト外で `beacon recap` が bash では rc=1 のエラー、python
+        # フロントでは rc=0 の usage になり、同じコマンドが OS で別挙動になる
+        # (AX review PR#803 high)。使い方を知る操作はプロジェクト不要。
         shift
         recap_sub="${1:-}"
         case "$recap_sub" in
@@ -4961,7 +4965,7 @@ EOF
                 echo "            (既定 7d / --since と --from/--to は排他)"
                 exit 0
                 ;;
-            targets|projects) shift ;;
+            targets|projects) ensure_project; shift ;;
             *) echo "beacon recap: unknown subcommand '$recap_sub' (expected: projects | targets)" >&2; exit 1 ;;
         esac
         recap_project=""; recap_since=""; recap_from=""; recap_to=""

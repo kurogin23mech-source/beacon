@@ -43,11 +43,6 @@ from commands_shared import (
     _get_api_client,
 )
 
-#: Why the one-call cross-project query could not be used, when it could not.
-#: A list (not a string) so the reason is set by the helper that observed the
-#: failure and read by the renderer, without either reaching into the other.
-_FALLBACK_REASON: list = []
-
 #: Used when neither --since nor --from/--to is given. A week is the span over
 #: which "what has been moving" is still a useful answer; the resolved window is
 #: always printed so the default is never invisible.
@@ -75,8 +70,28 @@ def _resolve_window() -> tuple:
               "Pass one period, not two.", file=sys.stderr)
         sys.exit(1)
 
-    if from_date or to_date:
-        return from_date, to_date, f"{from_date or '…'}..{to_date or '…'}"
+    # AX review (PR#803, high): one side alone used to be accepted and treated
+    # as unbounded on the other side. Measured: `--to 2026-10-14` with no
+    # --from returned 179 targets / 7625 evidence (the whole project history)
+    # against 27 / 307 for the documented default, with exit code 0 and a
+    # window label of "…..2026-10-14". A caller who bounded a query and got
+    # everything back cannot tell from the output that it happened — the exact
+    # silent-scope-change this milestone exists to remove. An explicit range
+    # now needs both ends; an open-ended period is what --since is for.
+    if bool(from_date) != bool(to_date):
+        missing = "--from" if to_date else "--to"
+        given = "--to" if to_date else "--from"
+        print(f"Error: {given} needs {missing} as well — an explicit range has "
+              f"two ends. For an open-ended period use --since "
+              f"(e.g. --since 7d, --since this-month).", file=sys.stderr)
+        sys.exit(1)
+
+    if from_date and to_date:
+        problem = _dw.validate_range(from_date, to_date)
+        if problem:
+            print(f"Error: {problem}", file=sys.stderr)
+            sys.exit(1)
+        return from_date, to_date, f"{from_date}..{to_date}"
 
     spec = since or DEFAULT_SINCE
     try:
@@ -90,15 +105,30 @@ def _resolve_window() -> tuple:
 
 
 def _int_env(key: str, default: int) -> int:
+    """Read a non-negative count from the env the CLI front sets.
+
+    0 is the documented "no cap" sentinel. A NEGATIVE value used to reach the
+    same `<= 0` branch and therefore meant "all" — the opposite end of the
+    scale from what the flag name says, undocumented, and silent (AX review
+    PR#803: `--evidence -1` returned every row, identically to `--evidence 0`).
+    A sign inversion that reads as success is worse than a rejection, so a
+    negative count is refused and names its own flag.
+    """
     raw = (os.environ.get(key, "") or "").strip()
+    flag = "--" + key.lower().replace("beacon_", "").replace("_", "-")
     if not raw:
         return default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
-        print(f"Error: {key.lower().replace('beacon_', '--')} must be an "
-              f"integer (got {raw!r})", file=sys.stderr)
+        print(f"Error: {flag} must be an integer (got {raw!r})",
+              file=sys.stderr)
         sys.exit(1)
+    if value < 0:
+        print(f"Error: {flag} must be 0 or more (got {value}). "
+              f"0 means no cap.", file=sys.stderr)
+        sys.exit(1)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +203,10 @@ def _read_named_project(project_ref: str) -> tuple:
     client, _config = _get_api_client()
 
     pid = project_ref
+    # No ImportError guard here, unlike the ``store`` import in
+    # _read_current_project: project_ref is a leaf lib module with no optional
+    # dependencies, so it is always importable wherever cmd_recap is
+    # (maintainability review PR#803 flagged the asymmetry as unexplained).
     try:
         import project_ref as _pr   # noqa: PLC0415
         pid = _pr.resolve_project_ref(project_ref,
@@ -294,14 +328,14 @@ def cmd_recap_projects():
         result["projects_scanned"] = scanned
         result["source"] = source
     else:
-        result = _server_recap(lo, hi)
+        result, fallback_reason = _server_recap(lo, hi)
         if result is None:
             rows, scanned, source = _scan_owned_projects(lo, hi)
             result = _pw.aggregate(rows, from_date=lo, to_date=hi)
             result["projects_scanned"] = scanned
             result["source"] = source
-            if _FALLBACK_REASON:
-                result["fallback_reason"] = _FALLBACK_REASON[0]
+            if fallback_reason:
+                result["fallback_reason"] = fallback_reason
     result.setdefault("window", {"from": lo, "to": hi})
     result["window"]["spec"] = label
     if limit > 0:
@@ -314,8 +348,18 @@ def cmd_recap_projects():
     _print_projects(result)
 
 
-def _server_recap(lo: str, hi: str) -> Optional[dict]:
-    """Ask the server for the whole sweep in one call, or ``None`` to fall back.
+def _server_recap(lo: str, hi: str) -> tuple:
+    """Ask the server for the whole sweep in one call.
+
+    Returns ``(result, reason)``: a result dict with an empty reason on
+    success, or ``(None, "<why>")`` when the sweep must be done locally
+    instead. The reason is RETURNED rather than parked in a module-level
+    list, which is how the first version did it — that list was appended to
+    and never cleared, and the renderer read index ``[0]``, so a second call
+    in the same process reported the FIRST call's reason (maintainability
+    review PR#803, reproduced). Returning it removes the process-lifetime
+    state instead of documenting a once-per-process precondition nothing
+    enforces.
 
     SPEC 方針 3: the truth for every project the caller owns already lives in
     one store, so the right shape is one period query there — not a mechanism
@@ -331,23 +375,20 @@ def _server_recap(lo: str, hi: str) -> Optional[dict]:
     except SystemExit:
         raise
     except _REMOTE_ERRORS as exc:
-        _FALLBACK_REASON.append(f"{type(exc).__name__}: {exc}")
-        return None
+        return None, f"{type(exc).__name__}: {exc}"
     try:
         out = client.me_recap(from_date=lo, to_date=hi)
     except _REMOTE_ERRORS as exc:
         # Why it failed matters to the reader: "this server has no such
         # endpoint" and "the server was briefly unreachable" look identical
         # from here, so the reason is carried instead of guessed.
-        _FALLBACK_REASON.append(f"{type(exc).__name__}: {exc}")
-        return None
+        return None, f"{type(exc).__name__}: {exc}"
     if not isinstance(out, dict) or "projects" not in out:
-        _FALLBACK_REASON.append("server returned an unexpected shape")
-        return None
+        return None, "server returned an unexpected shape"
     out.setdefault("source", "server")
     out.setdefault("projects_scanned", 0)
     out.setdefault("unavailable", [])
-    return out
+    return out, ""
 
 
 def _scan_local_only(lo: str, hi: str) -> tuple:

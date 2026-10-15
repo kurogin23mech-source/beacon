@@ -28,7 +28,12 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEST_FILE = "tests/test_progress_window_ms184.py"
+#: Every ms-184 test file the inversions select from. A fix guarded in one
+#: file must still be reachable when the harness runs, so the selection spans
+#: all of them rather than assuming one home.
+TEST_FILES = ("tests/test_progress_window_ms184.py",
+              "tests/test_cmd_recap_ms184.py",
+              "tests/test_recap_entrypath_ms184.py")
 #: Runs the harness itself — excluded or the harness would recurse forever.
 SELF_TEST = "test_inversion_harness_is_wired"
 
@@ -145,6 +150,15 @@ INVERSIONS = [
         ["test_derive_caps_evidence_rows_without_understating_the_count"],
     ),
     (
+        "the arm walk stops recursing (loses nested evidence)",
+        "lib/progress_window.py",
+        "            out.append(item)\n"
+        "            _walk_arms(item, arms, out, task_index, target_id)\n",
+        "            out.append(item)\n",
+        ["test_derive_reaches_evidence_nested_two_levels_deep",
+         "test_derive_reaches_evidence_three_levels_deep"],
+    ),
+    (
         "the cross-project fold drops the caveats of the projects it omits",
         "lib/progress_window.py",
         "        undated_total += int((result.get(\"undated\") or {}).get(\"count\") or 0)\n"
@@ -172,6 +186,50 @@ INVERSIONS = [
         ["test_aggregate_carries_the_caveats_of_projects_it_dropped"],
     ),
     (
+        "a one-sided --from/--to is accepted again (silent all-time window)",
+        "lib/cmd_recap.py",
+        "    if bool(from_date) != bool(to_date):\n",
+        "    if False:\n",
+        ["test_one_sided_explicit_range_is_refused"],
+    ),
+    (
+        "a negative count means 'all' again",
+        "lib/cmd_recap.py",
+        "    if value < 0:\n",
+        "    if False:\n",
+        ["test_negative_count_is_refused_not_read_as_all"],
+    ),
+    (
+        "the fallback reason goes back to process-lifetime state",
+        "lib/cmd_recap.py",
+        "            if fallback_reason:\n"
+        '                result["fallback_reason"] = fallback_reason\n',
+        "",
+        ["test_projects_falls_back_and_carries_the_reason_it_observed",
+         "test_fallback_reason_does_not_leak_between_calls"],
+    ),
+    (
+        "bash checks the project before it answers `recap` with no subcommand",
+        "bin/beacon",
+        "            targets|projects) ensure_project; shift ;;\n",
+        "            targets|projects) shift ;;\n",
+        ["test_both_frontends_agree_on_the_no_project_help_path"],
+    ),
+    (
+        "the Python front stops declaring --project on `projects`",
+        "beacon_cli/dispatch.py",
+        '    p_recap_projects.add_argument("--project", dest="recap_project", default="")\n',
+        "",
+        ["test_both_frontends_refuse_the_misplaced_project_flag"],
+    ),
+    (
+        "the range-order rule is copied back into the CLI boundary",
+        "lib/date_window.py",
+        '    if lo and hi and lo > hi:\n        return f"--from {lo} is after --to {hi}."\n',
+        '    return ""  # noqa\n    if False:\n        return ""\n',
+        ["test_inverted_explicit_range_is_refused"],
+    ),
+    (
         "an unparseable period silently becomes the default window",
         "lib/date_window.py",
         '    raise ValueError(\n'
@@ -191,7 +249,7 @@ def _scratch_tree() -> str:
     reintroduces a data-corrupting bug.
     """
     tmp = tempfile.mkdtemp(prefix="ms184-inversion-")
-    for sub in ("lib", "scripts", "tests"):
+    for sub in ("lib", "scripts", "tests", "bin", "beacon_cli"):
         shutil.copytree(os.path.join(REPO, sub), os.path.join(tmp, sub),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     return tmp
@@ -200,7 +258,7 @@ def _scratch_tree() -> str:
 def _run(tree: str, tests) -> subprocess.CompletedProcess:
     expr = " or ".join(tests)
     return subprocess.run(
-        [sys.executable, "-B", "-m", "pytest", TEST_FILE, "-q",
+        [sys.executable, "-B", "-m", "pytest", *TEST_FILES, "-q",
          "-p", "no:randomly", "-p", "no:cacheprovider",
          "-k", f"({expr}) and not {SELF_TEST}"],
         cwd=tree, capture_output=True, text=True, timeout=600,

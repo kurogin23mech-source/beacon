@@ -49,11 +49,13 @@ import date_window as _dw
 import occupation as _occ
 import work_model as _wm
 
-#: Timestamp fields a record may carry, in the order they are reported. Each is
-#: a distinct moment at which the record moved, so all are candidates and the
-#: newest one inside the window dates the evidence.
-_STAMP_FIELDS = ("done_at", "created_at", "date", "pushed_at", "deployed_at",
-                 "updated_at", "approved_at")
+#: Which stamps count as "this record moved" — the DECLARED movement set
+#: (``date_window.MOVEMENT_STAMPS``), not a list private to this module. Its
+#: sibling ``CREATION_STAMPS`` answers the other period question ("raised in
+#: this window", what ``search`` means); keeping both named in one place is
+#: what makes the difference between them a stated choice instead of an
+#: accident two files apart (maintainability review PR#803).
+_STAMP_FIELDS = _dw.MOVEMENT_STAMPS
 
 #: Entry types that are NOT evidence of the Target moving. ``task`` IS evidence
 #: (raising or finishing a work item is movement), so this set stays tiny and
@@ -70,13 +72,8 @@ EVIDENCE_SOURCES = ("entry", "document", "decision")
 
 
 def _stamps(record: dict) -> list:
-    """Every timestamp ``record`` carries, newest-first ordering not assumed."""
-    out = []
-    for f in _STAMP_FIELDS:
-        v = record.get(f)
-        if isinstance(v, str) and v.strip():
-            out.append(v.strip())
-    return out
+    """Every movement timestamp ``record`` carries (ordering not assumed)."""
+    return _dw.stamps_of(record, _STAMP_FIELDS)
 
 
 def _summary(record: dict) -> str:

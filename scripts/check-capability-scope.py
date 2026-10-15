@@ -334,16 +334,40 @@ def _arm_key(node: ast.AST) -> str:
 _ARM_SCAN_EXCLUDE = {"occupation.py"}
 
 
+#: Calling ANY of these makes a module a Target AGGREGATOR — it has stopped
+#: naming a profession's concrete collection and is walking the declared
+#: registry instead, so a hardcoded ARM name becomes its sole residual
+#: coupling and the arm scan should see it.
+#:
+#: ``iter_target_records`` was the original single signal (PR #629 C1). It was
+#: too narrow: a module that walks ``target_collections`` itself — reading
+#: ``project.get(coll)`` per collection, which is what ``iter_target_records``
+#: does internally — is exactly as much of an aggregator but called nothing on
+#: this list and so fell OUTSIDE the population entirely. ms-184's
+#: ``progress_window`` landed in that gap (it needs per-collection kind + arms,
+#: which the flat iterator does not return, so it walks the registry directly);
+#: the only thing then watching it was one bespoke test covering one narrower
+#: property. A maintainability review (PR#803) named the gap: the population
+#: tracked one function rather than the behaviour that defines membership.
+#: Widening it here fixes every future module in that shape, not just this one.
+_AGGREGATOR_SIGNALS = ("iter_target_records", "target_collections",
+                       "target_decomposition")
+
+
 def _calls_iter_target_records(tree: ast.AST) -> bool:
-    """True when ``tree`` contains a CALL to ``iter_target_records`` (bare or
-    ``occupation.iter_target_records``). AST-based, so a comment/docstring mention
-    (e.g. capability_ledger's prose) is NOT a false positive — only a real call
-    makes a module a Target aggregator subject to the arm scan."""
+    """True when ``tree`` CALLS any ``_AGGREGATOR_SIGNALS`` member (bare or
+    attribute form, e.g. ``occupation.target_collections``).
+
+    AST-based, so a comment/docstring mention (e.g. capability_ledger's prose)
+    is NOT a false positive — only a real call makes a module a Target
+    aggregator subject to the arm scan. The name is kept for the callers that
+    read it; the membership rule it implements is now the signal SET above."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             f = node.func
-            if (isinstance(f, ast.Attribute) and f.attr == "iter_target_records") \
-                    or (isinstance(f, ast.Name) and f.id == "iter_target_records"):
+            name = f.attr if isinstance(f, ast.Attribute) else (
+                f.id if isinstance(f, ast.Name) else "")
+            if name in _AGGREGATOR_SIGNALS:
                 return True
     return False
 

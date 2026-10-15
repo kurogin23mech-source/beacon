@@ -71,20 +71,25 @@ def _bash_flags(subverb: str) -> set:
 
 
 def _python_flags(subverb: str) -> set:
-    """Flags the Python front-end's `recap <subverb>` subparser accepts."""
+    """Flags the Python front-end's `recap <subverb>` subparser accepts.
+
+    Collects every ``p_recap_<subverb>.add_argument(...)`` line wherever it
+    appears, rather than scanning a contiguous block from the parser's
+    construction. The block-scanning version broke the moment a comment was
+    inserted between the parser and its first argument — it silently returned
+    an EMPTY flag set, which would have read as "the Python front accepts
+    nothing" and could just as easily have gone the other way and passed
+    vacuously. Matching the uniquely-prefixed variable name has no such
+    ordering assumption.
+    """
     src = _read("beacon_cli/dispatch.py")
-    marker = f'p_recap_{subverb} = recap_sub.add_parser("{subverb}"'
-    assert marker in src, f"no Python subparser for `recap {subverb}`"
-    start = src.index(marker)
-    # the subparser block runs until the next blank-line-separated statement
-    # that is not one of its own add_argument calls
-    tail = src[start:]
-    block = []
-    for line in tail.splitlines()[1:]:
-        if line.strip() and not line.startswith("    p_recap_"):
-            break
-        block.append(line)
-    return set(_FLAG.findall("\n".join(block)))
+    var = f"p_recap_{subverb}"
+    assert f'{var} = recap_sub.add_parser("{subverb}"' in src, \
+        f"no Python subparser for `recap {subverb}`"
+    lines = [ln for ln in src.splitlines()
+             if ln.strip().startswith(f"{var}.add_argument(")]
+    assert lines, f"`recap {subverb}` subparser declares no arguments"
+    return set(_FLAG.findall("\n".join(lines)))
 
 
 @pytest.mark.parametrize("subverb", sorted(EXPECTED_SUBVERBS))
@@ -108,6 +113,70 @@ def test_skill_flags_exist_on_both_frontends(subverb):
         f"Skill uses `beacon recap {subverb} {missing_python}` but "
         "beacon_cli/dispatch.py does not accept it (= Windows / pipx users "
         "would hit 'unrecognized arguments')")
+
+
+def _recap_arm_code() -> str:
+    """The bash `recap)` arm with comment lines REMOVED.
+
+    The first version of the ordering check searched the raw arm and matched
+    the word `ensure_project` inside the comment that EXPLAINS the ordering —
+    measuring the prose, not the code. That reads as a guard while being
+    satisfiable by a comment anywhere, in any order, which is strictly worse
+    than no check. Comments are stripped so the assertion can only be about
+    what runs.
+    """
+    src = _read("bin/beacon")
+    start = src.index("\n    recap)\n")
+    arm = src[start:src.index("\n    doctor)\n", start)]
+    return "\n".join(ln for ln in arm.splitlines()
+                      if not ln.strip().startswith("#"))
+
+
+def test_both_frontends_refuse_the_misplaced_project_flag(subverb="projects"):
+    """`--project` on the aggregate verb must be refused on BOTH front-ends.
+
+    The first version of this guard checked only the bash arm. The Python
+    parser did not declare `--project` at all, so the same misuse there fell
+    through to argparse's generic "unrecognized arguments" against the
+    TOP-LEVEL banner — losing both the reason it is refused and the redirect to
+    `recap targets --project <id>`. An independent AX review found it; the
+    guard that was supposed to cover this had enumerated one of the two paths
+    and read as if it covered the rule.
+    """
+    bash = _read("bin/beacon")
+    start = bash.index("\n    recap)\n")
+    arm = bash[start:bash.index("\n    doctor)\n", start)]
+    assert "recap projects: --project is not accepted" in arm, \
+        "bash must refuse a --project passed to `recap projects`, not ignore it"
+
+    dispatch = _read("beacon_cli/dispatch.py")
+    assert "--project" in _python_flags("projects"), (
+        "the Python parser must DECLARE --project on `projects` so the handler "
+        "can refuse it with an explanation; omitting it yields a generic "
+        "argparse error with no redirect")
+    assert "recap projects: --project is not accepted" in dispatch, \
+        "the Python front must refuse it with the same message bash gives"
+
+
+def test_both_frontends_agree_on_the_no_project_help_path():
+    """`beacon recap` with no subcommand must not need a Beacon project.
+
+    Learning how to use a command is not a project operation. The bash arm ran
+    `ensure_project` before it looked at help, so OUTSIDE a project the same
+    invocation errored (rc=1) on bash and printed usage (rc=0) on Python — one
+    command, two behaviours, split by OS. Pinned structurally: the bash arm
+    must reach its usage block before `ensure_project`.
+    """
+    arm = _recap_arm_code()
+    usage_at = arm.index('echo "usage:"')
+    ensure_at = arm.index("ensure_project")
+    assert ensure_at > usage_at, (
+        "bin/beacon runs ensure_project before handling help for `recap`, so "
+        "`beacon recap` outside a project errors on bash while the Python "
+        "front prints usage")
+    # ... and it must still gate the verbs that actually read project data.
+    assert "targets|projects) ensure_project" in arm, \
+        "the real verbs must still require a project"
 
 
 def test_recap_projects_refuses_the_flag_that_belongs_to_targets():

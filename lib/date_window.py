@@ -65,6 +65,51 @@ _END_OF_DAY = "~"
 
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# ---------------------------------------------------------------------------
+# Which stamps a period question reads — DECLARED, because there are two
+# legitimate questions and they must not look like one by accident.
+# ---------------------------------------------------------------------------
+#
+# A Beacon record can carry several timestamps, and the field list chosen is
+# what decides WHICH question gets answered:
+#
+# ``CREATION_STAMPS``  — "when did this record come into being". This is what
+#     ``search --from/--to`` means, and has always meant: find the records
+#     RAISED in this period. A task created in May and finished yesterday is
+#     correctly NOT a match for yesterday.
+# ``MOVEMENT_STAMPS``  — "when did anything happen to this record". This is
+#     what ``recap`` means (ms-184): the same task IS yesterday's work,
+#     because it was finished then.
+#
+# Both are right for their own question, and the difference is deliberate.
+# It is declared here, in one place, because the two field lists previously
+# lived as separate inline ``or``-chains in two modules that look like they
+# solve the same problem — a maintainability review (PR#803) reproduced the
+# disagreement and pointed out that a reader has to diff two files to notice
+# it. Naming the sets makes a future change state which question it is
+# changing, rather than silently moving one of them.
+CREATION_STAMPS = ("created_at", "date", "pushed_at")
+
+MOVEMENT_STAMPS = ("done_at", "created_at", "date", "pushed_at",
+                   "deployed_at", "updated_at", "approved_at")
+
+
+def stamps_of(record, fields) -> list:
+    """Every non-empty timestamp ``record`` carries among ``fields``.
+
+    Order follows ``fields``, so a caller that lists its preferred stamp first
+    gets it first. Non-string and blank values are dropped — a record with a
+    malformed stamp is treated as not carrying that one, which keeps the
+    three-valued classification honest instead of raising on bad data.
+    """
+    out = []
+    for f in fields or ():
+        v = record.get(f) if isinstance(record, dict) else None
+        if isinstance(v, str) and v.strip():
+            out.append(v.strip())
+    return out
+
+
 
 def normalize_bound(value: str, *, end: bool) -> str:
     """Return ``value`` widened to a whole-day bound when it is date-only.
@@ -82,6 +127,23 @@ def normalize_bound(value: str, *, end: bool) -> str:
     if end and _DATE_ONLY.match(value):
         return value + _END_OF_DAY
     return value
+
+
+def validate_range(from_date: str, to_date: str) -> str:
+    """Return an error message for an unusable explicit range, else "".
+
+    The ONE place that knows an inverted range is nonsense. ``parse_since``
+    already enforced this for the ``A..B`` spelling; the ``--from`` / ``--to``
+    spelling needs the same rule, and writing the comparison a second time at
+    the CLI boundary is how two copies of a period rule start (a test pinning
+    "no period comparisons outside this module" caught exactly that during
+    ms-184). Returns a message rather than raising so a CLI caller can print
+    it on stderr with its own exit convention.
+    """
+    lo, hi = (from_date or "").strip(), (to_date or "").strip()
+    if lo and hi and lo > hi:
+        return f"--from {lo} is after --to {hi}."
+    return ""
 
 
 def classify(value: str, from_date: str = "", to_date: str = "") -> str:
@@ -237,6 +299,7 @@ def parse_since(spec: str, *, today: Optional[datetime.date] = None) -> Tuple[st
 
 __all__ = [
     "IN_WINDOW", "OUT_OF_WINDOW", "UNDATED", "SINCE_FORMS",
-    "classify", "classify_any", "latest_in_window",
+    "CREATION_STAMPS", "MOVEMENT_STAMPS", "stamps_of",
+    "classify", "classify_any", "latest_in_window", "validate_range",
     "normalize_bound", "parse_since",
 ]

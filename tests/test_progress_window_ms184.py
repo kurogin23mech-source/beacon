@@ -248,6 +248,55 @@ def test_derive_sees_an_operation_whose_arms_are_undeclared():
     assert "op-1" in ids, "the Operation's daily run is evidence it moved"
 
 
+def test_derive_reaches_evidence_nested_two_levels_deep():
+    """``_walk_arms`` recursion is load-bearing — pin it, do not just claim it.
+
+    A dev Milestone's entry tree nests: a PR entry carries its own ``entries``
+    of commits. The module's docstring says the recursion is what reaches
+    them, but no fixture nested anything two levels deep, so DELETING the
+    recursive call left all 35 tests green (an independent maintainability
+    review removed it and measured that). A documented capability with no
+    executable proof is undocumented from the next editor's point of view —
+    and worse than undocumented, because the docstring invites trust.
+    """
+    project = {"project_id": "p", "milestones": [{
+        "id": "ms-1", "title": "m", "status": "in_progress",
+        "created_at": "2026-01-01T00:00:00Z",
+        "entries": [{
+            "id": "e-pr", "type": "pr", "description": "the PR",
+            "created_at": "2026-06-01",              # OUT of window
+            "entries": [{
+                "id": "e-nested", "type": "commit",
+                "description": "commit nested under the PR",
+                "created_at": "2026-10-14",          # IN window
+            }],
+        }],
+    }]}
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1])
+    assert result["target_count"] == 1, \
+        "a commit nested under a PR is still the Target's movement"
+    t = result["targets"][0]
+    assert [e["id"] for e in t["evidence"]] == ["e-nested"], \
+        "the nested commit must be reached; the out-of-window PR must not count"
+
+
+def test_derive_reaches_evidence_three_levels_deep():
+    """Depth is not special-cased at 2 — the walk recurses, it does not unroll."""
+    project = {"project_id": "p", "milestones": [{
+        "id": "ms-1", "title": "m", "status": "in_progress",
+        "created_at": "2026-01-01T00:00:00Z",
+        "entries": [{"id": "l1", "type": "pr", "description": "l1",
+                     "created_at": "2026-06-01",
+                     "entries": [{"id": "l2", "type": "save", "description": "l2",
+                                  "created_at": "2026-06-02",
+                                  "entries": [{"id": "l3", "type": "commit",
+                                               "description": "deep",
+                                               "created_at": "2026-10-14"}]}]}],
+    }]}
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1])
+    assert [e["id"] for e in result["targets"][0]["evidence"]] == ["l3"]
+
+
 def test_derive_is_occupation_generic_without_naming_an_arm():
     """A sales Opportunity's activity is evidence by the same rule.
 

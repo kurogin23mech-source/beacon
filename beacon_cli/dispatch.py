@@ -1368,6 +1368,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_recap_targets.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     p_recap_projects = recap_sub.add_parser("projects", add_help=False)
+    # `projects` already spans every project you own, so --project there means
+    # the caller wanted DEPTH and typed the BREADTH verb. It is DECLARED here
+    # (not omitted) so the handler can refuse it with the same explanation +
+    # redirect the bash front gives; omitting it made argparse answer with a
+    # generic "unrecognized arguments" against the top-level banner, losing
+    # both the reason and the way out (AX review PR#803 high — and the bash
+    # side's own guard test covered only bash, which is how this drifted).
+    p_recap_projects.add_argument("--project", dest="recap_project", default="")
     p_recap_projects.add_argument("--since", dest="recap_since", default="")
     p_recap_projects.add_argument("--from", dest="from_date", default="")
     p_recap_projects.add_argument("--to", dest="to_date", default="")
@@ -4427,6 +4435,12 @@ def _handle_recap(root: Path, args: argparse.Namespace) -> int:
         env["BEACON_EVIDENCE"] = getattr(args, "recap_evidence", "") or ""
         return _run_commands_py(root, "recap_targets", env)
     if recap_cmd == "projects":
+        stray = getattr(args, "recap_project", "") or ""
+        if stray:
+            print("beacon recap projects: --project is not accepted (it "
+                  "already spans every project you own). Use: beacon recap "
+                  f"targets --project {stray}", file=sys.stderr)
+            return 1
         return _run_commands_py(root, "recap_projects", env)
     print(_RECAP_USAGE)
     return 1

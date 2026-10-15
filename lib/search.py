@@ -499,8 +499,15 @@ def _entity_matches(entity_type: str, e: dict, *, q_lower: str,
         if e.get("owner", "") != owner and (e.get("meta") or {}).get("owner", "") != owner:
             return False
 
-    # date range (ms-184 e-7016: absence is its own verdict, not a match)
-    created_at = e.get("created_at", "") or e.get("date", "") or e.get("pushed_at", "")
+    # date range (ms-184 e-7016: absence is its own verdict, not a match).
+    # This filter answers "RAISED in this period" — it reads the declared
+    # CREATION_STAMPS set, deliberately NOT the movement set `beacon recap`
+    # reads. A task created in May and finished yesterday is not a match for
+    # yesterday HERE and is for recap; both answers are correct for their own
+    # question, and naming the two sets is what keeps that a stated choice
+    # (maintainability review PR#803).
+    stamps = _dw.stamps_of(e, _dw.CREATION_STAMPS)
+    created_at = stamps[0] if stamps else ""
     if not _in_window(created_at, from_date, to_date, entity_type, undated):
         return False
 
