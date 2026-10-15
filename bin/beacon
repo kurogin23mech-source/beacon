@@ -2549,6 +2549,129 @@ EOF
             BEACON_JSON="$_att_json" \
             python3 "$COMMANDS_PY" attention
         ;;
+    tool|tools)
+        # ms-180 e-7000: the declared registry of the tools this project uses.
+        # Beacon holds the DECLARATION (what exists / what it does / where its use
+        # is recorded); it never holds or runs the tool itself (SPEC 方針5), so
+        # there is deliberately no `tool run`.
+        ensure_project
+        case "${2:-}" in
+            add)
+                shift 2
+                _tool_name=""
+                _tool_purpose=""
+                _tool_effect=""
+                _tool_record=""
+                _tool_no_record=""
+                _tool_grain=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --purpose)    _tool_purpose="${2:-}"; shift 2 ;;
+                        --effect)     _tool_effect="${2:-}"; shift 2 ;;
+                        --record)     _tool_record="${2:-}"; shift 2 ;;
+                        --no-record)  _tool_no_record="${2:-}"; shift 2 ;;
+                        --grain)      _tool_grain="${2:-}"; shift 2 ;;
+                        --json)       _tool_json="1"; shift ;;
+                        -?*)          _guard_flag "$1" ;;
+                        *)            [[ -z "$_tool_name" ]] && _tool_name="$1"; shift ;;
+                    esac
+                done
+                BEACON_TOOL_NAME="$_tool_name" BEACON_TOOL_PURPOSE="$_tool_purpose" \
+                    BEACON_TOOL_EFFECT="$_tool_effect" BEACON_TOOL_RECORD="$_tool_record" \
+                    BEACON_TOOL_NO_RECORD="$_tool_no_record" BEACON_TOOL_GRAIN="$_tool_grain" \
+                    BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_add
+                ;;
+            list|ls)
+                shift 2
+                _tool_json=""
+                _tool_undecided=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --undecided) _tool_undecided="1"; shift ;;
+                        --json)      _tool_json="1"; shift ;;
+                        -?*)         _guard_flag "$1" ;;
+                        *)           _guard_positional "$1" "Usage: beacon tool list [--undecided] [--json]" ;;
+                    esac
+                done
+                BEACON_TOOL_UNDECIDED="$_tool_undecided" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_list
+                ;;
+            show)
+                shift 2
+                _tool_name=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _tool_json="1"; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      [[ -z "$_tool_name" ]] && _tool_name="$1"; shift ;;
+                    esac
+                done
+                BEACON_TOOL_NAME="$_tool_name" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_show
+                ;;
+            remove|rm)
+                shift 2
+                _tool_name=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _tool_json="1"; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      [[ -z "$_tool_name" ]] && _tool_name="$1"; shift ;;
+                    esac
+                done
+                BEACON_TOOL_NAME="$_tool_name" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_remove
+                ;;
+            lookup)
+                shift 2
+                _tool_query=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _tool_json="1"; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      [[ -z "$_tool_query" ]] && _tool_query="$1"; shift ;;
+                    esac
+                done
+                BEACON_TOOL_QUERY="$_tool_query" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_lookup
+                ;;
+            unregistered)
+                shift 2
+                _tool_json=""
+                _tool_clear=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --clear) _tool_clear="1"; shift ;;
+                        --json)  _tool_json="1"; shift ;;
+                        -?*)     _guard_flag "$1" ;;
+                        *)       _guard_positional "$1" "Usage: beacon tool unregistered [--clear] [--json]" ;;
+                    esac
+                done
+                BEACON_TOOL_CLEAR="$_tool_clear" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_unregistered
+                ;;
+            *)
+                echo "Usage: beacon tool add <道具名> --purpose \"<何のために使うか>\" --effect <read-only|state-change|outward>"
+                echo "                        [--record <save|evidence> [--grain <each|turn>] | --no-record \"<記録しない理由>\"] [--json]"
+                echo "                        (--record / --no-record を省くと記録先は『未判断』として載る = 黙って『記録しない』にはならない)"
+                echo "       beacon tool list [--undecided] [--json]        (--undecided は記録先が未判断の道具だけ)"
+                echo "       beacon tool show <道具名> [--json]"
+                echo "       beacon tool remove <道具名> [--json]"
+                echo "       beacon tool lookup \"<用途>\" [--json]            (用途から使うべき道具を引く; ms-180 e-7006)"
+                echo "       beacon tool unregistered [--clear] [--json]    (台帳に無いまま使われた道具 = 記録が残らなかった分; ms-180 e-7002)"
+                echo ""
+                echo "  真値は .beacon/tools.json (ローカル)。全ツール呼び出しで引かれる経路なので読み取りは"
+                echo "  ネットワークを伴わず、クラウドへは一方向ミラー (doc: tool-ledger) として同期する。"
+                echo "  Bash / Write / Edit / WebFetch / Task は read-only として登録できない (ms-169 の承認ゲートが"
+                echo "  この判定に依っているため)。厳しくする方向の宣言は可能。"
+                ;;
+        esac
+        ;;
     decision)
         # ms-154 e-5594: record an AI decision to the unified decision arm.
         ensure_project

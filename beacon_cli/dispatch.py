@@ -1295,6 +1295,22 @@ def build_parser() -> argparse.ArgumentParser:
                         action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
+    # ---- tool (ms-180 e-7000: 道具台帳 — 宣言の登録と読み口) ----
+    p_tool = sub.add_parser("tool", aliases=["tools"],
+                            help="Declare / read the project's tool ledger",
+                            add_help=False)
+    p_tool.add_argument("tool_cmd", nargs="?", default="")  # add|list|show|remove|lookup|unregistered
+    p_tool.add_argument("name", nargs="?", default="")      # 道具名 or lookup の用途
+    p_tool.add_argument("--purpose", default="")
+    p_tool.add_argument("--effect", default="")
+    p_tool.add_argument("--record", dest="record", default="")
+    p_tool.add_argument("--no-record", dest="no_record", default="")
+    p_tool.add_argument("--grain", default="")
+    p_tool.add_argument("--undecided", action="store_true")
+    p_tool.add_argument("--clear", action="store_true")
+    p_tool.add_argument("--json", action="store_true")
+    p_tool.add_argument("--help", "-h", action="store_true", dest="show_help")
+
     # ---- decision (ms-154 e-5594: log-time decision backstop の記録口) ----
     p_decision = sub.add_parser("decision", help="Record an AI decision to the decision arm",
                                 add_help=False)
@@ -4255,6 +4271,62 @@ _DECISION_USAGE = (
 )
 
 
+_TOOL_USAGE = (
+    "Usage: beacon tool add <道具名> --purpose \"<何のために使うか>\" --effect <read-only|state-change|outward>\n"
+    "                        [--record <save|evidence> [--grain <each|turn>] | --no-record \"<記録しない理由>\"] [--json]\n"
+    "                        (--record / --no-record を省くと記録先は『未判断』として載る\n"
+    "                         = 黙って『記録しない』にはならない)\n"
+    "       beacon tool list [--undecided] [--json]\n"
+    "       beacon tool show <道具名> [--json]\n"
+    "       beacon tool remove <道具名> [--json]\n"
+    "       beacon tool lookup \"<用途>\" [--json]          (用途から道具を引く; ms-180 e-7006)\n"
+    "       beacon tool unregistered [--clear] [--json]  (台帳に無いまま使われた道具; ms-180 e-7002)\n"
+    "  真値は .beacon/tools.json (ローカル)。読み取りはネットワークを伴わず、クラウドへは\n"
+    "  一方向ミラー (doc: tool-ledger) として同期する。Bash / Write / Edit / WebFetch / Task は\n"
+    "  read-only として登録できない (ms-169 の承認ゲートがこの判定に依っているため)。"
+)
+
+
+def _handle_tool(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help:
+        print(_TOOL_USAGE)
+        return 0
+    if (rc := _ensure_project()) is not None:
+        return rc
+    json_flag = "1" if args.json else ""
+    subc = args.tool_cmd
+    if subc == "add":
+        return _run_commands_py(root, "tool_add", {
+            "BEACON_TOOL_NAME": args.name or "",
+            "BEACON_TOOL_PURPOSE": args.purpose or "",
+            "BEACON_TOOL_EFFECT": args.effect or "",
+            "BEACON_TOOL_RECORD": args.record or "",
+            "BEACON_TOOL_NO_RECORD": args.no_record or "",
+            "BEACON_TOOL_GRAIN": args.grain or "",
+            "BEACON_JSON": json_flag,
+        })
+    if subc in ("list", "ls"):
+        return _run_commands_py(root, "tool_list", {
+            "BEACON_TOOL_UNDECIDED": "1" if args.undecided else "",
+            "BEACON_JSON": json_flag,
+        })
+    if subc == "show":
+        return _run_commands_py(root, "tool_show", {
+            "BEACON_TOOL_NAME": args.name or "", "BEACON_JSON": json_flag})
+    if subc in ("remove", "rm"):
+        return _run_commands_py(root, "tool_remove", {
+            "BEACON_TOOL_NAME": args.name or "", "BEACON_JSON": json_flag})
+    if subc == "lookup":
+        return _run_commands_py(root, "tool_lookup", {
+            "BEACON_TOOL_QUERY": args.name or "", "BEACON_JSON": json_flag})
+    if subc == "unregistered":
+        return _run_commands_py(root, "tool_unregistered", {
+            "BEACON_TOOL_CLEAR": "1" if args.clear else "",
+            "BEACON_JSON": json_flag})
+    print(_TOOL_USAGE)
+    return 1
+
+
 def _handle_decision(root: Path, args: argparse.Namespace) -> int:
     if args.show_help:
         print(_DECISION_USAGE)
@@ -6514,6 +6586,8 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "doc": _handle_doc,
     "document": _handle_doc,
     "note": _handle_note,
+    "tool": _handle_tool,  # ms-180 e-7000
+    "tools": _handle_tool,  # alias, mirrors bash `tool|tools)`
     "decision": _handle_decision,  # ms-154 e-5594
     "trigger": _handle_trigger,
     "search": _handle_search,

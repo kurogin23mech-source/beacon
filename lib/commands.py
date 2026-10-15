@@ -312,6 +312,9 @@ from cmd_retro import (  # noqa: F401
 )
 # ms-155 e-5602: deliverable family (produced-value projection resolver + list).
 from cmd_deliverable import cmd_deliverable_list  # noqa: F401
+from cmd_tool import (cmd_tool_add, cmd_tool_list, cmd_tool_show,  # noqa: F401  (ms-180 e-7000/e-7002/e-7006)
+                      cmd_tool_remove, cmd_tool_lookup,
+                      cmd_tool_unregistered)
 # ms-161 e-5902/e-5903: deliverable-changelog curation surface (add/retire/
 # supersede) + derived-map render (map).
 from cmd_deliverable import (  # noqa: F401
@@ -11704,6 +11707,12 @@ if __name__ == "__main__":
         "note_clear": cmd_note_clear,
         "note_restore": cmd_note_restore,
         "note_purge_probes": cmd_note_purge_probes,
+        "tool_add": cmd_tool_add,                   # ms-180 e-7000
+        "tool_list": cmd_tool_list,                 # ms-180 e-7000
+        "tool_show": cmd_tool_show,                 # ms-180 e-7000
+        "tool_remove": cmd_tool_remove,             # ms-180 e-7000
+        "tool_lookup": cmd_tool_lookup,             # ms-180 e-7006
+        "tool_unregistered": cmd_tool_unregistered,  # ms-180 e-7002
         "decision_record": cmd_decision_record,
         "decision_list": cmd_decision_list,
         "decision_derive": cmd_decision_derive,

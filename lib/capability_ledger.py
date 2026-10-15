@@ -1264,6 +1264,14 @@ _NOUN_SCOPE = {
     # 管理。全職種共通の認証基盤 (auth / operation / run と同じ L1 infra)。
     "machine": "L1",
     "stop": "L1", "trek": "L1", "trigger": "L1",
+    # ms-180 e-7000 — 道具台帳 (the declared registry of tools a project uses).
+    # L1: the ledger declares 道具 (Skills / MCP tools / CLI verbs) and is identical
+    # for every profession — it does not touch a Target at all (no phase, no
+    # completion, no deliverable), which is exactly why 方針8 rejected making it a
+    # target. It reads no profession concrete; its readers are the two tool-call
+    # interrupts, which are profession-agnostic too. Same tier as note / session /
+    # doctor (universal instance infrastructure).
+    "tool": "L1",
     # ms-134 e-5061: former L0 verbs promoted to L1. These are instance-universal
     # tooling (health check / self-update / project scaffold / skill install /
     # data migration / local reset) — identical for every profession & project,
