@@ -450,22 +450,39 @@ case "${1:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
                         --pr)                   _need_flag_value "$#" "$1"; _rd_pr="$2";      shift 2 ;;
+                        # ms-166 e-6918: PR を作らない作業 (branch でレビューした /
+                        # target の完了節目) にも実施を記録できるようにする。兄弟の
+                        # `review skip` は最初から --pr / --target の両対応だったのに
+                        # done だけ --pr しか無く、PR を作る前にレビューを走らせると
+                        # **関門を外す経路が存在しなかった**。
+                        --target)               _need_flag_value "$#" "$1"; _rd_target="$2";  shift 2 ;;
                         # ms-166 e-6971: どのリポジトリの PR 番号に対する実施か。
                         # 関門を外す記録がどの差分のものか辿れるようにするため。
                         --repo)                 _need_flag_value "$#" "$1"; _rd_repo="$2";    shift 2 ;;
                         --adjudication-summary) _need_flag_value "$#" "$1"; _rd_summary="$2"; shift 2 ;;
                         --adjudications)        _need_flag_value "$#" "$1"; _rd_adj="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
-                        *)      shift ;;
+                        # ms-166 e-6918: 位置引数を黙って捨てない。done だけ
+                        # `*) shift ;;` で捨てており `beacon review done ms-166` が
+                        # 無言で何もしなかった (既出の e-6762 と同じ型)。
+                        #
+                        # 専用の `_guard_no_positional` を使う。最初は
+                        # `_guard_positional` を「非 flag でも使えるよう」広げたが、
+                        # **その用途の helper は既に在った** (しかもその関数の
+                        # コメントに「以前 _guard_positional を兼用しようとして
+                        # 4 箇所を壊した」経緯が書いてある)。独立 AX レビュー medium。
+                        # 文面も Usage を手で再掲せず --help へ誘導する
+                        # (= 文法の写しを 3 箇所に増やさない)。
+                        *)      _guard_no_positional "review done" "$1" ;;
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rd_type" BEACON_PR_NUMBER="$_rd_pr" \
-                    BEACON_PR_REPO="$_rd_repo" \
+                    BEACON_PR_REPO="$_rd_repo" BEACON_TARGET_ID="$_rd_target" \
                     BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
                     python3 "$COMMANDS_PY" review_done ;;
@@ -488,9 +505,20 @@ case "${1:-}" in
                     BEACON_PR_REPO="$_rs_repo" \
                     BEACON_TARGET_ID="$_rs_target" BEACON_REASON="$_rs_reason" \
                     BEACON_JSON="$_rs_json" python3 "$COMMANDS_PY" review_skip ;;
-            *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> [--repo <owner/name>] | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力。--repo は PR 番号の属するリポジトリ、省略時は cwd; ms-166 e-6971)" >&2
-                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--repo <owner/name>] [--adjudication-summary <text>] [--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,\"rationale\":..}]']  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--adjudication-summary/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
-                      echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
+            *)
+                      # ms-166 e-6918 (独立保守性レビュー high): **文法を手で
+                      # 再掲しない**。ここに done / skip / context の文法の第 3 の
+                      # 写しが在り、done の行には --target も (--pr | --target) の
+                      # 排他表記も無かった (すぐ下の skip の行だけ正しく、兄弟
+                      # 同士で食い違っていた)。しかもこの文言は不正な sub-verb を
+                      # 打ったときだけ出るので目視でも気づきにくく、help drift の
+                      # 機械ガード (curated な REQUIRED_FLAG_PARITY) にも review
+                      # family は入っていない。
+                      #
+                      # `beacon review --help` と **同じ renderer** を呼ぶ
+                      # (= help registry が唯一の文法の源)。
+                      echo "Error: 知らない review の sub-verb です: ${2:-(空)}" >&2
+                      BEACON_HELP_QUERY="review" python3 "$COMMANDS_PY" help_render >&2 || true
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac
