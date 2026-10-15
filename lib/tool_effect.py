@@ -125,10 +125,43 @@ def _skill_name(tool_input) -> str:
     return ""
 
 
-def classify_tool(tool_name: str, tool_input: object = None) -> str:
+def _declared_effect(ledger, name: str) -> str:
+    """Translate a ledger row's 作用 into this module's two-value answer, or ""
+    when the ledger has no usable answer (ms-180 e-7003).
+
+    The ledger is passed IN, never read from disk here: this module stays pure, and
+    the caller (the PreToolUse gate) owns the one local file read.
+
+    Safety: the translation is delegated to ``tool_ledger.effect_of``, which returns
+    ``None`` both for an unregistered tool and for a row that tries to declare a
+    PINNED built-in read-only — so a declaration can never demote ``Bash`` /
+    ``Write`` / ``WebFetch`` / ``Task`` and friends. Any exception also yields "",
+    which routes the call to the fail-closed heuristic below.
+    """
+    if ledger is None:
+        return ""
+    try:
+        import tool_ledger
+        declared = tool_ledger.effect_of(ledger, name)
+    except Exception:
+        return ""
+    if declared == tool_ledger.EFFECT_READ_ONLY:
+        return READ_ONLY
+    if declared in (tool_ledger.EFFECT_STATE_CHANGE, tool_ledger.EFFECT_OUTWARD):
+        return SIDE_EFFECT
+    return ""
+
+
+def classify_tool(tool_name: str, tool_input: object = None,
+                  ledger: object = None) -> str:
     """Return ``READ_ONLY`` or ``SIDE_EFFECT`` for one tool invocation.
 
     Resolution order:
+      0. the DECLARED effect from the tool ledger, when a ``ledger`` is supplied
+         and it has a usable row (ms-180 e-7003). A declaration beats a guess —
+         that is the whole point of the ledger — but it can only ever REPLACE a
+         guess: ``tool_ledger.effect_of`` refuses to return ``read-only`` for the
+         built-ins the ms-169 approval gate depends on, so no row can soften them.
       1. Skill tool → classify the *invoked skill* by its verb tokens
          (``beacon-dm-send`` → send → side-effect). A Skill with no resolvable
          name is default-deny.
@@ -138,11 +171,19 @@ def classify_tool(tool_name: str, tool_input: object = None) -> str:
          (get/list/search/…) pass, unknown MCP verb default-denies.
       4. Any other name → verb heuristic (covers generic / future tools).
 
+    Steps 1-4 are UNCHANGED and remain the answer whenever the ledger is absent or
+    silent, so an unregistered tool keeps the old fail-closed behaviour exactly
+    (ms-180 受入条件6: 台帳に無い道具は従来どおり安全側).
+
     Fail-closed everywhere: an empty / non-string name is a side effect.
     """
     if not isinstance(tool_name, str) or not tool_name.strip():
         return SIDE_EFFECT
     name = tool_name.strip()
+
+    declared = _declared_effect(ledger, name)
+    if declared:
+        return declared
 
     if name == "Skill":
         skill = _skill_name(tool_input)
@@ -162,9 +203,13 @@ def classify_tool(tool_name: str, tool_input: object = None) -> str:
     return _classify_by_verb(name)
 
 
-def is_side_effect(tool_name: str, tool_input: object = None) -> bool:
-    """True when the call changes state or sends outward (= a gate target)."""
-    return classify_tool(tool_name, tool_input) == SIDE_EFFECT
+def is_side_effect(tool_name: str, tool_input: object = None,
+                   ledger: object = None) -> bool:
+    """True when the call changes state or sends outward (= a gate target).
+
+    ``ledger`` is optional and defaults to None, so every existing caller keeps
+    the pure-heuristic behaviour until it chooses to pass one."""
+    return classify_tool(tool_name, tool_input, ledger) == SIDE_EFFECT
 
 
 __all__ = [

@@ -77,6 +77,12 @@ import json
 import os
 from typing import Optional
 
+# One-way dependency: this module imports the pure classifier, and the classifier
+# takes a ledger as a PARAMETER (it performs no I/O and imports nothing from here).
+# That keeps the pair acyclic while letting the pinned-tool set be derived from the
+# classifier's own table instead of copied.
+import tool_effect as _tool_effect
+
 # ---------------------------------------------------------------------------
 # Vocabulary. Each set is closed and validated — an unknown value is refused at
 # write time rather than stored and reinterpreted later by whoever reads it.
@@ -141,15 +147,21 @@ class ToolLedgerError(ValueError):
 #
 # Hardening in the other direction is always allowed: a declaration may mark a
 # tool MORE dangerous than the heuristic guessed.
+# The NAMES are DERIVED from ``tool_effect.BUILTIN_SIDE_EFFECT`` rather than
+# re-listed here. Re-listing them would make the pin a hand-maintained copy of
+# another module's table: add one tool there and the ledger would quietly become
+# able to demote it, with every test still green. Deriving makes the pin extend
+# itself, and ``tests/test_tool_effect_ledger_ms180`` asserts the two sets are
+# equal so the derivation cannot be replaced by a copy without going red.
+#
+# Only the ``outward`` flavour needs naming: ``WebFetch`` reaches an ARBITRARY url,
+# so it is an exfiltration channel and not merely a local mutation. Everything else
+# in that table changes local state.
+_PINNED_OUTWARD = frozenset({"WebFetch"})
+
 NON_SOFTENABLE_EFFECT = {
-    "Write": EFFECT_STATE_CHANGE,
-    "Edit": EFFECT_STATE_CHANGE,
-    "MultiEdit": EFFECT_STATE_CHANGE,
-    "NotebookEdit": EFFECT_STATE_CHANGE,
-    "Bash": EFFECT_STATE_CHANGE,
-    "WebFetch": EFFECT_OUTWARD,
-    "Task": EFFECT_STATE_CHANGE,
-    "Agent": EFFECT_STATE_CHANGE,
+    name: (EFFECT_OUTWARD if name in _PINNED_OUTWARD else EFFECT_STATE_CHANGE)
+    for name in _tool_effect.BUILTIN_SIDE_EFFECT
 }
 
 

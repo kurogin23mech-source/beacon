@@ -160,10 +160,11 @@ def main() -> None:
     if event and event != "PreToolUse":
         return
 
-    libs = hb.import_lib("untrusted_turn", "tool_effect")
+    libs = hb.import_lib("untrusted_turn", "tool_effect", "tool_ledger")
     if libs is None:
         return  # fail-safe: can't classify → no opinion
     ut, te = libs["untrusted_turn"], libs["tool_effect"]
+    tl = libs["tool_ledger"]
 
     try:
         cwd = Path(hook_input.get("cwd") or ".")
@@ -173,9 +174,37 @@ def main() -> None:
         session_key = ut.resolve_session_key(root, hook_input)
         tool_name = hook_input.get("tool_name") or ""
         tool_input = hook_input.get("tool_input")
+        # ms-180 e-7003: ask the DECLARED registry what this tool does, instead of
+        # guessing from its name. The ledger's truth is a local file, so this read
+        # adds no network round trip to a path that runs on every tool call — the
+        # reason 方針8 put the truth on disk in the first place.
+        #
+        # Safety is carried by ``tool_ledger.effect_of``, not by this call site: it
+        # refuses to answer ``read-only`` for the built-ins this gate protects
+        # (Bash / Write / Edit / WebFetch / Task …), so a ledger row — including a
+        # hand-edited one — can tighten the classification but never loosen it. An
+        # unreadable ledger loads as EMPTY, which means "no declarations" and leaves
+        # the original fail-closed heuristic in charge.
+        ledger = tl.load_ledger(tl.ledger_path(root))
+        # ms-180 e-7002: a tool nobody declared is noted as debt the moment it is
+        # used, so "not in the ledger ⇒ its use is not recorded" never becomes a
+        # silent hole (SPEC 方針6). Noting it must not interfere with the call, so
+        # the helper swallows its own failures and this stays best-effort.
+        if tl.lookup(ledger, tool_name) is None and tool_name:
+            try:
+                debt = hb.import_lib("tool_usage_debt")
+                if debt is not None:
+                    import datetime
+                    mod = debt["tool_usage_debt"]
+                    mod.record_unregistered(
+                        mod.debt_path(str(root / ".beacon")), str(tool_name),
+                        at=datetime.datetime.now(
+                            datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:
+                pass
         state = ut.is_armed(root, session_key)
         if state:
-            if not te.is_side_effect(tool_name, tool_input):
+            if not te.is_side_effect(tool_name, tool_input, ledger):
                 return  # read-only call → passes even in an untrusted turn
             # Stamp that the gate actually asked, BEFORE emitting — the vet hook
             # requires this marker, so a side-effect that ran without a real ask
@@ -191,7 +220,8 @@ def main() -> None:
         # one (present-but-unreadable → we can't prove not-armed). For a corrupt
         # file, tilt a side-effect toward human confirmation instead of silently
         # passing; read-only calls still pass (no over-gating).
-        if ut.state_file_health(root) == "corrupt" and te.is_side_effect(tool_name, tool_input):
+        if ut.state_file_health(root) == "corrupt" \
+                and te.is_side_effect(tool_name, tool_input, ledger):
             _emit_ask(_build_corrupt_reason(str(tool_name)))
     except Exception:
         # Never brick the harness on a gate bug — fail safe (tool proceeds).
