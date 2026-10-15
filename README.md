@@ -436,7 +436,7 @@ generated mirror doc (`tool-ledger`).
 | `beacon tool show <name> [--json]` | Show one tool's declaration |
 | `beacon tool remove <name> [--json]` | Withdraw a registration |
 | `beacon tool lookup "<用途>" [--json]` | Find the tool for a purpose / 用途から道具を引く (正典化の材料; 使用は強制しない) |
-| `beacon tool used <name> [--summary "<1 回分>"]` | Record one use as evidence, profession-neutrally (dev → the milestone's arm, sales → the opportunity's). Normally called by the PostToolUse interrupt, not by hand |
+| `beacon tool used <name> [--summary "<1 回分>"] [--record <save\|evidence>]` | Record one use as evidence, profession-neutrally (dev → the milestone's arm, sales → the opportunity's). Normally called by the PostToolUse interrupt, not by hand |
 | `beacon tool unregistered [--clear] [--json]` | Uses that left NO record, split by reason: `[台帳に無い]` → register it, `[記録先が未判断]` → close the open question. A `--no-record` tool never appears (that is a decision, not a debt) |
 
 Omitting both `--record` and `--no-record` registers the tool with its record sink

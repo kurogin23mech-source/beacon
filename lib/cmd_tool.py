@@ -349,7 +349,7 @@ def cmd_tool_used():
 
     This is the writer the ``PostToolUse`` interrupt calls. The JUDGMENT (record
     or not, and at what grain) is made once, by ``tool_ledger.record_plan``, in
-    the hook — this verb carries it out. ``--recorder`` is how the hook passes the
+    the hook — this verb carries it out. ``--record`` is how the hook passes the
     already-resolved decision; omitted, this verb consults the ledger itself, so a
     human or AI can run it by hand and get the same routing (one judgment
     function, two entry points, never two policies).
@@ -361,7 +361,11 @@ def cmd_tool_used():
     """
     name = os.environ.get("BEACON_TOOL_NAME", "").strip()
     summary = os.environ.get("BEACON_TOOL_SUMMARY", "").strip()
-    recorder = os.environ.get("BEACON_TOOL_RECORDER", "").strip()
+    # Same env var name as `tool add`'s --record: the flag is spelled --record on
+    # BOTH subcommands now. It used to be --record on `add` and --recorder on
+    # `used` — one concept, two spellings, inside one verb family, which is the
+    # transfer mistake AX principle 1 names (independent review of PR #802).
+    recorder = os.environ.get("BEACON_TOOL_RECORD", "").strip()
     target = os.environ.get("BEACON_TOOL_TARGET", "").strip()
     url = os.environ.get("BEACON_TOOL_URL", "").strip()
     force = os.environ.get("BEACON_TOOL_NO_LEDGER_CHECK", "") == "1"
@@ -399,12 +403,23 @@ def cmd_tool_used():
                                  ensure_ascii=False))
             else:
                 print(f"記録しませんでした: {msg}", file=sys.stderr)
-            sys.exit(0)
+            # The exit code must AGREE with the body. An earlier version always
+            # exited 0, so a caller checking only ``$?`` — the cheapest and most
+            # common automation signal — read "recorded: false" as success
+            # (independent AX review of PR #802, high).
+            #
+            # Which outcomes are failures is not arbitrary: ``declined`` is an
+            # ANSWER (someone decided not to record this tool), so nothing went
+            # wrong and 0 is correct. ``unregistered`` / ``undecided`` are DEBTS —
+            # the use went unrecorded because a question is unanswered — so they
+            # exit non-zero. Same three-way distinction the record sink already
+            # makes, now visible at the process boundary too.
+            sys.exit(0 if plan["action"] == "skip" else 1)
         else:
             recorder = tl.RECORDER_EVIDENCE
 
     if recorder not in tl.RECORDERS:
-        print(f"Error: --recorder は {list(tl.RECORDERS)} のいずれかです "
+        print(f"Error: --record は {list(tl.RECORDERS)} のいずれかです "
               f"(指定: {recorder!r})", file=sys.stderr)
         sys.exit(1)
 
@@ -451,9 +466,16 @@ def _record_via_save(name, text, target, url):
     import occupation
     from commands_shared import load_project, save_project
     data = load_project()
+    # ``tool=name`` is the POINT of the structured field (ms-180 e-7004): the
+    # question 「何でやったか」 has to be answerable by a query, not by
+    # substring-matching prose. An earlier version of this function passed only
+    # the ``[tool: …]`` suffix, so every ``save``-recorded use was invisible to a
+    # ``meta.tool`` query while the ``evidence`` sibling was fine — found by the
+    # independent AX review of PR #802. The lesson: verifying that every WRITER
+    # accepts the field is not the same as verifying every CALLER passes it.
     result = occupation.record_target_entry(
-        data, target, description=f"{text} [tool: {name}]", source="auto",
-        date=_now_iso(), url=url)
+        data, target, description=text, source="auto",
+        date=_now_iso(), url=url, tool=name)
     if result.get("recorded"):
         save_project(data, op={"op": "tool_used", "tool": name,
                                "target": result.get("target", "")})

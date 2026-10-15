@@ -1303,11 +1303,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_tool.add_argument("name", nargs="?", default="")      # 道具名 or lookup の用途
     p_tool.add_argument("--purpose", default="")
     p_tool.add_argument("--effect", default="")
+    # --record is the sink flag for BOTH `tool add` and `tool used`: one concept,
+    # one spelling inside one verb family (it used to be --record on `add` and
+    # --recorder on `used`, which is the flag-transfer mistake AX principle 1
+    # names). One declaration serves both because every `tool` flag lives on this
+    # single shared parser — which is also why _TOOL_SUBCOMMAND_FLAGS below has to
+    # reject a flag belonging to a sibling subcommand.
     p_tool.add_argument("--record", dest="record", default="")
     p_tool.add_argument("--no-record", dest="no_record", default="")
     p_tool.add_argument("--grain", default="")
     p_tool.add_argument("--summary", default="")
-    p_tool.add_argument("--recorder", default="")
     p_tool.add_argument("--target", default="")
     p_tool.add_argument("--url", default="")
     p_tool.add_argument("--no-ledger-check", dest="no_ledger_check",
@@ -4286,7 +4291,7 @@ _TOOL_USAGE = (
     "       beacon tool show <道具名> [--json]\n"
     "       beacon tool remove <道具名> [--json]\n"
     "       beacon tool lookup \"<用途>\" [--json]          (用途から道具を引く; ms-180 e-7006)\n"
-    "       beacon tool used <道具名> [--summary \"<1 回分>\"] [--recorder <save|evidence>]\n"
+    "       beacon tool used <道具名> [--summary \"<1 回分>\"] [--record <save|evidence>]\n"
     "                        [--target <id>] [--url <url>] [--no-ledger-check] [--json]\n"
     "                        (利用 1 回を証跡として記録する職種中立の口; ms-180 e-7004)\n"
     "       beacon tool unregistered [--clear] [--json]  (台帳に無いまま使われた道具; ms-180 e-7002)\n"
@@ -4294,6 +4299,46 @@ _TOOL_USAGE = (
     "  一方向ミラー (doc: tool-ledger) として同期する。Bash / Write / Edit / WebFetch / Task は\n"
     "  read-only として登録できない (ms-169 の承認ゲートがこの判定に依っているため)。"
 )
+
+
+# Which flags each `tool` subcommand actually accepts (ms-180, AX review of PR
+# #802, high). Every `tool` flag is declared on ONE shared argparse parser, so
+# argparse alone accepts a flag that belongs to a SIBLING subcommand and the
+# handler then silently ignores it — e.g. `tool add --record evidence` was fine
+# but `tool add --recorder evidence` (the spelling the OTHER subcommand used)
+# registered the tool as record-sink *undecided* while exiting 0, whereas the
+# bash frontend rejected it. The two frontends must agree on what is an error,
+# so the allowed set is checked explicitly here, mirroring bash's per-subcommand
+# case blocks. `--json` / `--help` are universal and omitted.
+_TOOL_SUBCOMMAND_FLAGS = {
+    "add": {"purpose", "effect", "record", "grain", "no_record"},
+    "list": {"undecided"},
+    "ls": {"undecided"},
+    "show": set(),
+    "remove": set(),
+    "rm": set(),
+    "lookup": set(),
+    "used": {"summary", "record", "target", "url", "no_ledger_check"},
+    "unregistered": {"clear"},
+}
+
+#: argparse dest -> the flag spelling to name in the error message.
+_TOOL_FLAG_SPELLING = {
+    "purpose": "--purpose", "effect": "--effect", "record": "--record",
+    "grain": "--grain", "no_record": "--no-record", "undecided": "--undecided",
+    "clear": "--clear", "summary": "--summary", "target": "--target",
+    "url": "--url", "no_ledger_check": "--no-ledger-check",
+}
+
+
+def _tool_flags_given(args: argparse.Namespace) -> set:
+    """The flag dests the caller actually supplied (non-empty / true)."""
+    given = set()
+    for dest in _TOOL_FLAG_SPELLING:
+        value = getattr(args, dest, None)
+        if value not in (None, "", False):
+            given.add(dest)
+    return given
 
 
 def _handle_tool(root: Path, args: argparse.Namespace) -> int:
@@ -4304,6 +4349,15 @@ def _handle_tool(root: Path, args: argparse.Namespace) -> int:
         return rc
     json_flag = "1" if args.json else ""
     subc = args.tool_cmd
+    allowed = _TOOL_SUBCOMMAND_FLAGS.get(subc)
+    if allowed is not None:
+        stray = sorted(_tool_flags_given(args) - allowed)
+        if stray:
+            names = ", ".join(_TOOL_FLAG_SPELLING[d] for d in stray)
+            print(f"Error: {names} は 'beacon tool {subc}' では使えません。",
+                  file=sys.stderr)
+            print(_TOOL_USAGE, file=sys.stderr)
+            return 2
     if subc == "add":
         return _run_commands_py(root, "tool_add", {
             "BEACON_TOOL_NAME": args.name or "",
@@ -4332,7 +4386,7 @@ def _handle_tool(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "tool_used", {
             "BEACON_TOOL_NAME": args.name or "",
             "BEACON_TOOL_SUMMARY": args.summary or "",
-            "BEACON_TOOL_RECORDER": args.recorder or "",
+            "BEACON_TOOL_RECORD": args.record or "",
             "BEACON_TOOL_TARGET": args.target or "",
             "BEACON_TOOL_URL": args.url or "",
             "BEACON_TOOL_NO_LEDGER_CHECK": "1" if args.no_ledger_check else "",

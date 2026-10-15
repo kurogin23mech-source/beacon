@@ -102,7 +102,7 @@ def _record(root: Path, tool_name: str, recorder: str, summary: str,
     if cmd is None:
         return
     argv = cmd + ["tool", "used", tool_name, "--summary", summary,
-                  "--recorder", recorder, "--json"]
+                  "--record", recorder, "--json"]
     if url:
         argv += ["--url", url]
     try:

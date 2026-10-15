@@ -7119,7 +7119,7 @@ def _help_registry():
         {"command": "beacon tool show <道具名>", "flags": ["--json"], "description": "道具 1 件の宣言を表示"},
         {"command": "beacon tool remove <道具名>", "flags": ["--json"], "description": "道具の登録を取り下げる"},
         {"command": "beacon tool lookup <用途>", "flags": ["--json"], "description": "用途から使うべき道具を引く (ms-180 e-7006)。同じ業務に 2 つの流儀が混在していないかを読み手が判断する材料で、使用は強制しない"},
-        {"command": "beacon tool used <道具名>", "flags": ["--summary <1 回分>", "--recorder <save|evidence>", "--target <id>", "--url <url>", "--no-ledger-check", "--json"], "description": "道具の利用 1 回を証跡として記録する職種中立の口 (ms-180 e-7004)。開発は MS の、営業は商談の宣言済み証跡アームに書く。通常は PostToolUse 割り込みが自動で呼ぶので手で打つ必要はない"},
+        {"command": "beacon tool used <道具名>", "flags": ["--summary <1 回分>", "--record <save|evidence>", "--target <id>", "--url <url>", "--no-ledger-check", "--json"], "description": "道具の利用 1 回を証跡として記録する職種中立の口 (ms-180 e-7004)。開発は MS の、営業は商談の宣言済み証跡アームに書く。通常は PostToolUse 割り込みが自動で呼ぶので手で打つ必要はない"},
         {"command": "beacon tool unregistered", "flags": ["--clear", "--json"], "description": "使ったのに記録が残らなかった道具を一覧 (ms-180 e-7002)。理由別: [台帳に無い] は登録して閉じ、[記録先が未判断] は --record / --no-record で閉じる。『記録しない』と決めた道具は出ない (決着済みなので)"},
         {"command": "beacon doc add <title>", "flags": ["--scope <core|spec|memo>", "--ms <id>", "--content <text>", "--stdin", "--force"], "description": "Add a document (title is positional, NOT --title; refuses a same title+scope duplicate unless --force; ms-166 e-6044)"},
         {"command": "beacon doc list", "flags": ["--json", "--scope <scope>", "--ms <id>"], "description": "List documents"},
