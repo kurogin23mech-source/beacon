@@ -59,7 +59,7 @@ class TestLedger:
     def test_records_and_reads_back(self, ledger_in_tmp):
         assert cs.record_review_done_across_worktrees("ax", "796") == \
             cs.RECORDED_SHARED
-        assert cs._read_review_done_ledger() == {"796": ["ax"]}
+        assert cs._read_review_done_ledger() == {(cs.REF_KIND_PR, "796"): ["ax"]}
 
     def test_is_idempotent(self, ledger_in_tmp):
         """同じ (PR, 種別) を 2 回足しても増えない。
@@ -69,18 +69,19 @@ class TestLedger:
         """
         cs.record_review_done_across_worktrees("ax", "796")
         cs.record_review_done_across_worktrees("ax", "796")
-        assert cs._read_review_done_ledger()["796"] == ["ax"]
+        assert cs._read_review_done_ledger()[(cs.REF_KIND_PR, "796")] == ["ax"]
 
     def test_accumulates_multiple_types_per_pr(self, ledger_in_tmp):
         cs.record_review_done_across_worktrees("ax", "796")
         cs.record_review_done_across_worktrees("maintainability", "796")
-        assert sorted(cs._read_review_done_ledger()["796"]) == [
+        assert sorted(cs._read_review_done_ledger()[(cs.REF_KIND_PR, "796")]) == [
             "ax", "maintainability"]
 
     def test_separates_prs(self, ledger_in_tmp):
         cs.record_review_done_across_worktrees("ax", "796")
         cs.record_review_done_across_worktrees("ax", "797")
-        assert set(cs._read_review_done_ledger()) == {"796", "797"}
+        assert set(cs._read_review_done_ledger()) == {
+            (cs.REF_KIND_PR, "796"), (cs.REF_KIND_PR, "797")}
 
     def test_lives_in_the_shared_dir_not_the_cwd(self, ledger_in_tmp):
         """置き場が cwd ではなく共有ディレクトリであること。
@@ -108,7 +109,7 @@ class TestLedger:
         cs.record_review_done_across_worktrees("ax", "796")
         (ledger_in_tmp["ledger"] / "pr-900-broken.json").write_text(
             "not json at all", encoding="utf-8")
-        assert cs._read_review_done_ledger() == {"796": ["ax"]}
+        assert cs._read_review_done_ledger() == {(cs.REF_KIND_PR, "796"): ["ax"]}
 
     def test_wrong_shape_file_is_ignored(self, ledger_in_tmp):
         ledger_in_tmp["ledger"].mkdir(parents=True, exist_ok=True)
@@ -120,7 +121,7 @@ class TestLedger:
         cs.record_review_done_across_worktrees("ax", "796")
         cs.record_review_done_across_worktrees("ax", "797")
         cs.forget_review_done_across_worktrees("796")
-        assert set(cs._read_review_done_ledger()) == {"797"}
+        assert set(cs._read_review_done_ledger()) == {(cs.REF_KIND_PR, "797")}
 
     def test_forget_is_safe_when_absent(self, ledger_in_tmp):
         cs.forget_review_done_across_worktrees("999")   # 例外にならない
@@ -274,8 +275,8 @@ class TestConcurrentWritesDoNotLoseRecords:
         cs.record_review_done_across_worktrees("ax", "787")
         cs.record_review_done_across_worktrees("maintainability", "500")
         ledger = cs._read_review_done_ledger()
-        assert ledger.get("787") == ["ax"], "先に書いた記録が消えた"
-        assert ledger.get("500") == ["maintainability"]
+        assert ledger.get((cs.REF_KIND_PR, "787")) == ["ax"], "先に書いた記録が消えた"
+        assert ledger.get((cs.REF_KIND_PR, "500")) == ["maintainability"]
 
     def test_many_concurrent_writers_all_survive(self, ledger_in_tmp):
         """本当に並行に走らせて 1 件も落ちないことを測る。"""
@@ -291,7 +292,8 @@ class TestConcurrentWritesDoNotLoseRecords:
             t.join()
         ledger = cs._read_review_done_ledger()
         for rtype, pr in pairs:
-            assert rtype in (ledger.get(pr) or []), f"{pr}/{rtype} が落ちた"
+            assert rtype in (ledger.get((cs.REF_KIND_PR, pr)) or []), (
+                f"{pr}/{rtype} が落ちた")
 
     def test_one_fact_one_file(self, ledger_in_tmp):
         """read-modify-write が構造的に無いこと = 1 事実 1 ファイル。

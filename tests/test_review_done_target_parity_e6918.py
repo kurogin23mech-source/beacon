@@ -532,3 +532,114 @@ def test_the_usage_error_is_rendered_from_the_help_registry(tmp_path):
     assert proc.returncode != 0
     assert line in (proc.stdout + proc.stderr), (
         "Usage エラーが registry の行と一致しない:\n" + proc.stdout + proc.stderr)
+
+
+def test_the_target_call_site_passes_the_target_ref_kind():
+    """**呼び出し元の配線** を固定すること (独立保守性レビュー medium)。
+
+    evidence タグの試験は ``_record_review_adjudication_decision`` を直接
+    ``ref_kind="target"`` 付きで呼ぶので、**呼び出し元がそれを渡すのをやめても
+    緑のまま** だった —— 直したはずの「milestone の採否が pr:ms-9 と記録される」が
+    同じ形で再発しても検出できない。呼び出し側の keyword を構文木で固定する。
+    """
+    import ast as _ast
+    import commands
+    tree = _ast.parse(inspect.getsource(commands._emit_review_done_for_target))
+    calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
+             and (getattr(n.func, "id", None) or getattr(n.func, "attr", ""))
+             == "_record_review_adjudication_decision"]
+    assert len(calls) == 1, f"採否の記録の呼び出しが 1 つでない: {len(calls)}"
+    kw = {k.arg: _ast.unparse(k.value) for k in calls[0].keywords}
+    assert kw.get("ref_kind") == '"target"' or kw.get("ref_kind") == "'target'", (
+        "target の経路が ref_kind='target' を渡していない (既定の 'pr' に戻ると "
+        "milestone の採否が PR 番号のように記録される): " + repr(kw))
+
+
+def test_every_ledger_reader_keys_by_kind():
+    """台帳の読み手 **全員** が (種別, ref) で引くこと。
+
+    dict の形を変えたとき読み手 3 箇所のうち 1 箇所 (PR 側の冪等判定) を直し忘れ、
+    PR 側の冪等性を壊したのを自分の試験が捕まえた。平らな鍵に戻す / 1 箇所だけ
+    直し忘れる、のどちらも構文木で止める。
+    """
+    import ast as _ast
+    import importlib
+    offenders = []
+    for modname in ("commands", "commands_shared"):
+        mod = importlib.import_module(modname)
+        tree = _ast.parse(inspect.getsource(mod))
+        for node in _ast.walk(tree):
+            # `_read_review_done_ledger().get(<key>)` の <key> が Tuple であること
+            if not isinstance(node, _ast.Call):
+                continue
+            if getattr(node.func, "attr", "") != "get":
+                continue
+            inner = getattr(node.func, "value", None)
+            if not (isinstance(inner, _ast.Call)
+                    and (getattr(inner.func, "id", None)
+                         or getattr(inner.func, "attr", ""))
+                    == "_read_review_done_ledger"):
+                continue
+            key = node.args[0] if node.args else None
+            if not isinstance(key, _ast.Tuple):
+                offenders.append(
+                    f"{modname}:{node.lineno}: key="
+                    + (_ast.unparse(key) if key is not None else "(なし)"))
+    assert offenders == [], (
+        "台帳を種別なしの鍵で引いている読み手がある (PR と target が同じ文字列"
+        "空間を共有する): " + repr(offenders))
+
+
+def test_the_unknown_subverb_fallback_renders_from_the_registry(tmp_path):
+    """知らない sub-verb の案内も **registry 由来** であること。
+
+    独立保守性レビュー high: 「文法は registry を単一ソースにした」と言いながら、
+    すぐ隣の `review)` の catch-all に **第 3 の手書きコピー** が残っていた。
+    しかも done の行には ``--target`` も ``(--pr | --target)`` の排他表記も無く、
+    下の skip の行だけ正しいという兄弟間の食い違いになっていた。この文言は不正な
+    sub-verb を打ったときだけ出るので目視でも気づきにくい。
+    """
+    import commands
+    proj = _project(tmp_path)
+    proc = subprocess.run([BEACON, "review", "bogus"],
+                          capture_output=True, text=True, cwd=str(proj))
+    assert proc.returncode != 0, proc.stdout
+    out = proc.stdout + proc.stderr
+    assert "bogus" in out, "何が知らない語か名指ししていない"
+    # registry の done の行 (= 排他表記を含む) がそのまま出ること
+    line = commands._registry_usage_line("review done")
+    head = line.split(" [")[0]          # 旗の列挙より前 = 文法の本体
+    assert head in out, (
+        "catch-all が registry の文法を出していない (手書きの写しが残っている):\n"
+        + out)
+    # bin/beacon に done の文法の手書きが残っていないこと
+    with open(BEACON, encoding="utf-8") as f:
+        src = f.read()
+    handwritten = [ln for ln in src.splitlines()
+                   if "beacon review done --type" in ln and "echo" in ln]
+    assert handwritten == [], (
+        "bin/beacon に review done の文法の手書きが残っている:\n"
+        + "\n".join(handwritten))
+
+
+def test_forgetting_a_pr_does_not_touch_a_target_with_the_same_ref(tmp_path,
+                                                                   monkeypatch):
+    """台帳からの忘却が **種別で絞る** こと。
+
+    独立保守性レビュー low: 鍵を一般化したとき、ここのマッチだけを「両方の種別を
+    走査する」形に広げてしまった —— 名前 (``pr_number``) と docstring は PR 専用を
+    予告しているのに、実装はそれより広い **呼び出し元も試験も無い** 分岐を持つ、
+    という不一致だった。種別を呼び出し側に明示させる形に直した。
+    """
+    import commands_shared as cs
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    monkeypatch.setattr(cs, "_review_done_dir", lambda: (str(ledger), True))
+    for kind in (cs.REF_KIND_PR, cs.REF_KIND_TARGET):
+        (ledger / cs._review_done_marker_name("ax", "9", kind)).write_text(
+            json.dumps({"ref": "9", "ref_kind": kind, "review_type": "ax"}),
+            encoding="utf-8")
+    cs.forget_review_done_across_worktrees("9")          # 既定 = PR
+    left = sorted(p.name for p in ledger.iterdir())
+    assert left == ["target-9-ax.json"], (
+        "PR の忘却が同じ ref を持つ target の記録まで消した: " + repr(left))

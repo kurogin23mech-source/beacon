@@ -3156,7 +3156,7 @@ def _pending_review_types_for_pr(pr_number: str, pr_repo: str = "") -> list:
     # これが無いと、fork で正しく実施したレビューが親から「未実施」に見え、
     # 回復手段が「親で打ち直す (= 判断記録が重複する)」か
     # 「override で飛ばしたことにする (= 記録が嘘になる)」しか無くなる。
-    done = _read_review_done_ledger().get(pr_number) or []
+    done = _read_review_done_ledger().get((REF_KIND_PR, pr_number)) or []
     pr_repo = str(pr_repo or "").strip()
     if pr_repo:
         # ms-166 e-6971: 台帳の記録が **どのリポジトリの** PR に対する実施かを見る。
@@ -3373,7 +3373,16 @@ def _review_done_marker_name(review_type: str, ref: str,
 
 
 def _read_review_done_ledger() -> dict:
-    """``{pr_number: [review_type, ...]}`` を返す。無ければ空 dict。
+    """``{(ref_kind, ref): [review_type, ...]}`` を返す。無ければ空 dict。
+
+    **鍵に種別を含める** (ms-166 e-6918、独立保守性レビュー medium)。平らな
+    ``{ref: [...]}`` にすると PR 番号と target id が同じ文字列空間を共有し、
+    その安全性は「PR 番号は数字のみ / target id は必ず接頭辞付き
+    (``core.next_suffixed_id``)」という **この file からは見えない遠方の規約** に
+    だけ依存する。将来 bare な数字 id を持つ target-class が足されたり、手で
+    ``--target 9`` を通した実験が混ざると、PR#9 の実施記録が target "9" の記録と
+    畳み込まれ、関門が黙って外れる余地ができる。種別を鍵に入れればその余地が
+    構造的に消える。
 
     ディレクトリを走査するだけで、1 つの大きなファイルを読まない (lost update の
     原因だった read-modify-write が無い)。壊れた / 読めないファイルは **その 1 件
@@ -3401,17 +3410,22 @@ def _read_review_done_ledger() -> dict:
             continue
         # ms-166 e-6918: 鍵は ``ref`` (PR 番号 / target id)。旧形式は ``pr`` だけを
         # 持つので後退経路として読む (既存の記録を孤児にしない)。
-        pr = str(rec.get("ref") or rec.get("pr") or "").strip()
+        # ms-166 e-6918: 鍵は ``ref`` (PR 番号 / target id)。旧形式は ``pr`` だけを
+        # 持つので後退経路として読む (既存の記録を孤児にしない)。種別も旧形式には
+        # 無いので、その場合は PR として扱う (旧形式は PR 専用だった)。
+        ref = str(rec.get("ref") or rec.get("pr") or "").strip()
+        kind = str(rec.get("ref_kind") or REF_KIND_PR).strip() or REF_KIND_PR
         rtype = str(rec.get("review_type") or "").strip()
-        if not pr or not rtype:
+        if not ref or not rtype:
             continue
-        types = out.setdefault(pr, [])
+        types = out.setdefault((kind, ref), [])
         if rtype not in types:
             types.append(rtype)
     return out
 
 
-def review_done_provenance(pr_number: str) -> list:
+def review_done_provenance(pr_number: str,
+                           ref_kind: str = REF_KIND_PR) -> list:
     """この PR について台帳が持つ出自の記録を返す (誰が・いつ・どこで記録したか)。
 
     台帳は **ローカルのファイルなので、手で書けば偽装できる**。これは旧機構
@@ -3430,11 +3444,9 @@ def review_done_provenance(pr_number: str) -> list:
         names = sorted(os.listdir(directory))
     except OSError:
         return []
+    prefix = f"{ref_kind}-{pr_number}-"
     for name in names:
-        if not name.endswith(".json"):
-            continue
-        if not any(name.startswith(f"{k}-{pr_number}-")
-                   for k in (REF_KIND_PR, REF_KIND_TARGET)):
+        if not name.endswith(".json") or not name.startswith(prefix):
             continue
         try:
             with open(os.path.join(directory, name), encoding="utf-8") as f:
@@ -3512,11 +3524,20 @@ def record_review_done_across_worktrees(review_type: str, pr_number: str,
     return RECORDED_SHARED if shared else RECORDED_CWD_ONLY
 
 
-def forget_review_done_across_worktrees(pr_number: str) -> None:
-    """PR が解決 (merge / close) したら台帳から落とす。best-effort。
+def forget_review_done_across_worktrees(pr_number: str,
+                                        ref_kind: str = REF_KIND_PR) -> None:
+    """解決 (merge / close) した対象の記録を台帳から落とす。best-effort。
 
     落とさないと台帳が無限に育ち、同じ PR 番号を再利用する別リポジトリで
     誤って「実施済み」と読まれる余地が残る。
+
+    ``ref_kind`` を **呼び出し側に明示させる** (ms-166 e-6918、独立保守性レビュー
+    low)。鍵を一般化したとき、ここのマッチだけを「両方の種別を走査する」形に
+    広げてしまった —— 名前 (``pr_number``) と docstring は PR 専用を予告しているのに、
+    実装はそれより広い **呼び出し元も試験も無い** 分岐を持つ、という不一致だった。
+    次の人が「target の忘却も対応済み」と誤読しうる。
+    いまの呼び出し元は PR 解決時の 1 箇所だけで、target 側の忘却契機はまだ無い
+    (= target の記録は解決時に落ちない。必要になったらここに契機を足す)。
     """
     pr_number = str(pr_number or "").strip()
     if not pr_number:
@@ -3526,9 +3547,9 @@ def forget_review_done_across_worktrees(pr_number: str) -> None:
         names = os.listdir(directory)
     except OSError:
         return
+    prefix = f"{ref_kind}-{pr_number}-"
     for name in names:
-        if not any(name.startswith(f"{k}-{pr_number}-")
-                   for k in (REF_KIND_PR, REF_KIND_TARGET)):
+        if not name.startswith(prefix):
             continue
         try:
             os.remove(os.path.join(directory, name))

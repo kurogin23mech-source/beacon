@@ -487,6 +487,8 @@ from commands_shared import (  # noqa: F401
     _pr_open_reviewed_marker_path,
     RECORDED_CWD_ONLY,
     RECORDED_SHARED,
+    REF_KIND_PR,
+    REF_KIND_TARGET,
     record_review_done_across_worktrees,
     _read_review_done_ledger,
     _fire_review_due_for_pr,
@@ -3899,7 +3901,15 @@ def _emit_review_done_for_target(review_type: str, target_id: str) -> None:
     PR 側と分けてあるのは、PR 側が持つ 2 つの道具 (``beacon-review-gate`` の印は
     PR head の commit に押す / identity はリポジトリ) が target に無いから。
     **作業フォルダ横断の台帳は共用する** —— 鍵を ``<種別>-<ref>`` に一般化したので、
-    fork で打った target のレビューも親から実施済みとして見える。
+    fork で打った target のレビューも **この動詞からは** 実施済みとして見える
+    (= 親で打ち直しても冪等に 0 で終わり、判断記録が二重に増えない)。
+
+    **ここで覆っていない範囲** (独立保守性レビュー medium、過大な名乗りを避ける):
+    ``beacon trigger check`` が出す「レビューしてください」のナッジは、親の cwd の
+    トリガーファイルだけを見ており台帳を差し引かない。つまり fork で実施しても
+    親の一覧には出続ける (= 表示のノイズ。関門そのものは親で ``review done
+    --target`` を打てば外れる)。ナッジ側の差し引きは別の消費者 (cmd_trigger) の
+    話なので、ここでは **覆っていないことを名乗る** に留める。
 
     **順序が要点: 測る → 決める → 書く。** 初版は採否の判断記録と台帳への書き込みを
     分岐より前に置いていたので、**解消すべき義務が無かった呼び出し (--type の
@@ -3924,7 +3934,8 @@ def _emit_review_done_for_target(review_type: str, target_id: str) -> None:
     # 案内していた。本当の原因が破損や存在しない target id のとき、利用者は綴りを
     # 疑って本当の原因に辿り着けない。
     state = _target_review_due_state(target_id, review_type)
-    already = review_type in (_read_review_done_ledger().get(target_id) or [])
+    already = review_type in (
+        _read_review_done_ledger().get((REF_KIND_TARGET, target_id)) or [])
 
     # --- 決める (義務が無い / 既に記録済みなら、何も書かずに理由を言って終える) ---
     if state != "owed":
@@ -4065,8 +4076,12 @@ def cmd_review_done():
     # 「既に台帳に在るか」も **この実行が書く前に** 見る。後で見ると、この実行自身の
     # 記録で必ず真になり、下の「義務が無かったので非 0 で終える」分岐が死ぬ
     # (自分の試験がこれを捕まえた —— _owed_before と同じ「変える前に測る」の話)。
+    # ms-166 e-6918: 台帳の鍵は (種別, ref)。PR 側の読み手もそれに揃える
+    # (dict の形を変えて読み手 3 箇所のうち 1 箇所を直し忘れ、PR 側の冪等性を
+    #  壊したのを自分の試験が捕まえた = 全 caller を列挙する話)。
     _already_recorded = review_type in (
-        _read_review_done_ledger().get(pr_number) or [])
+        _read_review_done_ledger().get(
+            (REF_KIND_PR, pr_number)) or [])
     _clear_review_due_for_pr(review_type, pr_number, pr_repo=pr_repo,
                              repo_confirmed=_repo_confirmed)
     _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()

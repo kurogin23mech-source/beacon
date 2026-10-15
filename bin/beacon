@@ -505,9 +505,20 @@ case "${1:-}" in
                     BEACON_PR_REPO="$_rs_repo" \
                     BEACON_TARGET_ID="$_rs_target" BEACON_REASON="$_rs_reason" \
                     BEACON_JSON="$_rs_json" python3 "$COMMANDS_PY" review_skip ;;
-            *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> [--repo <owner/name>] | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力。--repo は PR 番号の属するリポジトリ、省略時は cwd; ms-166 e-6971)" >&2
-                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--repo <owner/name>] [--adjudication-summary <text>] [--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,\"rationale\":..}]']  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--adjudication-summary/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
-                      echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
+            *)
+                      # ms-166 e-6918 (独立保守性レビュー high): **文法を手で
+                      # 再掲しない**。ここに done / skip / context の文法の第 3 の
+                      # 写しが在り、done の行には --target も (--pr | --target) の
+                      # 排他表記も無かった (すぐ下の skip の行だけ正しく、兄弟
+                      # 同士で食い違っていた)。しかもこの文言は不正な sub-verb を
+                      # 打ったときだけ出るので目視でも気づきにくく、help drift の
+                      # 機械ガード (curated な REQUIRED_FLAG_PARITY) にも review
+                      # family は入っていない。
+                      #
+                      # `beacon review --help` と **同じ renderer** を呼ぶ
+                      # (= help registry が唯一の文法の源)。
+                      echo "Error: 知らない review の sub-verb です: ${2:-(空)}" >&2
+                      BEACON_HELP_QUERY="review" python3 "$COMMANDS_PY" help_render >&2 || true
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac
