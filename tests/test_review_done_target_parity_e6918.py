@@ -76,8 +76,27 @@ def _project(tmp_path, bindings=("philosophy", "attainment"), target="ms-9"):
     return tmp_path
 
 
+def _with_adjudication(args: tuple) -> list:
+    """``review done`` に採否の明示を補う (ms-166 e-6997)。
+
+    e-6997 で ``review done`` は **採否 (--adjudication-summary / --adjudications) か
+    「findings 0 件」の明示 (--no-findings) が無いと関門を開かない** ようになった
+    (旧: 採否を省くと黙って開き、「0 件だった」と「書き忘れた」が記録で区別できなかった)。
+    この module の試験が測っているのは関門と身元の扱いであって採否ではないので、
+    どちらも渡していない呼び出しには ``--no-findings`` を補って **その試験の主題を
+    変えずに** 新しい関門を満たす。採否を明示している呼び出しには触らない。
+    """
+    args = list(args)
+    if not args or args[0] != "done":
+        return args
+    if any(a in ("--no-findings", "--adjudication-summary", "--adjudications")
+           for a in args):
+        return args
+    return args + ["--no-findings"]
+
+
 def _run(proj, *args):
-    return subprocess.run([BEACON, "review", *args],
+    return subprocess.run([BEACON, "review", *_with_adjudication(args)],
                           capture_output=True, text=True, cwd=str(proj))
 
 
@@ -318,9 +337,16 @@ def _registry_flags(sub_verb: str) -> set:
     assert len(rows) == 1, f"registry の {sub_verb} の行が 1 つでない: {len(rows)}"
     # "--pr <n>" → "--pr"。旗の名前だけを語として取り出す。
     out = {f.split()[0] for f in rows[0]["flags"] if f.startswith("--")}
-    # command 欄に埋め込まれた必須旗 (例 "--type <...>") も宣伝に含まれる
-    out |= {t for t in rows[0]["command"].split() if t.startswith("--")}
-    return out
+    # command 欄に埋め込まれた必須旗 (例 "--type <...>") も宣伝に含まれる。
+    #
+    # 文法の括弧を剥がす (ms-166 e-6997): 値を取らない旗が選択肢の末尾に来ると
+    # ``| --no-findings)`` のように **閉じ括弧が旗名に直接くっつく**。剥がさないと
+    # 「help が宣伝しているのにパーサが受けない旗」として偽の赤を出す (実際に出した)。
+    # 値を取る旗は ``--target <ms-XX|op-X>)`` のように括弧が値側に付くので今まで
+    # 露出しなかっただけで、抽出が文法の形に追いついていなかった。
+    out |= {t.strip("()[]|,") for t in rows[0]["command"].split()
+            if t.lstrip("([|").startswith("--")}
+    return {t for t in out if t.startswith("--")}
 
 
 def _case_pattern_flags(block: str) -> set:

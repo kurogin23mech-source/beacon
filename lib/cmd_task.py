@@ -218,57 +218,20 @@ def cmd_task_add():
     print(f"Added {entry_type} [{eid}] to {work_model.target_label(target)}: {description}{from_str}")
 
 
-def _record_task_done_decision(entry_id: str, reason: str) -> None:
-    """ms-154 e-5650 — record a task-done judgment to the decision arm (CLI path).
-
-    The audit gap this closes: ``beacon task done`` mutates the project locally and
-    syncs via a whole-document PUT, so it never touches the server ``done_entry``
-    route where the decision-arm recording lives — the most audit-critical decision
-    (the AI's own done judgment) was recorded for Web-UI dones only, not for the CLI
-    path that /beacon-log and /beacon-task actually drive. We record it here, on the
-    primary path, through the generic decision write口 (POST /api/projects/{id}/decisions).
-
-    Two things are captured *for real* rather than assumed by route (the hollowness
-    the ms-154 philosophy review flagged):
-    - ``decided_by``: read from ``BEACON_DECIDED_BY`` so the caller (Skill) states who
-      actually decided — /beacon-log's autonomous AC-judgment passes ``autonomous-AI``,
-      a human-directed ``beacon task done`` passes ``human-delegated``. Default is the
-      conservative, most audit-critical ``autonomous-AI`` when the caller says nothing.
-    - ``evidence``: read from ``BEACON_DONE_EVIDENCE`` (newline-separated real links —
-      the commit hash /beacon-log knows at log time). Empty is honest: it surfaces a
-      done with no physical backing rather than fabricating a self-reference (e-5650).
-
-    cloud-only (the decision stream is server-side).
-
-    失敗契約の単一真実源は ``commands_shared.best_effort_decision_write``
-    (ms-166 e-6757 — 例外ごとの挙動はそちらの docstring を参照)。``task done`` の
-    フローは絶対に壊さないが、失敗を無言にはしない。最も監査が要る「AI 自身の done
-    判断」が endpoint 障害で記録されなかったとき、旧 ``except BaseException: pass``
-    では気づく手段が無かった。
-    """
-    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
-                                 _get_api_client)
-    with best_effort_decision_write(
-            f"task-done for task={entry_id or '?'}",
-            recovery_hint="the task is already done — do not re-run task done"):
-        if not _is_cloud_mode():
-            return
-        decided_by = os.environ.get("BEACON_DECIDED_BY", "").strip() or "autonomous-AI"
-        evidence = [ln.strip() for ln in
-                    os.environ.get("BEACON_DONE_EVIDENCE", "").splitlines() if ln.strip()]
-        client, config = _get_api_client()
-        project_id = config.get("project_id", "")
-        if not project_id:
-            return
-        payload = {
-            "kind": "task-done",
-            "decision": "done",
-            "rationale": reason or None,
-            "decided_by": decided_by,
-            "evidence": evidence,
-            "related": {"task_id": entry_id},
-        }
-        client.record_decision(project_id, payload)
+# ms-166 e-6997: ``_record_task_done_decision`` was REMOVED from here.
+#
+# それは CLI の handler だけが呼ぶ writer で、同じ状態 (タスクが done) に到達する
+# もう 1 つの経路 — ``beacon pr approve`` の自動完了 (``core.task_done`` を直に呼ぶ) —
+# は判断記録を 1 件も残さなかった。独立 judge の実測: 本番の直近 300 件で task-done は
+# 39 件あるが PR 承認由来は 0 件。**AI が単独で下した done 判断**こそ最も監査が要るのに、
+# そこだけが落ちていた。
+#
+# ms-154 e-5650 が捕まえたかった中身 (帰属を route から推測せず実際に渡す / 根拠は実
+# link だけ / 空 evidence は裏付け無しの監査シグナルとして正直に残す) はそのまま
+# ``core._stage_task_done_decision`` に移した。**全ての経路が通る唯一の場所**に置いた
+# ので、どの入口から閉じても記録が出る。書き込みは保存後の ``decision_outbox.flush``
+# で、保存後の data でそのタスクが本当に done かを述語で確認してから走る。
+# 失敗契約の単一真実源は変わらず ``commands_shared.best_effort_decision_write``。
 
 
 def cmd_task_done():
@@ -321,10 +284,18 @@ def cmd_task_done():
             if progress:
                 print(f"  Progress: {ms.get('progress', 0)}%")
             return
+    # ms-166 e-6997: 判断記録はデータ層の seam (core.task_done → decision_outbox) が
+    # 出すので、この handler は「誰が決めたか / 何を根拠にしたか」を渡すだけ。
+    # 以前はここが別途 POST しており、同じ状態へ到達する PR 承認の自動完了が
+    # 記録を 1 件も残していなかった (= 1 経路だけに置いた記録)。
+    _decided_by = os.environ.get("BEACON_DECIDED_BY", "").strip()
+    _evidence = [ln.strip() for ln in
+                 os.environ.get("BEACON_DONE_EVIDENCE", "").splitlines() if ln.strip()]
     try:
         ms, entry = core.task_done(data, entry_id, date=today, reason=reason,
                                    outcome=outcome, ac_verdicts=ac_verdicts,
-                                   ac_waive=ac_waive)
+                                   ac_waive=ac_waive, decided_by=_decided_by,
+                                   evidence=_evidence)
     except _tg.AcceptanceAdjudicationRequired as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -353,9 +324,6 @@ def cmd_task_done():
         print(f"  Outcome: {outcome}")
     if progress:
         print(f"  Progress: {ms.get('progress', 0)}%")
-    # ms-154 e-5650: record the done judgment on the decision arm (the CLI path
-    # otherwise never reaches the server done route — see helper docstring).
-    _record_task_done_decision(entry_id, reason)
     issue_number = entry.get("meta", {}).get("issue_number")
     if issue_number:
         print(f"  Linked Issue: #{issue_number} — close it with: gh issue close {issue_number}")

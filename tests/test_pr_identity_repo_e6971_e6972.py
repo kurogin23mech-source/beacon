@@ -730,6 +730,10 @@ def test_a_wrong_repo_review_done_does_not_lift_any_other_repos_gate(
     monkeypatch.setenv("BEACON_PR_REPO", "yet-another/repo")
     for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
         monkeypatch.delenv(k, raising=False)
+    # ms-166 e-6997: 採否の明示が無いと関門は開かない。この試験の主題は **身元**
+    # なので「findings 0 件」を明示して、測りたい分岐 (= この repo には義務が無い)
+    # まで到達させる。
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
     # この経路は「この repo には義務が無かった」なので非 0 で終える (medium 修正)。
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         with pytest.raises(SystemExit) as _ei:
@@ -763,6 +767,10 @@ def test_the_right_repos_review_done_does_lift_its_own_gate(
     monkeypatch.setenv("BEACON_PR_REPO", "o/r")
     for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
         monkeypatch.delenv(k, raising=False)
+    # ms-166 e-6997: 採否の明示が無いと関門は開かない。この試験の主題は **身元**
+    # なので「findings 0 件」を明示して、測りたい分岐 (= この repo には義務が無い)
+    # まで到達させる。
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         commands.cmd_review_done()
     with redirect_stderr(io.StringIO()):
@@ -903,8 +911,16 @@ def _run_review_done(tmp_path, monkeypatch, *, pr, repo, triggers_seed):
     monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
     monkeypatch.setenv("BEACON_PR_NUMBER", pr)
     monkeypatch.setenv("BEACON_PR_REPO", repo)
+    # ms-166 e-6997: 採否の明示が無いと関門は開かない (default-deny)。この module が
+    # 測っているのは **身元 (どのリポジトリの PR か)** であって採否ではないので、
+    # 「findings 0 件」を明示して主題を変えずに新しい関門を満たす。
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
     for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
         monkeypatch.delenv(k, raising=False)
+    # ms-166 e-6997: 採否の明示が無いと関門は開かない。この試験の主題は **身元**
+    # なので「findings 0 件」を明示して、測りたい分岐 (= この repo には義務が無い)
+    # まで到達させる。
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
     out, err = io.StringIO(), io.StringIO()
     code = None
     try:
@@ -1201,6 +1217,10 @@ def test_a_never_reviewed_pr_keeps_its_gate_shut(tmp_path, monkeypatch):
     monkeypatch.delenv("BEACON_PR_REPO", raising=False)
     for k in ("BEACON_REVIEW_ADJUDICATION_SUMMARY", "BEACON_REVIEW_ADJUDICATIONS"):
         monkeypatch.delenv(k, raising=False)
+    # ms-166 e-6997: 採否の明示が無いと関門は開かない。この試験の主題は **身元**
+    # なので「findings 0 件」を明示して、測りたい分岐 (= この repo には義務が無い)
+    # まで到達させる。
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         try:
             commands.cmd_review_done()

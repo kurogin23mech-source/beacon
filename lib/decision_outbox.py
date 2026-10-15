@@ -157,8 +157,13 @@ def flush(data: dict) -> int:
 
     written = 0
     for payload in survivors:
-        label = (f"{payload.get('kind')} for "
-                 f"target={(payload.get('related') or {}).get('target_id') or '?'} "
+        # ms-166 e-6997: 失敗の警告に **どの対象の判断か** を載せる。初版は
+        # ``related.target_id`` だけを読んでいたので、task の判断 (= related.task_id)
+        # は `target=?` になり、「どの task の done が記録できなかったか」が分からな
+        # かった (= 復旧できない警告)。related が運ぶ実際の鍵から拾う。
+        _rel = payload.get("related") or {}
+        _ref = next((f"{k}={_rel[k]}" for k in sorted(_rel) if _rel.get(k)), "ref=?")
+        label = (f"{payload.get('kind')} for {_ref} "
                  f"decision={payload.get('decision')}")
         with best_effort_decision_write(
                 label,

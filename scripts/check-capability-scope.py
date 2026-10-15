@@ -1099,10 +1099,18 @@ def find_decision_capture_gaps() -> list:
     gaps = []
     for kind in sorted(cl.DECISION_CAPTURE_PRODUCERS):
         producers = cl.DECISION_CAPTURE_PRODUCERS[kind]
-        if not any(t in wired for t in producers):
+        # ms-166 e-6997: 既定は **全ての producer が配線されていること**。以前は
+        # ``any`` で、独立思想レビューの実測どおり「溶接を 1 つ外しても緑」だった
+        # (= 種別単位の被覆であって経路単位の被覆ではなかった)。本当に排他な行だけ
+        # ``DECISION_CAPTURE_ALTERNATE_PRODUCERS`` に理由付きで挙げ、そこは any。
+        if cl.decision_capture_requires_all(kind):
+            unwired = sorted(t for t in producers if t not in wired)
+        else:
+            unwired = [] if any(t in wired for t in producers) else sorted(producers)
+        if unwired:
             status, advice = cl.classify_decision_capture(kind)
             gaps.append({"kind": kind, "producers": sorted(producers),
-                         "status": status, "advice": advice})
+                         "unwired": unwired, "status": status, "advice": advice})
     return gaps
 
 
@@ -1494,8 +1502,13 @@ def main() -> int:
         print(f"  NEW DECISION-CAPTURE GAP ({len(new_dcap)}) — a judgment-seam decision kind "
               f"produces no decision (配線はあるが silent、ms-166):")
         for g in new_dcap:
-            print(f"    - kind '{g['kind']}' has no wired producer "
-                  f"(expected one of: {', '.join(g['producers'])})")
+            # ms-166 e-6997: どの producer が配線されていないのかを名指しする。
+            # 「one of」のままだと、全数必須の行でも「どれか 1 つ在れば良い」と
+            # 読めてしまい、直す人が残りの経路を塞がない。
+            unwired = g.get("unwired") or sorted(g["producers"])
+            print(f"    - kind '{g['kind']}': 配線されていない producer "
+                  f"{', '.join(unwired)} "
+                  f"(宣言されている producer: {', '.join(sorted(g['producers']))})")
             print(f"      → {g['advice']}")
     # Dormant until KNOWN_DECISION_CAPTURE_GAP is non-empty (empty today — all kinds wired).
     if pending_dcap:
@@ -1524,7 +1537,8 @@ def main() -> int:
               "reaches a profession concrete (no NEW symbol reach / collection coupling / "
               "arm coupling / iterator narrowing), every L2 completion-dimension has a "
               "producer reached by every terminable class (no producer-coverage or "
-              "完遂-seam gap), every judgment-seam decision kind has a wired producer "
+              "完遂-seam gap), EVERY declared producer of every judgment-seam decision "
+              "kind is wired (path-level, not just one-of — ms-166 e-6997) "
               "(no decision-capture gap), and every code path reaching a completion "
               "terminal is accounted for in the台帳 (no unregistered terminal).")
     else:

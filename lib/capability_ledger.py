@@ -1075,7 +1075,12 @@ def classify_completion_seam(cls: str, dimension: str) -> tuple:
 # (cmd_pr._record_review_decision, decision_derive.build_pr_intent_decision,
 # cmd_decision_record). Proof-of-detection lives in tests/test_decision_capture_coverage_ms166.
 DECISION_CAPTURE_PRODUCERS = {
-    "task-done": frozenset({"decision_event_from_task_done"}),
+    # ms-166 e-6997: client 側の seam は **データ層** (core.task_done) に移した。
+    # 以前は CLI の handler だけが書いており、同じ状態 (タスクが done) に到達する
+    # PR 承認の自動完了は記録を 1 件も残さなかった (本番の task-done 39 件に PR 承認
+    # 由来が 0 件 — 独立 judge 実測)。server route 側の builder と **両方** 要る。
+    "task-done": frozenset({"decision_event_from_task_done",
+                            "_stage_task_done_decision"}),
     "completion-verdict": frozenset({"decision_event_from_completion_verdict",
                                      "_record_completion_verdict_decision"}),
     "scope-approval": frozenset({"decision_event_from_scope_approval"}),
@@ -1084,7 +1089,12 @@ DECISION_CAPTURE_PRODUCERS = {
     # halt / resume share one builder (decision_event_from_halt, resumed flag flips kind).
     "halt": frozenset({"decision_event_from_halt"}),
     "resume": frozenset({"decision_event_from_halt"}),
-    "review-adjudication": frozenset({"_record_review_decision"}),
+    # ms-166 e-6997: 採否は 2 つの漏斗から出る。`pr approve/reject` の
+    # `_record_review_decision` と、関門を開ける `review done` の
+    # `_record_review_adjudication_decision`。以前は前者だけが台帳に在り、**後者の
+    # 溶接を外しても checker は緑のまま**だった (独立思想レビュー high)。
+    "review-adjudication": frozenset({"_record_review_decision",
+                                      "_record_review_adjudication_decision"}),
     "log-backstop": frozenset({"cmd_decision_record"}),
     # ms-166 e-6599: 判断 seam は営業の商談ゲート settle (全 4 遷移の唯一の漏斗)。
     "gate-judgement": frozenset({"stage_gate_judgement_decision"}),
@@ -1095,6 +1105,29 @@ DECISION_CAPTURE_PRODUCERS = {
     # Must be listed in DECISION_CAPTURE_DERIVED_KINDS below (the orphan-guard's exception set).
     "pr-intent": frozenset({"build_pr_intent_decision"}),
 }
+
+# ms-166 e-6997 — 「どれか 1 つ配線されていれば良い」kind の明示。
+#
+# 既定は **全ての producer が配線されていること** (``all``)。以前の判定は
+# ``any`` (= 1 箇所でも呼ばれていれば緑) で、独立思想レビューが実測したとおり
+# **溶接を 1 つ外しても checker は緑のまま**だった。種別単位の被覆であって経路単位の
+# 被覆ではなかった、ということ。
+#
+# ただし本当に「代替」な行もある: 同じ判断を書く経路が排他で、どちらか 1 つしか
+# 存在し得ないもの。そういう行だけここに理由付きで挙げる。黙って ``any`` に
+# 倒さない (= 緩い側に倒れる既定を持たない)。
+DECISION_CAPTURE_ALTERNATE_PRODUCERS: dict = {
+    # halt / resume は 1 つの builder が resumed フラグで kind を切り替える。
+    # どちらの行も同じ関数名を指すので all/any の違いは出ないが、意図を明示しておく。
+    "halt": "1 つの builder (decision_event_from_halt) が kind を切り替える",
+    "resume": "同上 (halt と同じ builder)",
+}
+
+
+def decision_capture_requires_all(kind: str) -> bool:
+    """``kind`` の producer を **全て** 配線必須とするか (ms-166 e-6997)。"""
+    return kind not in DECISION_CAPTURE_ALTERNATE_PRODUCERS
+
 
 # Kinds that are producers here but intentionally NOT in decision_event.KNOWN_DECISION_KINDS
 # (= derived from an existing artifact rather than a first-class vocabulary kind). The

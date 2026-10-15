@@ -83,6 +83,9 @@ def test_gate_override_proceeds_with_audit(proj, monkeypatch, capsys):
 def test_review_done_clears_and_unblocks(proj, monkeypatch, capsys):
     _fire(proj, "ax", "482")
     _fire(proj, "maintainability", "482")
+    # ms-166 e-6997: 採否の明示が無いと関門は開かない (default-deny)。この試験の主題は
+    # 「実施を記録すると関門が外れる」ことなので、「findings 0 件」を明示して満たす。
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
     # run the ax review
     monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
     monkeypatch.setenv("BEACON_PR_NUMBER", "482")

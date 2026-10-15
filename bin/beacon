@@ -450,7 +450,7 @@ case "${1:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
@@ -466,6 +466,11 @@ case "${1:-}" in
                         --repo)                 _need_flag_value "$#" "$1"; _rd_repo="$2";    shift 2 ;;
                         --adjudication-summary) _need_flag_value "$#" "$1"; _rd_summary="$2"; shift 2 ;;
                         --adjudications)        _need_flag_value "$#" "$1"; _rd_adj="$2";     shift 2 ;;
+                        # ms-166 e-6997: findings が 0 件だったことの **明示**。
+                        # 以前は採否を省くと黙って関門が開いたので、「0 件だった」と
+                        # 「書き忘れた」が記録上まったく同じだった。省略を許さず、
+                        # 0 件ならそう宣言してもらう (値を取らない旗)。
+                        --no-findings)          _rd_nofind="1";                                shift ;;
                         -?*)    _guard_flag "$1" ;;
                         # ms-166 e-6918: 位置引数を黙って捨てない。done だけ
                         # `*) shift ;;` で捨てており `beacon review done ms-166` が
@@ -485,6 +490,7 @@ case "${1:-}" in
                     BEACON_PR_REPO="$_rd_repo" BEACON_TARGET_ID="$_rd_target" \
                     BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
+                    BEACON_REVIEW_NO_FINDINGS="$_rd_nofind" \
                     python3 "$COMMANDS_PY" review_done ;;
             skip)
                 shift 2

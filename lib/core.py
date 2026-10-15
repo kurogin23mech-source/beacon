@@ -1395,6 +1395,7 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
               outcome: str = "", acknowledge: bool = False,
               ac_verdicts: list = None, ac_waive: str = "",
               ac_flag_names: tuple = (),
+              decided_by: str = "", evidence: list = None,
               author: dict | None = None) -> tuple[dict, dict]:
     """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
     containing milestone first, the entry second (review finding #5: stated
@@ -1444,7 +1445,84 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     author_clean = _clean_author(author)
     if author_clean:
         entry.setdefault("meta", {})["done_by_user"] = author_clean
+    _stage_task_done_decision(entry_id, entry, reason=reason,
+                              ac_verdicts=ac_verdicts, ac_waive=ac_waive,
+                              decided_by=decided_by, evidence=evidence)
     return ms, entry
+
+
+def _stage_task_done_decision(entry_id: str, entry: dict, *, reason: str = "",
+                              ac_verdicts: list = None, ac_waive: str = "",
+                              decided_by: str = "",
+                              evidence: list = None) -> dict:
+    """「このタスクを done にした」という判断を outbox に積む (ms-166 e-6997)。
+
+    **なぜデータ層に置くか。** 以前この記録は CLI の handler
+    (``cmd_task._record_task_done_decision``) だけが書いていた。ところが同じ状態
+    (タスクが done) に到達する経路はもう 1 つあり、``beacon pr approve`` の自動完了は
+    ``core.task_done`` を直に呼ぶので **判断記録を 1 件も残さなかった**。独立 judge の
+    実測: 本番の直近 300 件で task-done は 39 件あるが、PR 承認由来のものは 0 件。
+    「AI が単独で下した done 判断」こそ最も監査が要るのに、そこだけが落ちていた。
+
+    この MS が繰り返し直している型 (= 1 つの入口にだけ関門を置き、同じ状態へ到達する
+    兄弟の経路には置かない) なので、**全ての経路が通る唯一の場所**であるデータ層の
+    seam に移した。これで CLI / PR 承認 / 将来の呼び出し元のどれから閉じても記録が出る。
+
+    書かずに **積むだけ** — 実際の書き込みは ``commands_shared.save_project`` が
+    ``decision_outbox.flush`` で行い、保存後の ``data`` で **そのタスクが本当に done に
+    なっていること**を述語で確認してからになる。途中で例外が出て保存に至らなかった
+    完了は保存 seam を通らないので decision も残らない (= 「判断したことになっているが
+    タスクは閉じていない」記録が構造的に作れない)。
+
+    受入条件の判定 (``ac_verdicts``) と、判定を出さずに通したこと (``ac_waive``) も
+    一緒に載せる。節ごとの判定は「なぜ done と言えるのか」の核心であり、記録に
+    残らなければ後から監査できない。waive は債務として数えられるよう理由ごと残す。
+    """
+    import decision_outbox
+    # ac_verdicts は ``"<節番号>:<met|partial|not-met>[:<根拠>]"`` の **文字列** list
+    # (terminal_gate.ac_verdicts_from_env の形)。最初に書いた版は dict を前提にして
+    # おり、**判定を渡しても記録に 1 件も載らない**形だった (自分の試験が捕まえた)。
+    # 根拠の本文は長いので記録には節番号と判定だけを載せ、本文は task 側の記録に残す。
+    verdict_notes = []
+    for v in (ac_verdicts or []):
+        text = v if isinstance(v, str) else ""
+        if not text.strip():
+            continue
+        parts = text.split(":", 2)
+        idx = parts[0].strip() or "?"
+        verdict = (parts[1].strip() if len(parts) > 1 else "") or "?"
+        verdict_notes.append(f"{idx}:{verdict}")
+    payload = {
+        "kind": "task-done",
+        "decision": "done",
+        "context": (f"task={entry_id or '?'} "
+                    + (f"acceptance={'/'.join(verdict_notes)}" if verdict_notes
+                       else ("acceptance=waived" if ac_waive
+                             else "acceptance=no-criteria"))),
+        "rationale": (reason or None),
+        # 帰属は呼び出し元が知っているなら呼び出し元から、知らないなら actor から
+        # 機械導出する。固定文字列にしない (ms-166 e-6603)。
+        "decided_by": (decided_by or "").strip()
+                      or decision_outbox.decided_by_for_actor(_get_actor()),
+        # 実 link だけ。空は「物理的な裏付けの無い done」という監査シグナルとして
+        # 正しく残す — 自己参照 (task:<自分>) で非空に見せかけない (e-5650)。
+        "evidence": [e for e in (evidence or []) if e],
+        "related": {"task_id": entry_id or None},
+    }
+    if ac_waive:
+        payload["acceptance_waiver"] = ac_waive
+    return decision_outbox.stage(
+        payload, verify=lambda d, _id=entry_id: _task_is_done(d, _id))
+
+
+def _task_is_done(data: dict, entry_id: str) -> bool:
+    """``entry_id`` が保存後の ``data`` で実際に done か (outbox の検証述語)。"""
+    if not entry_id:
+        return False
+    found = find_entry(data, entry_id)
+    if not found:
+        return False
+    return (found[2] or {}).get("status") == "done"
 
 
 def task_update(data: dict, entry_id: str, *,

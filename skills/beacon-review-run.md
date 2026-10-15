@@ -342,9 +342,19 @@ beacon review done --type <ax|maintainability> --pr <n> \
   --adjudications '[{"finding":"<id/要約>","disposition":"accepted|declined|deferred","rationale":"<なぜ>"}]'
 ```
 
-`--verdict` / `--adjudications` は任意: findings がゼロ、または採否をまだ決めていない
-なら省いて gate 解消だけしてよい。**採否を決めたなら必ず載せる** — さもないと「誰が何を
-採用/却下し なぜか」の判断軌跡が落ちる (この採否こそ最も監査が要る AI 判断)。
+**採否の記録は必須** (ms-166 e-6997): 採否 (`--adjudication-summary` /
+`--adjudications`) か、**findings が 0 件だったことの明示** (`--no-findings`) が
+無いと、`beacon review done` は関門を開けずに非 0 で終わる。
+
+```bash
+# findings が 0 件だったとき
+beacon review done --type <ax|maintainability> --pr <n> --no-findings
+```
+
+以前は省略すると黙って関門が開いた。その結果「レビューを走らせたが 0 件だった」と
+「採否を書き忘れた」が記録上まったく同じ (どちらも行ゼロ) で、後から区別できなかった
+—— 独立思想レビューが「溶接は正しい漏斗に在るが中身が空でも通る = お願い依存のまま」
+と指摘した形。いまは 0 件も 1 行残るので、**判断軌跡が落ちる経路が無い**。
 
 これは PR-open で発火した `<type>-review-due` トリガーを消し、`beacon pr
 approve` / `beacon pr merge` の**レビュー未実施ブロックを解消**する。ms-119 e-4060:
