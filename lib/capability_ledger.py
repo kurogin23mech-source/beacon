@@ -1672,6 +1672,14 @@ _SKILL_SCOPE = {
     # "AX/思想/保守性 = 開発固有" is expressed (leader ruling: it belongs at the
     # skill layer, not the review verb which is type-agnostic plumbing).
     "ax-review": "L3", "philosophy-review": "L3", "maintainability-review": "L3",
+    # review (ms-180 e-7005): the PR review Skill CLAUDE.md mandates. L3-dev for
+    # the same reason as the three instruments above — it reviews a PULL REQUEST,
+    # a development artifact, so it is profession-owned rather than shared
+    # plumbing (the profession-neutral review plumbing is beacon-review*, L2).
+    # It was previously absent from the repo entirely (existing only in one
+    # machine's ~/.claude/skills), which is why it had no ledger row.
+    # AI-proposed; confirm the layer at the next propose→confirm pass.
+    "review": "L3",
     # L4 — project-local to the Beacon source repo itself. beacon-scope-classify
     # (ms-134 e-4739) edits THIS ledger (lib/capability_ledger.py); a pip-installed
     # Beacon user has no ledger to maintain, so it is useful only in the Beacon
@@ -1706,6 +1714,7 @@ _SKILL_OWNER = {
     "beacon-push": "dev", "beacon-task": "dev", "beacon-scenario-gen": "dev",
     # code-review instruments (ms-134 e-5061): review CODE = a dev artifact.
     "ax-review": "dev", "philosophy-review": "dev", "maintainability-review": "dev",
+    "review": "dev",  # ms-180 e-7005: reviews a PR = a dev artifact.
 }
 
 # L4 skill -> owning PROJECT id (ms-134 e-4739), the skill-side parallel of
