@@ -145,6 +145,33 @@ INVERSIONS = [
         ["test_derive_caps_evidence_rows_without_understating_the_count"],
     ),
     (
+        "the cross-project fold drops the caveats of the projects it omits",
+        "lib/progress_window.py",
+        "        undated_total += int((result.get(\"undated\") or {}).get(\"count\") or 0)\n"
+        "        for src in result.get(\"sources_unavailable\") or []:\n"
+        "            if src not in missing_sources:\n"
+        "                missing_sources.append(src)\n",
+        "",
+        ["test_aggregate_carries_the_caveats_of_projects_it_dropped"],
+    ),
+    (
+        "the fold accumulates caveats only for the movers it keeps",
+        "lib/progress_window.py",
+        "        undated_total += int((result.get(\"undated\") or {}).get(\"count\") or 0)\n"
+        "        for src in result.get(\"sources_unavailable\") or []:\n"
+        "            if src not in missing_sources:\n"
+        "                missing_sources.append(src)\n"
+        "        if not result.get(\"moved\"):\n"
+        "            continue\n",
+        "        if not result.get(\"moved\"):\n"
+        "            continue\n"
+        "        undated_total += int((result.get(\"undated\") or {}).get(\"count\") or 0)\n"
+        "        for src in result.get(\"sources_unavailable\") or []:\n"
+        "            if src not in missing_sources:\n"
+        "                missing_sources.append(src)\n",
+        ["test_aggregate_carries_the_caveats_of_projects_it_dropped"],
+    ),
+    (
         "an unparseable period silently becomes the default window",
         "lib/date_window.py",
         '    raise ValueError(\n'

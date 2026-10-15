@@ -43,6 +43,11 @@ from commands_shared import (
     _get_api_client,
 )
 
+#: Why the one-call cross-project query could not be used, when it could not.
+#: A list (not a string) so the reason is set by the helper that observed the
+#: failure and read by the renderer, without either reaching into the other.
+_FALLBACK_REASON: list = []
+
 #: Used when neither --since nor --from/--to is given. A week is the span over
 #: which "what has been moving" is still a useful answer; the resolved window is
 #: always printed so the default is never invisible.
@@ -260,8 +265,13 @@ def _print_caveats(result: dict) -> None:
     """
     und = result.get("undated") or {}
     if und.get("count"):
-        kinds = ", ".join(f"{k} {n}" for k, n in sorted(und["by_kind"].items()))
-        print(f"  ※ 日付が無く期間で判定できなかった記録: {und['count']} 件 ({kinds})")
+        # The per-project answer breaks the count down by record kind; the
+        # cross-project fold carries only the total (a 12-project breakdown
+        # would be noise at that altitude).
+        by_kind = und.get("by_kind") or {}
+        detail = (" (" + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items()))
+                  + ")") if by_kind else ""
+        print(f"  ※ 日付が無く期間で判定できなかった記録: {und['count']} 件{detail}")
     missing = result.get("sources_unavailable") or []
     if missing:
         print(f"  ※ 参照できなかった証跡の種類: {', '.join(missing)} "
@@ -290,6 +300,8 @@ def cmd_recap_projects():
             result = _pw.aggregate(rows, from_date=lo, to_date=hi)
             result["projects_scanned"] = scanned
             result["source"] = source
+            if _FALLBACK_REASON:
+                result["fallback_reason"] = _FALLBACK_REASON[0]
     result.setdefault("window", {"from": lo, "to": hi})
     result["window"]["spec"] = label
     if limit > 0:
@@ -318,13 +330,19 @@ def _server_recap(lo: str, hi: str) -> Optional[dict]:
         client, _config = _get_api_client()
     except SystemExit:
         raise
-    except _REMOTE_ERRORS:
+    except _REMOTE_ERRORS as exc:
+        _FALLBACK_REASON.append(f"{type(exc).__name__}: {exc}")
         return None
     try:
         out = client.me_recap(from_date=lo, to_date=hi)
-    except _REMOTE_ERRORS:
+    except _REMOTE_ERRORS as exc:
+        # Why it failed matters to the reader: "this server has no such
+        # endpoint" and "the server was briefly unreachable" look identical
+        # from here, so the reason is carried instead of guessed.
+        _FALLBACK_REASON.append(f"{type(exc).__name__}: {exc}")
         return None
     if not isinstance(out, dict) or "projects" not in out:
+        _FALLBACK_REASON.append("server returned an unexpected shape")
         return None
     out.setdefault("source", "server")
     out.setdefault("projects_scanned", 0)
@@ -398,13 +416,19 @@ def _print_projects(result: dict) -> None:
     scanned = result.get("projects_scanned", 0)
     print(f"{w['from']}..{w['to']} [{w.get('spec', '')}] — "
           f"動いたプロジェクト {result['project_count']} 件 / 調べた {scanned} 件")
+    hidden = result["project_count"] - len(result["projects"])
+    if hidden > 0:
+        print(f"  ※ --limit により {hidden} 件は表示していません "
+              "(件数は動いた全件です)")
     source = result.get("source", "")
     if source == "local":
         print("  ※ local mode: このプロジェクト 1 件しか読めません "
               "(横断には cloud mode が必要)")
     elif source == "cloud":
-        print("  ※ サーバの横断クエリが無いため 1 件ずつ読みました "
-              "(結果は同じ導出、往復回数だけが違います)")
+        why = f" (理由: {result['fallback_reason']})" \
+            if result.get("fallback_reason") else ""
+        print("  ※ サーバの横断クエリを使えなかったので 1 件ずつ読みました"
+              f"{why}。結果は同じ導出で、違うのは往復回数だけです。")
     if not result["projects"]:
         print("  この期間に動いたプロジェクトはありません。")
     for p in result["projects"]:
@@ -422,6 +446,7 @@ def _print_projects(result: dict) -> None:
               "(動いていないのではなく、判定できていません):")
         for b in bad:
             print(f"      - {b['project_id']} {b['name']}: {b['error']}")
+    _print_caveats(result)
     if result["projects"]:
         print("  → 詳細: beacon recap targets --project <id> "
               f"--from {w['from']} --to {w['to']}")

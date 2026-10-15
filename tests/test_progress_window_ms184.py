@@ -368,6 +368,60 @@ def test_aggregate_orders_projects_by_most_recent_movement():
     assert [p["project_id"] for p in out["projects"]] == ["new", "old"]
 
 
+def test_aggregate_carries_the_caveats_of_projects_it_dropped():
+    """A project omitted as a non-mover may only LOOK still.
+
+    If its decision stream was unreadable, "did not move" is a guess. The
+    fold must keep that caveat even though it drops the project, or the
+    breadth answer — the one the headline question hits — silently converts
+    "could not tell" into "nothing happened" (受入条件 8).
+
+    This is the second consumer of the signal ``derive`` emits. Wiring only
+    the first one is the failure shape this milestone exists to remove, and
+    it was the state of this code until self-review caught it.
+    """
+    # A project with NO in-window evidence, whose decision stream was unreadable.
+    blind_still = pw.derive(_dev_project(), from_date=ANCIENT[0],
+                            to_date=ANCIENT[1], documents=[], decisions=None)
+    assert blind_still["moved"] is False
+    assert blind_still["sources_unavailable"] == ["decision"]
+
+    out = pw.aggregate([
+        {"project_id": "p-still", "name": "Still", "result": blind_still},
+    ], from_date=ANCIENT[0], to_date=ANCIENT[1])
+
+    assert out["projects"] == [], "it still must not be listed as a mover"
+    assert out["sources_unavailable"] == ["decision"], (
+        "the dropped project's unread evidence source vanished from the "
+        "cross-project answer")
+    assert out["undated"]["count"] == blind_still["undated"]["count"] > 0, \
+        "the dropped project's unjudgeable records vanished from the total"
+
+
+def test_aggregate_reports_no_caveats_when_everything_was_readable():
+    """The caveat lines must be ABSENT in the clean case.
+
+    A warning that is always present is a warning nobody reads — and this
+    project has the receipts (a notification queue that reached 102 entries,
+    70 of them dead).
+    """
+    clean = pw.derive(_dev_project(), from_date="2026-10-14", to_date="2026-10-14",
+                      documents=[], decisions=[])
+    project = {"project_id": "p", "milestones": [{
+        "id": "ms-1", "title": "m", "status": "todo",
+        "created_at": "2026-01-01T00:00:00Z",
+        "entries": [{"id": "e-1", "type": "commit", "description": "x",
+                     "created_at": "2026-10-14"}]}]}
+    spotless = pw.derive(project, from_date="2026-10-14", to_date="2026-10-14",
+                         documents=[], decisions=[])
+    out = pw.aggregate([
+        {"project_id": "p", "name": "P", "result": spotless},
+    ], from_date="2026-10-14", to_date="2026-10-14")
+    assert out["sources_unavailable"] == []
+    assert out["undated"]["count"] == 0
+    assert clean["sources_unavailable"] == []
+
+
 # ---------------------------------------------------------------------------
 # 受入条件 7 — the period spec never makes a person compute a date
 # ---------------------------------------------------------------------------

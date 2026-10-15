@@ -324,6 +324,8 @@ def aggregate(rows, *, from_date: str = "", to_date: str = "") -> dict:
     """
     moved = []
     unavailable = []
+    undated_total = 0
+    missing_sources: list = []
     for row in rows or []:
         pid = (row.get("project_id") or "").strip()
         name = row.get("name") or pid
@@ -333,6 +335,16 @@ def aggregate(rows, *, from_date: str = "", to_date: str = "") -> dict:
             })
             continue
         result = row.get("result") or {}
+        # Accumulate the caveats BEFORE the mover filter. A project that looks
+        # still may only look that way because a whole evidence source was
+        # unreadable for it — dropping its caveat with the project is how
+        # "could not tell" turns into "did not move" (受入条件 8). This is the
+        # second consumer of the signal derive() emits; wiring only the first
+        # one is the exact gap this MS is about.
+        undated_total += int((result.get("undated") or {}).get("count") or 0)
+        for src in result.get("sources_unavailable") or []:
+            if src not in missing_sources:
+                missing_sources.append(src)
         if not result.get("moved"):
             continue
         moved.append({
@@ -359,6 +371,10 @@ def aggregate(rows, *, from_date: str = "", to_date: str = "") -> dict:
         "projects": moved,
         "project_count": len(moved),
         "unavailable": unavailable,
+        # Same two caveats derive() reports, folded across every project that
+        # was read — including the ones omitted as non-movers.
+        "undated": {"count": undated_total},
+        "sources_unavailable": [s for s in EVIDENCE_SOURCES if s in missing_sources],
     }
 
 
