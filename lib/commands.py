@@ -312,6 +312,9 @@ from cmd_retro import (  # noqa: F401
 )
 # ms-155 e-5602: deliverable family (produced-value projection resolver + list).
 from cmd_deliverable import cmd_deliverable_list  # noqa: F401
+from cmd_tool import (cmd_tool_add, cmd_tool_list, cmd_tool_show,  # noqa: F401  (ms-180 e-7000/e-7002/e-7006)
+                      cmd_tool_remove, cmd_tool_lookup,
+                      cmd_tool_unregistered, cmd_tool_used)
 # ms-161 e-5902/e-5903: deliverable-changelog curation surface (add/retire/
 # supersede) + derived-map render (map).
 from cmd_deliverable import (  # noqa: F401
@@ -7111,6 +7114,13 @@ def _help_registry():
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
         {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
+        {"command": "beacon tool add <道具名>", "flags": ["--purpose <用途>", "--effect <read-only|state-change|outward>", "--record <save|evidence>", "--grain <each|turn>", "--no-record <理由>", "--json"], "description": "道具 (Skill / MCP のツール / CLI の動詞) を台帳に登録する。用途・作用・記録先の宣言 (ms-180 e-7000)。--record / --no-record を省くと記録先は『未判断』として載る (黙って『記録しない』にはならない)。Bash / Write / Edit / WebFetch / Task は read-only として登録できない (ms-169 の承認ゲートがこの判定に依る)"},
+        {"command": "beacon tool list", "flags": ["--undecided", "--json"], "description": "台帳の道具を一覧 (--undecided は記録先が未判断の行だけ)"},
+        {"command": "beacon tool show <道具名>", "flags": ["--json"], "description": "道具 1 件の宣言を表示"},
+        {"command": "beacon tool remove <道具名>", "flags": ["--json"], "description": "道具の登録を取り下げる"},
+        {"command": "beacon tool lookup <用途>", "flags": ["--json"], "description": "用途から使うべき道具を引く (ms-180 e-7006)。同じ業務に 2 つの流儀が混在していないかを読み手が判断する材料で、使用は強制しない"},
+        {"command": "beacon tool used <道具名>", "flags": ["--summary <1 回分>", "--record <save|evidence>", "--target <id>", "--url <url>", "--no-ledger-check", "--json"], "description": "道具の利用 1 回を証跡として記録する職種中立の口 (ms-180 e-7004)。開発は MS の、営業は商談の宣言済み証跡アームに書く。通常は PostToolUse 割り込みが自動で呼ぶので手で打つ必要はない"},
+        {"command": "beacon tool unregistered", "flags": ["--clear", "--json"], "description": "使ったのに記録が残らなかった道具を一覧 (ms-180 e-7002)。理由別: [台帳に無い] は登録して閉じ、[記録先が未判断] は --record / --no-record で閉じる。『記録しない』と決めた道具は出ない (決着済みなので)"},
         {"command": "beacon doc add <title>", "flags": ["--scope <core|spec|memo>", "--ms <id>", "--content <text>", "--stdin", "--force"], "description": "Add a document (title is positional, NOT --title; refuses a same title+scope duplicate unless --force; ms-166 e-6044)"},
         {"command": "beacon doc list", "flags": ["--json", "--scope <scope>", "--ms <id>"], "description": "List documents"},
         {"command": "beacon doc show <doc-id>", "flags": [], "description": "Show document content"},
@@ -11704,6 +11714,13 @@ if __name__ == "__main__":
         "note_clear": cmd_note_clear,
         "note_restore": cmd_note_restore,
         "note_purge_probes": cmd_note_purge_probes,
+        "tool_add": cmd_tool_add,                   # ms-180 e-7000
+        "tool_list": cmd_tool_list,                 # ms-180 e-7000
+        "tool_show": cmd_tool_show,                 # ms-180 e-7000
+        "tool_remove": cmd_tool_remove,             # ms-180 e-7000
+        "tool_lookup": cmd_tool_lookup,             # ms-180 e-7006
+        "tool_unregistered": cmd_tool_unregistered,  # ms-180 e-7002
+        "tool_used": cmd_tool_used,                 # ms-180 e-7004
         "decision_record": cmd_decision_record,
         "decision_list": cmd_decision_list,
         "decision_derive": cmd_decision_derive,

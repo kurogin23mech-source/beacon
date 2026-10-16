@@ -799,7 +799,7 @@ def list_evidence(rec: dict) -> list:
 
 def add_evidence(data: dict, desc: dict, target_id: str, *, summary: str = "",
                  linked_id: str = "", fields: Optional[dict] = None,
-                 actor: str = "", at: str = "") -> dict:
+                 actor: str = "", at: str = "", tool: str = "") -> dict:
     """Append an Evidence record to a target and return it. When ``linked_id``
     names one of the target's WorkItems the evidence is tied to it (mirroring a
     commit closing a task); an unknown ``linked_id`` raises so a typo can't
@@ -827,6 +827,11 @@ def add_evidence(data: dict, desc: dict, target_id: str, *, summary: str = "",
         ev["summary"] = summary
     if actor:
         ev["created_by"] = actor
+    # ms-180 e-7004: the instrument used, stamped like ``actor`` — a first-class
+    # column on the record, NOT a value smuggled through ``fields`` (which is
+    # declared-keys-only by contract and would reject an undeclared ``tool``).
+    if tool:
+        ev["tool"] = tool
     _apply_child_fields(td.evidence_fields(desc), ev, fields or {},
                         what="Evidence", kind=desc.get("kind", ""))
     rec.setdefault(EVIDENCE_KEY, []).append(ev)
