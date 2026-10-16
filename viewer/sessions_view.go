@@ -686,6 +686,11 @@ type SessionFilter struct {
 
 // workingSource は「道具が動いている」の判定を、どの出自が決めたか。
 // 判定だけを返して出自を潰さない (ServerState と State を混ぜない e-6454 の原則)。
+//
+// この値は今のところ **この package の試験でしか読まれていない** (API の JSON にも
+// page.html にも出していない)。出自を画面に出す計画が立ったら ServerStateOrigin と
+// 同じ流儀で SessionOverview に足す。それまでは「出自が既にどこかで見えている」と
+// 読まないこと (#804 独立レビュー AX / 保守性 が両方指摘)。
 type workingSource string
 
 const (
@@ -693,11 +698,44 @@ const (
 	workingFromProcess workingSource = "process"
 	// workingFromServerState はサーバが導出する正典の作業状態。
 	workingFromServerState workingSource = "server_state"
+	// workingFromUnrankedServerState はサーバが正典集合に無い値を話した。
+	// 黙って次点に流さず、ここで止める (下の網羅の節を参照)。
+	workingFromUnrankedServerState workingSource = "server_state_unranked"
 	// workingFromToolState はローカル道具の busy/idle 申告 (台帳の status)。
 	workingFromToolState workingSource = "tool_state"
 	// workingUnspoken はどの出自も動いているとも止まっているとも言っていない。
 	workingUnspoken workingSource = ""
 )
+
+// serverStateWorking は、サーバ導出の正典状態ごとに「その道具が動いているか」を定める。
+//
+// **正典集合 (lib/bus_liveness.py の ALL_STATES) の全 7 値を必ず並べる。** 既定値に
+// 落とす形にすると、新しい状態が足されたときに silent に片側へ流れる — ms-177 の
+// interrupted (= 事故で止まった) が roster の順位表を素通りしたのと同じ型の事故に
+// なる。網羅は tests/test_go_attention_state_parity.py が Python の正典集合と
+// 突き合わせて縛る (先例: tests/test_attention_roster_e6293.py の網羅性ガード)。
+//
+// 各値の意味は lib/bus_liveness.py の定義コメントに従う。
+var serverStateWorking = map[string]bool{
+	"running":        true,  // 自律実行中 — 人の手は要らない
+	"idle":           false, // 生きて待機、判断要求なし
+	"awaiting_human": false, // 具体的な判断要求が立っている
+	"blocked":        false, // 外部要因で停止
+	"terminated":     false, // 終了 (completed / aborted / failed)
+	"unknown":        false, // 生きているが何をしているか一度も言っていない
+	"interrupted":    false, // 事故で止まった (ms-177: 大声で知らせる側)
+}
+
+// recognisedServerStates はこのビューワーが順位付けしているサーバ状態の一覧。
+// Python の正典集合との突き合わせ (網羅性ガード) が読む唯一の口。
+func recognisedServerStates() []string {
+	out := make([]string, 0, len(serverStateWorking))
+	for k := range serverStateWorking {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // toolWorking は「その道具が今動いているか」を、手元にある最も確かな出自から決める。
 //
@@ -712,24 +750,33 @@ const (
 // セッション単位の申告なので、代入すると出自と粒度が混ざる (e-6454 が分離した軸)。
 // 消費側で出自を明示して優先順に読む。
 //
-// 優先順は確かさの順。先に語った出自で決め、混ぜない:
-//  1. 手元のプロセス観測 — 実際に動いているところを見ている
-//  2. サーバ導出の正典状態 — awaiting_human / blocked は「人を待っている」の宣言
-//     そのものなので、動いていない側に倒す (e-6562: 内容の有無と待っている事実を
-//     混同しない)
-//  3. ローカル道具の busy/idle 申告 — サーバが何も言っていないときの手がかり
+// 優先順は **語っている内容の確かさ** の順。先に語った出自で決め、混ぜない:
+//  1. サーバ導出の正典状態 — 7 値の凍結集合で「何をしているか」を名指しする。
+//     awaiting_human / blocked は「人を待っている」の宣言そのもの (e-6562)、
+//     interrupted / unknown は「生きているのに何をしているか言えない」。
+//  2. ローカル道具の busy / idle 申告 — セッション単位だがサーバの導出を経ていない。
+//  3. 手元のプロセス観測 (ToolRunning) — **最も粗い**。道具のプロセスは、考えている
+//     間も人の入力を待っている間も生きているので、これだけでは稼働と待機を割れない。
+//
+// ToolRunning を最後に置いたのは #804 の独立レビュー (AX / 保守性) の指摘。以前は
+// これを先頭に置いていたため、ToolRunning=true のとき サーバの awaiting_human /
+// interrupted の明示的な宣言が粗いプロセス生存に押し負け、人を待っている行・事故で
+// 止まった行が「稼働中」として要対応から消えていた。
 func toolWorking(s SessionOverview) (bool, workingSource) {
+	if st := strings.ToLower(strings.TrimSpace(s.ServerState)); st != "" {
+		if working, ranked := serverStateWorking[st]; ranked {
+			return working, workingFromServerState
+		}
+		// 正典に無い値 = サーバが新しい語を話し始めた。次点に流すと新状態が
+		// silent にローカル申告で判定されるので、ここで止めて人の目に出す側
+		// (= 動いていない) に倒す。網羅性ガードが開発時に気付かせる。
+		return false, workingFromUnrankedServerState
+	}
+	if st := strings.ToLower(strings.TrimSpace(s.State)); st != "" {
+		return st == "busy", workingFromToolState
+	}
 	if s.ToolRunning {
 		return true, workingFromProcess
-	}
-	switch strings.ToLower(strings.TrimSpace(s.ServerState)) {
-	case "running":
-		return true, workingFromServerState
-	case "awaiting_human", "blocked":
-		return false, workingFromServerState
-	}
-	if strings.EqualFold(strings.TrimSpace(s.State), "busy") {
-		return true, workingFromToolState
 	}
 	return false, workingUnspoken
 }

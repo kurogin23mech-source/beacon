@@ -1103,14 +1103,40 @@ func TestToolWorkingReadsEachSourceInOrder(t *testing.T) {
 			SessionOverview{ServerState: "awaiting_human"}, false, workingFromServerState},
 		{"サーバ正典の blocked も動いていない",
 			SessionOverview{ServerState: "blocked"}, false, workingFromServerState},
-		{"サーバが idle でもローカル道具が busy なら動いている",
-			SessionOverview{ServerState: "idle", State: "busy"}, true, workingFromToolState},
+		{"サーバが idle と言えば、ローカルの busy 申告より優先される",
+			SessionOverview{ServerState: "idle", State: "busy"}, false, workingFromServerState},
 		{"台帳経路の実形 (ToolRunning 未設定 + status=busy) で動いていると読める",
 			SessionOverview{State: "busy"}, true, workingFromToolState},
-		{"どの出自も動いていると言わなければ動いていない",
-			SessionOverview{ServerState: "idle", State: "idle"}, false, workingUnspoken},
+		{"サーバが黙っていてローカルも idle なら動いていない",
+			SessionOverview{State: "idle"}, false, workingFromToolState},
 		{"出自がひとつも無ければ動いていない",
 			SessionOverview{}, false, workingUnspoken},
+
+		// --- 出自が食い違うとき、どちらが勝つか (#804 独立レビュー: 優先順の
+		// 契約がコメントに書かれているのに試験で一度も踏まれていなかった) ---
+		{"人を待っている宣言は、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, ServerState: "awaiting_human"},
+			false, workingFromServerState},
+		{"事故で止まった宣言は、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, ServerState: "interrupted"},
+			false, workingFromServerState},
+		{"外部要因で停止の宣言も、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, ServerState: "blocked"},
+			false, workingFromServerState},
+		{"終了の宣言は、ローカルに残った busy 申告に勝つ",
+			SessionOverview{ServerState: "terminated", State: "busy"},
+			false, workingFromServerState},
+		{"何をしているか言えていない宣言は、ローカルの busy 申告に勝つ",
+			SessionOverview{ServerState: "unknown", State: "busy"},
+			false, workingFromServerState},
+		{"ローカルの idle 申告は、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, State: "idle"},
+			false, workingFromToolState},
+
+		// --- 正典に無い値をサーバが話したら、黙って次点に流さない ---
+		{"順位付けしていないサーバ状態は、ローカル申告に流さず止める",
+			SessionOverview{ServerState: "some_future_state", State: "busy"},
+			false, workingFromUnrankedServerState},
 	}
 	for _, c := range cases {
 		gotWorking, gotSource := toolWorking(c.in)
@@ -1170,5 +1196,39 @@ func TestAttentionIsStrictSubsetWhenWorkingRowsExist(t *testing.T) {
 	}
 	if len(att) != 2 {
 		t.Errorf("要対応 = %d 件, want 2 (両方 idle と 確認待ち)", len(att))
+	}
+}
+
+// 順位付け表が正典集合を取りこぼしていないこと。
+//
+// 既定値に落ちる形だと、新しい状態が足されても試験が緑のまま片側へ流れる
+// (ms-177 の interrupted が roster の順位表を素通りしたのと同じ型)。Python の
+// 正典集合との突き合わせは tests/test_go_attention_state_parity.py が行う。
+// ここは Go 側だけで言える不変条件 — 順位表が空でなく、キーが正規化済みで、
+// 読み出し口が表と一致すること — を縛る。
+func TestRecognisedServerStatesMatchesRankingTable(t *testing.T) {
+	got := recognisedServerStates()
+	if len(got) != len(serverStateWorking) {
+		t.Fatalf("読み出し口 %d 件 vs 順位表 %d 件 — ずれている",
+			len(got), len(serverStateWorking))
+	}
+	for _, st := range got {
+		if _, ok := serverStateWorking[st]; !ok {
+			t.Errorf("読み出し口が順位表に無い状態を返した: %q", st)
+		}
+		if st != strings.ToLower(strings.TrimSpace(st)) {
+			t.Errorf("順位表のキーが正規化されていない: %q (toolWorking は小文字化して引く)", st)
+		}
+	}
+	// 稼働と判定する状態がちょうど 1 つ (running) であること。ここが増えると
+	// 「要対応」から落ちる行が静かに増えるので、意図的な変更として試験を直させる。
+	working := 0
+	for _, v := range serverStateWorking {
+		if v {
+			working++
+		}
+	}
+	if working != 1 {
+		t.Errorf("稼働と判定する状態が %d 件 — running だけのはず", working)
 	}
 }
