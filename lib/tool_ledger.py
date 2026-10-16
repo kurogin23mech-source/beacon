@@ -180,14 +180,38 @@ def is_softening(name: str, effect: str) -> bool:
          effect is known from the harness, not guessed; and
       2. a name carrying a WRITE VERB (``mcp__gmail__send_email`` → ``send``).
          A write verb is a positive signal, not an absence of one — so a row
-         saying 「読み取りだけ」 about it is a detectable lie, and the ledger must
-         not pass it (ms-180 e-7004 受入条件3).
+         saying 「読み取りだけ」 about it is a detectable lie, and the ledger does
+         not pass it.
 
     What stays declarable is exactly the case the ledger exists for: a name with
     NO recognisable verb (``mcp__weird__frobnicate``), which the heuristic can
     only default-deny. There, the declaration replaces a guess rather than
     contradicting evidence — so over-gating gets fixed while under-gating cannot
     be introduced.
+
+    DECLARED TENSION — this narrows e-7003 受入条件1 (ms-180 / 2026-10-16)
+    --------------------------------------------------------------------
+    Clause 2 is a deliberate, disclosed exception to the task's own AC1
+    (「台帳に載っている道具については、作用の判定が台帳の宣言を読む形になる
+    (名前の形から推測しない)」). For a registered tool whose NAME carries a write
+    verb, the name — not the row — decides, which is the opposite of what AC1
+    asks. Writing that down rather than leaving it implicit:
+
+      * AC3's supporting clause is 「…嘘を台帳が通さない形**も考える**」 — "also
+        consider", a suggestion, NOT a requirement. An earlier version of this
+        docstring cited it as e-7004 (wrong task) and the adjudication record
+        called it 明示要求 (overstated). A neutral audit of that adjudication
+        caught both; the decline stands, the justification was one-sided.
+      * The line is kept because the asymmetry is real: a write verb is positive
+        evidence of effect, while "no recognisable verb" is the absence of
+        evidence. Overriding evidence is a different act from resolving an
+        unknown, and SPEC 受入条件6 (「ms-169 の承認ゲートが緩まない」) is the
+        stronger constraint when the two pull apart.
+      * The residual cost is real and NOT hidden: a genuinely read-only tool
+        whose name happens to contain ``run`` / ``execute`` / ``mark`` /
+        ``download`` / … cannot be declared read-only and stays gated in an
+        untrusted turn. That is the fail-safe direction, but it is a cost, and
+        the owner of the ledger should know it exists rather than discover it.
     """
     if effect != EFFECT_READ_ONLY:
         return False
