@@ -177,9 +177,19 @@ def cmd_tool_list():
     # parses was the one channel that lacked it (independent AX review of
     # PR #805, high). Same shape as the defect this milestone exists to remove:
     # the signal was added, but not to every consumer.
-    undecided = tl.undecided_tools(ledger)
-    purposeless = tl.purposeless_tools(ledger)
-    degraded = _degraded_tools()
+    # Scoped to the rows this response actually contains. They used to be
+    # computed ledger-wide and emitted unchanged even when `--undecided` had
+    # narrowed `tools`, so `degraded` could name a fully-decided tool that
+    # appears nowhere else in the same response — a scope leak the flag's name
+    # does not warn about (independent AX review of PR #805). One rule for every
+    # view: what a response reports is about what that response returned. The
+    # whole-ledger picture is what the unfiltered `beacon tool list` is for.
+    shown = {str(r.get("name")) for r in rows}
+    undecided = [r for r in tl.undecided_tools(ledger)
+                 if str(r.get("name")) in shown]
+    purposeless = [r for r in tl.purposeless_tools(ledger)
+                   if str(r.get("name")) in shown]
+    degraded = [r for r in _degraded_tools() if str(r.get("name")) in shown]
     degraded_names = {str(r.get("name")) for r in degraded}
 
     if json_mode:
@@ -323,6 +333,20 @@ def cmd_tool_lookup():
 # tool unregistered — 台帳に無い道具が使われた記録 (e-7002)
 # ---------------------------------------------------------------------------
 
+def _explained_debt_row(row: dict) -> dict:
+    """A debt row with its writer reason code spelled out, when it has one.
+
+    The text listing passes every row's ``detail`` through
+    ``explain_write_failure``; the JSON listing used to emit the bare code. The
+    explanation is attached HERE, once, so both channels carry it and a future
+    edit cannot reach one listing and miss the other.
+    """
+    detail = row.get("detail")
+    if not detail:
+        return dict(row)
+    return dict(row, detail_message=explain_write_failure(detail))
+
+
 def cmd_tool_unregistered():
     """Uses that left NO record, split by WHY (ms-180 受入条件2).
 
@@ -352,7 +376,14 @@ def cmd_tool_unregistered():
     # hole at the display site.
     buckets = {r: debt.debt_by_reason(rows, r) for r in debt.REASONS}
     if json_mode:
-        payload = {debt.REASON_DISPLAY[r]["key"]: buckets[r]
+        # Keyed by the reason CONSTANT, not by a display alias. The alias for
+        # the write-failure reason was spelled `write_failed` while the value
+        # stored in every row is `write-failed`, so one concept arrived under
+        # two spellings in a single payload — a reader that learned the name
+        # from the bucket key and later filtered rows by it matched nothing.
+        # With one string there is no second spelling to drift (independent AX
+        # review of PR #805).
+        payload = {r: [_explained_debt_row(row) for row in buckets[r]]
                    for r in debt.REASONS}
         payload["count"] = len(rows)
         print(json.dumps(payload, ensure_ascii=False))
@@ -480,8 +511,17 @@ def cmd_tool_used():
     result = writer(name, text, effect, target, url)
 
     if json_mode:
-        print(json.dumps(result, ensure_ascii=False))
-        if not result.get("recorded"):
+        body = dict(result)
+        if not body.get("recorded"):
+            # The SAME sentence the text path prints. Explaining the failure only
+            # on the human channel left the one channel automation parses holding
+            # a bare slug (`no-target`) with no next step — the identical split
+            # that `tool list --json` had for the degraded-grain warning, one
+            # layer down and inside the very helper written to fix that class
+            # (independent AX review of PR #805).
+            body["message"] = explain_write_failure(body.get("reason"))
+        print(json.dumps(body, ensure_ascii=False))
+        if not body.get("recorded"):
             sys.exit(1)   # the body and the exit code must agree, --json too
         return
     if result.get("recorded"):

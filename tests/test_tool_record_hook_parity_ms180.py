@@ -399,7 +399,11 @@ def test_the_debt_display_is_exhaustive_over_the_vocabulary():
     producing a silently empty bucket."""
     assert set(tdebt.REASON_DISPLAY) == set(tdebt.REASONS)
     for meta in tdebt.REASON_DISPLAY.values():
-        assert meta["key"] and meta["label"] and meta["action"]
+        # No `key` any more: that separate machine spelling was itself a thing
+        # that could drift, and it did (see
+        # tests/test_review_findings_pr805_round2.py). Machine output is keyed
+        # by the REASON constants, so only the display text lives here.
+        assert meta["label"] and meta["action"]
 
 
 def test_a_fourth_debt_reason_is_displayed_rather_than_vanishing(project,

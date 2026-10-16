@@ -79,20 +79,23 @@ REASONS = (REASON_UNREGISTERED, REASON_UNDECIDED, REASON_WRITE_FAILED)
 #: row that appeared in NO bucket, in text or JSON, with the header still
 #: counting it (independent maintainability review of PR #805 reproduced exactly
 #: that with a hypothetical 4th reason).
+#: Display text per reason. There is deliberately **no** separate machine name
+#: here: a second spelling of the same concept is a thing that can drift, and it
+#: did — the alias for the write-failure reason read ``write_failed`` while the
+#: value stored in every row reads ``write-failed``, so one concept reached a
+#: single JSON payload under two spellings. Callers key machine output by the
+#: REASON constants themselves (ms-180 follow-up, independent AX review).
 REASON_DISPLAY = {
     REASON_UNREGISTERED: {
-        "key": "unregistered",
         "label": "台帳に無い",
         "action": "`beacon tool add <道具名> ...` で登録して閉じる",
     },
     REASON_UNDECIDED: {
-        "key": "undecided",
         "label": "記録先が未判断",
         "action": "台帳に在るが記録するかを誰も判断していない。"
                   "`--record <recorder>` か `--no-record \"<理由>\"` で閉じる",
     },
     REASON_WRITE_FAILED: {
-        "key": "write_failed",
         "label": "記録すると決めたのに書けなかった",
         "action": "台帳の約束が破れた分。原因を見てください",
     },

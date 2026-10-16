@@ -583,6 +583,15 @@ def grain_defaulted_tools(ledger: dict) -> list:
 #: left behind, with nothing to say so.
 DEBT_ACTIONS = frozenset({"unregistered", "undecided"})
 
+#: Every action ``record_plan`` can return, named once where it is produced.
+#: Callers that explain these actions to a reader (``beacon tool used``) hold a
+#: table keyed by them; without the vocabulary written down, a fifth action
+#: would be added here and that table would fall through to printing the raw
+#: action word, which is the shape a sibling guard in this module already
+#: forbids for the recorder and effect vocabularies (ms-180 follow-up,
+#: independent maintainability review of PR #805).
+RECORD_PLAN_ACTIONS = frozenset({"record", "skip", "undecided", "unregistered"})
+
 
 def is_debt_action(action: str) -> bool:
     """True when a ``record_plan`` action is a debt worth noting (see DEBT_ACTIONS)."""
@@ -643,6 +652,7 @@ __all__ = [
     "ledger_path", "empty_ledger", "load_ledger", "save_ledger",
     "build_record", "upsert", "remove",
     "lookup", "effect_of", "gate_classification", "record_plan",
-    "DEBT_ACTIONS", "is_debt_action", "undecided_tools",
+    "DEBT_ACTIONS", "RECORD_PLAN_ACTIONS", "is_debt_action",
+    "undecided_tools",
     "purposeless_tools", "grain_defaulted_tools", "find_by_purpose",
 ]

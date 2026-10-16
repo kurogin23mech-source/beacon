@@ -861,11 +861,68 @@ def _manifest_hook_present(hooks_dict: dict, spec: dict) -> bool:
     return True
 
 
+def _manifest_hook_outdated_fields(entry: dict, hook: dict, spec: dict,
+                                   command: str) -> list:
+    """Which of the spec's DECLARED fields this installed hook does not carry.
+
+    The manifest declares four things about a hook: its ``command``, the
+    ``matcher`` that decides WHICH tool calls reach it, its ``timeout`` and its
+    ``statusMessage``. Only the command used to be compared, so an install that
+    already had the hook kept whatever matcher it was first written with —
+    widening a matcher in HOOK_MANIFEST reached new installs only, and every
+    existing one went on using the old one with nothing saying so. ms-180 exists
+    to remove exactly that shape (the declaration changes and nothing happens),
+    so the comparison has to cover every field the manifest declares, not the
+    one that happens to be easiest to compare.
+
+    ``matcher`` lives on the ENTRY (the object holding ``hooks``), the other two
+    on the hook itself. An entry may hold other tools' hooks alongside ours;
+    only ours is judged here, and the caller drops only ours.
+
+    Returns the field names that differ, in declaration order, so a caller can
+    say WHICH field drifted rather than only that something did.
+    """
+    outdated = []
+    if command and hook.get("command", "") != command:
+        outdated.append("command")
+    if entry.get("matcher") != spec.get("matcher"):
+        outdated.append("matcher")
+    if hook.get("timeout") != spec["timeout"]:
+        outdated.append("timeout")
+    if hook.get("statusMessage") != spec["statusMessage"]:
+        outdated.append("statusMessage")
+    return outdated
+
+
+def _manifest_hook_drift(hooks_dict: dict, spec: dict) -> list:
+    """``[(event, field)]`` where an INSTALLED hook contradicts the manifest.
+
+    Separate from ``_manifest_hook_present`` on purpose: "the hook is missing"
+    and "the hook is there but wired differently than declared" are different
+    facts with different remedies, and folding them into one boolean would make
+    `beacon doctor` report one of them under the other's message.
+    """
+    command = _resolve_manifest_hook_command(spec)
+    drift = []
+    for event in spec["events"]:
+        for entry in hooks_dict.get(event, []):
+            for hook in entry.get("hooks", []):
+                if not any(s in hook.get("command", "")
+                           for s in spec["identity"]):
+                    continue
+                for field in _manifest_hook_outdated_fields(entry, hook, spec,
+                                                            command):
+                    drift.append((event, field))
+    return drift
+
+
 def _install_manifest_hook(hooks_dict: dict, spec: dict) -> bool:
     """Idempotently register one HOOK_MANIFEST entry across all of its events.
-    Drops stale same-identity entries whose command differs (path migration),
-    then adds the resolved command wherever absent. Returns True if it changed
-    anything. No-op (returns False) when the command can't be resolved."""
+    Drops same-identity entries that contradict the manifest in ANY declared
+    field (command, matcher, timeout, statusMessage — see
+    ``_manifest_hook_outdated_fields``), then adds the declared shape wherever
+    absent. Returns True if it changed anything. No-op (returns False) when the
+    command can't be resolved."""
     command = _resolve_manifest_hook_command(spec)
     if not command:
         return False
@@ -874,15 +931,19 @@ def _install_manifest_hook(hooks_dict: dict, spec: dict) -> bool:
     changed = False
     for event in spec["events"]:
         event_list = hooks_dict.setdefault(event, [])
-        # 1. drop stale same-identity entries whose command != the resolved one.
+        # 1. drop same-identity entries that contradict the manifest. Dropping
+        #    is what makes step 2 re-add the hook in its DECLARED shape, so this
+        #    is also how a changed matcher reaches an install that already had
+        #    the hook.
         cleaned = []
         for entry in event_list:
             kept = []
             for h in entry.get("hooks", []):
-                existing = h.get("command", "")
-                if any(s in existing for s in spec["identity"]) and existing != command:
+                if (any(s in h.get("command", "") for s in spec["identity"])
+                        and _manifest_hook_outdated_fields(entry, h, spec,
+                                                           command)):
                     changed = True
-                    continue  # drop stale
+                    continue  # drop outdated
                 kept.append(h)
             entry["hooks"] = kept
             if kept:
@@ -6705,14 +6766,37 @@ def cmd_doctor():
                 _all_hooks = json.load(_f).get("hooks", {})
             missing_hooks = [spec["key"] for spec in HOOK_MANIFEST
                              if not _manifest_hook_present(_all_hooks, spec)]
+            # A hook that IS installed but wired differently than the manifest
+            # declares is a separate fact with the same remedy, and it used to
+            # be invisible: only the command was compared, so an install that
+            # already had the hook kept its original matcher forever. Widening
+            # a matcher in HOOK_MANIFEST then reached new installs only, with
+            # nothing saying so — the "declared but nothing happens" shape this
+            # milestone exists to remove (ms-180 follow-up).
+            stale_hooks = []
+            for spec in HOOK_MANIFEST:
+                drift = _manifest_hook_drift(_all_hooks, spec)
+                if drift:
+                    fields = sorted({field for _event, field in drift})
+                    stale_hooks.append(f"{spec['key']} ({', '.join(fields)})")
         except Exception:
             missing_hooks = []
+            stale_hooks = []
         if missing_hooks:
             warnings.append(
                 "WARN [hooks] Beacon hooks missing from ~/.claude/settings.json: "
                 + ", ".join(missing_hooks) + "\n"
                 "       (your install path did not wire these; the matching "
                 "receive / auto-save / STOP behaviour silently no-ops.)\n"
+                "       Run: beacon skill install"
+            )
+        if stale_hooks:
+            warnings.append(
+                "WARN [hooks] Beacon hooks in ~/.claude/settings.json are wired "
+                "differently than declared: " + ", ".join(stale_hooks) + "\n"
+                "       (the hook runs, but with the field(s) named above left "
+                "at an older value — e.g. a matcher that still filters out the "
+                "tool calls the current version means to see.)\n"
                 "       Run: beacon skill install"
             )
 
