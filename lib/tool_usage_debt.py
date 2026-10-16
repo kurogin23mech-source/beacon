@@ -14,8 +14,9 @@ written for it".
 
 TWO reasons a use leaves no record, kept apart (受入条件2)
 ---------------------------------------------------------
-  ``unregistered`` — the ledger has no row for this tool at all.
-  ``undecided``    — there IS a row, but nobody has judged its record sink yet.
+  ``unregistered``  — the ledger has no row for this tool at all.
+  ``undecided``     — there IS a row, but nobody has judged its record sink yet.
+  ``write-failed``  — the ledger said to record and the write did not happen.
 
 Both are debts and both must be visible; a tool that is ``declined`` is NOT here,
 because that is a decision, not a debt. The two reasons stay separate fields
@@ -59,7 +60,46 @@ MAX_ROWS = 500
 #: not a new category to interpret at read time.
 REASON_UNREGISTERED = "unregistered"
 REASON_UNDECIDED = "undecided"
-REASONS = (REASON_UNREGISTERED, REASON_UNDECIDED)
+#: The ledger DID say to record and the write still did not happen (no worked
+#: Target, a class with no evidence arm, the CLI unreachable…). Its own reason,
+#: because collapsing it into silence hides the one case where the ledger's
+#: promise — "what is listed gets recorded" — was actually broken. Found by an
+#: independent philosophy review of PR #802: the hook ran the writer with its
+#: output discarded and never looked at the exit code, so "decided not to write"
+#: and "could not write" were the same nothing.
+REASON_WRITE_FAILED = "write-failed"
+REASONS = (REASON_UNREGISTERED, REASON_UNDECIDED, REASON_WRITE_FAILED)
+
+
+#: Per-reason presentation: the section label and the action that CLOSES it.
+#: Lives next to ``REASONS`` so adding a reason without a label is a visible
+#: omission in one file rather than a silently-empty bucket three files away.
+#: ``cmd_tool_unregistered`` iterates this instead of hand-naming each reason —
+#: it used to call ``debt_by_reason`` three times, so a fourth reason produced a
+#: row that appeared in NO bucket, in text or JSON, with the header still
+#: counting it (independent maintainability review of PR #805 reproduced exactly
+#: that with a hypothetical 4th reason).
+#: Display text per reason. There is deliberately **no** separate machine name
+#: here: a second spelling of the same concept is a thing that can drift, and it
+#: did — the alias for the write-failure reason read ``write_failed`` while the
+#: value stored in every row reads ``write-failed``, so one concept reached a
+#: single JSON payload under two spellings. Callers key machine output by the
+#: REASON constants themselves (ms-180 follow-up, independent AX review).
+REASON_DISPLAY = {
+    REASON_UNREGISTERED: {
+        "label": "台帳に無い",
+        "action": "`beacon tool add <道具名> ...` で登録して閉じる",
+    },
+    REASON_UNDECIDED: {
+        "label": "記録先が未判断",
+        "action": "台帳に在るが記録するかを誰も判断していない。"
+                  "`--record <recorder>` か `--no-record \"<理由>\"` で閉じる",
+    },
+    REASON_WRITE_FAILED: {
+        "label": "記録すると決めたのに書けなかった",
+        "action": "台帳の約束が破れた分。原因を見てください",
+    },
+}
 
 
 def debt_path(beacon_dir: str) -> str:
@@ -98,7 +138,7 @@ def debt_by_reason(rows: list, reason: str) -> list:
 
 
 def record_no_record_use(path: str, name: str, *, reason: str,
-                         at: str = "") -> Optional[dict]:
+                         at: str = "", detail: str = "") -> Optional[dict]:
     """Note one use of a tool that left no record. Returns the updated row, or
     ``None`` when nothing was written (empty name, bad reason, or I/O failure).
 
@@ -121,6 +161,10 @@ def record_no_record_use(path: str, name: str, *, reason: str,
                    "first_seen": at, "last_seen": at}
             rows.append(row)
         row["reason"] = reason
+        if detail:
+            row["detail"] = detail
+        elif "detail" in row:
+            del row["detail"]  # a later use with no detail must not keep a stale one
         row["count"] = int(row.get("count") or 0) + 1
         row["last_seen"] = at or row.get("last_seen") or ""
         if not row.get("first_seen"):
@@ -159,6 +203,7 @@ def record_unregistered(path: str, name: str, at: str = "") -> Optional[dict]:
 
 
 __all__ = ["DEBT_FILENAME", "MAX_ROWS", "REASON_UNREGISTERED",
-           "REASON_UNDECIDED", "REASONS", "debt_path", "load_debt",
+           "REASON_UNDECIDED", "REASON_WRITE_FAILED", "REASONS",
+           "REASON_DISPLAY", "debt_path", "load_debt",
            "debt_by_reason", "record_no_record_use", "record_unregistered",
            "clear_debt"]

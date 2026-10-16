@@ -149,6 +149,20 @@ def _record_label(row):
 # tool list / show / remove
 # ---------------------------------------------------------------------------
 
+def _degraded_tools():
+    """Tools whose ``turn`` grain silently became ``each``. Best-effort: a
+    missing / unreadable turn file means "nothing degraded", never an error.
+
+    Shared by BOTH output modes of ``tool list`` so the two cannot disagree
+    about which tools are degraded (the asymmetry the AX review of PR #805
+    found: only the human-text path had it)."""
+    try:
+        import tool_turn
+        return tool_turn.degraded_tools(tool_turn.turn_path(_beacon_dir()))
+    except Exception:
+        return []
+
+
 def cmd_tool_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     only_undecided = os.environ.get("BEACON_TOOL_UNDECIDED", "") == "1"
@@ -156,9 +170,45 @@ def cmd_tool_list():
     rows = tl.undecided_tools(ledger) if only_undecided else (
         sorted(ledger.get("tools") or [], key=lambda r: str(r.get("name") or "")))
 
+    # Gather the three advisory signals BEFORE branching on output mode. The
+    # degraded-grain warning used to be produced only in the human-text path
+    # below, so `--json` reported `grain: turn` for a tool that was in fact
+    # recording every call — the one disclosure channel AI tooling actually
+    # parses was the one channel that lacked it (independent AX review of
+    # PR #805, high). Same shape as the defect this milestone exists to remove:
+    # the signal was added, but not to every consumer.
+    # Scoped to the rows this response actually contains. They used to be
+    # computed ledger-wide and emitted unchanged even when `--undecided` had
+    # narrowed `tools`, so `degraded` could name a fully-decided tool that
+    # appears nowhere else in the same response — a scope leak the flag's name
+    # does not warn about (independent AX review of PR #805). One rule for every
+    # view: what a response reports is about what that response returned. The
+    # whole-ledger picture is what the unfiltered `beacon tool list` is for.
+    shown = {str(r.get("name")) for r in rows}
+    undecided = [r for r in tl.undecided_tools(ledger)
+                 if str(r.get("name")) in shown]
+    purposeless = [r for r in tl.purposeless_tools(ledger)
+                   if str(r.get("name")) in shown]
+    degraded = [r for r in _degraded_tools() if str(r.get("name")) in shown]
+    degraded_names = {str(r.get("name")) for r in degraded}
+
     if json_mode:
-        print(json.dumps({"tools": rows, "count": len(rows),
-                          "undecided_count": len(tl.undecided_tools(ledger))},
+        payload_rows = []
+        for row in rows:
+            out = dict(row)
+            block = dict(out.get("record") or {})
+            if str(row.get("name")) in degraded_names:
+                # The DECLARED grain stays as declared; `grain_effective` says
+                # what is actually happening. Two fields, because collapsing them
+                # would lose either the declaration or the reality.
+                block["grain_effective"] = tl.GRAIN_EACH
+                block["grain_degraded"] = True
+            out["record"] = block
+            payload_rows.append(out)
+        print(json.dumps({"tools": payload_rows, "count": len(rows),
+                          "undecided_count": len(undecided),
+                          "purposeless_count": len(purposeless),
+                          "degraded": degraded},
                          ensure_ascii=False))
         return
     if not rows:
@@ -176,13 +226,11 @@ def cmd_tool_list():
             print(f"      用途: {row['purpose']}")
     if only_undecided:
         return
-    undecided = tl.undecided_tools(ledger)
     if undecided:
         print(f"\n⚠ 記録先が未判断: {len(undecided)} 件 "
               f"(`beacon tool list --undecided`)")
     # 用途が空の行 (= build_record が拒否するので、旧ファイルか手編集だけ)。
     # 片方の writer にしか効かない規則は規則ではない (ms-174 の教訓)。
-    purposeless = tl.purposeless_tools(ledger)
     if purposeless:
         print(f"\n⚠ 用途が空の行: {len(purposeless)} 件 "
               f"— {', '.join(str(r.get('name')) for r in purposeless[:5])}")
@@ -191,11 +239,6 @@ def cmd_tool_list():
     # 受入条件3: a `turn` grain that silently became `each` because no turn
     # boundary was observable. Saying nothing here would make the degradation
     # indistinguishable from a working fold.
-    try:
-        import tool_turn
-        degraded = tool_turn.degraded_tools(tool_turn.turn_path(_beacon_dir()))
-    except Exception:
-        degraded = []
     if degraded:
         print(f"\n⚠ ターン境界が観測できず、粒度 {tl.GRAIN_TURN} が "
               f"{tl.GRAIN_EACH} に縮退した道具: {len(degraded)} 件")
@@ -290,6 +333,20 @@ def cmd_tool_lookup():
 # tool unregistered — 台帳に無い道具が使われた記録 (e-7002)
 # ---------------------------------------------------------------------------
 
+def _explained_debt_row(row: dict) -> dict:
+    """A debt row with its writer reason code spelled out, when it has one.
+
+    The text listing passes every row's ``detail`` through
+    ``explain_write_failure``; the JSON listing used to emit the bare code. The
+    explanation is attached HERE, once, so both channels carry it and a future
+    edit cannot reach one listing and miss the other.
+    """
+    detail = row.get("detail")
+    if not detail:
+        return dict(row)
+    return dict(row, detail_message=explain_write_failure(detail))
+
+
 def cmd_tool_unregistered():
     """Uses that left NO record, split by WHY (ms-180 受入条件2).
 
@@ -311,30 +368,41 @@ def cmd_tool_unregistered():
               else json.dumps({"cleared": removed}, ensure_ascii=False))
         return
     rows = debt.load_debt(debt.debt_path(_beacon_dir()))
-    unregistered = debt.debt_by_reason(rows, debt.REASON_UNREGISTERED)
-    undecided = debt.debt_by_reason(rows, debt.REASON_UNDECIDED)
+    # Iterate the VOCABULARY, not a hand-written list of three. Calling
+    # debt_by_reason once per known reason meant a fourth reason produced a row
+    # that landed in no bucket at all — text or JSON — while the header still
+    # counted it (maintainability review of PR #805). Now a reason without a
+    # REASON_DISPLAY entry is a KeyError at the definition site, not a silent
+    # hole at the display site.
+    buckets = {r: debt.debt_by_reason(rows, r) for r in debt.REASONS}
     if json_mode:
-        print(json.dumps({"unregistered": unregistered,
-                          "undecided": undecided,
-                          "count": len(rows)}, ensure_ascii=False))
+        # Keyed by the reason CONSTANT, not by a display alias. The alias for
+        # the write-failure reason was spelled `write_failed` while the value
+        # stored in every row is `write-failed`, so one concept arrived under
+        # two spellings in a single payload — a reader that learned the name
+        # from the bucket key and later filtered rows by it matched nothing.
+        # With one string there is no second spelling to drift (independent AX
+        # review of PR #805).
+        payload = {r: [_explained_debt_row(row) for row in buckets[r]]
+                   for r in debt.REASONS}
+        payload["count"] = len(rows)
+        print(json.dumps(payload, ensure_ascii=False))
         return
     if not rows:
         print("記録が残らなかった道具の使用はありません。")
         return
     print(f"⚠ 使ったのに記録が残らなかった道具 {len(rows)} 件:")
-    if unregistered:
-        print(f"\n  [台帳に無い] {len(unregistered)} 件 "
-              f"— `beacon tool add <道具名> ...` で登録して閉じる")
-        for row in unregistered:
+    for reason in debt.REASONS:
+        bucket = buckets[reason]
+        if not bucket:
+            continue
+        meta = debt.REASON_DISPLAY[reason]
+        print(f"\n  [{meta['label']}] {len(bucket)} 件 — {meta['action']}")
+        for row in bucket:
             print(f"    {row.get('name')} — {row.get('count')} 回 "
-                  f"(最初 {row.get('first_seen')} / 最後 {row.get('last_seen')})")
-    if undecided:
-        print(f"\n  [記録先が未判断] {len(undecided)} 件 "
-              f"— 台帳に在るが記録するかを誰も判断していない。"
-              f"`--record <recorder>` か `--no-record \"<理由>\"` で閉じる")
-        for row in undecided:
-            print(f"    {row.get('name')} — {row.get('count')} 回 "
-                  f"(最初 {row.get('first_seen')} / 最後 {row.get('last_seen')})")
+                  f"(最後 {row.get('last_seen')})")
+            if row.get("detail"):
+                print(f"      {explain_write_failure(row.get('detail'))}")
     print("\n台帳は事前に全部埋める必要はありません (端末の走査はしない方針)。"
           "実際に使われた道具だけがここに出ます。")
     print("消すだけなら `beacon tool unregistered --clear`。")
@@ -443,13 +511,81 @@ def cmd_tool_used():
     result = writer(name, text, effect, target, url)
 
     if json_mode:
-        print(json.dumps(result, ensure_ascii=False))
+        body = dict(result)
+        if not body.get("recorded"):
+            # The SAME sentence the text path prints. Explaining the failure only
+            # on the human channel left the one channel automation parses holding
+            # a bare slug (`no-target`) with no next step — the identical split
+            # that `tool list --json` had for the degraded-grain warning, one
+            # layer down and inside the very helper written to fix that class
+            # (independent AX review of PR #805).
+            body["message"] = explain_write_failure(body.get("reason"))
+        print(json.dumps(body, ensure_ascii=False))
+        if not body.get("recorded"):
+            sys.exit(1)   # the body and the exit code must agree, --json too
         return
     if result.get("recorded"):
         print(f"記録: {name} → {result.get('target') or '(project)'} "
               f"[{result.get('arm') or recorder}]")
-    else:
-        print(f"記録しませんでした: {result.get('reason')}", file=sys.stderr)
+        return
+    # The ledger said to record and the writer could not (no worked Target, a
+    # class with no evidence arm, …). Exit non-zero: an earlier version printed
+    # this to stderr and exited 0, so a caller checking $? — including this
+    # feature's own PostToolUse hook — read a failed write as success
+    # (philosophy review of PR #802).
+    reason = result.get("reason")
+    print(f"記録しませんでした: {explain_write_failure(reason)}", file=sys.stderr)
+    sys.exit(1)
+
+
+#: Writer reason code -> a sentence naming the concrete next command.
+#:
+#: The three NON-recording ledger states (declined / undecided / unregistered)
+#: each got a full sentence with its fix, while a WRITE FAILURE printed the raw
+#: internal slug (``no-target`` / ``empty-summary`` / ``…-no-evidence-arm``).
+#: Within one command's own failure vocabulary two tiers explained themselves and
+#: the third did not, so the reader had to open lib/occupation.py to decode it
+#: (independent AX review of PR #805). Codes come from
+#: ``occupation.record_evidence`` / ``record_target_entry``.
+_WRITE_FAILURE_HELP = {
+    "no-target": "記録先の作業対象が無いため書けませんでした。進行中のターゲットが"
+                 "ゼロです — `beacon milestone start <ms-id>` で活性化するか、"
+                 "`beacon tool used <道具名> --target <id>` で明示してください。",
+    "empty-summary": "記録する内容が空のため書けませんでした — "
+                     "`--summary \"<1 回分の内容>\"` を付けてください。",
+    "no-milestone": "記録先のマイルストーンが決まらないため書けませんでした "
+                    "(進行中が 0 件、または複数で曖昧) — `--target <ms-id>` で"
+                    "明示してください。",
+    "beacon-cli-not-found": "beacon CLI を見つけられず記録できませんでした — "
+                            "PATH か install を確認してください。",
+}
+
+
+def explain_write_failure(reason: str) -> str:
+    """A sentence for a writer reason code, naming the fix where we know it.
+
+    An unknown code still gets a usable line: it says WHERE the code came from,
+    so a reader can find it instead of guessing. Codes are generated per class
+    (``{kind}-no-evidence-arm``), so an exhaustive table is impossible — the
+    suffix match covers the generated families."""
+    code = str(reason or "").strip()
+    if not code:
+        return "書き込みに失敗しました (理由不明)。"
+    if code in _WRITE_FAILURE_HELP:
+        return _WRITE_FAILURE_HELP[code]
+    if code.endswith("-no-evidence-arm"):
+        kind = code[:-len("-no-evidence-arm")]
+        return (f"対象の種別 ({kind}) は証跡を書くアームを宣言していないため"
+                f"書けませんでした。記録先に別の対象を指定するか、"
+                f"この道具の記録先を見直してください "
+                f"(`beacon tool add <道具名> --no-record \"<理由>\"`)。")
+    if code.endswith("-no-writer"):
+        return (f"宣言されたアームに対応する writer が無いため書けませんでした "
+                f"({code})。Beacon 側の配線の問題です。")
+    if code.endswith("-not-found"):
+        return f"指定された対象が見つかりません ({code})。id を確認してください。"
+    return (f"書き込みに失敗しました ({code})。理由コードは "
+            f"occupation.record_evidence / record_target_entry が返します。")
 
 
 def _record_via_evidence(name, text, effect, target, url):
@@ -513,4 +649,5 @@ _RECORDER_WRITERS = {
 
 
 __all__ = ["cmd_tool_add", "cmd_tool_list", "cmd_tool_show", "cmd_tool_remove",
-           "cmd_tool_lookup", "cmd_tool_unregistered", "cmd_tool_used"]
+           "cmd_tool_lookup", "cmd_tool_unregistered", "cmd_tool_used",
+           "explain_write_failure"]

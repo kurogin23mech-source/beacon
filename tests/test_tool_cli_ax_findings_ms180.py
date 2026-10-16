@@ -308,3 +308,150 @@ def test_the_tool_is_not_carried_only_as_prose_in_the_description(project):
     entry = _entries(project)[0]
     assert entry["meta"]["tool"] == "mcp__drive__upload"
     assert "[tool:" not in entry["description"]
+
+
+# ---------------------------------------------------------------------------
+# Findings from the independent AX review of PR #805 (the follow-up PR).
+#
+#   A1 (high)   The degraded-grain disclosure reached only the human-text output
+#               of `tool list`. `--json` reported `grain: turn` for a tool that
+#               was in fact recording every call, because the json body returned
+#               BEFORE the degraded check ran. The one channel AI tooling
+#               actually parses was the one channel that lacked the signal — the
+#               same shape as the defect this milestone exists to remove: the
+#               disclosure was added, but not to every consumer.
+#   A2 (medium) A write failure printed the raw internal slug (`no-target`,
+#               `empty-summary`, `…-no-evidence-arm`) while its three sibling
+#               non-recording states each got a full sentence naming the fix.
+#               Within one command's own failure vocabulary, two tiers explained
+#               themselves and the third sent the reader into lib/occupation.py.
+# ---------------------------------------------------------------------------
+
+def _declare_turn_tool(project: Path, name: str = "mcp__turn__tool") -> None:
+    r = bash(project, "tool", "add", name, "--purpose", "確認する",
+             "--effect", "read-only", "--record", "save", "--grain", "turn")
+    assert r.returncode == 0, r.stderr
+
+
+def _fire(project: Path, tool_name: str, *, event="PostToolUse",
+          session="no-boundary") -> None:
+    payload = json.dumps({"hook_event_name": event, "session_id": session,
+                          "cwd": str(project), "tool_name": tool_name,
+                          "tool_input": {}})
+    r = subprocess.run([str(REPO / "bin" / "beacon-save-hook.sh")],
+                       input=payload, capture_output=True, text=True,
+                       timeout=60, cwd=str(project))
+    assert r.returncode == 0, r.stderr
+
+
+def test_json_output_discloses_a_degraded_turn_grain(project):
+    """A1: the signal must reach the consumer that parses, not only the reader."""
+    _declare_turn_tool(project)
+    for _ in range(2):
+        _fire(project, "mcp__turn__tool")          # no UserPromptSubmit ever
+    body = json.loads(bash(project, "tool", "list", "--json").stdout)
+    assert body["degraded"], "--json hides the degradation the text output shows"
+    assert body["degraded"][0]["name"] == "mcp__turn__tool"
+    record = body["tools"][0]["record"]
+    assert record["grain"] == "turn"              # the DECLARATION is preserved
+    assert record["grain_effective"] == "each"    # …and so is the reality
+    assert record["grain_degraded"] is True
+
+
+def test_json_and_text_agree_on_which_tools_are_degraded(project):
+    """Both modes read one helper, so they cannot disagree."""
+    _declare_turn_tool(project)
+    _fire(project, "mcp__turn__tool")
+    body = json.loads(bash(project, "tool", "list", "--json").stdout)
+    text = bash(project, "tool", "list").stdout
+    assert ("mcp__turn__tool" in text) and ("縮退" in text)
+    assert [r["name"] for r in body["degraded"]] == ["mcp__turn__tool"]
+
+
+def test_a_working_fold_reports_no_degradation_in_either_mode(project):
+    """Over-reach check: the signal must be ABSENT when the fold works, or it is
+    noise and gets ignored — and the fold itself must still happen."""
+    _declare_turn_tool(project, "mcp__turn__ok")
+    _fire(project, "", event="UserPromptSubmit", session="s")
+    for _ in range(2):
+        _fire(project, "mcp__turn__ok", session="s")
+    body = json.loads(bash(project, "tool", "list", "--json").stdout)
+    assert body["degraded"] == []
+    assert "grain_degraded" not in body["tools"][0]["record"]
+    assert len(_entries(project)) == 1, "the fold stopped working"
+
+
+def test_json_also_carries_the_other_two_advisory_counts(project):
+    """The same asymmetry would apply to the undecided / purposeless signals."""
+    assert bash(project, "tool", "add", "mcp__a__thing", "--purpose", "p",
+                "--effect", "read-only").returncode == 0
+    body = json.loads(bash(project, "tool", "list", "--json").stdout)
+    assert body["undecided_count"] == 1
+    assert "purposeless_count" in body
+
+
+@pytest.mark.parametrize("code,must_mention", [
+    ("no-target", "milestone start"),
+    ("empty-summary", "--summary"),
+    ("no-milestone", "--target"),
+    ("beacon-cli-not-found", "PATH"),
+    ("milestone-no-evidence-arm", "milestone"),
+    ("opportunity-arm-communications-no-writer", "writer"),
+])
+def test_every_known_write_failure_names_a_concrete_next_step(code,
+                                                               must_mention):
+    """A2: the write-failure tier must explain itself like its siblings do."""
+    import sys as _sys
+    _sys.path.insert(0, str(REPO / "lib"))
+    import cmd_tool
+    message = cmd_tool.explain_write_failure(code)
+    assert code not in message or must_mention in message, message
+    assert must_mention in message, f"{code} -> {message}"
+    assert len(message) > 20, message
+
+
+def test_an_unknown_write_failure_code_still_says_where_to_look():
+    """An exhaustive table is impossible (codes are generated per class), so the
+    fallback must be usable rather than a bare slug echo."""
+    import sys as _sys
+    _sys.path.insert(0, str(REPO / "lib"))
+    import cmd_tool
+    message = cmd_tool.explain_write_failure("something-brand-new")
+    assert "something-brand-new" in message
+    assert "occupation" in message, "the fallback should name where codes come from"
+
+
+def test_the_write_failure_message_is_not_the_bare_reason_slug(tmp_path):
+    """End-to-end: the user-facing line must not be just the internal code."""
+    (tmp_path / ".beacon").mkdir(parents=True)
+    (tmp_path / ".beacon" / "project.json").write_text(json.dumps({
+        "name": "t", "profession": "dev", "summary": "",
+        "milestones": [], "documents": []}), encoding="utf-8")
+    assert bash(tmp_path, "tool", "add", "mcp__x__send_thing", "--purpose",
+                "送る", "--effect", "outward", "--record",
+                "evidence").returncode == 0
+    r = bash(tmp_path, "tool", "used", "mcp__x__send_thing", "--summary", "s")
+    assert r.returncode != 0
+    assert "記録しませんでした: no-target" not in r.stderr, (
+        "the raw slug is still the whole message")
+    assert "milestone start" in r.stderr
+
+
+def test_the_debt_list_explains_the_write_failure_too(tmp_path):
+    """The same code also surfaces in `tool unregistered`; it must be explained
+    in both places, not just at the moment of failure."""
+    (tmp_path / ".beacon").mkdir(parents=True)
+    (tmp_path / ".beacon" / "project.json").write_text(json.dumps({
+        "name": "t", "profession": "dev", "summary": "",
+        "milestones": [], "documents": []}), encoding="utf-8")
+    assert bash(tmp_path, "tool", "add", "mcp__x__send_thing", "--purpose",
+                "送る", "--effect", "outward", "--record",
+                "evidence").returncode == 0
+    payload = json.dumps({"hook_event_name": "PostToolUse", "session_id": "s",
+                          "cwd": str(tmp_path),
+                          "tool_name": "mcp__x__send_thing", "tool_input": {}})
+    subprocess.run([str(REPO / "bin" / "beacon-save-hook.sh")], input=payload,
+                   capture_output=True, text=True, timeout=60,
+                   cwd=str(tmp_path))
+    out = bash(tmp_path, "tool", "unregistered").stdout
+    assert "milestone start" in out, out

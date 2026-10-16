@@ -433,3 +433,31 @@ def test_the_write_verb_check_looks_at_the_tool_segment_not_the_server():
     import tool_effect as te
     assert te.has_write_verb("mcp__sender-service__get_status") is False
     assert te.has_write_verb("mcp__x__send_thing") is True
+
+
+def test_the_write_verb_veto_declares_that_it_narrows_e7003_ac1():
+    """A neutral audit of this milestone's adjudications found the decline's
+    justification one-sided: e-7003 AC3's supporting clause says 「…形も考える」
+    ("also consider"), not a requirement, while the same task's AC1 says
+    「名前の形から推測しない」 — which clause 2 of ``is_softening`` contradicts for
+    write-verb names.
+
+    The decision stands (positive evidence beats absence of evidence, and SPEC
+    受入条件6 is the stronger constraint), but the tension must be WRITTEN DOWN
+    rather than implied, so the next reader does not have to rediscover that the
+    ledger's promise has an exception. This pins the disclosure, because the
+    whole failure mode here was a claim reading as more absolute than the code.
+    """
+    doc = tl.is_softening.__doc__ or ""
+    assert "DECLARED TENSION" in doc
+    assert "e-7003" in doc, "the AC it narrows must be named"
+    # The doc DOES still mention e-7004 — as the correction of its own earlier
+    # miscitation, which is history worth keeping. What must not come back is the
+    # miscitation USED AS the rule's source.
+    assert "e-7004 受入条件3)" not in doc, "the wrong-task citation is back"
+    assert "wrong task" in doc or "誤り" in doc, (
+        "the miscitation should be recorded as corrected, not silently dropped")
+    assert "も考える" in doc, "the AC's soft wording must be quoted, not paraphrased"
+    assert "受入条件1" in doc, "the AC it contradicts must be named"
+    # the residual cost must be stated, not just the justification
+    assert "read-only" in doc and ("過剰" in doc or "gated" in doc)

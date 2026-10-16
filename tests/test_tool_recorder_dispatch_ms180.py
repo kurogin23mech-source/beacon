@@ -131,13 +131,20 @@ def test_the_debt_action_set_is_defined_once():
     assert tl.is_debt_action(None) is False
 
 
-@pytest.mark.parametrize("hook", ["beacon-tool-record-hook.py",
-                                   "beacon-untrusted-tool-gate.py"])
-def test_neither_hook_hardcodes_the_debt_action_literals(hook):
-    """Both interrupts ask the same question. With the tuple copied into each, a
-    fifth outcome could be added to one and silently forgotten in the other —
-    the duplication this PR already refuses for the pinned-effect set."""
-    source = (REPO / "bin" / hook).read_text(encoding="utf-8")
+#: Every file that decides "is this action a debt". After the philosophy review
+#: of PR #802 that is ONE place — the shared hook module — because the debt file
+#: has one writer and the hook decision has one definition with two thin entry
+#: points. If a second file ever asks this question, add it here so the
+#: no-hardcoded-literal rule covers it too.
+_DEBT_DECIDING_FILES = [LIB / "tool_record_hook.py"]
+
+
+@pytest.mark.parametrize("path", _DEBT_DECIDING_FILES, ids=lambda p: p.name)
+def test_the_debt_decision_hardcodes_no_literals(path):
+    """With the tuple copied into a file, a fifth outcome could be added to the
+    vocabulary and silently forgotten here — the duplication this PR already
+    refuses for the pinned-effect set."""
+    source = path.read_text(encoding="utf-8")
     code = "\n".join(line for line in source.splitlines()
                      if not line.lstrip().startswith("#"))
     assert '"unregistered", "undecided"' not in code
@@ -145,11 +152,75 @@ def test_neither_hook_hardcodes_the_debt_action_literals(hook):
     assert "is_debt_action" in code
 
 
-def test_both_hooks_agree_because_they_call_the_same_predicate():
-    """The agreement is structural: there is one predicate and both call it."""
-    for hook in ("beacon-tool-record-hook.py", "beacon-untrusted-tool-gate.py"):
-        source = (REPO / "bin" / hook).read_text(encoding="utf-8")
-        assert "tl.is_debt_action(" in source or "is_debt_action(" in source
+def test_no_other_file_decides_debt_membership_by_hand():
+    """Guard the list above: if some file starts testing the action against the
+    literals itself, this fails rather than letting the census go stale."""
+    import re
+    pattern = re.compile(r'["\']unregistered["\']\s*,\s*["\']undecided["\']'
+                         r'|["\']undecided["\']\s*,\s*["\']unregistered["\']')
+    offenders = []
+    # The census used to be ``LIB.glob("tool_*.py")``, which does NOT match
+    # lib/cmd_tool.py — the CLI display surface, i.e. the file most likely to
+    # need this very logic. An independent maintainability review of PR #805
+    # planted the forbidden literal there and this test PASSED. A guard that
+    # cannot fail for the likeliest regression site is worse than no guard,
+    # because green CI then reads as proof. Cover every module both interrupts
+    # and the CLI can reach.
+    for path in (list((REPO / "bin").glob("*.py")) + list(LIB.glob("*.py"))
+                 + list((REPO / "beacon_cli").rglob("*.py"))):
+        if path.name == "tool_ledger.py":
+            continue  # the definition itself
+        code = "\n".join(l for l in path.read_text(encoding="utf-8").splitlines()
+                          if not l.lstrip().startswith("#"))
+        if pattern.search(code):
+            offenders.append(path.name)
+    assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("victim", ["lib/cmd_tool.py",
+                                    "beacon_cli/hooks/save_hook.py"])
+def test_the_census_actually_catches_a_planted_literal(victim):
+    """Test-the-test. The previous census silently excluded lib/cmd_tool.py, so
+    it reported OK with the forbidden literal sitting in it. Plant the literal in
+    each at-risk file and require the census to find it — a guard is only worth
+    its green when it can go red."""
+    import re
+    path = REPO / victim
+    original = path.read_text(encoding="utf-8")
+    try:
+        path.write_text(
+            original + '\n\ndef _planted(action):\n'
+                       '    return action in ("unregistered", "undecided")\n',
+            encoding="utf-8")
+        pattern = re.compile(r'["\']unregistered["\']\s*,\s*["\']undecided["\']'
+                             r'|["\']undecided["\']\s*,\s*["\']unregistered["\']')
+        found = []
+        for p in (list((REPO / "bin").glob("*.py")) + list(LIB.glob("*.py"))
+                  + list((REPO / "beacon_cli").rglob("*.py"))):
+            if p.name == "tool_ledger.py":
+                continue
+            code = "\n".join(
+                l for l in p.read_text(encoding="utf-8").splitlines()
+                if not l.lstrip().startswith("#"))
+            if pattern.search(code):
+                found.append(p.name)
+        assert path.name in found, (
+            f"the census does not reach {victim}; it would pass with the "
+            f"forbidden literal planted there")
+    finally:
+        path.write_text(original, encoding="utf-8")
+
+
+def test_the_hook_entry_points_delegate_rather_than_decide():
+    """Both legs are wrappers. The debt decision (and every other) lives once in
+    lib/tool_record_hook — which is the fix for the defect where one leg was
+    rewritten and the other was left on the old behaviour."""
+    for leg in (REPO / "bin" / "beacon-tool-record-hook.py",
+                REPO / "beacon_cli" / "hooks" / "save_hook.py"):
+        source = leg.read_text(encoding="utf-8")
+        assert "tool_record_hook" in source, leg.name
+        assert "is_debt_action" not in source, (
+            f"{leg.name} decides debt membership itself; it should delegate")
 
 
 def test_every_record_plan_action_is_either_a_debt_an_answer_or_a_record():

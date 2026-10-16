@@ -42,16 +42,32 @@ def _seed_sales_entity(project_dir: Path, collection: str, entity: dict):
     store.apply(_op, validate=False)
 
 
+def _must(args, **kw):
+    """Run a setup command and, on failure, put the child's own words in the report.
+
+    ``check=True`` with ``capture_output=True`` raises CalledProcessError whose
+    message carries only the exit status — the subprocess's stderr is attached to
+    the exception but pytest never prints it. A setup command that fails
+    intermittently then leaves no diagnosable trace at all (observed on CI: this
+    fixture's ``beacon init`` failing on 1 of 6 parallel workers, exit 1, reason
+    unknowable from the log). Assert instead, with stdout/stderr inlined.
+    """
+    proc = subprocess.run([str(BEACON_BIN)] + args, text=True,
+                          capture_output=True, **kw)
+    assert proc.returncode == 0, (
+        f"setup command failed: beacon {' '.join(args)} (rc={proc.returncode})\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )
+    return proc
+
+
 @pytest.fixture
 def proj(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
-    subprocess.run([str(BEACON_BIN), "init"], input="lk\ntest\n5\n1\n",
-                   text=True, check=True, capture_output=True)
-    subprocess.run([str(BEACON_BIN), "milestone", "add", "MS One", "--untriaged"],
-                   check=True, capture_output=True)
-    subprocess.run([str(BEACON_BIN), "milestone", "start", "ms-1"],
-                   check=True, capture_output=True)
+    _must(["init"], input="lk\ntest\n5\n1\n")
+    _must(["milestone", "add", "MS One", "--untriaged"])
+    _must(["milestone", "start", "ms-1"])
     return tmp_path
 
 

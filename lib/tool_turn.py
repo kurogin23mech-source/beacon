@@ -10,8 +10,16 @@ What counts as a turn
 --------------------
 A human prompt. ``UserPromptSubmit`` is already the turn boundary the ms-169
 untrusted-turn machinery uses, and the same event bumps the epoch here. The
-record hook registers for that event too, so the boundary comes from the hook
-itself rather than from a second hook that may or may not be installed.
+record hook is installed for that event too (``commands.HOOK_MANIFEST``'s
+``save-turn`` entry), so the boundary comes from the same hook that consumes it
+rather than from a second hook that may or may not be installed.
+
+That registration was MISSING when this module was written — the docstring
+claimed it while the manifest carried ``PostToolUse`` only, so in any shipped
+install the epoch never advanced and the grain below silently degraded forever.
+An independent philosophy review of PR #802 found it. The install list is part of
+"the interrupt": a feature needing a new event is not wired until the manifest
+says so, however confidently the comment next to the code says otherwise.
 
 What happens when the boundary signal is missing
 ------------------------------------------------

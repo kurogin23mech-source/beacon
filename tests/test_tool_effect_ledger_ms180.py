@@ -333,10 +333,17 @@ def test_gate_does_not_fire_when_not_armed_even_with_a_ledger(tmp_path):
     assert _decision(out) == ""
 
 
-def test_gate_records_unregistered_use_as_debt(tmp_path):
-    """e-7002 via the gate: observing an undeclared tool must note the debt and
-    must NOT block the call."""
-    import tool_usage_debt as debt
+def test_gate_does_not_block_an_undeclared_tool(tmp_path):
+    """e-7002: observing an undeclared tool must NOT block the call — the ledger
+    is a record of declarations, not an allowlist.
+
+    This test used to ALSO assert the gate wrote the debt row. It no longer does:
+    both interrupts see every call, so writing the debt on both sides
+    double-counted every use and the count stopped being an observed fact
+    (philosophy review of PR #802). The debt is now owned by the PostToolUse
+    recorder; the property itself is pinned in
+    ``tests/test_tool_record_hook_parity_ms180`` and
+    ``tests/test_tool_record_hook_ms180``."""
     root = _beacon_root(tmp_path)
     _write_ledger(root, _ledger(tl.build_record(
         "Read", purpose="読む", effect=tl.EFFECT_READ_ONLY)))
@@ -344,36 +351,19 @@ def test_gate_records_unregistered_use_as_debt(tmp_path):
                            "tool_name": "mcp__brand__new_tool",
                            "tool_input": {}})
     assert _decision(out) == ""  # not armed → the call proceeds untouched
-    rows = debt.load_debt(debt.debt_path(str(root / ".beacon")))
-    assert [r["name"] for r in rows] == ["mcp__brand__new_tool"]
 
 
-def test_gate_records_no_debt_for_a_tool_whose_sink_is_settled(tmp_path):
-    """A tool with a DECIDED sink leaves no debt — whether the decision was to
-    record or not to. Only an unjudged sink does (受入条件2)."""
-    import tool_usage_debt as debt
-    root = _beacon_root(tmp_path)
-    _write_ledger(root, _ledger(
-        tl.build_record("Read", purpose="読む", effect=tl.EFFECT_READ_ONLY,
-                        decline_reason="読み取りは証跡ではない"),
-        tl.build_record("mcp__gmail__send_email", purpose="送る",
-                        effect=tl.EFFECT_OUTWARD,
-                        recorder=tl.RECORDER_EVIDENCE)))
-    for name in ("Read", "mcp__gmail__send_email"):
-        _run_gate(root, {"hook_event_name": "PreToolUse", "session_id": "sv-1",
-                         "tool_name": name, "tool_input": {}})
-    assert debt.load_debt(debt.debt_path(str(root / ".beacon"))) == []
-
-
-def test_gate_records_an_undecided_tools_use_as_its_own_reason(tmp_path):
-    """The gate sees every call, so it is also where an unjudged row being USED
-    becomes visible — distinguishable from a tool nobody declared at all."""
+def test_the_gate_writes_no_debt_at_all(tmp_path):
+    """One writer for the debt file. The gate's question is the EFFECT one; a
+    record-shaped fact ("this use left no record") belongs to the recording
+    interrupt, and having both write it made the count a double (philosophy
+    review of PR #802)."""
     import tool_usage_debt as debt
     root = _beacon_root(tmp_path)
     _write_ledger(root, _ledger(tl.build_record(
         "Read", purpose="読む", effect=tl.EFFECT_READ_ONLY)))
-    _run_gate(root, {"hook_event_name": "PreToolUse", "session_id": "sv-1",
-                     "tool_name": "Read", "tool_input": {}})
-    rows = debt.load_debt(debt.debt_path(str(root / ".beacon")))
-    assert [(r["name"], r["reason"]) for r in rows] == \
-        [("Read", debt.REASON_UNDECIDED)]
+    for name in ("Read", "mcp__brand__new_tool"):
+        _run_gate(root, {"hook_event_name": "PreToolUse",
+                         "session_id": "sv-1", "tool_name": name,
+                         "tool_input": {}})
+    assert debt.load_debt(debt.debt_path(str(root / ".beacon"))) == []
