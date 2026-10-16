@@ -2887,7 +2887,8 @@ def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
 
 
 class TrekSchedulerTickRequest(BaseModel):
-    """Body for POST /api/system/trek-scheduler/tick (ms-83 / e-1997).
+    """Body for POST /api/system/tick (ms-83 / e-1997; path moved off the
+    trek-named one in ms-185 e-7065, the old path forwards).
 
     Cloud Scheduler calls this endpoint at a fixed cadence (= every minute
     by default). The endpoint walks all active Treks, decides which are
@@ -3261,41 +3262,47 @@ from routers_treks import (  # noqa: E402
     emit_leader_succession_consent_dm,
 )
 
-@app.post("/api/system/trek-scheduler/tick")
-def trek_scheduler_tick_endpoint(
-    body: TrekSchedulerTickRequest,
-    request: Request,
-):
-    """Run one Trek scheduler tick (ms-83 / e-1997).
+def _require_scheduler_key(request) -> None:
+    """定期発火の入口に内部鍵を要求する (e-1391 / ms-66)。
 
-    Returns a structured report of which treks were considered, which
-    fired, and any per-trek errors. The report is what Cloud Scheduler
-    logs hold onto for observability.
-
-    Decision logic (= pure) lives in ``lib/trek_scheduler.py`` so unit
-    tests pin the cadence math without standing up an HTTP server.
+    鍵は app 側と駆動役 (``scripts/vps-tick.sh``) で同値でなければならない。
+    未設定なら app が起動を拒否する (e-4115) ので、ここで空の鍵が通ることはない。
     """
     provided = request.headers.get("X-Beacon-Scheduler-Key", "")
     expected = envelope_mod.scheduler_internal_key()
     if not provided or provided != expected:
         raise HTTPException(
             status_code=403,
-            detail="trek scheduler tick requires X-Beacon-Scheduler-Key",
+            detail="scheduler tick requires X-Beacon-Scheduler-Key",
         )
 
+
+def _run_trek_tick(body, now) -> dict:
+    """Trek の集約を 1 tick 分走らせる (ms-185 e-7065 で定期発火の入口から分離)。
+
+    **なぜ分離したか (= 直したのは中身ではなく住所)**: 呼び出し元
+    ``_run_system_tick`` は (1) Trek の集約と (2) ターゲットに依存しない定期発火
+    (``_fire_due_scheduled`` = Operation の発火と締切リマインド) の 2 つを走らせる。
+    分離前はこの 2 つが 1 つの関数本体に同居していたため、Trek 側が下の quiesce
+    分岐でローカル変数 ``now_iso`` を実時計 (``trek_mod.utcnow_iso()``) に**再束縛**
+    すると、その値がそのまま ``_fire_due_scheduled`` に渡っていた。つまり quiesce が
+    走った tick だけ、ターゲット非依存の発火が「注入された時計」ではなく実時計を
+    受け取っていた (= ms-128 AC12 の意図が破れる)。関数を分けると再束縛はこの関数の
+    ローカルに閉じ込められ、**構造的に漏れない**。
+
+    Trek の挙動は分離前と同一で、時刻の扱いも含めて変えていない (この MS は Trek を
+    畳む準備であり、この段では Trek の削除も挙動変更も行わない)。
+
+    戻り値は応答に載せる報告 (= どの trek を見て、どれが発火し、何が escalate /
+    stall / quiesce / halt したか)。判定ロジック (= 純粋関数) は
+    ``lib/trek_scheduler.py`` にあるので、単体テストは HTTP を立てずに周期の計算を
+    固定できる。
+    """
     import copy
     import datetime
-    now = _scheduler_now()
-    # ms-66 fix: bind now_iso UNCONDITIONALLY here. It is read below by
-    # _fire_due_scheduled(now_iso) (operation firing), but its only other binding
-    # is inside the trek-quiesce conditional branch — so on every tick where that
-    # branch does not run (the common case), now_iso was unbound at the call site
-    # → UnboundLocalError, swallowed by the try/except below → the server tick's
-    # Operation-firing path silently died on every tick since ms-107 (804dfa16).
-    # Trek fanout was unaffected (it calls trek_mod.utcnow_iso() directly).
-    # ms-128 AC12 — derive now_iso from the (possibly injected) clock so the
-    # Operation-firing path and the Trek fanout share one time source under the
-    # harness. In production (no injection) this equals utcnow_iso() (both real).
+    # 分離前と同一の束縛。下の quiesce 分岐が ``now_iso`` を再束縛するが、その分岐を
+    # 通らない経路でも読まれる (3606 以降) ので、ここで必ず束縛しておく。分離前は
+    # 呼び出し元の同名変数がこの役を担っていた。
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     # Fan out across active treks. Without project scoping we list every
     # trek in the backend (admin-style enumeration); the scheduler tick is
@@ -4553,12 +4560,62 @@ def trek_scheduler_tick_endpoint(
                 "event_id": event_id,
             })
 
-    # ms-107 e-3434 chunk 3b ("trek tick 相乗り") — on this same Cloud-Scheduler
-    # tick, also fire due *scheduled* things (target-agnostic periodic-tick
-    # primitive, lib/tick_scheduler). Operation is the first source; Account
-    # 定期連絡 / short-lived watch tasks plug into the same seam later. Fully
-    # isolated + best-effort: any failure is captured, never touches the Trek
-    # fanout above.
+    return {
+        "candidate_treks": candidate_treks,
+        "due_treks": due_treks,
+        "fired": fired,
+        "escalations": escalations,
+        "leader_review_stall_escalations": leader_review_stall_escalations,
+        "auto_stalled": auto_stalled,
+        "errors": errors,
+        "quiesced": quiesced,
+        # ms-97 / e-2612 (AC32) — halt が立っていて飛ばした trek。
+        # ``quiesced`` (= タスク状態の集計が終端) とは別にして、観測側が
+        # 「リーダーが緊急停止した」と「本当に終わった」を区別できるようにする。
+        "halted": halted,
+        # 2026-08-20: id を持たず発火対象から外した trek。空なら健全。
+        "skipped_no_id": skipped_no_id,
+    }
+
+
+def _run_system_tick(body) -> dict:
+    """定期発火を 1 回走らせる (ms-185 e-7065)。
+
+    この関数が**本番の自律の全駆動**である。中身は 2 つ:
+
+      1. **Trek の集約** (``_run_trek_tick``) — 畳む対象 (ms-185)。
+      2. **ターゲットに依存しない定期発火** (``_fire_due_scheduled``) —
+         Operation の発火と締切リマインド。``lib/tick_scheduler`` の
+         「対象を問わない周期発火」の部品に載っており、Trek とは無関係に残る。
+
+    2 を 1 の中から取り出したのがこの分離の目的。Trek を畳むときに 2 を一緒に
+    落とさないよう、住所を Trek 非依存にしてある (入口も
+    ``POST /api/system/tick``)。
+    """
+    now = _scheduler_now()
+    # ms-66 fix: bind now_iso UNCONDITIONALLY here. It is read below by
+    # _fire_due_scheduled(now_iso) (operation firing + deadline reminders).
+    # 分離前はこの変数が Trek の集約と同居しており、Trek の quiesce 分岐が
+    # 条件付きで再束縛していた。そのため (a) 分岐が走らない tick では未束縛で
+    # UnboundLocalError (= bare except に飲まれて Operation 発火が ms-107 以降
+    # 無音で死んでいた、804dfa16) / (b) 分岐が走った tick では実時計が漏れる、
+    # という 2 つの穴があった。(a) は ms-66 でここの無条件束縛により閉じ、
+    # (b) は ms-185 e-7065 で Trek の集約を別関数に出して構造的に閉じた。
+    # ms-128 AC12 — 注入可能な時計から導出するので、試験ハーネス下でも
+    # ターゲット非依存の発火と Trek の集約が 1 つの時間源を共有する。
+    # 本番 (注入なし) では utcnow_iso() と同値 (どちらも実時計)。
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    trek = _run_trek_tick(body, now)
+    candidate_treks = trek["candidate_treks"]
+    due_treks = trek["due_treks"]
+    fired = trek["fired"]
+
+    # ms-107 e-3434 chunk 3b ("trek tick 相乗り" → e-7065 で住所を Trek から
+    # 分離) — この同じ定期起動で、due な *scheduled* なものも発火する
+    # (対象を問わない周期発火の部品、lib/tick_scheduler)。源は 2 つ:
+    # Operation (dev/sales の永続ターゲット) と締切リマインド (ms-139 e-4953)。
+    # Account 定期連絡 / 短命の watch タスクも同じ継ぎ目に後から挿す。
+    # 完全に隔離した best-effort: どんな失敗も捕まえ、Trek の集約には触れない。
     try:
         scheduled_fires = _fire_due_scheduled(now_iso)
     except Exception as _op_exc:  # pragma: no cover - defensive isolation
@@ -4593,21 +4650,56 @@ def trek_scheduler_tick_endpoint(
         "candidates": len(candidate_treks),
         "due": len(due_treks),
         "fired": fired,
-        "escalations": escalations,
-        "leader_review_stall_escalations": leader_review_stall_escalations,
-        "auto_stalled": auto_stalled,
-        "errors": errors,
-        "quiesced": quiesced,
+        "escalations": trek["escalations"],
+        "leader_review_stall_escalations":
+            trek["leader_review_stall_escalations"],
+        "auto_stalled": trek["auto_stalled"],
+        "errors": trek["errors"],
+        "quiesced": trek["quiesced"],
         # ms-97 / e-2612 (AC32) — treks skipped because halt is set.
         # Separate from ``quiesced`` (= terminal task-state aggregate)
         # so observers can tell "leader pulled the cord" apart from
         # "work is genuinely done".
-        "halted": halted,
+        "halted": trek["halted"],
         # 2026-08-20: id を持たず発火対象から外した trek。空なら健全。
-        "skipped_no_id": skipped_no_id,
+        "skipped_no_id": trek["skipped_no_id"],
         # ms-107 e-3434 chunk 3b — scheduled things fired on this tick.
         "scheduled_fires": scheduled_fires,
     }
+
+
+@app.post("/api/system/tick")
+def system_tick_endpoint(
+    body: TrekSchedulerTickRequest,
+    request: Request,
+):
+    """定期発火の入口 (正本、ms-185 e-7065)。
+
+    本番の自律 (Operation の発火 / 締切リマインド / Trek の集約) はすべてこの
+    入口で駆動される。駆動役は ``scripts/vps-tick.sh`` (systemd の
+    ``beacon-tick.timer`` から 1 分毎)。
+
+    旧入口 ``POST /api/system/trek-scheduler/tick`` もこの入口へ転送するので、
+    駆動役の設定を更新し忘れても止まらない (= 移転の取りこぼしで本番の自律が
+    無音で死ぬのを防ぐ。ms-66 / e-1391 で一度踏んだ型)。
+    """
+    _require_scheduler_key(request)
+    return _run_system_tick(body)
+
+
+@app.post("/api/system/trek-scheduler/tick")
+def trek_scheduler_tick_endpoint(
+    body: TrekSchedulerTickRequest,
+    request: Request,
+):
+    """旧入口。正本 ``POST /api/system/tick`` へ転送する (ms-185 e-7065)。
+
+    Trek を畳む (ms-185) にあたって定期発火の住所を Trek 非依存にしたが、
+    外部の駆動役 (本番 VPS の systemd timer) の設定更新を待つ必要があるので、
+    この旧入口を転送として残す。撤去するのは、新入口経由の発火を本番で
+    実測したあと。
+    """
+    return system_tick_endpoint(body, request)
 
 
 @app.get("/api/system/tick-health")
@@ -5420,7 +5512,7 @@ async def _verify_scheduler_key_configured():
 
     Twin guard to ``_verify_envelope_secret_configured`` for the *other*
     internal secret. ``BEACON_SCHEDULER_INTERNAL_KEY`` gates
-    ``POST /api/system/trek-scheduler/tick`` (which drives Trek / Operation
+    ``POST /api/system/tick`` (which drives Operation / Trek
     autonomy) and the T1-system envelope mint path. Its dev fallback
     (``server/envelope.py:_DEV_FALLBACK_SCHEDULER_KEY``) is visible in the
     public repo, so booting production with the key unset would let anyone who

@@ -13,14 +13,20 @@ app.py's module-global ``_auth_enabled`` bool become calls to the injected
 are reflected — same reasoning as routers_auth's get_local_dev_enabled).
 
 Boundary with app.py — INTENTIONALLY LEFT BEHIND:
-  ``POST /api/system/trek-scheduler/tick`` (trek_scheduler_tick_endpoint)
-  stays in app.py. It is not purely trek: it also drives the Operation
-  scheduler (``_fire_due_scheduled``) and shares a time-source invariant
-  with operation firing (a 2026-07-19 refactor silently killed operation
-  firing here — see the comment block around that endpoint). Extracting it
-  is a separate, higher-risk slice (follow-up e-4870b). The tick re-imports
-  the handful of trek helpers it still needs (the module-level helpers
-  below) via ``from routers_treks import ...``.
+  The periodic tick stays in app.py. It is not purely trek: the same tick
+  also drives the Operation scheduler and deadline reminders
+  (``_fire_due_scheduled``), and a 2026-07-19 refactor silently killed
+  operation firing here by sharing a time-source with the trek fanout.
+
+  ms-185 e-7065 split that endpoint so the shared part is no longer
+  trek-addressed: ``_run_system_tick`` (behind ``POST /api/system/tick``)
+  runs ``_run_trek_tick`` for the trek aggregation and
+  ``_fire_due_scheduled`` for the target-agnostic firing, and the old
+  ``POST /api/system/trek-scheduler/tick`` forwards to it. So folding Trek
+  (ms-185) can now drop ``_run_trek_tick`` without touching the driver of
+  production autonomy. The tick re-imports the handful of trek helpers it
+  still needs (the module-level helpers below) via
+  ``from routers_treks import ...``.
 
 Module-level helpers (below, importable by app.py's scheduler tick) are the
 self-contained ones that depend only on ``db`` / ``trek_mod`` /

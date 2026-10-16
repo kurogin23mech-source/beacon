@@ -376,7 +376,7 @@ cd "$PROJECT_DIR" && beacon operation activate <op-id>
 ### Step 5b: 定期ティックに乗せるか（ms-166 e-5980）
 
 **open にしただけでは自律発火しない。** 本番のサーバ側ティック
-(`beacon-tick.timer` → `POST /api/system/trek-scheduler/tick`) は、
+(`beacon-tick.timer` → `POST /api/system/tick`) は、
 **`meta.server_tick` を opt-in した Operation だけ**を発火対象にする。
 この opt-in を打つ経路がどこにも無かったため、「定期実行の Operation を
 open にしたのに何も起きない」が起きていた（動詞は在ったが bin/beacon に
