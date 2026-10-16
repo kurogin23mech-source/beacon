@@ -379,6 +379,27 @@ class ApiClient:
         """
         return self.get("/api/me/projects")
 
+    def me_recap(self, *, from_date: str = "", to_date: str = "",
+                 limit: int = 0) -> dict:
+        """Cross-project period query (ms-184 e-7017 / SPEC 方針 3).
+
+        Returns the ``progress_window.aggregate`` shape — only the projects
+        that moved, plus ``unavailable`` for the ones that could not be read.
+        Raises ``RuntimeError`` on 404 / 501 (= a server that predates this
+        endpoint, or one where it is not wired), which the caller handles by
+        reading each project itself; both paths run the same derivation, so
+        they cannot disagree about what counts as progress.
+        """
+        q = []
+        if from_date:
+            q.append(f"from={urllib.parse.quote(from_date, safe='')}")
+        if to_date:
+            q.append(f"to={urllib.parse.quote(to_date, safe='')}")
+        if limit:
+            q.append(f"limit={int(limit)}")
+        qs = ("?" + "&".join(q)) if q else ""
+        return self.get(f"/api/me/recap{qs}")
+
     def me_upsert_machine(
         self, fingerprint: str, *, hostname: str = "", agent: str = ""
     ) -> dict:

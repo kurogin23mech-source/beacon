@@ -41,6 +41,19 @@ Metadata filters (specified separately from `q`, not part of fulltext):
   type[], status[], priority[], scope, ms, op, id (exact),
   assignee, owner, from (created_at ≥), to (created_at ≤),
   limit, offset
+
+The period filter (`from` / `to`) is three-valued, not two (ms-184 e-7016).
+A record carrying NO timestamp cannot be judged against a period, so it is
+excluded from a windowed query and counted in the result's `undated` block
+instead of being reported as a match. Before this, the inline comparison
+`if from_date and created_at and created_at < from_date` skipped both bounds
+on an empty `created_at` and returned such records for EVERY period: asking
+for 2020-01-01..2020-01-02 and for yesterday both returned the same 25
+long-finished milestones, while the milestone that actually took 8 commits
+yesterday appeared in neither. A date-only upper bound also now covers the
+whole of that day (see `date_window.normalize_bound`) — `--to 2026-10-14`
+used to drop everything stamped with a time on the 14th. Both rules live in
+`lib/date_window.py` so the period question has one answer everywhere.
 """
 
 from __future__ import annotations
@@ -48,6 +61,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+import date_window as _dw
 import occupation
 import work_model
 
@@ -96,6 +110,13 @@ def search_project(
     priority_filter = set(priority) if priority else None
     q_lower = q.lower().strip() if q else ""
 
+    # ms-184 e-7016: records that carry no timestamp cannot be judged against a
+    # period. They are excluded from a windowed query and tallied here so the
+    # result can SAY how many were unjudgeable — the old code reported them as
+    # matches for every period, which is why a 2020 query and a "yesterday"
+    # query returned the identical 25 undated milestones.
+    undated: dict = {}
+
     matches: list[dict] = []
 
     # ------------------ Milestones ------------------
@@ -117,6 +138,7 @@ def search_project(
             owner=owner,
             from_date=from_date,
             to_date=to_date,
+            undated=undated,
             scope_filter=None,
         ):
             matches.append(_render_milestone(m, q_lower))
@@ -153,6 +175,7 @@ def search_project(
             owner=owner,
             from_date=from_date,
             to_date=to_date,
+            undated=undated,
             scope_filter=None,
         ):
             matches.append(_render_operation(opn, q_lower))
@@ -169,6 +192,7 @@ def search_project(
                         owner=owner,
                         from_date=from_date,
                         to_date=to_date,
+                        undated=undated,
                         parent_is_op=True)
 
     # ------------------ Other Target classes (generic engine) ------------------
@@ -215,6 +239,7 @@ def search_project(
                     owner=owner,
                     from_date=from_date,
                     to_date=to_date,
+                    undated=undated,
                     scope_filter=None,
                     state_field=_state_field,
                 ):
@@ -241,6 +266,7 @@ def search_project(
             owner=owner,
             from_date=from_date,
             to_date=to_date,
+            undated=undated,
             scope_filter=None,
         ):
             if not ms or push.get("ms_id") == ms:
@@ -264,6 +290,7 @@ def search_project(
             owner=owner,
             from_date=from_date,
             to_date=to_date,
+            undated=undated,
             scope_filter=None,
         ):
             matches.append(_render_deploy(synth, q_lower))
@@ -277,7 +304,8 @@ def search_project(
                               op_filter=op,
                               id_filter=id,
                               from_date=from_date,
-                              to_date=to_date):
+                              to_date=to_date,
+                              undated=undated):
             matches.append(_render_document(doc, q_lower))
 
     # ------------------ Facets (from matched set, pre-pagination) ------------------
@@ -297,6 +325,13 @@ def search_project(
         "limit": limit,
         "offset": offset,
         "facets": facets,
+        # Unjudgeable-by-date records excluded from a windowed query. Always
+        # present (0 when no period was requested) so a consumer can read it
+        # unconditionally instead of guessing whether the key exists.
+        "undated": {
+            "excluded": sum(undated.values()),
+            "by_type": dict(sorted(undated.items())),
+        },
     }
 
 
@@ -307,7 +342,8 @@ def search_project(
 def _walk_entry(entry: dict, parent: dict, matches: list[dict], *,
                 q_lower: str, type_filter, status_filter, priority_filter,
                 ms_filter, op_filter, id_filter, assignee, owner,
-                from_date, to_date, parent_is_op: bool = False):
+                from_date, to_date, parent_is_op: bool = False,
+                undated=None):
     entry_type = entry.get("type", "")
 
     # Map nested entry types to their search-facing names if needed.
@@ -330,6 +366,7 @@ def _walk_entry(entry: dict, parent: dict, matches: list[dict], *,
         owner=owner,
         from_date=from_date,
         to_date=to_date,
+        undated=undated,
         scope_filter=None,
     ):
         # Only attach if scope checks pass
@@ -354,6 +391,7 @@ def _walk_entry(entry: dict, parent: dict, matches: list[dict], *,
                     owner=owner,
                     from_date=from_date,
                     to_date=to_date,
+                    undated=undated,
                     parent_is_op=parent_is_op)
 
 
@@ -384,12 +422,32 @@ _Q_FIELDS_BY_TYPE = {
 _Q_FIELDS_FALLBACK = ["label", "name", "title", "description"]
 
 
+def _in_window(value: str, from_date: str, to_date: str,
+                entity_type: str, undated) -> bool:
+    """Return whether ``value`` passes the requested period (ms-184 e-7016).
+
+    An UNDATED record (no timestamp at all) fails a windowed query and is
+    tallied in ``undated`` so the caller can report "N records could not be
+    judged by date" rather than silently claiming they matched (the old
+    behaviour) or silently dropping them (equally misleading — a reader cannot
+    distinguish that from "nothing happened"). ``undated`` is a plain dict the
+    caller owns; ``None`` disables tallying for callers that do not report it.
+    """
+    verdict = _dw.classify(value, from_date, to_date)
+    if verdict == _dw.IN_WINDOW:
+        return True
+    if verdict == _dw.UNDATED and undated is not None:
+        undated[entity_type] = undated.get(entity_type, 0) + 1
+    return False
+
+
 def _entity_matches(entity_type: str, e: dict, *, q_lower: str,
                     type_filter, status_filter, priority_filter,
                     ms_filter: str, op_filter: str, id_filter: str,
                     assignee: str, owner: str,
                     from_date: str, to_date: str,
-                    scope_filter, state_field: str = "status") -> bool:
+                    scope_filter, state_field: str = "status",
+                    undated=None) -> bool:
     # type filter
     if type_filter is not None and entity_type not in type_filter:
         return False
@@ -441,11 +499,16 @@ def _entity_matches(entity_type: str, e: dict, *, q_lower: str,
         if e.get("owner", "") != owner and (e.get("meta") or {}).get("owner", "") != owner:
             return False
 
-    # date range
-    created_at = e.get("created_at", "") or e.get("date", "") or e.get("pushed_at", "")
-    if from_date and created_at and created_at < from_date:
-        return False
-    if to_date and created_at and created_at > to_date:
+    # date range (ms-184 e-7016: absence is its own verdict, not a match).
+    # This filter answers "RAISED in this period" — it reads the declared
+    # CREATION_STAMPS set, deliberately NOT the movement set `beacon recap`
+    # reads. A task created in May and finished yesterday is not a match for
+    # yesterday HERE and is for recap; both answers are correct for their own
+    # question, and naming the two sets is what keeps that a stated choice
+    # (maintainability review PR#803).
+    stamps = _dw.stamps_of(e, _dw.CREATION_STAMPS)
+    created_at = stamps[0] if stamps else ""
+    if not _in_window(created_at, from_date, to_date, entity_type, undated):
         return False
 
     # fulltext q — also match the entity's own id (e-XXX / ms-XX / op-X) so a
@@ -479,7 +542,8 @@ def _matches_fulltext(entity_type: str, e: dict, q_lower: str) -> bool:
 
 def _document_matches(doc: dict, *, q_lower: str, type_filter,
                        scope_filter: str, ms_filter: str, op_filter: str,
-                       id_filter: str, from_date: str, to_date: str) -> bool:
+                       id_filter: str, from_date: str, to_date: str,
+                       undated=None) -> bool:
     if type_filter is not None and "document" not in type_filter:
         return False
     if scope_filter and doc.get("scope", "") != scope_filter:
@@ -491,9 +555,7 @@ def _document_matches(doc: dict, *, q_lower: str, type_filter,
     if id_filter and doc.get("doc_id", "") != id_filter:
         return False
     updated = doc.get("updated_at", "") or doc.get("created_at", "")
-    if from_date and updated and updated < from_date:
-        return False
-    if to_date and updated and updated > to_date:
+    if not _in_window(updated, from_date, to_date, "document", undated):
         return False
     if q_lower:
         did = (doc.get("doc_id") or doc.get("id") or "").lower()

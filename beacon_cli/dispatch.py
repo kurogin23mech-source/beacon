@@ -1374,6 +1374,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_trig_clear = trigger_sub.add_parser("clear", add_help=False)
     p_trig_clear.add_argument("name", nargs="?", default="")
 
+    # ---- recap (ms-184) ----
+    # Two verbs on one noun: `projects` answers breadth ("which of my projects
+    # moved"), `targets` answers depth ("what moved in this one"). Keeping them
+    # separate is SPEC 方針 6 — one verb carrying both would be over- or
+    # under-full for whichever question was actually asked.
+    p_recap = sub.add_parser("recap", help="What progressed in a period",
+                             add_help=False)
+    p_recap.add_argument("--help", "-h", action="store_true", dest="show_help")
+    recap_sub = p_recap.add_subparsers(dest="recap_cmd")
+
+    p_recap_targets = recap_sub.add_parser("targets", add_help=False)
+    p_recap_targets.add_argument("--project", dest="recap_project", default="")
+    p_recap_targets.add_argument("--since", dest="recap_since", default="")
+    p_recap_targets.add_argument("--from", dest="from_date", default="")
+    p_recap_targets.add_argument("--to", dest="to_date", default="")
+    p_recap_targets.add_argument("--evidence", dest="recap_evidence", default="")
+    p_recap_targets.add_argument("--limit", default="")
+    p_recap_targets.add_argument("--json", action="store_true")
+    p_recap_targets.add_argument("--help", "-h", action="store_true", dest="show_help")
+
+    p_recap_projects = recap_sub.add_parser("projects", add_help=False)
+    # `projects` already spans every project you own, so --project there means
+    # the caller wanted DEPTH and typed the BREADTH verb. It is DECLARED here
+    # (not omitted) so the handler can refuse it with the same explanation +
+    # redirect the bash front gives; omitting it made argparse answer with a
+    # generic "unrecognized arguments" against the top-level banner, losing
+    # both the reason and the way out (AX review PR#803 high — and the bash
+    # side's own guard test covered only bash, which is how this drifted).
+    p_recap_projects.add_argument("--project", dest="recap_project", default="")
+    p_recap_projects.add_argument("--since", dest="recap_since", default="")
+    p_recap_projects.add_argument("--from", dest="from_date", default="")
+    p_recap_projects.add_argument("--to", dest="to_date", default="")
+    p_recap_projects.add_argument("--limit", default="")
+    p_recap_projects.add_argument("--json", action="store_true")
+    p_recap_projects.add_argument("--help", "-h", action="store_true", dest="show_help")
+
     # ---- search ----
     p_search = sub.add_parser("search", help="Unified search", add_help=False)
     p_search.add_argument("query", nargs="?", default="")
@@ -4508,6 +4544,53 @@ def _handle_trigger(root: Path, args: argparse.Namespace) -> int:
     return 1
 
 
+# ---- recap (ms-184) ----
+
+_RECAP_USAGE = (
+    "Usage:\n"
+    "  beacon recap projects [--since <period>] [--from A --to B] [--limit N] [--json]\n"
+    "      Which of your projects moved in the period (movers only).\n"
+    "  beacon recap targets  [--project <id>] [--since <period>] [--from A --to B]\n"
+    "                        [--evidence N] [--limit N] [--json]\n"
+    "      Which Targets of one project progressed, and the evidence.\n"
+    "      --project reads another project without changing directory.\n"
+    "\n"
+    "  <period>: today | yesterday | this-week | last-week | this-month |\n"
+    "            Nd | Nw | Nh | Nm | YYYY-MM-DD | YYYY-MM-DD..YYYY-MM-DD\n"
+    "            (default: 7d; --since and --from/--to are mutually exclusive)"
+)
+
+
+def _handle_recap(root: Path, args: argparse.Namespace) -> int:
+    recap_cmd = getattr(args, "recap_cmd", None)
+    if args.show_help or recap_cmd is None:
+        print(_RECAP_USAGE)
+        return 0
+    if (rc := _ensure_project()) is not None:
+        return rc
+    env = {
+        "BEACON_SINCE": getattr(args, "recap_since", "") or "",
+        "BEACON_FROM": getattr(args, "from_date", "") or "",
+        "BEACON_TO": getattr(args, "to_date", "") or "",
+        "BEACON_LIMIT": getattr(args, "limit", "") or "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    }
+    if recap_cmd == "targets":
+        env["BEACON_RECAP_PROJECT"] = getattr(args, "recap_project", "") or ""
+        env["BEACON_EVIDENCE"] = getattr(args, "recap_evidence", "") or ""
+        return _run_commands_py(root, "recap_targets", env)
+    if recap_cmd == "projects":
+        stray = getattr(args, "recap_project", "") or ""
+        if stray:
+            print("beacon recap projects: --project is not accepted (it "
+                  "already spans every project you own). Use: beacon recap "
+                  f"targets --project {stray}", file=sys.stderr)
+            return 1
+        return _run_commands_py(root, "recap_projects", env)
+    print(_RECAP_USAGE)
+    return 1
+
+
 # ---- search ----
 
 
@@ -6663,6 +6746,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "tools": _handle_tool,  # alias, mirrors bash `tool|tools)`
     "decision": _handle_decision,  # ms-154 e-5594
     "trigger": _handle_trigger,
+    "recap": _handle_recap,  # ms-184
     "search": _handle_search,
     "cycle": _handle_cycle,
     "push": _handle_push,
@@ -6727,6 +6811,7 @@ def _print_top_help() -> None:
         "  beacon doc show <doc-id>\n"
         "  beacon note \"<text>\" | note list | note clear --yes | note restore\n"
         "  beacon search \"query\" [--ms id] [--scope S]\n"
+        "  beacon recap projects|targets [--since yesterday] [--project id]\n"
         "  beacon trigger fire|check|clear [name]\n"
         "  beacon retro [--prepare|--catch-up] [--since X] [--until Y]\n"
         "  beacon retro save --week YYYY-WNN [--content T | --stdin] [--json]\n"

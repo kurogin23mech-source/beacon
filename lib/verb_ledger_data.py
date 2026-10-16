@@ -431,6 +431,8 @@ VERB_LEDGER = {
     "scenario_list": {"cls": "Q", "secondary": [], "note": "保存シナリオの read-only 一覧(Q)"},
     "scenario_replay": {"cls": "Q", "secondary": ["B"], "note": "保存シナリオを CI 回帰として replay + MS close の attainment evidence 供給(実プロジェクト不変=Q / 実CLI黒箱実行=B)。attainment は verdict でなく evidence"},
     # --- search ---
+    "recap_projects": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-184] read-only: 期間に動いたプロジェクトだけを横断で返す(集計/幅)。動いていないものは返さない"},
+    "recap_targets": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-184] read-only: 1 プロジェクトで期間内に進捗した対象+証跡(詳細/深さ)。--project で別プロジェクトを cwd 非移動で読む"},
     "search": {"cls": "Q", "secondary": [], "note": ""},
 
     # --- session ---
