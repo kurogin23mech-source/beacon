@@ -42,13 +42,6 @@ def _seed_sales_entity(project_dir: Path, collection: str, entity: dict):
     store.apply(_op, validate=False)
 
 
-# TEMPORARY (ms-180 CI triage): trace the init call so the intermittent
-# "$1: unbound variable" failure names its own location. PS4 carries
-# source:line:function, and only the tail of the trace is reported, and only
-# when the command fails. Remove once the cause is fixed.
-_TRACE_FIRST_ARG = {"init"}
-
-
 def _must(args, **kw):
     """Run a setup command and, on failure, put the child's own words in the report.
 
@@ -59,22 +52,12 @@ def _must(args, **kw):
     fixture's ``beacon init`` failing on 1 of 6 parallel workers, exit 1, reason
     unknowable from the log). Assert instead, with stdout/stderr inlined.
     """
-    import os
-    argv = [str(BEACON_BIN)] + args
-    env = None
-    if args and args[0] in _TRACE_FIRST_ARG:
-        argv = ["bash", "-x", str(BEACON_BIN)] + args
-        env = dict(os.environ,
-                   PS4="+${BASH_SOURCE}:${LINENO}:${FUNCNAME[0]:-main}: ")
-    proc = subprocess.run(argv, text=True, capture_output=True, env=env, **kw)
-    if proc.returncode != 0:
-        tail = "\n".join(proc.stderr.splitlines()[-60:])
-        raise AssertionError(
-            f"setup command failed: beacon {' '.join(args)} "
-            f"(rc={proc.returncode})\n"
-            f"--- stdout ---\n{proc.stdout}\n"
-            f"--- stderr (last 60 lines) ---\n{tail}"
-        )
+    proc = subprocess.run([str(BEACON_BIN)] + args, text=True,
+                          capture_output=True, **kw)
+    assert proc.returncode == 0, (
+        f"setup command failed: beacon {' '.join(args)} (rc={proc.returncode})\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )
     return proc
 
 

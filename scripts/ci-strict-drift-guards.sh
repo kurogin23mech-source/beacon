@@ -136,4 +136,19 @@ echo "[ci-strict-drift-guards] beacon tool のサブコマンド別 flag 一致 
 # 定義を 2 つ持たないため)。標準ライブラリのみ (pytest 非依存)。
 python3 "$ROOT/scripts/check-tool-subcommand-flag-parity.py"
 
+echo "[ci-strict-drift-guards] 未設定の位置引数で死なないこと (ms-180)…"
+# bin/beacon は `set -euo pipefail` で走るので、守られていない `$1` / `$2` 参照が
+# 1 つあると、引数を省いた呼び出しが usage ではなく
+# `$1: unbound variable` の中断になる。
+#
+# この級は **静的に読むだけでは閉じない**。実際に観測されたのは CI (Linux / bash 5、
+# 並列実行) だけで、手元 (macOS / bash 3.2) では 1 度も再現しなかった。だから probe は
+# 「走らせて確かめる」形にしてある — 走っている環境がそのまま計器になる。
+#
+# 全 verb path を help レジストリ (= `beacon help --json` が描くのと同じ単一の
+# レジストリ) から引くので、後から足した verb も本体を触らずに probe される。
+# 読み取り専用 probe gate 下で走り、HOME と作業ディレクトリも使い捨てに向けるので、
+# probe が実際の設定を書き換えることはない。標準ライブラリのみ (pytest 非依存)。
+python3 "$ROOT/scripts/check-cli-unset-positional.py" --quiet
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."
