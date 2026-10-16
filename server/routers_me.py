@@ -46,6 +46,14 @@ import store_router as db  # e-1544: same backend-routing binding app.py uses
 # "beacon.server")), so log records keep landing on the identical logger.
 logger = logging.getLogger("beacon.server")
 
+#: Store/remote failures that legitimately mean "this source could not be
+#: read" (ms-184 e-7017). Mirrors ``lib/cmd_recap._REMOTE_ERRORS`` so the two
+#: halves of the same feature treat the same failure class the same way. A
+#: ``TypeError`` / ``AttributeError`` is NOT here: that is a bug in this file
+#: and must not be reported as an unavailable source.
+_STORE_ERRORS = (RuntimeError, ConnectionError, TimeoutError, OSError,
+                 ValueError, KeyError)
+
 
 class MeMachineUpsert(BaseModel):
     """Body for POST /api/me/machine (e-1509).
@@ -265,17 +273,37 @@ def make_router(
             try:
                 data = load_project(pid, user)
             except Exception as exc:    # noqa: BLE001 — one bad project must
-                # not abort the sweep; it is REPORTED, not skipped.
+                # not abort the sweep; it is REPORTED, not skipped. Broad on
+                # purpose here (unlike the two reads below): ANY failure to
+                # load one project is information the caller needs, and it is
+                # surfaced in ``unavailable`` rather than swallowed. Logged so
+                # a programming error is not only visible as a per-project
+                # error string.
+                logger.warning("me_recap: load_project(%s) failed: %s",
+                               pid, exc)
                 rows.append({"project_id": pid, "name": name,
                              "error": f"{type(exc).__name__}: {exc}"})
                 continue
+            # Narrow, and LOG. The CLI half of this same milestone deliberately
+            # narrowed its tuple with a comment saying this exact mistake —
+            # swallowing a bug in the handler's own code as "source
+            # unavailable" — had been made and caught. The server half kept
+            # a bare ``except Exception`` with no log, so a real TypeError
+            # here would read as a transient read failure forever (an
+            # independent maintainability review caught the asymmetry,
+            # PR#803). Store/remote failures still degrade to None (= "not
+            # consulted"); a programming error now surfaces.
             try:
                 documents = db.list_documents(pid) or []
-            except Exception:           # noqa: BLE001
+            except _STORE_ERRORS as exc:
+                logger.warning("me_recap: list_documents(%s) failed: %s",
+                               pid, exc)
                 documents = None
             try:
                 decisions = db.list_decision_events(pid, limit=500) or []
-            except Exception:           # noqa: BLE001
+            except _STORE_ERRORS as exc:
+                logger.warning("me_recap: list_decision_events(%s) failed: %s",
+                               pid, exc)
                 decisions = None
             rows.append({
                 "project_id": pid, "name": name,

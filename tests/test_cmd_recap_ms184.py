@@ -357,6 +357,42 @@ def test_projects_limit_truncates_the_list_but_not_the_count(monkeypatch, capsys
     assert out["project_count"] == 4, "a display cap must not lower the count"
 
 
+def test_document_read_failure_is_not_reported_as_zero(monkeypatch):
+    """A document source that could not be READ must say so (受入条件 6/8).
+
+    The first version of this file got that right for decisions (via
+    ``_decisions_for``, returning ``None`` with a docstring explaining why) and
+    then wrote the opposite for documents, inline, at every call site: a failed
+    store read became ``[]`` and ``derive`` reported ``document`` as
+    CONSULTED. So "the store was down" and "this project has no documents in
+    the window" were the same answer — the exact confusion this milestone
+    exists to remove, in its own code. An independent maintainability review
+    reproduced it.
+    """
+    import store as _store
+
+    monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: False)
+    monkeypatch.setattr(cmd_recap, "load_project", lambda: _project())
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(_store, "get_store", _boom)
+    _pid, _name, _data, documents, _dec = cmd_recap._read_current_project()
+    assert documents is None, \
+        "a failed read must be None (not consulted), never [] (zero records)"
+
+    # ... and a SUCCESSFUL read of zero documents must still count as consulted,
+    # or the fix would have traded one conflation for its mirror image.
+    class _Empty:
+        def list_documents(self):
+            return []
+
+    monkeypatch.setattr(_store, "get_store", lambda *a, **k: _Empty())
+    _pid, _name, _data, documents, _dec = cmd_recap._read_current_project()
+    assert documents == [], "an empty-but-successful read is zero, not unknown"
+
+
 # ---------------------------------------------------------------------------
 # The caveats must survive into the rendered text, not only the JSON
 # ---------------------------------------------------------------------------

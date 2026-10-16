@@ -33,7 +33,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: all of them rather than assuming one home.
 TEST_FILES = ("tests/test_progress_window_ms184.py",
               "tests/test_cmd_recap_ms184.py",
-              "tests/test_recap_entrypath_ms184.py")
+              "tests/test_recap_entrypath_ms184.py",
+              "tests/test_recap_frontend_parity_ms184.py")
 #: Runs the harness itself — excluded or the harness would recurse forever.
 SELF_TEST = "test_inversion_harness_is_wired"
 
@@ -228,6 +229,34 @@ INVERSIONS = [
         '    if lo and hi and lo > hi:\n        return f"--from {lo} is after --to {hi}."\n',
         '    return ""  # noqa\n    if False:\n        return ""\n',
         ["test_inverted_explicit_range_is_refused"],
+    ),
+    (
+        "a failed document read becomes [] (= indistinguishable from zero)",
+        "lib/cmd_recap.py",
+        "    except _REMOTE_ERRORS + (ImportError,):\n        return None\n",
+        "    except _REMOTE_ERRORS + (ImportError,):\n        return []\n",
+        ["test_document_read_failure_is_not_reported_as_zero"],
+    ),
+    (
+        "bash stops carrying --evidence to commands.py",
+        "bin/beacon",
+        '                --evidence)  recap_evidence="${2:-}"; shift 2 ;;\n',
+        "",
+        ["test_both_frontends_hand_commands_py_the_same_env"],
+    ),
+    (
+        "bash sends `recap targets` to the projects backend",
+        "bin/beacon",
+        'python3 "$COMMANDS_PY" recap_targets',
+        'python3 "$COMMANDS_PY" recap_projects',
+        ["test_both_frontends_hand_commands_py_the_same_env"],
+    ),
+    (
+        "the python front sends `recap targets` to the projects backend",
+        "beacon_cli/dispatch.py",
+        '_run_commands_py(root, "recap_targets", env)',
+        '_run_commands_py(root, "recap_projects", env)',
+        ["test_both_frontends_hand_commands_py_the_same_env"],
     ),
     (
         "an unparseable period silently becomes the default window",

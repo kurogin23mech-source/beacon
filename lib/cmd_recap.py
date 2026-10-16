@@ -163,16 +163,40 @@ def _decisions_for(client, project_id: str) -> Optional[list]:
     return rows if isinstance(rows, list) else None
 
 
+def _documents_for(reader) -> Optional[list]:
+    """Best-effort document read. ``None`` — not ``[]`` — on failure.
+
+    The sibling :func:`_decisions_for` already encodes this: a source that
+    could not be READ must report itself as not consulted, or a zero result is
+    indistinguishable from a complete one. The first version of this file got
+    that right for decisions and then wrote the opposite for documents, inline,
+    at every call site — a failed store read became ``[]`` and
+    ``progress_window.derive`` reported ``document`` as CONSULTED. That
+    violates this milestone's own 受入条件 6/8 for the document source
+    specifically, which an independent maintainability review reproduced
+    (PR#803). One helper, same shape as its sibling, so the two honesty rules
+    cannot drift apart again.
+
+    ``reader`` is a zero-argument callable returning the document list.
+    """
+    if reader is None:
+        return None
+    try:
+        rows = reader()
+    except _REMOTE_ERRORS + (ImportError,):
+        return None
+    return list(rows) if rows is not None else None
+
+
 def _read_current_project() -> tuple:
     """``(project_id, name, project, documents, decisions)`` for the cwd project."""
     data = load_project()
     pid = data.get("project_id", "") or ""
-    documents = []
-    try:
+    def _read_docs():
         import store as _store      # noqa: PLC0415 — optional in bare unit runs
-        documents = _store.get_store().list_documents() or []
-    except _REMOTE_ERRORS + (ImportError,):
-        documents = []
+        return _store.get_store().list_documents()
+
+    documents = _documents_for(_read_docs)
     decisions = None
     if _is_cloud_mode():
         try:
@@ -229,10 +253,7 @@ def _read_named_project(project_ref: str) -> tuple:
               file=sys.stderr)
         sys.exit(1)
 
-    try:
-        documents = client.list_documents(pid) or []
-    except _REMOTE_ERRORS:
-        documents = []
+    documents = _documents_for(lambda: client.list_documents(pid))
     return (pid, data.get("name", "") or pid, data, documents,
             _decisions_for(client, pid))
 
@@ -438,10 +459,7 @@ def _scan_owned_projects(lo: str, hi: str) -> tuple:
             rows.append({"project_id": pid, "name": name,
                          "error": "empty project payload"})
             continue
-        try:
-            documents = client.list_documents(pid) or []
-        except _REMOTE_ERRORS:
-            documents = []
+        documents = _documents_for(lambda: client.list_documents(pid))
         rows.append({
             "project_id": pid, "name": name,
             "result": _pw.derive(data, from_date=lo, to_date=hi,
