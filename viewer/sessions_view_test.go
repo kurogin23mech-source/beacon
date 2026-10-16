@@ -1080,3 +1080,155 @@ func TestStuckRunningSurfacesInPage(t *testing.T) {
 			"誰も気づけない (ms-173 独立レビュー AX-4)")
 	}
 }
+
+// 「要対応のみ」が「生きている全部」に退化しないこと (ms-173 AC2)。
+//
+// 退化の経緯: 判定が ToolRunning だけを見ていたが、実運用の行をすべて作る台帳経路は
+// その欄を立てないため、!ToolRunning が生きている全行で真になっていた。当時の単体
+// テストは ToolRunning を手で立てていたので、本番の signal が死んでいても緑だった。
+// ここでは **台帳経路が実際に作る形** (ToolRunning 未設定 + State/ServerState あり) で
+// 判定を縛る。
+func TestToolWorkingReadsEachSourceInOrder(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          SessionOverview
+		wantWorking bool
+		wantSource  workingSource
+	}{
+		{"プロセス観測が動いていると言えばそれで決まる",
+			SessionOverview{ToolRunning: true}, true, workingFromProcess},
+		{"プロセス観測が黙っていてもサーバ正典が running なら動いている",
+			SessionOverview{ServerState: "running"}, true, workingFromServerState},
+		{"サーバ正典の awaiting_human は人を待っている = 動いていない",
+			SessionOverview{ServerState: "awaiting_human"}, false, workingFromServerState},
+		{"サーバ正典の blocked も動いていない",
+			SessionOverview{ServerState: "blocked"}, false, workingFromServerState},
+		{"サーバが idle と言えば、ローカルの busy 申告より優先される",
+			SessionOverview{ServerState: "idle", State: "busy"}, false, workingFromServerState},
+		{"台帳経路の実形 (ToolRunning 未設定 + status=busy) で動いていると読める",
+			SessionOverview{State: "busy"}, true, workingFromToolState},
+		{"サーバが黙っていてローカルも idle なら動いていない",
+			SessionOverview{State: "idle"}, false, workingFromToolState},
+		{"出自がひとつも無ければ動いていない",
+			SessionOverview{}, false, workingUnspoken},
+
+		// --- 出自が食い違うとき、どちらが勝つか (#804 独立レビュー: 優先順の
+		// 契約がコメントに書かれているのに試験で一度も踏まれていなかった) ---
+		{"人を待っている宣言は、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, ServerState: "awaiting_human"},
+			false, workingFromServerState},
+		{"事故で止まった宣言は、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, ServerState: "interrupted"},
+			false, workingFromServerState},
+		{"外部要因で停止の宣言も、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, ServerState: "blocked"},
+			false, workingFromServerState},
+		{"終了の宣言は、ローカルに残った busy 申告に勝つ",
+			SessionOverview{ServerState: "terminated", State: "busy"},
+			false, workingFromServerState},
+		{"何をしているか言えていない宣言は、ローカルの busy 申告に勝つ",
+			SessionOverview{ServerState: "unknown", State: "busy"},
+			false, workingFromServerState},
+		{"ローカルの idle 申告は、粗いプロセス生存に勝つ",
+			SessionOverview{ToolRunning: true, State: "idle"},
+			false, workingFromToolState},
+
+		// --- 正典に無い値をサーバが話したら、黙って次点に流さない ---
+		{"順位付けしていないサーバ状態は、ローカル申告に流さず止める",
+			SessionOverview{ServerState: "some_future_state", State: "busy"},
+			false, workingFromUnrankedServerState},
+	}
+	for _, c := range cases {
+		gotWorking, gotSource := toolWorking(c.in)
+		if gotWorking != c.wantWorking || gotSource != c.wantSource {
+			t.Errorf("%s: toolWorking = (%v, %q), want (%v, %q)",
+				c.name, gotWorking, gotSource, c.wantWorking, c.wantSource)
+		}
+	}
+}
+
+// 台帳経路が実際に作る行で「要対応」が正しく割れること。
+// ToolRunning は **立てない** (台帳経路は立てないため) — ここを手で立てると、
+// 退化を見逃した当時のテストと同じ偽の緑に戻る。
+func TestNeedsAttentionOnLedgerShapedRows(t *testing.T) {
+	cases := []struct {
+		name string
+		in   SessionOverview
+		want bool
+	}{
+		{"作業中 (サーバ running / 道具 busy) は要対応でない",
+			SessionOverview{Running: true, ServerState: "running", State: "busy"}, false},
+		{"サーバ running で道具が一瞬 idle でも要対応でない",
+			SessionOverview{Running: true, ServerState: "running", State: "idle"}, false},
+		{"両方 idle は要対応",
+			SessionOverview{Running: true, ServerState: "idle", State: "idle"}, true},
+		{"確認待ちは要対応",
+			SessionOverview{Running: true, ServerState: "awaiting_human"}, true},
+		{"別マシンの行は道具の状態が手元に無いので対象外",
+			SessionOverview{TransportLive: true, ServerState: "idle", Remote: true}, false},
+		{"生きていない行は要対応でない",
+			SessionOverview{ServerState: "idle", State: "idle"}, false},
+	}
+	for _, c := range cases {
+		if got := NeedsAttention(c.in); got != c.want {
+			t.Errorf("%s: NeedsAttention = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 要対応が全件と一致してしまう退化を、集合として捕まえる (個別の脚だけを縛ると、
+// 新しい出自が足されたときに同じ退化が別の経路で戻りうる)。
+func TestAttentionIsStrictSubsetWhenWorkingRowsExist(t *testing.T) {
+	p := &ProjectRef{ProjectID: "p1", Name: "P1"}
+	rows := []SessionOverview{
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "running", State: "busy"},
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "running", State: "idle"},
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "idle", State: "idle"},
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "awaiting_human"},
+	}
+	all := FilterSessions(rows, SessionFilter{Scope: ScopeAll}, "me@example.com")
+	att := FilterSessions(rows, SessionFilter{Scope: ScopeAttention}, "me@example.com")
+	if len(all) != 4 {
+		t.Fatalf("all = %d, want 4", len(all))
+	}
+	if len(att) == len(all) {
+		t.Fatalf("要対応が全件と同じ (%d 件) = フィルタが退化している", len(att))
+	}
+	if len(att) != 2 {
+		t.Errorf("要対応 = %d 件, want 2 (両方 idle と 確認待ち)", len(att))
+	}
+}
+
+// 順位付け表が正典集合を取りこぼしていないこと。
+//
+// 既定値に落ちる形だと、新しい状態が足されても試験が緑のまま片側へ流れる
+// (ms-177 の interrupted が roster の順位表を素通りしたのと同じ型)。Python の
+// 正典集合との突き合わせは tests/test_go_attention_state_parity.py が行う。
+// ここは Go 側だけで言える不変条件 — 順位表が空でなく、キーが正規化済みで、
+// 読み出し口が表と一致すること — を縛る。
+func TestRecognisedServerStatesMatchesRankingTable(t *testing.T) {
+	got := recognisedServerStates()
+	if len(got) != len(serverStateWorking) {
+		t.Fatalf("読み出し口 %d 件 vs 順位表 %d 件 — ずれている",
+			len(got), len(serverStateWorking))
+	}
+	for _, st := range got {
+		if _, ok := serverStateWorking[st]; !ok {
+			t.Errorf("読み出し口が順位表に無い状態を返した: %q", st)
+		}
+		if st != strings.ToLower(strings.TrimSpace(st)) {
+			t.Errorf("順位表のキーが正規化されていない: %q (toolWorking は小文字化して引く)", st)
+		}
+	}
+	// 稼働と判定する状態がちょうど 1 つ (running) であること。ここが増えると
+	// 「要対応」から落ちる行が静かに増えるので、意図的な変更として試験を直させる。
+	working := 0
+	for _, v := range serverStateWorking {
+		if v {
+			working++
+		}
+	}
+	if working != 1 {
+		t.Errorf("稼働と判定する状態が %d 件 — running だけのはず", working)
+	}
+}
