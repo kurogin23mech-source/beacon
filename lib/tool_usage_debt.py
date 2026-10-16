@@ -14,8 +14,9 @@ written for it".
 
 TWO reasons a use leaves no record, kept apart (受入条件2)
 ---------------------------------------------------------
-  ``unregistered`` — the ledger has no row for this tool at all.
-  ``undecided``    — there IS a row, but nobody has judged its record sink yet.
+  ``unregistered``  — the ledger has no row for this tool at all.
+  ``undecided``     — there IS a row, but nobody has judged its record sink yet.
+  ``write-failed``  — the ledger said to record and the write did not happen.
 
 Both are debts and both must be visible; a tool that is ``declined`` is NOT here,
 because that is a decision, not a debt. The two reasons stay separate fields
@@ -59,7 +60,15 @@ MAX_ROWS = 500
 #: not a new category to interpret at read time.
 REASON_UNREGISTERED = "unregistered"
 REASON_UNDECIDED = "undecided"
-REASONS = (REASON_UNREGISTERED, REASON_UNDECIDED)
+#: The ledger DID say to record and the write still did not happen (no worked
+#: Target, a class with no evidence arm, the CLI unreachable…). Its own reason,
+#: because collapsing it into silence hides the one case where the ledger's
+#: promise — "what is listed gets recorded" — was actually broken. Found by an
+#: independent philosophy review of PR #802: the hook ran the writer with its
+#: output discarded and never looked at the exit code, so "decided not to write"
+#: and "could not write" were the same nothing.
+REASON_WRITE_FAILED = "write-failed"
+REASONS = (REASON_UNREGISTERED, REASON_UNDECIDED, REASON_WRITE_FAILED)
 
 
 def debt_path(beacon_dir: str) -> str:
@@ -98,7 +107,7 @@ def debt_by_reason(rows: list, reason: str) -> list:
 
 
 def record_no_record_use(path: str, name: str, *, reason: str,
-                         at: str = "") -> Optional[dict]:
+                         at: str = "", detail: str = "") -> Optional[dict]:
     """Note one use of a tool that left no record. Returns the updated row, or
     ``None`` when nothing was written (empty name, bad reason, or I/O failure).
 
@@ -121,6 +130,10 @@ def record_no_record_use(path: str, name: str, *, reason: str,
                    "first_seen": at, "last_seen": at}
             rows.append(row)
         row["reason"] = reason
+        if detail:
+            row["detail"] = detail
+        elif "detail" in row:
+            del row["detail"]  # a later use with no detail must not keep a stale one
         row["count"] = int(row.get("count") or 0) + 1
         row["last_seen"] = at or row.get("last_seen") or ""
         if not row.get("first_seen"):
@@ -159,6 +172,7 @@ def record_unregistered(path: str, name: str, at: str = "") -> Optional[dict]:
 
 
 __all__ = ["DEBT_FILENAME", "MAX_ROWS", "REASON_UNREGISTERED",
-           "REASON_UNDECIDED", "REASONS", "debt_path", "load_debt",
+           "REASON_UNDECIDED", "REASON_WRITE_FAILED", "REASONS",
+           "debt_path", "load_debt",
            "debt_by_reason", "record_no_record_use", "record_unregistered",
            "clear_debt"]

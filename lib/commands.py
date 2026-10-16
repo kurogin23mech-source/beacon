@@ -732,11 +732,35 @@ HOOK_MANIFEST = [
      # (ms-160 e-5801), so the status text names lifecycle events, not just commit.
      "timeout": 10,
      "statusMessage": "Beacon: checking for commit / PR / target-close / deploy..."},
-    {"key": "save", "events": ["PostToolUse"], "matcher": "mcp__",
+    # ms-180: the tool-record hook. TWO manifest changes the ledger needs, both
+    # found by an independent philosophy review of PR #802 — the INSTALL is part
+    # of "the interrupt", so a feature that needs a new event or a wider matcher
+    # is not wired until this list says so:
+    #
+    #   matcher "mcp__" → "*": the ledger accepts any 道具 (Skill / MCP tool /
+    #   CLI verb) and `beacon tool add` does not restrict the name's shape. With
+    #   an mcp__-only matcher, a Skill registered WITH a record sink produced no
+    #   record and no debt either (the PreToolUse gate sees action == record and
+    #   stays quiet) — "listed but silently not recorded", which is worse than
+    #   unregistered. Which calls matter is the LEDGER's decision (方針3); a
+    #   matcher that pre-filters by name puts part of that policy back in config.
+    #   The hook is cheap on the hot path (one local file read) and fail-safe.
+    {"key": "save", "events": ["PostToolUse"], "matcher": "*",
      "resolver": "beacon-save-hook.sh",
      "identity": ("beacon-save-hook", "beacon-hook-save",
                   "beacon_cli.hooks.save_hook"),
-     "timeout": 10, "statusMessage": "Beacon: checking MCP operation..."},
+     "timeout": 10, "statusMessage": "Beacon: 道具の利用を台帳と照合中..."},
+    #   UserPromptSubmit: the turn boundary the `turn` record grain folds within.
+    #   Without it `current_epoch` is always None, so 受入条件4's per-tool grain
+    #   never actually held in a shipped install — `turn` degraded to `each`
+    #   forever and the only remedy was a human hand-wiring the event, i.e. the
+    #   お願い layer 方針2 forbids. A separate entry because this event carries no
+    #   tool and takes no matcher.
+    {"key": "save-turn", "events": ["UserPromptSubmit"], "matcher": None,
+     "resolver": "beacon-save-hook.sh",
+     "identity": ("beacon-save-hook", "beacon-hook-save",
+                  "beacon_cli.hooks.save_hook"),
+     "timeout": 10, "statusMessage": "Beacon: ターン境界を記録中..."},
     # e-5803 review (AX-9): matcher "*" is Claude Code's settings.json glob for
     # "all tools". The Codex equivalent uses the regex ".*" (see
     # plugins/beacon/scripts/beacon-codex-bridge._halt_hook_entry) — the two hook

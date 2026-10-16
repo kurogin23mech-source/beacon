@@ -313,9 +313,11 @@ def cmd_tool_unregistered():
     rows = debt.load_debt(debt.debt_path(_beacon_dir()))
     unregistered = debt.debt_by_reason(rows, debt.REASON_UNREGISTERED)
     undecided = debt.debt_by_reason(rows, debt.REASON_UNDECIDED)
+    write_failed = debt.debt_by_reason(rows, debt.REASON_WRITE_FAILED)
     if json_mode:
         print(json.dumps({"unregistered": unregistered,
                           "undecided": undecided,
+                          "write_failed": write_failed,
                           "count": len(rows)}, ensure_ascii=False))
         return
     if not rows:
@@ -335,6 +337,16 @@ def cmd_tool_unregistered():
         for row in undecided:
             print(f"    {row.get('name')} — {row.get('count')} 回 "
                   f"(最初 {row.get('first_seen')} / 最後 {row.get('last_seen')})")
+    if write_failed:
+        # The one bucket that is NOT a missing decision: the ledger answered
+        # "record" and the write still failed. Shown separately because the fix
+        # is neither "register it" nor "close the question" — something broke.
+        print(f"\n  [記録すると決めたのに書けなかった] {len(write_failed)} 件 "
+              f"— 台帳の約束が破れた分。原因を見てください")
+        for row in write_failed:
+            detail = f" / {row.get('detail')}" if row.get("detail") else ""
+            print(f"    {row.get('name')} — {row.get('count')} 回"
+                  f"{detail} (最後 {row.get('last_seen')})")
     print("\n台帳は事前に全部埋める必要はありません (端末の走査はしない方針)。"
           "実際に使われた道具だけがここに出ます。")
     print("消すだけなら `beacon tool unregistered --clear`。")
@@ -444,12 +456,20 @@ def cmd_tool_used():
 
     if json_mode:
         print(json.dumps(result, ensure_ascii=False))
+        if not result.get("recorded"):
+            sys.exit(1)   # the body and the exit code must agree, --json too
         return
     if result.get("recorded"):
         print(f"記録: {name} → {result.get('target') or '(project)'} "
               f"[{result.get('arm') or recorder}]")
-    else:
-        print(f"記録しませんでした: {result.get('reason')}", file=sys.stderr)
+        return
+    # The ledger said to record and the writer could not (no worked Target, a
+    # class with no evidence arm, …). Exit non-zero: an earlier version printed
+    # this to stderr and exited 0, so a caller checking $? — including this
+    # feature's own PostToolUse hook — read a failed write as success
+    # (philosophy review of PR #802).
+    print(f"記録しませんでした: {result.get('reason')}", file=sys.stderr)
+    sys.exit(1)
 
 
 def _record_via_evidence(name, text, effect, target, url):

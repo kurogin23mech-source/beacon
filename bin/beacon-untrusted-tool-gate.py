@@ -191,30 +191,12 @@ def main() -> None:
         # converted to its two-value vocabulary here rather than by reaching back
         # into tool_ledger from inside tool_effect (which was a deferred cycle).
         declared = tl.gate_classification(ledger, tool_name)
-        # ms-180 e-7002 / 受入条件2: a use that leaves NO record is noted the
-        # moment it happens, so "not declared ⇒ not recorded" never becomes a
-        # silent hole (SPEC 方針6). Two reasons qualify and stay distinguishable —
-        # ``unregistered`` (no row) and ``undecided`` (a row whose record sink
-        # nobody judged); ``declined`` is a decision and is deliberately NOT
-        # noted. The set lives in ``tool_ledger.DEBT_ACTIONS`` so this hook and the
-        # PostToolUse recorder cannot drift apart on what counts as a debt.
-        # Best-effort: noting a debt must never interfere with the call.
-        if tool_name:
-            try:
-                debt_lib = hb.import_lib("tool_usage_debt")
-                if debt_lib is not None:
-                    plan = tl.record_plan(ledger, tool_name)
-                    if tl.is_debt_action(plan.get("action")):
-                        import datetime
-                        mod = debt_lib["tool_usage_debt"]
-                        mod.record_no_record_use(
-                            mod.debt_path(str(root / ".beacon")),
-                            str(tool_name), reason=plan["action"],
-                            at=datetime.datetime.now(
-                                datetime.timezone.utc).strftime(
-                                    "%Y-%m-%dT%H:%M:%SZ"))
-            except Exception:
-                pass
+        # NOTE: the debt file is written by the PostToolUse recorder ONLY, not
+        # here. Both interrupts see every call, so writing it on both sides
+        # double-counted every use and the count stopped being an observed fact
+        # (philosophy review of PR #802). "A use left no record" is a fact about
+        # recording, so it belongs to the recording interrupt. This gate's job is
+        # the effect question, and it asks only that.
         state = ut.is_armed(root, session_key)
         if state:
             if not te.is_side_effect(tool_name, tool_input, declared):
