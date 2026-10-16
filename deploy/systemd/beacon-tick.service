@@ -1,4 +1,6 @@
-# e-1391 (ms-66) — 本番の定期ティック駆動 (Trek/Operation 自律発火のドライバ)。
+# e-1391 (ms-66) — 本番の定期ティック駆動 (Operation の発火・締切リマインド・
+# Trek の集約のドライバ)。入口は POST /api/system/tick (ms-185 e-7065 で
+# /api/system/trek-scheduler/tick から移転、旧パスも転送として生きている)。
 # beacon-tick.timer から oneshot で起動される。Cloud Run 廃止 → VPS 移行で消えた
 # tick ドライバの復旧 (2026-07-24 Trek review で発覚)。
 # /etc/systemd/system/beacon-tick.service に配置する (docs/DEPLOY_VPS.md 参照)。
