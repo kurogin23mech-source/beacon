@@ -18,8 +18,15 @@ unknown tool, a name with no recognisable verb, or any name carrying a write
 verb — is a side effect (gate target). "When in doubt, gate."
 
 This module is pure classification: it holds NO policy about *when* to gate (that
-is the untrusted-turn condition, owned by e-6237) and performs no I/O. It answers
-one question: "is this call read-only or a side effect?"
+is the untrusted-turn condition, owned by e-6237), performs no I/O, and imports
+nothing from Beacon. It answers one question: "is this call read-only or a side
+effect?"
+
+Dependency direction (ms-180): ``tool_ledger`` imports THIS module — it derives
+its pinned-tool set from ``BUILTIN_SIDE_EFFECT`` rather than copying it — and this
+module imports nothing back. A caller that wants the ledger's declaration to win
+translates it first (``tool_ledger.gate_classification``) and passes the result as
+``declared``.
 """
 
 from __future__ import annotations
@@ -106,6 +113,32 @@ def _classify_by_verb(name: str) -> str:
     return SIDE_EFFECT  # no recognisable verb → default-deny
 
 
+def has_write_verb(name: str) -> bool:
+    """True when ``name`` carries a token from ``WRITE_VERBS``.
+
+    A POSITIVE signal that the call writes or sends — as opposed to the absence
+    of a read verb, which is merely unknown. ``tool_ledger`` consumes this to
+    refuse a ``read-only`` declaration that contradicts it (ms-180 e-7003
+    受入条件3: the ledger must not pass a lie), while leaving a name with no
+    recognisable verb fully declarable, since there a declaration replaces a
+    guess instead of overriding evidence.
+
+    For an ``mcp__server__tool`` name only the TOOL segment is considered, the
+    same part ``classify_tool`` classifies — otherwise a server whose NAME
+    contains a write verb (``mcp__google-drive__read_file``: ``drive`` is not a
+    verb, but a hypothetical ``mcp__updater__get_status`` would be) would make
+    every one of its read tools undeclarable.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return False
+    target = name.strip()
+    if target.startswith("mcp__"):
+        target = target.split("__", 2)[2] if target.count("__") >= 2 else ""
+        if not target:
+            return False
+    return bool(set(_tokens(target)) & WRITE_VERBS)
+
+
 def _skill_name(tool_input) -> str:
     """Extract the skill name from a Skill tool invocation's input.
 
@@ -125,10 +158,30 @@ def _skill_name(tool_input) -> str:
     return ""
 
 
-def classify_tool(tool_name: str, tool_input: object = None) -> str:
+def classify_tool(tool_name: str, tool_input: object = None,
+                  declared: str = "") -> str:
     """Return ``READ_ONLY`` or ``SIDE_EFFECT`` for one tool invocation.
 
     Resolution order:
+      0. ``declared`` — an ALREADY-TRANSLATED answer (``READ_ONLY`` /
+         ``SIDE_EFFECT``) from the tool ledger, when the caller supplies one
+         (ms-180 e-7003). A declaration beats a guess; that is the whole point of
+         the ledger. Produce it with ``tool_ledger.gate_classification(ledger,
+         name)``, which applies the guard that refuses to answer ``read-only``
+         for the built-ins the ms-169 approval gate depends on — so no row can
+         soften them.
+
+         Why a pre-translated STRING rather than the ledger itself: this module
+         must not import ``tool_ledger``. ``tool_ledger`` imports THIS module (it
+         derives its pinned-tool set from ``BUILTIN_SIDE_EFFECT``), so taking a
+         ledger here meant reaching back the other way, which only worked because
+         the import was hidden inside the function body. That is a real cycle with
+         its crash deferred to call time: hoisting that lazy import to the top —
+         an utterly ordinary cleanup — raised ``partially initialized module``
+         from tool_ledger's file, nowhere near the edit. An independent
+         maintainability review of PR #802 reproduced exactly that, and the
+         comment here used to claim the pair was "acyclic". It is acyclic NOW,
+         because the dependency genuinely runs one way only.
       1. Skill tool → classify the *invoked skill* by its verb tokens
          (``beacon-dm-send`` → send → side-effect). A Skill with no resolvable
          name is default-deny.
@@ -138,11 +191,18 @@ def classify_tool(tool_name: str, tool_input: object = None) -> str:
          (get/list/search/…) pass, unknown MCP verb default-denies.
       4. Any other name → verb heuristic (covers generic / future tools).
 
+    Steps 1-4 are UNCHANGED and remain the answer whenever the ledger is absent or
+    silent, so an unregistered tool keeps the old fail-closed behaviour exactly
+    (ms-180 受入条件6: 台帳に無い道具は従来どおり安全側).
+
     Fail-closed everywhere: an empty / non-string name is a side effect.
     """
     if not isinstance(tool_name, str) or not tool_name.strip():
         return SIDE_EFFECT
     name = tool_name.strip()
+
+    if declared in (READ_ONLY, SIDE_EFFECT):
+        return declared
 
     if name == "Skill":
         skill = _skill_name(tool_input)
@@ -162,9 +222,14 @@ def classify_tool(tool_name: str, tool_input: object = None) -> str:
     return _classify_by_verb(name)
 
 
-def is_side_effect(tool_name: str, tool_input: object = None) -> bool:
-    """True when the call changes state or sends outward (= a gate target)."""
-    return classify_tool(tool_name, tool_input) == SIDE_EFFECT
+def is_side_effect(tool_name: str, tool_input: object = None,
+                   declared: str = "") -> bool:
+    """True when the call changes state or sends outward (= a gate target).
+
+    ``declared`` is optional and defaults to "", so every existing caller keeps
+    the pure-heuristic behaviour until it chooses to pass a ledger answer
+    (see ``tool_ledger.gate_classification``)."""
+    return classify_tool(tool_name, tool_input, declared) == SIDE_EFFECT
 
 
 __all__ = [
@@ -175,5 +240,6 @@ __all__ = [
     "WRITE_VERBS",
     "READ_VERBS",
     "classify_tool",
+    "has_write_verb",
     "is_side_effect",
 ]

@@ -2387,21 +2387,47 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
     return "\n".join(lines) + body
 
 
-def rewrite_document_body(doc_id, new_body):
+def rewrite_document_body(doc_id, new_body, create_as=None):
     """Overwrite an EXISTING document's body, preserving its title + frontmatter
     (scope / milestone / operation / trek / target). Returns True if written,
     False if the doc does not exist (nothing to regenerate).
 
     This is the single seam a GENERATED doc uses to refresh itself WITHOUT a human
     re-typing ``beacon doc update`` — ms-161 e-5851 write-through for the derived
-    application-map. It deliberately does NOT create a missing doc (a generated doc
-    only starts existing after the e-5851 backfill authors it once), so an
-    unmigrated / non-map project is a clean no-op. Mirrors ``cmd_doc``'s per-backend
-    write branch (until Store.save_document lands in Phase 3, this two-way branch is
-    the only document write path)."""
+    application-map. By default it deliberately does NOT create a missing doc (a
+    generated doc only starts existing after the e-5851 backfill authors it once),
+    so an unmigrated / non-map project is a clean no-op. Mirrors ``cmd_doc``'s
+    per-backend write branch (until Store.save_document lands in Phase 3, this
+    two-way branch is the only document write path).
+
+    ``create_as={"title": ..., "scope": ...}`` opts IN to creating the doc at this
+    exact ``doc_id`` when it is absent (ms-180 e-7000: the tool-ledger cloud mirror
+    has no human-authored first version to refresh — nobody types a generated
+    mirror by hand, so its first sync has to be able to author it). Kept as one
+    extra parameter on THIS function rather than a second write path: ms-166 e-6937
+    was exactly the cost of a generated mirror acquiring more than one door to
+    write through. Callers that must never create simply omit it, so the
+    refresh-only contract the application-map relies on is unchanged.
+    """
     existing = get_store().get_document(doc_id)
     if not existing:
-        return False
+        if not create_as:
+            return False
+        title = create_as.get("title") or doc_id
+        content = _add_frontmatter(new_body,
+                                   create_as.get("scope") or DEFAULT_SCOPE)
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            # put_document is an upsert BY ID — the mirror needs its well-known
+            # doc_id, which create_document (server-assigned id) cannot give.
+            client.put_document(config["project_id"], doc_id, title, content)
+        else:
+            docs_dir = _get_docs_dir()
+            os.makedirs(docs_dir, exist_ok=True)
+            with open(os.path.join(docs_dir, f"{doc_id}.md"), "w",
+                      encoding="utf-8") as f:
+                f.write(content)
+        return True
     title = existing.get("title", "") or doc_id
     content = _add_frontmatter(
         new_body,

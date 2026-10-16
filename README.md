@@ -412,6 +412,42 @@ Formats: default `markdown`; `table` = 行×列の構造化ドキュメント (c
 
 Use `--ms <ms-id>` to associate a document with a milestone, or `--op <op-id>` to associate with an Operation (e.g. log fetch instructions for `/beacon-operation-review`).
 
+### Tool ledger (道具台帳 / ms-180)
+
+The declared registry of the tools this project uses. Beacon holds the
+**declaration** — what exists, what it does, where its use gets recorded — and
+never the tool itself, so there is deliberately no `beacon tool run`.
+
+Two interrupts that already fire on every tool call consult it instead of
+guessing: `PreToolUse` asks *what does this tool do* (replacing a regex over the
+tool's name), and `PostToolUse` asks *does using it get recorded, and how*
+(replacing a hand-written `case` statement that named two MCP servers).
+
+The truth is the local file `.beacon/tools.json` — it is read on every tool call,
+so the read must not touch the network — and it syncs one-way to the cloud as a
+generated mirror doc (`tool-ledger`).
+
+| Command | Description |
+|---------|-------------|
+| `beacon tool add <name> --purpose "<用途>" --effect <read-only\|state-change\|outward>` | Register a tool / 道具を登録 (用途・作用・記録先の宣言) |
+| `beacon tool add <name> ... --record <save\|evidence> [--grain <each\|turn>]` | Declare where its use is recorded, and at what grain / 記録先と粒度を宣言 |
+| `beacon tool add <name> ... --no-record "<理由>"` | Declare that its use is deliberately NOT recorded / 記録しないと決める (理由必須) |
+| `beacon tool list [--undecided] [--json]` | List the ledger; `--undecided` shows only rows whose record sink nobody judged yet |
+| `beacon tool show <name> [--json]` | Show one tool's declaration |
+| `beacon tool remove <name> [--json]` | Withdraw a registration |
+| `beacon tool lookup "<用途>" [--json]` | Find the tool for a purpose / 用途から道具を引く (正典化の材料; 使用は強制しない) |
+| `beacon tool used <name> [--summary "<1 回分>"] [--record <save\|evidence>]` | Record one use as evidence, profession-neutrally (dev → the milestone's arm, sales → the opportunity's). Normally called by the PostToolUse interrupt, not by hand |
+| `beacon tool unregistered [--clear] [--json]` | Uses that left NO record, split by reason: `[台帳に無い]` → register it, `[記録先が未判断]` → close the open question. A `--no-record` tool never appears (that is a decision, not a debt) |
+
+Omitting both `--record` and `--no-record` registers the tool with its record sink
+**undecided** — a third value, so a row nobody has judged yet can never read as
+"decided not to record". Using such a tool is itself recorded as a debt.
+
+`Bash` / `Write` / `Edit` / `MultiEdit` / `NotebookEdit` / `WebFetch` / `Task` /
+`Agent` cannot be declared `read-only`: the ms-169 approval gate depends on that
+classification, and a ledger row must not be able to weaken it. Declaring one
+*more* dangerous than the heuristic guessed is allowed.
+
 ### Save (Non-commit actions)
 
 | Command | Description |
