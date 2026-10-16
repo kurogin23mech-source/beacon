@@ -328,3 +328,132 @@ def test_the_gate_still_consults_the_ledger_for_the_effect_question():
     reason to read the ledger."""
     code = _executable_code(GATE)
     assert "gate_classification" in code
+
+
+# ---------------------------------------------------------------------------
+# Findings from the independent MAINTAINABILITY review of PR #805.
+#
+#   M1 (high)   beacon_cli/hooks/save_hook.py hand-rolled its OWN walk-up
+#               root-finder — a fourth copy of a rule bin/hook_bootstrap was
+#               created to de-duplicate (its docstring records the drift that
+#               prompted it). Editing the marker rule in one place and missing
+#               the other reproduces, one layer down, the very "one leg updated,
+#               the other stale" defect this module was written to fix.
+#   M2 (high)   The debt display hand-named three reasons instead of iterating
+#               the vocabulary, so a 4th reason produced a row in NO bucket —
+#               text or JSON — while the header still counted it.
+#   M4 (medium) handle()'s fail-safe plus each leg's fail-safe swallowed a real
+#               bug twice: renaming one function gave 33 bare "assert 0 == 1"
+#               failures with no traceback anywhere.
+#
+# M3 (the census guard that could not fail for lib/cmd_tool.py) is pinned in
+# tests/test_tool_recorder_dispatch_ms180.py next to the guard itself.
+# ---------------------------------------------------------------------------
+
+def test_the_shared_module_owns_root_finding():
+    import tool_record_hook
+    assert hasattr(tool_record_hook, "find_root")
+
+
+@pytest.mark.parametrize("leg", [
+    REPO / "bin" / "beacon-tool-record-hook.py",
+    REPO / "beacon_cli" / "hooks" / "save_hook.py",
+])
+def test_neither_leg_hand_rolls_its_own_root_finder(leg):
+    code = _executable_code(leg)
+    assert "find_root" in code, f"{leg.name} must use the shared find_root"
+    assert ".beacon" not in code or "project.json" not in code, (
+        f"{leg.name} appears to re-implement the marker rule")
+
+
+def test_both_root_finders_agree(tmp_path):
+    """Two copies of the rule remain by construction — hook_bootstrap cannot
+    depend on lib/ (it is the thing that FINDS lib). So they are pinned against
+    each other instead, which is what the previous fourth copy lacked."""
+    import importlib.util
+    import tool_record_hook
+    spec = importlib.util.spec_from_file_location(
+        "_hb", REPO / "bin" / "hook_bootstrap.py")
+    hb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hb)
+
+    root = tmp_path / "proj"
+    (root / ".beacon").mkdir(parents=True)
+    (root / ".beacon" / "project.json").write_text("{}", encoding="utf-8")
+    deep = root / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    for start in (root, deep, outside, tmp_path):
+        mine = tool_record_hook.find_root(start)
+        theirs = hb.find_beacon_root(start)
+        assert (mine is None) == (theirs is None), start
+        if mine is not None:
+            assert Path(mine).resolve() == Path(theirs).resolve(), start
+
+
+def test_the_debt_display_is_exhaustive_over_the_vocabulary():
+    """M2: every reason must have a label/action, so adding one to REASONS
+    without wiring its presentation fails at the definition site rather than
+    producing a silently empty bucket."""
+    assert set(tdebt.REASON_DISPLAY) == set(tdebt.REASONS)
+    for meta in tdebt.REASON_DISPLAY.values():
+        assert meta["key"] and meta["label"] and meta["action"]
+
+
+def test_a_fourth_debt_reason_is_displayed_rather_than_vanishing(project,
+                                                                  monkeypatch):
+    """The judge's reproduction: a hypothetical 4th reason was accepted by the
+    writer, counted in the header, and shown in no bucket at all."""
+    monkeypatch.setattr(tdebt, "REASONS",
+                        tuple(tdebt.REASONS) + ("quota-exceeded",))
+    monkeypatch.setitem(tdebt.REASON_DISPLAY, "quota-exceeded",
+                        {"key": "quota_exceeded", "label": "上限超過",
+                         "action": "上限を上げる"})
+    path = tdebt.debt_path(str(project / ".beacon"))
+    tdebt.record_no_record_use(path, "mcp__q__tool", reason="quota-exceeded",
+                               at="T1")
+    rows = tdebt.load_debt(path)
+    assert [r["reason"] for r in rows] == ["quota-exceeded"]
+    buckets = {r: tdebt.debt_by_reason(rows, r) for r in tdebt.REASONS}
+    shown = sum(len(v) for v in buckets.values())
+    assert shown == len(rows), (
+        "a row counted in the header must appear in exactly one bucket")
+
+
+def test_the_hook_debug_hatch_records_a_swallowed_bug(project, monkeypatch):
+    """M4: the production path stays fail-safe, but a bug inside it must be
+    findable instead of indistinguishable from a correct no-op."""
+    import tool_record_hook
+    monkeypatch.setenv("BEACON_HOOK_DEBUG", "1")
+    monkeypatch.setattr(tool_record_hook._tl, "load_ledger",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("boom")))
+    rc = tool_record_hook.handle(
+        {"hook_event_name": "PostToolUse", "session_id": "s",
+         "tool_name": "mcp__x__y", "tool_input": {}}, project)
+    assert rc == 0, "the fail-safe contract must hold"
+    log = project / ".beacon" / "hook-debug.log"
+    assert log.exists(), "the swallowed exception left no trace"
+    assert "boom" in log.read_text(encoding="utf-8")
+
+
+def test_the_debug_hatch_is_silent_when_not_enabled(project, monkeypatch):
+    """Off by default: the log must not appear in normal operation."""
+    import tool_record_hook
+    monkeypatch.delenv("BEACON_HOOK_DEBUG", raising=False)
+    monkeypatch.setattr(tool_record_hook._tl, "load_ledger",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("boom")))
+    assert tool_record_hook.handle(
+        {"hook_event_name": "PostToolUse", "session_id": "s",
+         "tool_name": "mcp__x__y", "tool_input": {}}, project) == 0
+    assert not (project / ".beacon" / "hook-debug.log").exists()
+
+
+def test_the_known_old_shape_hook_is_named():
+    """M5: two idioms now coexist for two-leg hooks. The old one is named so the
+    next person choosing between them knows the intended direction."""
+    doc = (LIB / "tool_record_hook.py").read_text(encoding="utf-8")
+    assert "post_commit" in doc

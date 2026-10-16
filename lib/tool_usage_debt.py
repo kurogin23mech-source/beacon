@@ -71,6 +71,34 @@ REASON_WRITE_FAILED = "write-failed"
 REASONS = (REASON_UNREGISTERED, REASON_UNDECIDED, REASON_WRITE_FAILED)
 
 
+#: Per-reason presentation: the section label and the action that CLOSES it.
+#: Lives next to ``REASONS`` so adding a reason without a label is a visible
+#: omission in one file rather than a silently-empty bucket three files away.
+#: ``cmd_tool_unregistered`` iterates this instead of hand-naming each reason —
+#: it used to call ``debt_by_reason`` three times, so a fourth reason produced a
+#: row that appeared in NO bucket, in text or JSON, with the header still
+#: counting it (independent maintainability review of PR #805 reproduced exactly
+#: that with a hypothetical 4th reason).
+REASON_DISPLAY = {
+    REASON_UNREGISTERED: {
+        "key": "unregistered",
+        "label": "台帳に無い",
+        "action": "`beacon tool add <道具名> ...` で登録して閉じる",
+    },
+    REASON_UNDECIDED: {
+        "key": "undecided",
+        "label": "記録先が未判断",
+        "action": "台帳に在るが記録するかを誰も判断していない。"
+                  "`--record <recorder>` か `--no-record \"<理由>\"` で閉じる",
+    },
+    REASON_WRITE_FAILED: {
+        "key": "write_failed",
+        "label": "記録すると決めたのに書けなかった",
+        "action": "台帳の約束が破れた分。原因を見てください",
+    },
+}
+
+
 def debt_path(beacon_dir: str) -> str:
     return os.path.join(str(beacon_dir), DEBT_FILENAME)
 
@@ -173,6 +201,6 @@ def record_unregistered(path: str, name: str, at: str = "") -> Optional[dict]:
 
 __all__ = ["DEBT_FILENAME", "MAX_ROWS", "REASON_UNREGISTERED",
            "REASON_UNDECIDED", "REASON_WRITE_FAILED", "REASONS",
-           "debt_path", "load_debt",
+           "REASON_DISPLAY", "debt_path", "load_debt",
            "debt_by_reason", "record_no_record_use", "record_unregistered",
            "clear_debt"]

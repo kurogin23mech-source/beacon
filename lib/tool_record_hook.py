@@ -25,7 +25,19 @@ judgment itself already has (``tool_ledger.record_plan``). Both legs are now thi
 wrappers whose only job is to find the project root and the CLI.
 
 Fails safe by contract: every path returns 0 and swallows its own errors. A
-recording hook must never break the session it observes.
+recording hook must never break the session it observes. Set
+``BEACON_HOOK_DEBUG=1`` to also append the swallowed traceback to
+``.beacon/hook-debug.log`` — the production contract is unchanged, but a bug in
+here stops being indistinguishable from a correct no-op.
+
+KNOWN INCONSISTENCY (maintainability review of PR #805): ``post_commit`` is still
+on the OLD two-leg shape — ``beacon_cli/hooks/post_commit.py`` describes itself as
+"a Python translation of bin/beacon-post-commit-hook.sh", i.e. two independently
+maintained implementations of one decision, with the same latent "one leg patched,
+the other stale" risk that this module was created to remove for the save hook.
+It is deliberately NOT migrated here (out of this milestone's scope), but the
+inconsistency is named so the next person choosing between the two idioms knows
+which is the intended direction.
 """
 
 from __future__ import annotations
@@ -46,6 +58,38 @@ import tool_usage_debt as _debt
 NAME_KEYS = ("title", "name", "fileName", "file_name", "documentTitle",
              "subject", "query", "description")
 URL_KEYS = ("url", "fileUrl", "file_url", "link")
+
+
+def find_root(start) -> Optional[Path]:
+    """Walk up from ``start`` for a ``.beacon/project.json`` marker.
+
+    BOTH legs call this. ``bin/hook_bootstrap.find_beacon_root`` is the same rule
+    for the other three hooks, and its own docstring records that the rule had
+    been copied into three scripts, drifted, and was consolidated for exactly
+    that reason — so the Python leg hand-rolling a FOURTH copy was reproducing
+    the hazard that module exists to remove (independent maintainability review
+    of PR #805).
+
+    Why the rule lives here and not only in hook_bootstrap: the wheel install has
+    no ``bin/`` — ``beacon_cli/hooks/save_hook.py`` cannot import
+    ``hook_bootstrap`` at all, but it CAN import this module (``lib/`` is remapped
+    into the package). So this is the one place both legs can share. The two
+    remaining copies are pinned against each other by
+    ``tests/test_tool_record_hook_parity_ms180.test_both_root_finders_agree``,
+    because hook_bootstrap by construction cannot depend on ``lib/`` (it is the
+    thing that FINDS lib).
+    """
+    try:
+        cur = Path(start).resolve()
+    except Exception:
+        return None
+    for cand in (cur, *cur.parents):
+        try:
+            if (cand / ".beacon" / "project.json").exists():
+                return cand
+        except Exception:
+            continue
+    return None
 
 
 def _now() -> str:
@@ -191,8 +235,32 @@ def handle(payload: dict, root: Path) -> int:
                                        at=_now(), detail=failure)
         return 0
     except Exception:
+        # Fail-safe by contract: a recording hook must never break the session.
+        # But the double fail-safe (here AND in each thin leg) made a bug inside
+        # this module indistinguishable from a correct no-op: renaming one
+        # function produced 33 bare "assert 0 == 1" failures with no traceback
+        # anywhere (independent maintainability review of PR #805). The escape
+        # hatch keeps the production contract and makes the failure findable.
+        _debug_dump_exception(root)
         return 0
 
 
+def _debug_dump_exception(root) -> None:
+    """Append the swallowed traceback to ``.beacon/hook-debug.log`` when
+    ``BEACON_HOOK_DEBUG`` is set. Silent and best-effort otherwise — the whole
+    point is that the production path stays fail-safe."""
+    if not os.environ.get("BEACON_HOOK_DEBUG"):
+        return
+    try:
+        import traceback
+        path = Path(root) / ".beacon" / "hook-debug.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"--- {_now()} tool_record_hook ---\n")
+            fh.write(traceback.format_exc())
+    except Exception:
+        return
+
+
 __all__ = ["NAME_KEYS", "URL_KEYS", "first_str", "summary_for",
-           "resolve_beacon_cli", "handle"]
+           "resolve_beacon_cli", "find_root", "handle"]

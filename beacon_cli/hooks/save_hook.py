@@ -27,26 +27,6 @@ from pathlib import Path
 from typing import Optional
 
 
-def _find_root(start: Path) -> Optional[Path]:
-    """Walk up for a ``.beacon/project.json`` marker.
-
-    The previous version checked only ``./.beacon/project.json`` and gave up —
-    which silently did nothing whenever Claude Code's cwd was a subdirectory.
-    Walking up matches every other Beacon hook (``bin/hook_bootstrap``).
-    """
-    try:
-        cur = start.resolve()
-    except Exception:
-        return None
-    for cand in (cur, *cur.parents):
-        try:
-            if (cand / ".beacon" / "project.json").exists():
-                return cand
-        except Exception:
-            continue
-    return None
-
-
 def _import_shared():
     """Import ``lib/tool_record_hook`` — the single definition of the decision.
 
@@ -85,13 +65,19 @@ def main(argv: Optional[list] = None) -> int:
         if not isinstance(payload, dict):
             return 0
 
-        root = _find_root(Path(payload.get("cwd") or "."))
-        if root is None:
-            return 0
-
         shared = _import_shared()
         if shared is None:
             return 0  # fail-safe: cannot reach the shared decision → record nothing
+
+        # Root-finding comes from the SHARED module too. This leg used to
+        # hand-roll its own walk-up loop — a fourth copy of a rule
+        # bin/hook_bootstrap had already been created to de-duplicate, so editing
+        # the marker rule in one place and missing the other would reproduce the
+        # very "one leg updated, the other stale" defect this module fixed
+        # (maintainability review of PR #805).
+        root = shared.find_root(payload.get("cwd") or ".")
+        if root is None:
+            return 0
         shared.handle(payload, root)
         return 0
     except Exception:

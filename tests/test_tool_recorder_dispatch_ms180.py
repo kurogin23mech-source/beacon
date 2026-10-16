@@ -159,7 +159,15 @@ def test_no_other_file_decides_debt_membership_by_hand():
     pattern = re.compile(r'["\']unregistered["\']\s*,\s*["\']undecided["\']'
                          r'|["\']undecided["\']\s*,\s*["\']unregistered["\']')
     offenders = []
-    for path in list((REPO / "bin").glob("*.py")) + list(LIB.glob("tool_*.py")):
+    # The census used to be ``LIB.glob("tool_*.py")``, which does NOT match
+    # lib/cmd_tool.py — the CLI display surface, i.e. the file most likely to
+    # need this very logic. An independent maintainability review of PR #805
+    # planted the forbidden literal there and this test PASSED. A guard that
+    # cannot fail for the likeliest regression site is worse than no guard,
+    # because green CI then reads as proof. Cover every module both interrupts
+    # and the CLI can reach.
+    for path in (list((REPO / "bin").glob("*.py")) + list(LIB.glob("*.py"))
+                 + list((REPO / "beacon_cli").rglob("*.py"))):
         if path.name == "tool_ledger.py":
             continue  # the definition itself
         code = "\n".join(l for l in path.read_text(encoding="utf-8").splitlines()
@@ -167,6 +175,40 @@ def test_no_other_file_decides_debt_membership_by_hand():
         if pattern.search(code):
             offenders.append(path.name)
     assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("victim", ["lib/cmd_tool.py",
+                                    "beacon_cli/hooks/save_hook.py"])
+def test_the_census_actually_catches_a_planted_literal(victim):
+    """Test-the-test. The previous census silently excluded lib/cmd_tool.py, so
+    it reported OK with the forbidden literal sitting in it. Plant the literal in
+    each at-risk file and require the census to find it — a guard is only worth
+    its green when it can go red."""
+    import re
+    path = REPO / victim
+    original = path.read_text(encoding="utf-8")
+    try:
+        path.write_text(
+            original + '\n\ndef _planted(action):\n'
+                       '    return action in ("unregistered", "undecided")\n',
+            encoding="utf-8")
+        pattern = re.compile(r'["\']unregistered["\']\s*,\s*["\']undecided["\']'
+                             r'|["\']undecided["\']\s*,\s*["\']unregistered["\']')
+        found = []
+        for p in (list((REPO / "bin").glob("*.py")) + list(LIB.glob("*.py"))
+                  + list((REPO / "beacon_cli").rglob("*.py"))):
+            if p.name == "tool_ledger.py":
+                continue
+            code = "\n".join(
+                l for l in p.read_text(encoding="utf-8").splitlines()
+                if not l.lstrip().startswith("#"))
+            if pattern.search(code):
+                found.append(p.name)
+        assert path.name in found, (
+            f"the census does not reach {victim}; it would pass with the "
+            f"forbidden literal planted there")
+    finally:
+        path.write_text(original, encoding="utf-8")
 
 
 def test_the_hook_entry_points_delegate_rather_than_decide():

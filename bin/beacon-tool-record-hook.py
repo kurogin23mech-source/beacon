@@ -42,10 +42,15 @@ def main() -> None:
     if libs is None:
         return
     try:
-        root = hb.find_beacon_root(hook_input.get("cwd") or ".")
+        shared = libs["tool_record_hook"]
+        # The SHARED find_root, not hb.find_beacon_root: the Python leg cannot
+        # import hook_bootstrap (no bin/ in the wheel), so the rule has to live
+        # where both legs reach it. A test pins the two implementations against
+        # each other (maintainability review of PR #805).
+        root = shared.find_root(hook_input.get("cwd") or ".")
         if root is None:
             return  # not a beacon project
-        libs["tool_record_hook"].handle(hook_input, root)
+        shared.handle(hook_input, root)
     except Exception:
         return
 
