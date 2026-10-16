@@ -136,19 +136,20 @@ echo "[ci-strict-drift-guards] beacon tool のサブコマンド別 flag 一致 
 # 定義を 2 つ持たないため)。標準ライブラリのみ (pytest 非依存)。
 python3 "$ROOT/scripts/check-tool-subcommand-flag-parity.py"
 
-echo "[ci-strict-drift-guards] 未設定の位置引数で死なないこと (ms-180)…"
-# bin/beacon は `set -euo pipefail` で走るので、守られていない `$1` / `$2` 参照が
-# 1 つあると、引数を省いた呼び出しが usage ではなく
-# `$1: unbound variable` の中断になる。
+echo "[ci-strict-drift-guards] テストが検査対象のリポジトリを書き換えないこと (ms-180)…"
+# テスト一式は並列 (pytest-xdist) で **1 つの作業コピーを共有して** 走る。だから
+# リポジトリ実体を書き換えるテストは、たとえ後で忠実に戻していても、その窓の間は
+# 他の worker に書き換え途中のファイルを読ませ / 実行させる。
 #
-# この級は **静的に読むだけでは閉じない**。実際に観測されたのは CI (Linux / bash 5、
-# 並列実行) だけで、手元 (macOS / bash 3.2) では 1 度も再現しなかった。だから probe は
-# 「走らせて確かめる」形にしてある — 走っている環境がそのまま計器になる。
+# 実害が出た: ガードの反転を確かめるテストが bin/beacon をその場で書き換えており、
+# その窓で CLI を起動した他の worker が
+# `bin/beacon: line 5222: $1: unbound variable` (= 元ファイル 5221 行の外) や
+# `Text file busy` で死んだ。1 回の実行につき 1 件、毎回違う無関係なテストが落ち、
+# 単一プロセスの手元実行では 1 度も再現しない。証拠がすべて被害者側を指すため
+# 原因の特定に CI 3 周を要した。
 #
-# 全 verb path を help レジストリ (= `beacon help --json` が描くのと同じ単一の
-# レジストリ) から引くので、後から足した verb も本体を触らずに probe される。
-# 読み取り専用 probe gate 下で走り、HOME と作業ディレクトリも使い捨てに向けるので、
-# probe が実際の設定を書き換えることはない。標準ライブラリのみ (pytest 非依存)。
-python3 "$ROOT/scripts/check-cli-unset-positional.py" --quiet
+# 直し方は常に同じ形: ファイルをコピーし、**コピーを壊し**、ガードにコピーを見せる
+# (ガードに path 引数が無ければ足す)。標準ライブラリのみ (pytest 非依存)。
+python3 "$ROOT/scripts/check-tests-dont-mutate-repo.py" --quiet
 
 echo "[ci-strict-drift-guards] all strict drift guards passed."

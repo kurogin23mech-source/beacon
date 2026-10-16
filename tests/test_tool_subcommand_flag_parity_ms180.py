@@ -47,15 +47,42 @@ def _load():
 parity = _load()
 
 
-def _run() -> int:
+def _run(*extra: str) -> int:
     """Exit code only — deliberately NOT through a pipe.
 
     Measuring a guard's verdict through ``| tail`` reports the pipe's status, not
     the guard's; that mistake made an inversion look like it had passed while
     writing these.
+
+    ``extra`` carries ``--bin`` / ``--dispatch`` so an inversion can point the
+    guard at a COPY. See ``_broken_pair``.
     """
-    return subprocess.run([sys.executable, str(SCRIPT)],
+    return subprocess.run([sys.executable, str(SCRIPT), *extra],
                           capture_output=True, text=True, timeout=60).returncode
+
+
+def _broken_pair(tmp_path, *, bin_text: str = "", dispatch_text: str = ""):
+    """Copy both sides into ``tmp_path``, optionally replacing their contents.
+
+    Inversions MUST run against copies. Editing the repo's own ``bin/beacon``
+    (or ``beacon_cli/dispatch.py``) in place and restoring it afterwards leaves
+    a window during which every other test worker that spawns the CLI executes
+    the half-written file. That is not hypothetical: it surfaced as
+    `$1: unbound variable` reported at a line number PAST the end of the
+    pristine 5221-line file, and as `Text file busy`, failing whichever
+    unrelated test happened to spawn `beacon` at that moment — one victim per
+    run, a different one each time. The repo under test is shared state.
+
+    Returns the ``--bin``/``--dispatch`` argv for ``_run`` plus both paths.
+    """
+    bin_copy = tmp_path / "beacon"
+    dispatch_copy = tmp_path / "dispatch.py"
+    bin_copy.write_text(bin_text or BIN_BEACON.read_text(encoding="utf-8"),
+                        encoding="utf-8")
+    dispatch_copy.write_text(
+        dispatch_text or DISPATCH.read_text(encoding="utf-8"), encoding="utf-8")
+    argv = ("--bin", str(bin_copy), "--dispatch", str(dispatch_copy))
+    return argv, bin_copy, dispatch_copy
 
 
 # ---------------------------------------------------------------------------
@@ -98,33 +125,21 @@ def test_universal_flags_are_excluded_from_both_sides():
 # Inversions — both directions, plus the loud-failure path.
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def restore_dispatch():
-    original = DISPATCH.read_text(encoding="utf-8")
-    yield
-    DISPATCH.write_text(original, encoding="utf-8")
-
-
-@pytest.fixture
-def restore_bin():
-    original = BIN_BEACON.read_text(encoding="utf-8")
-    yield
-    BIN_BEACON.write_text(original, encoding="utf-8")
-
-
-def test_inversion_widening_only_the_python_side_goes_red(restore_dispatch):
+def test_inversion_widening_only_the_python_side_goes_red(tmp_path):
     """The judge's exact edit: one entry added to the Python table."""
     text = DISPATCH.read_text(encoding="utf-8")
     assert '    "show": set(),' in text, "anchor moved; this inversion is stale"
-    DISPATCH.write_text(text.replace('    "show": set(),',
-                                     '    "show": {"target"},', 1),
-                        encoding="utf-8")
-    assert parity.python_tool_subcommand_flags()["show"] == {"--target"}, (
+    argv, _bin_copy, dispatch_copy = _broken_pair(
+        tmp_path,
+        dispatch_text=text.replace('    "show": set(),',
+                                   '    "show": {"target"},', 1))
+    assert parity.python_tool_subcommand_flags(
+        str(dispatch_copy))["show"] == {"--target"}, (
         "the mutation did not land, so this inversion proves nothing")
-    assert _run() == 1
+    assert _run(*argv) == 1
 
 
-def test_inversion_widening_only_the_bash_side_goes_red(restore_bin):
+def test_inversion_widening_only_the_bash_side_goes_red(tmp_path):
     """The other direction. NOTE: the ``show)`` arm must be located INSIDE the
     ``tool|tools)`` block — an unscoped search finds ``task``'s ``show)`` first,
     which is how a first attempt at this test silently edited the wrong arm and
@@ -147,28 +162,29 @@ def test_inversion_widening_only_the_bash_side_goes_red(restore_bin):
         needle,
         '--target) _tool_target="${2:-}"; shift 2 ;;\n'
         '                        ' + needle, 1)
-    BIN_BEACON.write_text(
-        text[:blk_start] + block[:m.end()] + arm2 + block[end:] + text[blk_end:],
-        encoding="utf-8")
+    argv, bin_copy, _dispatch_copy = _broken_pair(
+        tmp_path,
+        bin_text=(text[:blk_start] + block[:m.end()] + arm2 + block[end:]
+                  + text[blk_end:]))
 
     drift = parity._load_drift_helpers()
-    assert "--target" in parity.bash_tool_subcommand_flags(drift)["show"], (
+    assert "--target" in parity.bash_tool_subcommand_flags(
+        drift, str(bin_copy))["show"], (
         "the mutation did not land, so this inversion proves nothing")
-    assert _run() == 1
+    assert _run(*argv) == 1
 
 
-def test_renaming_the_python_table_fails_loudly_instead_of_passing(
-        restore_dispatch):
+def test_renaming_the_python_table_fails_loudly_instead_of_passing(tmp_path):
     """If the table is renamed, "found nothing" must not read as "nothing is
     wrong" — the guard has to say it lost its anchor."""
     text = DISPATCH.read_text(encoding="utf-8")
-    DISPATCH.write_text(
-        text.replace("_TOOL_SUBCOMMAND_FLAGS = {",
-                     "_TOOL_SUBCOMMAND_FLAGS_RENAMED = {", 1),
-        encoding="utf-8")
+    argv, _bin_copy, dispatch_copy = _broken_pair(
+        tmp_path,
+        dispatch_text=text.replace("_TOOL_SUBCOMMAND_FLAGS = {",
+                                   "_TOOL_SUBCOMMAND_FLAGS_RENAMED = {", 1))
     with pytest.raises(RuntimeError):
-        parity.python_tool_subcommand_flags()
-    assert _run() == 1
+        parity.python_tool_subcommand_flags(str(dispatch_copy))
+    assert _run(*argv) == 1
 
 
 def test_a_missing_bash_block_fails_loudly(tmp_path):

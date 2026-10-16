@@ -133,10 +133,22 @@ def python_tool_subcommand_flags(dispatch_path: str = "") -> dict:
     return out
 
 
-def audit() -> dict:
+def audit(bin_path: str = "", dispatch_path: str = "") -> dict:
+    """Compare the two sides. Both inputs are addressable (ms-180 follow-up).
+
+    The paths default to this repo's own files, which is what CI wants. They are
+    arguments because the *inversion* tests — the ones that prove this guard can
+    go red — have to hand it a deliberately broken pair, and the only other way
+    to do that is to edit the real ``bin/beacon`` in place. That is what the
+    first version of those tests did, and under parallel test execution every
+    other worker that spawned ``bin/beacon`` during the edit window executed the
+    half-written file: observed as `$1: unbound variable` at a line number past
+    the end of the pristine file, and as `Text file busy`, in unrelated tests.
+    A guard must never require mutating the thing it guards.
+    """
     drift = _load_drift_helpers()
-    bash = bash_tool_subcommand_flags(drift)
-    python = python_tool_subcommand_flags()
+    bash = bash_tool_subcommand_flags(drift, bin_path)
+    python = python_tool_subcommand_flags(dispatch_path)
 
     problems = []
     for sub in sorted(set(bash) | set(python)):
@@ -160,10 +172,16 @@ def audit() -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--bin", default="",
+                    help="path to the bash dispatcher to read "
+                         "(default: this repo's bin/beacon)")
+    ap.add_argument("--dispatch", default="",
+                    help="path to dispatch.py to read "
+                         "(default: this repo's beacon_cli/dispatch.py)")
     args = ap.parse_args()
 
     try:
-        result = audit()
+        result = audit(args.bin, args.dispatch)
     except RuntimeError as exc:
         print(f"[tool-subcommand-parity] {exc}", file=sys.stderr)
         return 1
