@@ -1080,3 +1080,95 @@ func TestStuckRunningSurfacesInPage(t *testing.T) {
 			"誰も気づけない (ms-173 独立レビュー AX-4)")
 	}
 }
+
+// 「要対応のみ」が「生きている全部」に退化しないこと (ms-173 AC2)。
+//
+// 退化の経緯: 判定が ToolRunning だけを見ていたが、実運用の行をすべて作る台帳経路は
+// その欄を立てないため、!ToolRunning が生きている全行で真になっていた。当時の単体
+// テストは ToolRunning を手で立てていたので、本番の signal が死んでいても緑だった。
+// ここでは **台帳経路が実際に作る形** (ToolRunning 未設定 + State/ServerState あり) で
+// 判定を縛る。
+func TestToolWorkingReadsEachSourceInOrder(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          SessionOverview
+		wantWorking bool
+		wantSource  workingSource
+	}{
+		{"プロセス観測が動いていると言えばそれで決まる",
+			SessionOverview{ToolRunning: true}, true, workingFromProcess},
+		{"プロセス観測が黙っていてもサーバ正典が running なら動いている",
+			SessionOverview{ServerState: "running"}, true, workingFromServerState},
+		{"サーバ正典の awaiting_human は人を待っている = 動いていない",
+			SessionOverview{ServerState: "awaiting_human"}, false, workingFromServerState},
+		{"サーバ正典の blocked も動いていない",
+			SessionOverview{ServerState: "blocked"}, false, workingFromServerState},
+		{"サーバが idle でもローカル道具が busy なら動いている",
+			SessionOverview{ServerState: "idle", State: "busy"}, true, workingFromToolState},
+		{"台帳経路の実形 (ToolRunning 未設定 + status=busy) で動いていると読める",
+			SessionOverview{State: "busy"}, true, workingFromToolState},
+		{"どの出自も動いていると言わなければ動いていない",
+			SessionOverview{ServerState: "idle", State: "idle"}, false, workingUnspoken},
+		{"出自がひとつも無ければ動いていない",
+			SessionOverview{}, false, workingUnspoken},
+	}
+	for _, c := range cases {
+		gotWorking, gotSource := toolWorking(c.in)
+		if gotWorking != c.wantWorking || gotSource != c.wantSource {
+			t.Errorf("%s: toolWorking = (%v, %q), want (%v, %q)",
+				c.name, gotWorking, gotSource, c.wantWorking, c.wantSource)
+		}
+	}
+}
+
+// 台帳経路が実際に作る行で「要対応」が正しく割れること。
+// ToolRunning は **立てない** (台帳経路は立てないため) — ここを手で立てると、
+// 退化を見逃した当時のテストと同じ偽の緑に戻る。
+func TestNeedsAttentionOnLedgerShapedRows(t *testing.T) {
+	cases := []struct {
+		name string
+		in   SessionOverview
+		want bool
+	}{
+		{"作業中 (サーバ running / 道具 busy) は要対応でない",
+			SessionOverview{Running: true, ServerState: "running", State: "busy"}, false},
+		{"サーバ running で道具が一瞬 idle でも要対応でない",
+			SessionOverview{Running: true, ServerState: "running", State: "idle"}, false},
+		{"両方 idle は要対応",
+			SessionOverview{Running: true, ServerState: "idle", State: "idle"}, true},
+		{"確認待ちは要対応",
+			SessionOverview{Running: true, ServerState: "awaiting_human"}, true},
+		{"別マシンの行は道具の状態が手元に無いので対象外",
+			SessionOverview{TransportLive: true, ServerState: "idle", Remote: true}, false},
+		{"生きていない行は要対応でない",
+			SessionOverview{ServerState: "idle", State: "idle"}, false},
+	}
+	for _, c := range cases {
+		if got := NeedsAttention(c.in); got != c.want {
+			t.Errorf("%s: NeedsAttention = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 要対応が全件と一致してしまう退化を、集合として捕まえる (個別の脚だけを縛ると、
+// 新しい出自が足されたときに同じ退化が別の経路で戻りうる)。
+func TestAttentionIsStrictSubsetWhenWorkingRowsExist(t *testing.T) {
+	p := &ProjectRef{ProjectID: "p1", Name: "P1"}
+	rows := []SessionOverview{
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "running", State: "busy"},
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "running", State: "idle"},
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "idle", State: "idle"},
+		{Who: "me@example.com", Project: p, Running: true, ServerState: "awaiting_human"},
+	}
+	all := FilterSessions(rows, SessionFilter{Scope: ScopeAll}, "me@example.com")
+	att := FilterSessions(rows, SessionFilter{Scope: ScopeAttention}, "me@example.com")
+	if len(all) != 4 {
+		t.Fatalf("all = %d, want 4", len(all))
+	}
+	if len(att) == len(all) {
+		t.Fatalf("要対応が全件と同じ (%d 件) = フィルタが退化している", len(att))
+	}
+	if len(att) != 2 {
+		t.Errorf("要対応 = %d 件, want 2 (両方 idle と 確認待ち)", len(att))
+	}
+}

@@ -684,17 +684,70 @@ type SessionFilter struct {
 	Scope string `json:"scope"`
 }
 
+// workingSource は「道具が動いている」の判定を、どの出自が決めたか。
+// 判定だけを返して出自を潰さない (ServerState と State を混ぜない e-6454 の原則)。
+type workingSource string
+
+const (
+	// workingFromProcess は手元のプロセス観測 (ToolRunning)。
+	workingFromProcess workingSource = "process"
+	// workingFromServerState はサーバが導出する正典の作業状態。
+	workingFromServerState workingSource = "server_state"
+	// workingFromToolState はローカル道具の busy/idle 申告 (台帳の status)。
+	workingFromToolState workingSource = "tool_state"
+	// workingUnspoken はどの出自も動いているとも止まっているとも言っていない。
+	workingUnspoken workingSource = ""
+)
+
+// toolWorking は「その道具が今動いているか」を、手元にある最も確かな出自から決める。
+//
+// **ToolRunning だけを見てはならない。** 台帳経路 (claudeFromRegistry = 実運用の行を
+// すべて作る本命) は ToolRunning を立てないので、!ToolRunning が生きている全行で真に
+// なり、「要対応のみ」が「生きている全部」に退化していた (実測 9/9 表示、うち 3 行は
+// busy)。単体テストが ToolRunning を手で立てていたため、本番の signal が死んでいても
+// 試験は緑だった — 独立レビュー 2 体と実機測定が独立に同じ場所を指した (ms-173 AC2)。
+//
+// 台帳経路に ToolRunning を立てて直す道は採らない。ToolRunning は「その道具の
+// プロセスが動いているか (セッション単位ではない)」で、台帳の status は
+// セッション単位の申告なので、代入すると出自と粒度が混ざる (e-6454 が分離した軸)。
+// 消費側で出自を明示して優先順に読む。
+//
+// 優先順は確かさの順。先に語った出自で決め、混ぜない:
+//  1. 手元のプロセス観測 — 実際に動いているところを見ている
+//  2. サーバ導出の正典状態 — awaiting_human / blocked は「人を待っている」の宣言
+//     そのものなので、動いていない側に倒す (e-6562: 内容の有無と待っている事実を
+//     混同しない)
+//  3. ローカル道具の busy/idle 申告 — サーバが何も言っていないときの手がかり
+func toolWorking(s SessionOverview) (bool, workingSource) {
+	if s.ToolRunning {
+		return true, workingFromProcess
+	}
+	switch strings.ToLower(strings.TrimSpace(s.ServerState)) {
+	case "running":
+		return true, workingFromServerState
+	case "awaiting_human", "blocked":
+		return false, workingFromServerState
+	}
+	if strings.EqualFold(strings.TrimSpace(s.State), "busy") {
+		return true, workingFromToolState
+	}
+	return false, workingUnspoken
+}
+
 // NeedsAttention は「人の手が要りそう」か。
 //
-// 生きている (alive = Running か TransportLive) のに道具が動いていない (!ToolRunning)
-// = 待機中で、返事待ちの可能性がある。名乗っているだけの別マシンのセッションは道具の
-// 状態が手元に無く、既定の false を「待機中」と取り違えて全部 要対応 に挙げてしまう
-// ため、対象外にする。
+// 生きている (alive = Running か TransportLive) のに道具が動いていない = 待機中で、
+// 返事待ちの可能性がある。名乗っているだけの別マシンのセッションは道具の状態が手元に
+// 無く、既定の false を「待機中」と取り違えて全部 要対応 に挙げてしまうため、対象外に
+// する。
 //
-// **これは手がかりであって断定ではない。** ms-159 が activity を出し始めたら、
-// もっと確かな「返事待ち」の判定に寄せられる。それまでの近似。
+// 「道具が動いているか」の判定は toolWorking が持つ (出自の優先順はそこ)。
 func NeedsAttention(s SessionOverview) bool {
-	return alive(s) && !s.ToolRunning && !s.Remote
+	if !alive(s) || s.Remote {
+		return false
+	}
+	working, _ := toolWorking(s)
+	return !working
 }
 
 // isSelf は自分のセッションか。
