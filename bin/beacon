@@ -32,6 +32,30 @@ ensure_project() {
 # "--help" milestones across projects (e-902). Called only with tokens that
 # already matched `-?*` (a dash followed by at least one char), so a lone "-"
 # is still a valid value. $1 = the token, $2 = a usage line to show.
+# Reject an EXCESS positional token that a `*)` catch-all would otherwise drop
+# on the floor (ms-180, AX review of PR #802). Distinct from _guard_positional:
+# that one exists for a FLAG-LIKE token landing in a value slot and says so
+# ("looks like a flag, not a value"), which is actively misleading for a plain
+# word. The overwhelmingly common cause here is an unquoted multi-word value
+# (`--purpose confirm a meeting`), where every word after the first used to be
+# dropped silently while the command still printed success — so the message names
+# the stray token AND the quoting fix, which is the actual recovery.
+_guard_excess_positional() {
+    case "$1" in
+        -h|--help)
+            echo "$2"
+            exit 0
+            ;;
+        *)
+            echo "Error: '$1' は余分な引数です (直前の値に続く 2 語目以降は" >&2
+            echo "       黙って捨てられるのではなく、ここで止めています)。" >&2
+            echo "       空白を含む値は引用符で囲んでください: --purpose \"...\"" >&2
+            echo "$2" >&2
+            exit 1
+            ;;
+    esac
+}
+
 _guard_positional() {
     case "$1" in
         -h|--help)
@@ -2548,6 +2572,174 @@ EOF
             BEACON_ATTENTION_ROOT="$_att_root" \
             BEACON_JSON="$_att_json" \
             python3 "$COMMANDS_PY" attention
+        ;;
+    tool|tools)
+        # ms-180 e-7000: the declared registry of the tools this project uses.
+        # Beacon holds the DECLARATION (what exists / what it does / where its use
+        # is recorded); it never holds or runs the tool itself (SPEC 方針5), so
+        # there is deliberately no `tool run`.
+        ensure_project
+        case "${2:-}" in
+            add)
+                shift 2
+                _tool_name=""
+                _tool_purpose=""
+                _tool_effect=""
+                _tool_record=""
+                _tool_no_record=""
+                _tool_grain=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --purpose)    _tool_purpose="${2:-}"; shift 2 ;;
+                        --effect)     _tool_effect="${2:-}"; shift 2 ;;
+                        --record)     _tool_record="${2:-}"; shift 2 ;;
+                        --no-record)  _tool_no_record="${2:-}"; shift 2 ;;
+                        --grain)      _tool_grain="${2:-}"; shift 2 ;;
+                        --json)       _tool_json="1"; shift ;;
+                        -?*)          _guard_flag "$1" ;;
+                        *)            if [[ -z "$_tool_name" ]]; then _tool_name="$1"; shift;
+                                         else _guard_excess_positional "$1" "Usage: beacon tool add <道具名> --purpose \"<用途>\" --effect <read-only|state-change|outward> ...  (用途や理由に空白を含むなら引用符で囲んでください — 囲まないと 2 語目以降が黙って落ちます)"; fi ;;
+                    esac
+                done
+                BEACON_TOOL_NAME="$_tool_name" BEACON_TOOL_PURPOSE="$_tool_purpose" \
+                    BEACON_TOOL_EFFECT="$_tool_effect" BEACON_TOOL_RECORD="$_tool_record" \
+                    BEACON_TOOL_NO_RECORD="$_tool_no_record" BEACON_TOOL_GRAIN="$_tool_grain" \
+                    BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_add
+                ;;
+            list|ls)
+                shift 2
+                _tool_json=""
+                _tool_undecided=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --undecided) _tool_undecided="1"; shift ;;
+                        --json)      _tool_json="1"; shift ;;
+                        -?*)         _guard_flag "$1" ;;
+                        *)           _guard_excess_positional "$1" "Usage: beacon tool list [--undecided] [--json]" ;;
+                    esac
+                done
+                BEACON_TOOL_UNDECIDED="$_tool_undecided" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_list
+                ;;
+            show)
+                shift 2
+                _tool_name=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _tool_json="1"; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      if [[ -z "$_tool_name" ]]; then _tool_name="$1"; shift;
+                                   else _guard_excess_positional "$1" "Usage: beacon tool show <道具名> [--json]"; fi ;;
+                    esac
+                done
+                BEACON_TOOL_NAME="$_tool_name" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_show
+                ;;
+            remove|rm)
+                shift 2
+                _tool_name=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _tool_json="1"; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      if [[ -z "$_tool_name" ]]; then _tool_name="$1"; shift;
+                                   else _guard_excess_positional "$1" "Usage: beacon tool remove <道具名> [--json]"; fi ;;
+                    esac
+                done
+                BEACON_TOOL_NAME="$_tool_name" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_remove
+                ;;
+            lookup)
+                shift 2
+                _tool_query=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _tool_json="1"; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      if [[ -z "$_tool_query" ]]; then _tool_query="$1"; shift;
+                                   else _guard_excess_positional "$1" "Usage: beacon tool lookup \"<用途>\" [--json]  (用途に空白を含むなら引用符で囲んでください — 囲まないと 2 語目以降が黙って落ちます)"; fi ;;
+                    esac
+                done
+                BEACON_TOOL_QUERY="$_tool_query" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_lookup
+                ;;
+            used)
+                shift 2
+                _tool_name=""
+                _tool_summary=""
+                _tool_recorder=""
+                _tool_target=""
+                _tool_url=""
+                _tool_force=""
+                _tool_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --summary)  _tool_summary="${2:-}"; shift 2 ;;
+                        --record)   _tool_recorder="${2:-}"; shift 2 ;;
+                        --target)   _tool_target="${2:-}"; shift 2 ;;
+                        --url)      _tool_url="${2:-}"; shift 2 ;;
+                        --no-ledger-check) _tool_force="1"; shift ;;
+                        --json)     _tool_json="1"; shift ;;
+                        -?*)        _guard_flag "$1" ;;
+                        *)          if [[ -z "$_tool_name" ]]; then _tool_name="$1"; shift;
+                                       else _guard_excess_positional "$1" "Usage: beacon tool used <道具名> [--summary \"<1 回分>\"] ...  (--summary に空白を含むなら引用符で囲んでください)"; fi ;;
+                    esac
+                done
+                BEACON_TOOL_NAME="$_tool_name" BEACON_TOOL_SUMMARY="$_tool_summary" \
+                    BEACON_TOOL_RECORD="$_tool_recorder" BEACON_TOOL_TARGET="$_tool_target" \
+                    BEACON_TOOL_URL="$_tool_url" \
+                    BEACON_TOOL_NO_LEDGER_CHECK="$_tool_force" \
+                    BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_used
+                ;;
+            unregistered)
+                shift 2
+                _tool_json=""
+                _tool_clear=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --clear) _tool_clear="1"; shift ;;
+                        --json)  _tool_json="1"; shift ;;
+                        -?*)     _guard_flag "$1" ;;
+                        *)       _guard_excess_positional "$1" "Usage: beacon tool unregistered [--clear] [--json]" ;;
+                    esac
+                done
+                BEACON_TOOL_CLEAR="$_tool_clear" BEACON_JSON="$_tool_json" \
+                    python3 "$COMMANDS_PY" tool_unregistered
+                ;;
+            *)
+                echo "Usage: beacon tool add <道具名> --purpose \"<何のために使うか>\" --effect <read-only|state-change|outward>"
+                echo "                        [--record <save|evidence> [--grain <each|turn>] | --no-record \"<記録しない理由>\"] [--json]"
+                echo "                        (--record / --no-record を省くと記録先は『未判断』として載る = 黙って『記録しない』にはならない)"
+                echo "       beacon tool list [--undecided] [--json]        (--undecided は記録先が未判断の道具だけ)"
+                echo "       beacon tool show <道具名> [--json]"
+                echo "       beacon tool remove <道具名> [--json]"
+                echo "       beacon tool lookup \"<用途>\" [--json]            (用途から使うべき道具を引く; ms-180 e-7006)"
+                echo "       beacon tool used <道具名> [--summary \"<1 回分の内容>\"] [--record <save|evidence>]"
+                echo "                        [--target <id>] [--url <url>] [--no-ledger-check] [--json]"
+                echo "                        (道具の利用 1 回を証跡として記録する職種中立の口。開発は MS の、営業は商談の"
+                echo "                         宣言済み証跡アームに書く。PostToolUse 割り込みが呼ぶ writer; ms-180 e-7004)"
+                echo "       beacon tool unregistered [--clear] [--json]    (台帳に無いまま使われた道具 = 記録が残らなかった分; ms-180 e-7002)"
+                echo ""
+                echo "  真値は .beacon/tools.json (ローカル)。全ツール呼び出しで引かれる経路なので読み取りは"
+                echo "  ネットワークを伴わず、クラウドへは一方向ミラー (doc: tool-ledger) として同期する。"
+                echo "  Bash / Write / Edit / WebFetch / Task は read-only として登録できない (ms-169 の承認ゲートが"
+                echo "  この判定に依っているため)。厳しくする方向の宣言は可能。"
+                # Usage for a missing / unknown subcommand is a FAILURE. The Python
+                # frontend already returned 1, so exiting 0 made the two entry
+                # points disagree about the identical mistake (AX review of PR
+                # #802). Sibling bash families are inconsistent today
+                # (`deliverable` exits 1; `decision` / `note` / `doc` exit 0) —
+                # left alone deliberately, since silently changing another
+                # family's exit code could break its existing callers.
+                exit 1
+                ;;
+        esac
         ;;
     decision)
         # ms-154 e-5594: record an AI decision to the unified decision arm.

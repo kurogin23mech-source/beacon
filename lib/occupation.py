@@ -598,7 +598,8 @@ def deliverable_bearing_classes(data: dict) -> list:
 def _changelog_via_milestone(data: dict, target_id: str, *, arm: str,
                              collection: str, kind: str, description: str,
                              source: str, date: str, revision_id: str,
-                             url: str, hash: str, progress: str) -> dict:
+                             url: str, hash: str, progress: str,
+                             tool: str = "") -> dict:
     """Dev milestone changelog: record through ``core.save_entry`` (which owns the
     milestone resolution + dedup + progress bump). No-ops (``no-milestone``) when the
     id resolves to no recordable milestone; a bad EXPLICIT id raises through the
@@ -618,7 +619,8 @@ def _changelog_via_milestone(data: dict, target_id: str, *, arm: str,
         return {"recorded": False, "reason": "no-milestone"}
     result = core.save_entry(data, ms_id=target_id, description=description,
                              source=source, date=date, url=url,
-                             revision_id=revision_id, hash=hash, progress=progress)
+                             revision_id=revision_id, hash=hash,
+                             progress=progress, tool=tool)
     return {"recorded": True, "target": result.get("milestone", target_id),
             "result": result}
 
@@ -626,7 +628,7 @@ def _changelog_via_milestone(data: dict, target_id: str, *, arm: str,
 def _changelog_via_plain(data: dict, target_id: str, *, arm: str, collection: str,
                          kind: str, description: str, source: str, date: str,
                          revision_id: str, url: str, hash: str,
-                         progress: str) -> dict:
+                         progress: str, tool: str = "") -> dict:
     """Plain changelog append (was ``_record_operation_entry``, generalised to any
     collection + arm): find the Target record by id in its ``collection`` and append a
     ``save`` entry to the declared ``arm``, matching the shape ``core.save_entry``
@@ -642,6 +644,12 @@ def _changelog_via_plain(data: dict, target_id: str, *, arm: str, collection: st
             meta = {"source": source}
             if revision_id:
                 meta["revision_id"] = revision_id
+            # ms-180 e-7004: carry the tool on EVERY recorder strategy, not just
+            # the milestone one. A field present on one writer and missing on its
+            # sibling is how 「どの道具を使ったか」 silently stops being answerable
+            # for whichever class happens to use the other strategy.
+            if tool:
+                meta["tool"] = tool
             record.setdefault(arm, []).append({
                 "id": core.next_entry_id(data),
                 "type": "save",
@@ -668,7 +676,7 @@ _CHANGELOG_RECORDERS = {
 def record_target_entry(data: dict, target_id: str = "", *, description: str,
                         source: str = "auto", date: str = "",
                         revision_id: str = "", url: str = "", hash: str = "",
-                        progress: str = "") -> dict:
+                        progress: str = "", tool: str = "") -> dict:
     """Record a side-effect changelog entry against a Target, dispatched by the
     Target's kind, profession-agnostically (ms-134 e-4720).
 
@@ -705,7 +713,7 @@ def record_target_entry(data: dict, target_id: str = "", *, description: str,
         result = core.save_entry(data, ms_id="", description=description,
                                  source=source, date=date, url=url,
                                  revision_id=revision_id, hash=hash,
-                                 progress=progress)
+                                 progress=progress, tool=tool)
         return {"recorded": True, "target": result.get("milestone", ""),
                 "result": result}
     # Explicit target → the class's DECLARED changelog recorder. No ``if kind ==``:
@@ -738,7 +746,7 @@ def record_target_entry(data: dict, target_id: str = "", *, description: str,
     return _CHANGELOG_RECORDERS[decl["recorder"]](
         data, target_id, arm=decl["arm"], collection=decl["collection"], kind=kind,
         description=description, source=source, date=date,
-        revision_id=revision_id, url=url, hash=hash, progress=progress)
+        revision_id=revision_id, url=url, hash=hash, progress=progress, tool=tool)
 
 
 # Target classes whose existence is hard-validated before a shared capability
@@ -2456,7 +2464,8 @@ def changelog_recorder_for(data: dict, kind: str) -> dict | None:
 def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
                  channel: str = "other", body: str = "",
                  source: dict | None = None, occurred_at: str = "",
-                 created_at: str = "", created_in_phase: str = "") -> dict:
+                 created_at: str = "", created_in_phase: str = "",
+                 tool: str = "") -> dict:
     """Append a piece of evidence (a sales Communication / 事後記録型の証跡) under a
     Target or the work item it fulfilled, occupation-generically, and return the new
     record (ms-143 設計判断 b 系統4 = 証跡追加). Returns the record dict — symmetric
@@ -2524,6 +2533,10 @@ def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
         # 現フェーズを既定に、retarget しても不変)。
         "created_in_phase": created_in_phase or container.get("phase", ""),
     }
+    # ms-180 e-7004: 使った道具を構造化フィールドで刻む (非空のときだけ)。散文から
+    # 部分一致で取り出す形にはしない — 「何でやったか」は問い合わせで答えられる必要がある。
+    if tool:
+        record["tool"] = tool
     # e-3544: 本文欄は非空のときだけ書く (空なら key ごと省いて前方互換を保つ)。
     body_txt = (body or "").strip()
     if body_txt:
@@ -2537,6 +2550,177 @@ def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
 # honest seam ``_resolve_evidence_parent`` uses to reach the sales resolvers rather
 # than forcing accounts into the manifest.
 _NON_MANIFEST_WORK_ITEM_ARMS = {"account": "nurturings"}
+
+
+# ms-180 e-7004 — the profession-NEUTRAL evidence door ("one use of a tool").
+#
+# The gap this closes. Two write lines existed and neither could take a plain
+# "this happened once" from any profession:
+#
+#   * ``record_target_entry`` (the changelog line) records a dev milestone entry
+#     and NO-OPs on a sales Target — correct for its purpose, useless for sales.
+#   * ``add_evidence`` (the evidence line) resolves its parent through
+#     ``sales_entities.resolve_communication_target`` and REQUIRES ``direction``
+#     from the sales vocabulary. Hand it ``ms-180`` and it raises
+#     「Communication target not found」 — even though the manifest declares the dev
+#     milestone's own evidence arm (``entries`` / item_type ``commit``). The write
+#     side was fixed to one profession's vocabulary while the DECLARATION was
+#     already generic.
+#
+# So the dispatch here reads the declaration instead of the profession: a class
+# that declares an evidence arm gets its use recorded through whichever recorder
+# that arm's class declares. Nothing branches on "is this sales" — the same
+# "declare ⇒ light up" contract ``record_target_entry`` and ``add_evidence``
+# already follow on their own halves.
+#
+# ``direction`` stays in the record for sales classes (their arm's schema has it),
+# but a neutral caller no longer has to invent one: it is DERIVED from the tool's
+# declared effect, which is the same distinction under a different name — reading
+# a mailbox is inbound, sending anything outward is outbound.
+_EFFECT_TO_DIRECTION = {
+    "read-only": sales_entities.COMM_INBOUND,
+    "state-change": sales_entities.COMM_OUTBOUND,
+    "outward": sales_entities.COMM_OUTBOUND,
+}
+
+
+def record_evidence(data: dict, parent_id: str = "", *, summary: str,
+                    tool: str = "", effect: str = "", direction: str = "",
+                    channel: str = "", body: str = "", source: dict | None = None,
+                    occurred_at: str = "", created_at: str = "",
+                    url: str = "") -> dict:
+    """Record ONE piece of evidence against a Target, profession-generically.
+
+    This is the single door for "a thing was done once" that works in development
+    and in sales alike (ms-180 e-7004 受入条件: 開発でも営業でも同じ口で 1 回分を
+    証跡として書ける). ``tool`` names the instrument used, so a record can answer
+    「何でやったか」 — the arm of the audit loop that was cut while tools had no
+    identifier (SPEC ms-180 § 背景 症状2).
+
+    Dispatch is by DECLARATION, never by profession:
+
+      1. no ``parent_id`` → the session's active Target(s), first one
+         (``resolve_worked_targets``); none active → NO-OP, never a guess.
+      2. the class declares no evidence arm → NO-OP with a reason.
+      3. the class's evidence arm is ALSO its changelog arm (dev milestone /
+         operation: both are ``entries``) → write through that declared changelog
+         recorder, i.e. ``record_target_entry``. One arm must not get two record
+         shapes written into it.
+      4. otherwise (a class whose evidence arm is its own — sales
+         ``communications``) → write through ``add_evidence``.
+
+    Returns ``{"recorded": bool, "reason": str, "target": str, "arm": str, ...}``
+    and NEVER raises for "nothing to record onto" — the caller (a PostToolUse
+    interrupt) must not fail a tool call over attribution. A genuinely bad
+    explicit id still raises, as everywhere else.
+
+    Boundary with ms-142 e-5308 (ms-180 e-7004 受入条件2 — no double implementation)
+    -------------------------------------------------------------------------------
+    e-5308 ("証跡の書き込み側を manifest 駆動化する") is still open and still
+    DISTINCT, because the two sit at different layers and neither contains the
+    other:
+
+      * THIS function is the canonical neutral ENTRY POINT: "one act happened,
+        record it against whatever Target this profession has". It owns the
+        dispatch — which writer owns the declared arm — and nothing else.
+      * e-5308 is about the INTERNALS of the sales writer this function routes
+        to: ``add_evidence``'s parent resolution
+        (``resolve_communication_target``), its id space (``comm-``), and its
+        vocabulary (``VALID_COMM_DIRECTION``) are still sales concretes. A brand
+        new profession that declares ``evidence_arms`` lights up the READ side
+        (``iter_evidence``) but would still land in those concretes on write.
+
+    So: ``record_evidence`` is the canonical door, and e-5308's work happens
+    BELOW it — when that lands, this function's branch 5 keeps the same contract
+    and simply stops being sales-specific underneath. Do NOT re-implement the
+    dispatch inside ``add_evidence``; route through here instead.
+    """
+    target_id = (parent_id or "").strip()
+    if not target_id:
+        worked = resolve_worked_targets(data)
+        ids = worked.get("target_ids") or []
+        if not ids:
+            return {"recorded": False, "reason": "no-target", "target": "",
+                    "arm": ""}
+        target_id = ids[0]
+
+    kind = narrowing_kind_for_ref(target_id, data) or _wm.target_kind(target_id)
+    arm = evidence_arm_for(data, kind)
+    decl = changelog_recorder_for(data, kind)
+    if not arm:
+        # No DECLARED evidence arm. Two legitimate ways to still have somewhere to
+        # put "this happened once", in this order:
+        #   (a) the class declares a CHANGELOG (an Operation: changelog arm
+        #       ``entries``, evidence arm none). A side-log of what happened is
+        #       where one use of a tool belongs, so fall through to branch 3.
+        #   (b) a non-manifest sales grain reached by id (act- / nrt-), whose
+        #       container owns the ``communications`` arm.
+        # Anything else records NOTHING rather than falling through onto some other
+        # Target — the e-4710 lesson (an explicit target must never silently
+        # record somewhere else).
+        if decl is not None:
+            arm = decl.get("arm") or ""
+        else:
+            sales_container, _ = sales_entities.resolve_communication_target(
+                data, target_id)
+            if sales_container is None:
+                return {"recorded": False, "reason": f"{kind}-no-evidence-arm",
+                        "target": target_id, "arm": ""}
+            arm = "communications"
+
+    text = (summary or "").strip()
+    if not text:
+        return {"recorded": False, "reason": "empty-summary",
+                "target": target_id, "arm": arm}
+
+    # 3. The arm the write is going to IS the class's changelog arm (dev milestone
+    #    and Operation both: ``entries``). One arm must not receive two different
+    #    record shapes, so the declared changelog recorder owns the write.
+    if decl is not None and decl.get("arm") == arm:
+        result = record_target_entry(data, target_id, description=text,
+                                     source="auto", date=created_at, url=url,
+                                     tool=tool)
+        return {"recorded": bool(result.get("recorded")),
+                "reason": result.get("reason", ""),
+                "target": target_id, "arm": arm, "via": "changelog",
+                "result": result}
+
+    # 4/5. Otherwise route by WHICH WRITER OWNS THE DECLARED ARM. The arm is the
+    #    discriminator — not "does a descriptor exist for this kind" — because the
+    #    built-in sales classes ARE descriptors too, so descriptor-first ordering
+    #    sent an Opportunity's tool use through target_engine and wrote a
+    #    target_engine-shaped record into the ``communications`` arm that
+    #    sales_entities owns. Two shapes in one arm is corruption, and it is the
+    #    exact hazard branch 6 below refuses to risk, so the dispatch asks the
+    #    question that actually decides it: whose arm is this?
+
+    # 4. ``evidence`` — the descriptor-driven engine's own arm.
+    if arm == _te.EVIDENCE_KEY:
+        desc = effective_get_descriptor(data, kind)
+        if desc is not None:
+            rec = _te.add_evidence(data, desc, target_id, summary=text,
+                                   tool=tool, at=created_at)
+            return {"recorded": True, "reason": "", "target": target_id,
+                    "arm": arm, "via": "descriptor", "record": rec}
+
+    # 5. ``communications`` — the sales evidence line. ``direction`` is derived from
+    #    the tool's declared effect when the caller gives none, so a neutral caller
+    #    need not invent a sales-vocabulary value (e-7004).
+    if arm == "communications":
+        rec = add_evidence(
+            data, target_id, summary=text, tool=tool,
+            direction=(direction or _EFFECT_TO_DIRECTION.get(
+                effect, sales_entities.COMM_OUTBOUND)),
+            channel=channel or "other", body=body, source=source,
+            occurred_at=occurred_at, created_at=created_at)
+        return {"recorded": True, "reason": "", "target": target_id, "arm": arm,
+                "via": "evidence", "record": rec}
+
+    # 6. A declared arm whose record shape nobody here owns. NO-OP with a reason
+    #    rather than guessing a writer — writing an invented shape into a declared
+    #    arm would corrupt whatever does own it.
+    return {"recorded": False, "reason": f"{kind}-arm-{arm}-no-writer",
+            "target": target_id, "arm": arm}
 
 
 def _evidence_work_item_arm(data: dict, container_id: str) -> tuple:

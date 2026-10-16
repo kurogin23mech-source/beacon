@@ -1295,6 +1295,33 @@ def build_parser() -> argparse.ArgumentParser:
                         action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
+    # ---- tool (ms-180 e-7000: 道具台帳 — 宣言の登録と読み口) ----
+    p_tool = sub.add_parser("tool", aliases=["tools"],
+                            help="Declare / read the project's tool ledger",
+                            add_help=False)
+    p_tool.add_argument("tool_cmd", nargs="?", default="")  # add|list|show|remove|lookup|unregistered
+    p_tool.add_argument("name", nargs="?", default="")      # 道具名 or lookup の用途
+    p_tool.add_argument("--purpose", default="")
+    p_tool.add_argument("--effect", default="")
+    # --record is the sink flag for BOTH `tool add` and `tool used`: one concept,
+    # one spelling inside one verb family (it used to be --record on `add` and
+    # --recorder on `used`, which is the flag-transfer mistake AX principle 1
+    # names). One declaration serves both because every `tool` flag lives on this
+    # single shared parser — which is also why _TOOL_SUBCOMMAND_FLAGS below has to
+    # reject a flag belonging to a sibling subcommand.
+    p_tool.add_argument("--record", dest="record", default="")
+    p_tool.add_argument("--no-record", dest="no_record", default="")
+    p_tool.add_argument("--grain", default="")
+    p_tool.add_argument("--summary", default="")
+    p_tool.add_argument("--target", default="")
+    p_tool.add_argument("--url", default="")
+    p_tool.add_argument("--no-ledger-check", dest="no_ledger_check",
+                        action="store_true")
+    p_tool.add_argument("--undecided", action="store_true")
+    p_tool.add_argument("--clear", action="store_true")
+    p_tool.add_argument("--json", action="store_true")
+    p_tool.add_argument("--help", "-h", action="store_true", dest="show_help")
+
     # ---- decision (ms-154 e-5594: log-time decision backstop の記録口) ----
     p_decision = sub.add_parser("decision", help="Record an AI decision to the decision arm",
                                 add_help=False)
@@ -4291,6 +4318,124 @@ _DECISION_USAGE = (
 )
 
 
+_TOOL_USAGE = (
+    "Usage: beacon tool add <道具名> --purpose \"<何のために使うか>\" --effect <read-only|state-change|outward>\n"
+    "                        [--record <save|evidence> [--grain <each|turn>] | --no-record \"<記録しない理由>\"] [--json]\n"
+    "                        (--record / --no-record を省くと記録先は『未判断』として載る\n"
+    "                         = 黙って『記録しない』にはならない)\n"
+    "       beacon tool list [--undecided] [--json]\n"
+    "       beacon tool show <道具名> [--json]\n"
+    "       beacon tool remove <道具名> [--json]\n"
+    "       beacon tool lookup \"<用途>\" [--json]          (用途から道具を引く; ms-180 e-7006)\n"
+    "       beacon tool used <道具名> [--summary \"<1 回分>\"] [--record <save|evidence>]\n"
+    "                        [--target <id>] [--url <url>] [--no-ledger-check] [--json]\n"
+    "                        (利用 1 回を証跡として記録する職種中立の口; ms-180 e-7004)\n"
+    "       beacon tool unregistered [--clear] [--json]  (台帳に無いまま使われた道具; ms-180 e-7002)\n"
+    "  真値は .beacon/tools.json (ローカル)。読み取りはネットワークを伴わず、クラウドへは\n"
+    "  一方向ミラー (doc: tool-ledger) として同期する。Bash / Write / Edit / WebFetch / Task は\n"
+    "  read-only として登録できない (ms-169 の承認ゲートがこの判定に依っているため)。"
+)
+
+
+# Which flags each `tool` subcommand actually accepts (ms-180, AX review of PR
+# #802, high). Every `tool` flag is declared on ONE shared argparse parser, so
+# argparse alone accepts a flag that belongs to a SIBLING subcommand and the
+# handler then silently ignores it — e.g. `tool add --record evidence` was fine
+# but `tool add --recorder evidence` (the spelling the OTHER subcommand used)
+# registered the tool as record-sink *undecided* while exiting 0, whereas the
+# bash frontend rejected it. The two frontends must agree on what is an error,
+# so the allowed set is checked explicitly here, mirroring bash's per-subcommand
+# case blocks. `--json` / `--help` are universal and omitted.
+_TOOL_SUBCOMMAND_FLAGS = {
+    "add": {"purpose", "effect", "record", "grain", "no_record"},
+    "list": {"undecided"},
+    "ls": {"undecided"},
+    "show": set(),
+    "remove": set(),
+    "rm": set(),
+    "lookup": set(),
+    "used": {"summary", "record", "target", "url", "no_ledger_check"},
+    "unregistered": {"clear"},
+}
+
+#: argparse dest -> the flag spelling to name in the error message.
+_TOOL_FLAG_SPELLING = {
+    "purpose": "--purpose", "effect": "--effect", "record": "--record",
+    "grain": "--grain", "no_record": "--no-record", "undecided": "--undecided",
+    "clear": "--clear", "summary": "--summary", "target": "--target",
+    "url": "--url", "no_ledger_check": "--no-ledger-check",
+}
+
+
+def _tool_flags_given(args: argparse.Namespace) -> set:
+    """The flag dests the caller actually supplied (non-empty / true)."""
+    given = set()
+    for dest in _TOOL_FLAG_SPELLING:
+        value = getattr(args, dest, None)
+        if value not in (None, "", False):
+            given.add(dest)
+    return given
+
+
+def _handle_tool(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help:
+        print(_TOOL_USAGE)
+        return 0
+    if (rc := _ensure_project()) is not None:
+        return rc
+    json_flag = "1" if args.json else ""
+    subc = args.tool_cmd
+    allowed = _TOOL_SUBCOMMAND_FLAGS.get(subc)
+    if allowed is not None:
+        stray = sorted(_tool_flags_given(args) - allowed)
+        if stray:
+            names = ", ".join(_TOOL_FLAG_SPELLING[d] for d in stray)
+            print(f"Error: {names} は 'beacon tool {subc}' では使えません。",
+                  file=sys.stderr)
+            print(_TOOL_USAGE, file=sys.stderr)
+            return 2
+    if subc == "add":
+        return _run_commands_py(root, "tool_add", {
+            "BEACON_TOOL_NAME": args.name or "",
+            "BEACON_TOOL_PURPOSE": args.purpose or "",
+            "BEACON_TOOL_EFFECT": args.effect or "",
+            "BEACON_TOOL_RECORD": args.record or "",
+            "BEACON_TOOL_NO_RECORD": args.no_record or "",
+            "BEACON_TOOL_GRAIN": args.grain or "",
+            "BEACON_JSON": json_flag,
+        })
+    if subc in ("list", "ls"):
+        return _run_commands_py(root, "tool_list", {
+            "BEACON_TOOL_UNDECIDED": "1" if args.undecided else "",
+            "BEACON_JSON": json_flag,
+        })
+    if subc == "show":
+        return _run_commands_py(root, "tool_show", {
+            "BEACON_TOOL_NAME": args.name or "", "BEACON_JSON": json_flag})
+    if subc in ("remove", "rm"):
+        return _run_commands_py(root, "tool_remove", {
+            "BEACON_TOOL_NAME": args.name or "", "BEACON_JSON": json_flag})
+    if subc == "lookup":
+        return _run_commands_py(root, "tool_lookup", {
+            "BEACON_TOOL_QUERY": args.name or "", "BEACON_JSON": json_flag})
+    if subc == "used":
+        return _run_commands_py(root, "tool_used", {
+            "BEACON_TOOL_NAME": args.name or "",
+            "BEACON_TOOL_SUMMARY": args.summary or "",
+            "BEACON_TOOL_RECORD": args.record or "",
+            "BEACON_TOOL_TARGET": args.target or "",
+            "BEACON_TOOL_URL": args.url or "",
+            "BEACON_TOOL_NO_LEDGER_CHECK": "1" if args.no_ledger_check else "",
+            "BEACON_JSON": json_flag,
+        })
+    if subc == "unregistered":
+        return _run_commands_py(root, "tool_unregistered", {
+            "BEACON_TOOL_CLEAR": "1" if args.clear else "",
+            "BEACON_JSON": json_flag})
+    print(_TOOL_USAGE)
+    return 1
+
+
 def _handle_decision(root: Path, args: argparse.Namespace) -> int:
     if args.show_help:
         print(_DECISION_USAGE)
@@ -6597,6 +6742,8 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "doc": _handle_doc,
     "document": _handle_doc,
     "note": _handle_note,
+    "tool": _handle_tool,  # ms-180 e-7000
+    "tools": _handle_tool,  # alias, mirrors bash `tool|tools)`
     "decision": _handle_decision,  # ms-154 e-5594
     "trigger": _handle_trigger,
     "recap": _handle_recap,  # ms-184

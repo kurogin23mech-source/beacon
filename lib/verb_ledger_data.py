@@ -142,6 +142,20 @@ VERB_LEDGER = {
     "deadline_due": {"cls": "Q", "secondary": [], "note": "職種横断で期日到達/超過の work item を一覧する read-only (opportunity_due の cross-profession 版)"},
 
     # --- decision (ms-154 e-5594) ---
+    # ms-180 e-7000/e-7002/e-7006 [post-memo] — 道具台帳 (declared tool registry).
+    # The ledger is a DECLARATION store, so add/remove are ledger-appends (R) and
+    # every read口 is Q. None of them is B: the台帳 runs no machinery itself — the
+    # two interrupts (PreToolUse / PostToolUse) consult it, which is their B, not
+    # the verbs'. And none is C: nothing here reaches outward or asks a human
+    # (the cloud mirror is a derived doc write on the same append, not a separate
+    # outward act).
+    "tool_add": {"cls": "R", "secondary": [], "note": "道具を台帳に登録/更新 (道具・用途・作用・記録先の宣言を append)。宣言の記帳=R [post-memo]"},
+    "tool_remove": {"cls": "R", "secondary": [], "note": "道具の登録を取り下げ (台帳からの削除も宣言の変更=R) [post-memo]"},
+    "tool_list": {"cls": "Q", "secondary": [], "note": "台帳を read-only 一覧 (--undecided で記録先が未判断の行だけ) [post-memo]"},
+    "tool_show": {"cls": "Q", "secondary": [], "note": "道具 1 件の宣言を read-only 表示 [post-memo]"},
+    "tool_lookup": {"cls": "Q", "secondary": [], "note": "用途から道具を引く read-only 検索 (ms-180 e-7006、正典化の材料; 使用強制はしない) [post-memo]"},
+    "tool_used": {"cls": "R", "secondary": [], "note": "道具の利用 1 回を証跡として記録する職種中立の口 (開発=MS の、営業=商談の宣言済み証跡アーム)。証跡の記帳=R。PostToolUse 割り込みが呼ぶ writer で、記録するか否かの判定は台帳 (record_plan) 側 [post-memo]"},
+    "tool_unregistered": {"cls": "Q", "secondary": [], "note": "台帳に無いまま使われた道具 (= 記録が残らなかった分) を read-only 一覧。--clear は観測記録の破棄で宣言は触らない [post-memo]"},
     "decision_record": {"cls": "R", "secondary": [], "note": "AI の非自明な決定を decision arm (統一 decision stream) に自己申告記録 (log-time backstop)。生の判断記録=R"},
     "decision_list": {"cls": "Q", "secondary": [], "note": "decision arm を read-only 一覧 (独立検証: 別 AI が宣言 rationale を実コードに照合する読み口、ms-154 e-5595)"},
     "decision_derive": {"cls": "R", "secondary": ["Q"], "note": "既存成果物(PR intent)から decision を導出して arm に記録 (別途 record を叩かせない、ms-166 e-5972)。dry-run 既定・--apply で書込、既存分は dedup"},

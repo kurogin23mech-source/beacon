@@ -105,4 +105,35 @@ echo "[ci-strict-drift-guards] worktree 判定の箇所が台帳どおりか (ms
 # 動く制約と衝突するので、散在を機械で数える側で閉じる。増えても減っても赤くする。
 python3 "$ROOT/scripts/check-worktree-probe-census.py" --strict
 
+echo "[ci-strict-drift-guards] 必須と命じた道具が実在するか (ms-180 e-7005)…"
+# CLAUDE.md は道具へのハード依存を宣言する (「PR のレビューは必ず /review を使う」)。
+# だが 2026-10-08 から、その /review の実体は書いた人の端末の ~/.claude/skills/ に
+# しか無く、リポジトリには存在しなかった。別マシンに clean install すると「必須と
+# 命じられた道具が無い」状態になり、**それを検知するものが何も無かった**。
+# マイルストーンを参照する doc は capability 台帳の依存不変条件が弾くのに、道具を
+# 参照する doc は誰も弾かなかった (ms-180 SPEC 症状3)。
+#
+# 存在判定は構造で行う: Skill は既知パスのファイル解決、CLI verb は
+# lib/cli_surface の列挙との集合比較。名前を本文から grep する形にはしない
+# (偶然の一致で緑になるガードは、無ガードより悪い)。
+# 標準ライブラリのみ: この script は pytest の無い lint-docs ジョブからも呼ばれる。
+python3 "$ROOT/scripts/check-mandated-tools.py"
+
+echo "[ci-strict-drift-guards] beacon tool のサブコマンド別 flag 一致 (ms-180)…"
+# `beacon tool` は 2 回パースされる: bin/beacon はサブコマンドごとの case arm、
+# beacon_cli/dispatch.py は **全 flag を 1 つの共有 argparse parser に載せて**
+# _TOOL_SUBCOMMAND_FLAGS で絞る。この表は手書きのミラーなので、片側だけ広げると
+# 同じ入力で bash が拒否し Python が受ける (= ms-180 が閉じたはずの穴の再発)。
+#
+# 既存の cli-help-drift はこれを**構造的に見られない**: 比較は verb 単位
+# (`beacon tool` 全体) で、全 flag が 1 つの parser に載っている設計上、verb 単位の
+# 集合は自明に一致してしまう。食い違いは 1 階層下のサブコマンド単位にしか現れない。
+# 独立 maintainability レビュー (PR #802) が、片側を 1 行広げても試験一式と
+# ci-strict-drift-guards が緑のままであることを実証した。
+#
+# 例示 4 件ではなく **全サブコマンド × 両方向** を比較する。bash の case arm 読み取りは
+# check-cli-help-drift の parser を再利用する (「bash の arg loop から flag を読む」の
+# 定義を 2 つ持たないため)。標準ライブラリのみ (pytest 非依存)。
+python3 "$ROOT/scripts/check-tool-subcommand-flag-parity.py"
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."
