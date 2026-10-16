@@ -46,7 +46,50 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def _project(pid="p-test", *, commit_at="2026-10-14"):
+@pytest.fixture(autouse=True)
+def _no_real_store(monkeypatch):
+    """Make reaching the REAL store a loud failure in this file.
+
+    ``_read_current_project`` reads documents through ``store.get_store()``.
+    The first version of these tests stubbed ``load_project`` but left that
+    call live, so every handler test quietly talked to the real (cloud) store
+    — which resolves a session id and, on a machine with no
+    ``.beacon/session.json`` yet, CREATES one via a ``session.json.tmp``
+    atomic write. That temp file is not on the suite's known-leak allowlist,
+    so under CI's parallel workers it appeared inside ANOTHER test's
+    before/after window and failed an innocent bystander
+    (``test_advisory_silent_when_no_project``), which is exactly the
+    misattribution tests/conftest.py documents. Locally it never reproduced,
+    because this machine already has a fresh session.json and so no write
+    happens.
+
+    A unit test for this module has no business reaching the live store, so
+    the reach is replaced AND forbidden: an unstubbed one raises here instead
+    of silently doing I/O and blaming someone else three files away.
+    """
+    import store as _store
+
+    def _refuse(*_a, **_k):
+        raise AssertionError(
+            "a test in this file reached the REAL store (store.get_store). "
+            "Stub the dependency — a cmd_recap unit test must not touch the "
+            "live project store, which resolves/creates a session file and "
+            "then gets attributed to an unrelated test.")
+
+    monkeypatch.setattr(_store, "get_store", _refuse)
+
+
+#: The day a relative spec of "yesterday" actually resolves to, read from the
+#: SAME parser the handler uses. A fixture that hardcodes an absolute date and
+#: then asks for "yesterday" is a date bomb: it passes on the day it was
+#: written and silently stops exercising anything the next day (these tests
+#: broke exactly that way one day after being written). This repo already
+#: guards the same mistake elsewhere (scripts/check-arm-fixed-timestamp.py).
+_YESTERDAY_FROM, _YESTERDAY_TO = dw.parse_since("yesterday")
+
+
+def _project(pid="p-test", *, commit_at=None):
+    commit_at = _YESTERDAY_FROM if commit_at is None else commit_at
     return {
         "project_id": pid, "name": pid.upper(),
         "milestones": [{
@@ -58,11 +101,23 @@ def _project(pid="p-test", *, commit_at="2026-10-14"):
     }
 
 
+def _stub_store(monkeypatch, documents=()):
+    """Replace ``store.get_store`` with one returning ``documents``."""
+    import store as _store
+
+    class _S:
+        def list_documents(self):
+            return list(documents)
+
+    monkeypatch.setattr(_store, "get_store", lambda *a, **k: _S())
+
+
 @pytest.fixture
 def local(monkeypatch):
-    """Pin the module into local mode with one readable project."""
+    """Pin the module into local mode with one readable project, no real I/O."""
     monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: False)
     monkeypatch.setattr(cmd_recap, "load_project", lambda: _project())
+    _stub_store(monkeypatch)
     return _project()
 
 
@@ -182,9 +237,10 @@ def test_targets_evidence_cap_does_not_lower_the_count(monkeypatch, capsys):
         "id": "ms-1", "title": "m", "status": "todo",
         "created_at": "2026-01-01T00:00:00Z",
         "entries": [{"id": f"e-{i}", "type": "commit", "description": f"c{i}",
-                     "created_at": "2026-10-14"} for i in range(8)]}]}
+                     "created_at": _YESTERDAY_FROM} for i in range(8)]}]}
     monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: False)
     monkeypatch.setattr(cmd_recap, "load_project", lambda: project)
+    _stub_store(monkeypatch)
     out = _run(cmd_recap.cmd_recap_targets, capsys,
                BEACON_SINCE="yesterday", BEACON_EVIDENCE="3")
     t = out["targets"][0]
@@ -287,7 +343,7 @@ def test_projects_limit_truncates_the_list_but_not_the_count(monkeypatch, capsys
         for i in range(4):
             rows.append({"project_id": f"p{i}", "name": f"P{i}", "result": {
                 "moved": True, "target_count": 1, "evidence_count": 1,
-                "last_evidence_at": f"2026-10-1{i}T00:00:00Z", "targets": [],
+                "last_evidence_at": f"{_YESTERDAY_FROM}T0{i}:00:00Z", "targets": [],
                 "undated": {"count": 0, "by_kind": {}},
                 "sources_unavailable": []}})
         return rows, 4, "cloud"
@@ -314,6 +370,7 @@ def test_text_output_states_what_could_not_be_judged(monkeypatch, capsys):
                      "created_at": ""}]}]}
     monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: False)
     monkeypatch.setattr(cmd_recap, "load_project", lambda: project)
+    _stub_store(monkeypatch)
     monkeypatch.setenv("BEACON_SINCE", "yesterday")
     cmd_recap.cmd_recap_targets()
     out = capsys.readouterr().out
