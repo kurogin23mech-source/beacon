@@ -45,6 +45,35 @@ SYSTEM_PROVENANCE_CHANNELS = frozenset({
     "trek-leader-digest",
 })
 
+# Channels that USED to be server-minted and no longer are (ms-185 e-7077).
+#
+# **Why this set has to exist.** The provenance gate below is deliberately
+# narrow: a channel the project explicitly opted into (``bus auto-execute add``)
+# is honored WITHOUT a server signature, because the opt-in itself is the human
+# consent (pinned by ``test_non_provenance_channel_kept_without_envelope``).
+# That is sound while "opted in" and "server-minted" are decided independently.
+#
+# It stops being sound the moment a channel is REMOVED from
+# ``SYSTEM_PROVENANCE_CHANNELS`` while stale opt-ins for it still sit in some
+# project's ``bus_auto_execute_channels``. The channel then silently changes
+# class — from "signature required" to "trusted on the opt-in alone" — and an
+# unsigned ``delivery=auto-execute`` event on it is executed. Measured on
+# 2026-10-19: with ``trek-*`` still in this repo's allowlist (written there by
+# ``_arm_for_trek`` at Trek-join time) and removed from the provenance set,
+# ``classify_auto_execute`` returns ``("auto-execute", "", "")`` for an
+# unsigned event. Nothing in the old code could notice.
+#
+# So retiring a provenance channel is a two-sided operation and this set is the
+# code side: a retired channel is downgraded even when it is allowlisted, which
+# keeps stale data fail-closed forever. The data side (removing the stale
+# opt-ins) is still done — this is defence in depth, not a substitute, because
+# allowlists live in every project's own record and we cannot reach them all.
+#
+# **Do not just delete a name from SYSTEM_PROVENANCE_CHANNELS — move it here.**
+# ``tests/test_retired_provenance_channels_e7077.py`` fails if a known
+# server-minted channel family member is in neither set.
+RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset()
+
 T1_SYSTEM_TIER = "T1-system"
 T1_SYSTEM_ISSUER = "beacon-system"
 
@@ -60,6 +89,12 @@ T1_SYSTEM_ISSUER = "beacon-system"
 # and treat the else as allowlist-miss (or use ``if not reason``).
 _DOWNGRADE_ALLOWLIST_MISS = ""
 DOWNGRADE_NON_SYSTEM_ENVELOPE = "non-system-envelope"
+# ms-185 e-7077 — the channel was retired from the server-minted set, so an
+# opt-in for it no longer means anything. Distinct from the two reasons above
+# because the operator action differs: an allowlist miss is fixed by opting in,
+# a provenance miss cannot be fixed by the operator at all, and THIS one is
+# fixed by removing the stale opt-in (``bus auto-execute remove``).
+DOWNGRADE_RETIRED_CHANNEL = "retired-provenance-channel"
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -115,6 +150,11 @@ def classify_auto_execute(
     event: dict,
     *,
     allowlist,
+    # 並びは **評価順** に合わせてある (allowlist → retired → provenance)。
+    # ms-185 e-7077 の AX レビュー: 並びと評価順が逆だと、文脈ゼロの読み手が
+    # 引数の順から優先順位を類推して逆に取る。優先順位が逆になっても降格自体は
+    # 変わらないが理由タグが変わり、消費側の案内が反転する。
+    retired_channels=RETIRED_PROVENANCE_CHANNELS,
     provenance_channels=SYSTEM_PROVENANCE_CHANNELS,
 ) -> tuple:
     """Resolve one event's effective delivery + downgrade metadata.
@@ -124,6 +164,11 @@ def classify_auto_execute(
       * non-auto-execute event → ``(delivery, "", "")`` unchanged.
       * auto-execute, channel not in ``allowlist`` →
         ``("propose-to-ai", "auto-execute", "")`` (allowlist miss, no reason tag).
+      * auto-execute, channel in ``retired_channels`` →
+        ``("propose-to-ai", "auto-execute", "retired-provenance-channel")``.
+        Checked BEFORE the provenance gate and regardless of the allowlist,
+        because a retired channel's opt-in is exactly the stale state we must
+        not trust (ms-185 e-7077 — see RETIRED_PROVENANCE_CHANNELS).
       * auto-execute, channel is a provenance channel without a T1-system
         envelope → ``("propose-to-ai", "auto-execute", "non-system-envelope")``.
       * auto-execute, opted-in and (if provenance-gated) system-minted → kept:
@@ -139,6 +184,8 @@ def classify_auto_execute(
     channel = str(event.get("channel") or "")
     if channel not in allowlist:
         return (PROPOSE_TO_AI, AUTO_EXECUTE, _DOWNGRADE_ALLOWLIST_MISS)
+    if channel in retired_channels:
+        return (PROPOSE_TO_AI, AUTO_EXECUTE, DOWNGRADE_RETIRED_CHANNEL)
     if channel in provenance_channels and not has_system_provenance(event):
         return (PROPOSE_TO_AI, AUTO_EXECUTE, DOWNGRADE_NON_SYSTEM_ENVELOPE)
     return (AUTO_EXECUTE, "", "")
@@ -213,5 +260,7 @@ __all__ = [
     "has_system_provenance",
     "read_auto_execute_channels",
     "classify_auto_execute",
+    "RETIRED_PROVENANCE_CHANNELS",
+    "DOWNGRADE_RETIRED_CHANNEL",
     "format_operation_trigger_imperative",
 ]
