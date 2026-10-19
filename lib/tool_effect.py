@@ -174,6 +174,19 @@ def _skill_name(tool_input) -> str:
     The Skill tool carries the target skill in ``skill`` (Claude Code) or as the
     first token of ``command`` (leading slash tolerated). Returns "" if none
     found — the caller then falls back to default-deny on the bare "Skill" name.
+
+    PRECEDENCE, and the assumption under it: ``skill`` / ``name`` win over
+    ``command``. The explicit field is the harness's own answer to "which
+    skill", while ``command`` is a line a human typed that merely begins with
+    it. The two are assumed to agree, and that assumption is NOT verified here —
+    a payload carrying ``{"skill": "a", "command": "/b …"}`` resolves to ``a``
+    with no complaint. An independent AX review of PR #807 raised the mismatch
+    as a possible gap and could not find a harness that actually sends one
+    (its own stated limit), so no check was added for a shape nobody has
+    observed: a check would have to choose a behaviour for the mismatch, and
+    choosing one for a hypothetical is how a guard ends up protecting the wrong
+    thing. Written down here so the next reader inherits the assumption rather
+    than rediscovering it.
     """
     if not isinstance(tool_input, dict):
         return ""

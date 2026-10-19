@@ -66,16 +66,25 @@ def test_ledger_name_resolves_the_name_the_ledger_is_keyed_by(
 
 
 def test_the_resolution_has_one_parser():
-    """A second parser here could disagree with the heuristic's about the same
-    payload, which is the drift this repo removes rather than polices."""
+    """A second parser could disagree with this one about the same payload.
+
+    The check is `scripts/check-single-skill-parser.py`, which reads the syntax
+    tree. An earlier version of this test compared source text against
+    ``'get("skill")'``; an independent maintainability review planted
+    ``tool_input.get('skill')`` — the same read with single quotes — and it
+    stayed green. The quote style must not decide whether a guard fires, so the
+    comparison moved to the parsed form; `test_single_skill_parser_guard.py`
+    plants each spelling and requires the guard to catch it.
+    """
     source = (LIB / "tool_effect.py").read_text(encoding="utf-8")
     assert source.count("def _skill_name(") == 1
     assert "_skill_name(tool_input)" in source
-    # Neither interrupt may grow its own copy.
-    for path in (LIB / "tool_record_hook.py", GATE):
-        text = path.read_text(encoding="utf-8")
-        assert "def _skill_name" not in text, f"{path.name} has a second parser"
-        assert 'get("skill")' not in text, f"{path.name} parses the payload itself"
+    proc = subprocess.run([sys.executable,
+                           str(REPO / "scripts" / "check-single-skill-parser.py")],
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, (
+        f"a second place reads which Skill a call names:\n"
+        f"{proc.stdout}\n{proc.stderr}")
 
 
 # ---------------------------------------------------------------------------
@@ -151,28 +160,31 @@ def test_a_skill_that_declined_recording_records_nothing(project, leg):
         "a declined sink is an answer, not a debt")
 
 
-def test_an_unregistered_skill_is_debited_under_the_skill_name(project):
+@pytest.mark.parametrize("leg", ["bash", "python"])
+def test_an_unregistered_skill_is_debited_under_the_skill_name(project, leg):
     """The debt must name the skill, not the wrapper — otherwise every
     unregistered skill collapses into one row called `Skill`."""
     _declare(project)
     assert _fire(project, _payload(project, "Skill", {"skill": "some-skill"}),
-                 "bash") == 0
+                 leg) == 0
     names = [r.get("name") for r in
              debt.load_debt(debt.debt_path(str(project / ".beacon")))]
     assert names == ["some-skill"], names
 
 
-def test_an_unreadable_skill_payload_is_still_visible_as_debt(project):
+@pytest.mark.parametrize("leg", ["bash", "python"])
+def test_an_unreadable_skill_payload_is_still_visible_as_debt(project, leg):
     """Fail toward debt: a call we cannot name is debited under `Skill`, not
     dropped."""
     _declare(project)
-    assert _fire(project, _payload(project, "Skill", {}), "bash") == 0
+    assert _fire(project, _payload(project, "Skill", {}), leg) == 0
     names = [r.get("name") for r in
              debt.load_debt(debt.debt_path(str(project / ".beacon")))]
     assert names == ["Skill"], names
 
 
-def test_per_tool_grain_applies_to_the_resolved_skill(project):
+@pytest.mark.parametrize("leg", ["bash", "python"])
+def test_per_tool_grain_applies_to_the_resolved_skill(project, leg):
     """`turn` grain is a property of the 道具, so it must fold the SKILL's calls
     — keying on `Skill` would fold every skill together."""
     _declare(project,
@@ -184,12 +196,12 @@ def test_per_tool_grain_applies_to_the_resolved_skill(project):
                              recorder=tl.RECORDER_EVIDENCE, grain=tl.GRAIN_TURN))
     begin = json.dumps({"hook_event_name": "UserPromptSubmit",
                         "session_id": "sT", "cwd": str(project)})
-    assert _fire(project, begin, "bash") == 0
+    assert _fire(project, begin, leg) == 0
     for _ in range(3):
         _fire(project, _payload(project, "Skill", {"skill": "review"},
-                                session="sT"), "bash")
+                                session="sT"), leg)
     _fire(project, _payload(project, "Skill", {"skill": "beacon-note"},
-                            session="sT"), "bash")
+                            session="sT"), leg)
     tools = [e["meta"]["tool"] for e in _entries(project)]
     assert sorted(tools) == ["beacon-note", "review"], (
         f"expected one fold per skill within the turn, got {tools}")
@@ -292,3 +304,65 @@ def test_non_skill_gating_is_unchanged(armed, tool_name, tool_input, expected):
     name, so nothing outside the Skill class may shift."""
     _seed_raw(armed)
     assert _gate(armed, tool_name, tool_input) == expected
+
+
+# ---------------------------------------------------------------------------
+# A spelling variant of a pinned built-in is not new knowledge (AX review of
+# PR #807, high). Resolving Skills to their own names made the free-form skill
+# namespace reach the pinned table for the first time, and the table matched
+# EXACTLY: `Bash` was refused, `bash` was accepted, and `Skill(bash)` declared
+# read-only then passed the ms-169 gate with no prompt at all.
+# ---------------------------------------------------------------------------
+
+def _variants(name: str) -> list:
+    """Spellings that must all collapse onto the same pinned name."""
+    out = {name, name.lower(), name.upper()}
+    # NotebookEdit -> notebook-edit / notebook_edit
+    spaced = "".join(f" {c}" if c.isupper() else c for c in name).split()
+    if len(spaced) > 1:
+        out.add("-".join(p.lower() for p in spaced))
+        out.add("_".join(p.lower() for p in spaced))
+    return sorted(out)
+
+
+@pytest.mark.parametrize("pinned", sorted(tl.NON_SOFTENABLE_EFFECT))
+def test_no_spelling_of_a_pinned_builtin_can_be_declared_read_only(pinned):
+    """Every pinned name, every variant — not four examples."""
+    for spelling in _variants(pinned):
+        assert tl.is_softening(spelling, tl.EFFECT_READ_ONLY) is True, (
+            f"{spelling!r} can be declared read-only although it is the same "
+            f"name as the pinned {pinned!r}")
+        assert tl.pinned_canonical_name(spelling) == pinned, (
+            f"{spelling!r} did not resolve to {pinned!r}")
+
+
+@pytest.mark.parametrize("pinned", sorted(tl.NON_SOFTENABLE_EFFECT))
+def test_the_refusal_names_the_pinned_spelling_it_collided_with(pinned):
+    """A refusal the author cannot act on is a refusal they will work around."""
+    lowered = pinned.lower()
+    if lowered == pinned:
+        pytest.skip(f"{pinned} has no distinct lower-case spelling")
+    with pytest.raises(tl.ToolLedgerError) as err:
+        tl.build_record(lowered, purpose="x", effect=tl.EFFECT_READ_ONLY)
+    assert pinned in str(err.value), (
+        f"the refusal for {lowered!r} does not name {pinned!r}: {err.value}")
+
+
+@pytest.mark.parametrize("spelling", ["bash", "BASH", "webfetch", "notebook-edit"])
+def test_a_skill_named_like_a_pinned_builtin_stays_gated(armed, spelling):
+    """End to end through the gate, with the ledger hand-edited so the CLI's
+    refusal cannot be what is being measured."""
+    _seed_raw(armed, {"name": spelling, "purpose": "p", "effect": "read-only",
+                      "record": {"sink": "undecided"}})
+    assert _gate(armed, "Skill", {"skill": spelling}) == "ask", (
+        f"a skill named {spelling!r} declared read-only passed the gate in an "
+        f"armed untrusted turn")
+
+
+def test_a_stricter_declaration_is_still_allowed_for_a_pinned_name():
+    """The guard must only block SOFTENING. Declaring `outward` for Bash is
+    stricter than its pinned `state-change` and has to stay possible, or the
+    guard has eaten the ledger's purpose."""
+    row = tl.build_record("bash", purpose="x", effect=tl.EFFECT_OUTWARD)
+    assert row["effect"] == tl.EFFECT_OUTWARD
+    assert tl.is_softening("bash", tl.EFFECT_OUTWARD) is False
