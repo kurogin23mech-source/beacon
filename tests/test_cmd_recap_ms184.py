@@ -46,6 +46,37 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _no_env_leak():
+    """Fail if this MODULE leaves any BEACON_* env var behind.
+
+    The leak this catches broke five tests in an unrelated family and blamed
+    them (twice now: first a store/session write, now an env write). Both
+    times the damage landed elsewhere in the suite while a single-file run was
+    green, so the signal belongs at the boundary this file owns.
+
+    MODULE scope on purpose. The first version was per-test, which measured at
+    the wrong moment: a per-test fixture that does not depend on ``monkeypatch``
+    can finalize BEFORE monkeypatch undoes its own changes, so it reported 18
+    leaks that were really just not-yet-undone patches. Checking once, after
+    every test in the file has finished, is the claim actually being made —
+    and it cannot be fooled by fixture ordering.
+
+    Compared as a delta, so vars the harness legitimately sets
+    (BEACON_SESSION_KIND / BEACON_TEST_MODE) are not mistaken for ours.
+    """
+    before = {k: v for k, v in os.environ.items() if k.startswith("BEACON_")}
+    yield
+    after = {k: v for k, v in os.environ.items() if k.startswith("BEACON_")}
+    added = {k: after[k] for k in set(after) - set(before)}
+    changed = {k: (before[k], after[k]) for k in set(after) & set(before)
+               if before[k] != after[k]}
+    assert not added and not changed, (
+        f"this module leaked env state (added={added}, changed={changed}). "
+        "Use monkeypatch.setenv, never a raw os.environ write — a raw write "
+        "survives teardown and reaches every later test in the process.")
+
+
 @pytest.fixture(autouse=True)
 def _no_real_store(monkeypatch):
     """Make reaching the REAL store a loud failure in this file.
@@ -121,10 +152,26 @@ def local(monkeypatch):
     return _project()
 
 
-def _run(handler, capsys, **env):
+def _run(handler, capsys, monkeypatch, **env):
+    """Drive a handler in JSON mode, with every env write SCOPED to the test.
+
+    The first version wrote straight to ``os.environ`` and never undid it, so
+    ``BEACON_JSON=1`` (and whichever period/count flags a case set) leaked into
+    every test that ran afterwards IN THE SAME PROCESS. Measured: after this
+    file, ``BEACON_JSON`` / ``BEACON_SINCE`` / ``BEACON_EVIDENCE`` /
+    ``BEACON_LIMIT`` were all still set. Downstream that flipped other
+    families' CLI output to JSON and broke five ``test_trek_cli.py``
+    assertions — tests that have nothing to do with this feature and that
+    pass fine on their own. The autouse ``_clean_env`` fixture did not save us:
+    it clears at SETUP, so it only ever cleaned up after the previous test,
+    never after the last one, and a raw ``os.environ`` write is invisible to
+    monkeypatch's own teardown.
+
+    ``monkeypatch.setenv`` undoes itself at teardown, which is the whole point.
+    """
     for k, v in env.items():
-        os.environ[k] = v
-    os.environ["BEACON_JSON"] = "1"
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("BEACON_JSON", "1")
     handler()
     return json.loads(capsys.readouterr().out)
 
@@ -224,8 +271,8 @@ def test_non_integer_count_is_refused(monkeypatch, capsys):
 # recap targets — the assembled answer
 # ---------------------------------------------------------------------------
 
-def test_targets_reports_the_window_the_project_and_the_movement(local, capsys):
-    out = _run(cmd_recap.cmd_recap_targets, capsys, BEACON_SINCE="yesterday")
+def test_targets_reports_the_window_the_project_and_the_movement(local, capsys, monkeypatch):
+    out = _run(cmd_recap.cmd_recap_targets, capsys, monkeypatch, BEACON_SINCE="yesterday")
     assert out["window"]["from"] == out["window"]["to"]
     assert out["window"]["spec"] == "yesterday"
     assert out["project_id"] == "p-test"
@@ -241,7 +288,7 @@ def test_targets_evidence_cap_does_not_lower_the_count(monkeypatch, capsys):
     monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: False)
     monkeypatch.setattr(cmd_recap, "load_project", lambda: project)
     _stub_store(monkeypatch)
-    out = _run(cmd_recap.cmd_recap_targets, capsys,
+    out = _run(cmd_recap.cmd_recap_targets, capsys, monkeypatch,
                BEACON_SINCE="yesterday", BEACON_EVIDENCE="3")
     t = out["targets"][0]
     assert len(t["evidence"]) == 3
@@ -265,8 +312,8 @@ def test_named_project_in_local_mode_refuses_rather_than_reading_this_one(
 # recap projects — the sweep, its source, and its fallback reason
 # ---------------------------------------------------------------------------
 
-def test_projects_in_local_mode_says_it_saw_only_one(local, capsys):
-    out = _run(cmd_recap.cmd_recap_projects, capsys, BEACON_SINCE="yesterday")
+def test_projects_in_local_mode_says_it_saw_only_one(local, capsys, monkeypatch):
+    out = _run(cmd_recap.cmd_recap_projects, capsys, monkeypatch, BEACON_SINCE="yesterday")
     assert out["source"] == "local"
     assert out["projects_scanned"] == 1, \
         "a one-project answer must not be rendered as a 12-project sweep"
@@ -285,7 +332,7 @@ def test_projects_prefers_the_server_sweep(monkeypatch, capsys):
 
     monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(cmd_recap, "_get_api_client", lambda: (_C(), {}))
-    out = _run(cmd_recap.cmd_recap_projects, capsys, BEACON_SINCE="yesterday")
+    out = _run(cmd_recap.cmd_recap_projects, capsys, monkeypatch, BEACON_SINCE="yesterday")
     assert out["source"] == "server"
     assert "fallback_reason" not in out
     assert out["projects_scanned"] == 3
@@ -301,7 +348,7 @@ def test_projects_falls_back_and_carries_the_reason_it_observed(
     monkeypatch.setattr(cmd_recap, "_get_api_client", lambda: (_C(), {}))
     monkeypatch.setattr(cmd_recap, "_scan_owned_projects",
                         lambda lo, hi: ([], 7, "cloud"))
-    out = _run(cmd_recap.cmd_recap_projects, capsys, BEACON_SINCE="yesterday")
+    out = _run(cmd_recap.cmd_recap_projects, capsys, monkeypatch, BEACON_SINCE="yesterday")
     assert out["source"] == "cloud"
     assert "404" in out["fallback_reason"], \
         "the reason must be the one observed, not a guessed cause"
@@ -329,8 +376,8 @@ def test_fallback_reason_does_not_leak_between_calls(monkeypatch, capsys):
     monkeypatch.setattr(cmd_recap, "_scan_owned_projects",
                         lambda lo, hi: ([], 1, "cloud"))
 
-    first = _run(cmd_recap.cmd_recap_projects, capsys, BEACON_SINCE="yesterday")
-    second = _run(cmd_recap.cmd_recap_projects, capsys, BEACON_SINCE="yesterday")
+    first = _run(cmd_recap.cmd_recap_projects, capsys, monkeypatch, BEACON_SINCE="yesterday")
+    second = _run(cmd_recap.cmd_recap_projects, capsys, monkeypatch, BEACON_SINCE="yesterday")
     assert "404" in first["fallback_reason"]
     assert "timed out" in second["fallback_reason"], (
         f"second call reported the first call's reason: "
@@ -351,7 +398,7 @@ def test_projects_limit_truncates_the_list_but_not_the_count(monkeypatch, capsys
     monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(cmd_recap, "_server_recap", lambda lo, hi: (None, "no endpoint"))
     monkeypatch.setattr(cmd_recap, "_scan_owned_projects", _rows)
-    out = _run(cmd_recap.cmd_recap_projects, capsys,
+    out = _run(cmd_recap.cmd_recap_projects, capsys, monkeypatch,
                BEACON_SINCE="yesterday", BEACON_LIMIT="2")
     assert len(out["projects"]) == 2
     assert out["project_count"] == 4, "a display cap must not lower the count"
