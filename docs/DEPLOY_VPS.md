@@ -96,14 +96,27 @@ sudo systemctl restart beacon-api.service
 curl -fsS https://beacon-ai.dev/health
 ```
 
-## 定期ティック (Trek/Operation 自律の駆動) — e-1391 / ms-66
+## 定期ティック (自律の駆動) — e-1391 / ms-66 / ms-185 e-7065
 
-Trek と Operation の server-side 自律発火は、`POST /api/system/trek-scheduler/tick`
-を **定期的に叩く外部ドライバ** に依存する (endpoint 自体は Trek fanout に加えて
-`lib/tick_scheduler` 経由で due な Operation も相乗り発火する = 単一 endpoint が
-自律の全駆動)。Cloud Run 時代は Cloud Scheduler がこれを叩いていたが、VPS 移行
-(ms-102/ms-96) でこのドライバが**無音で消失**し、本番で Trek/Operation が発火
-しなくなっていた (2026-07-24 Trek review で発覚)。復旧のため systemd timer で叩く。
+server-side の自律発火は、`POST /api/system/tick` を **定期的に叩く外部ドライバ**
+に依存する。この 1 つの入口が自律の全駆動で、中身は 3 つ:
+
+| 発火するもの | どこの仕組みか |
+|---|---|
+| Operation (繰り返す運用業務) の発火 | `lib/tick_scheduler` (対象を問わない周期発火の部品) |
+| 締切リマインド (ms-139 e-4953) | 同上 |
+| Trek の集約 (進捗確認 / 停滞検出 / escalation) | `lib/trek_scheduler` |
+
+Cloud Run 時代は Cloud Scheduler がこれを叩いていたが、VPS 移行 (ms-102/ms-96) で
+このドライバが**無音で消失**し、本番で自律が発火しなくなっていた (2026-07-24 Trek
+review で発覚)。復旧のため systemd timer で叩く。
+
+> **入口の移転 (ms-185 e-7065)**: 以前の入口は `POST /api/system/trek-scheduler/tick`
+> だった。Trek を畳む (ms-185) ときに、同じ入口に相乗りしていた Operation の発火と
+> 締切リマインドを一緒に落としてしまう住所だったため、Trek 非依存の
+> `POST /api/system/tick` に移した。**旧パスは app 側で新パスへの転送として
+> 残っている**ので、`BEACON_TICK_URL` に旧パスを設定したままの本番でも止まらない。
+> 旧パスを撤去するのは、新パス経由の発火を本番で実測したあと。
 
 ### セットアップ (VPS で 1 回だけ)
 
