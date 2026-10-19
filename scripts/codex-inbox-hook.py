@@ -310,6 +310,9 @@ def main() -> int:
     op_trigger_events: list[dict] = []
     downgraded_allowlist = 0
     downgraded_provenance = 0
+    downgraded_retired = 0
+    downgraded_other = 0
+    downgraded_other_reasons: set = set()
     gate_unavailable_autoexec = 0
     if bd is not None:
         allowlist = bd.read_auto_execute_channels(cwd)
@@ -318,13 +321,28 @@ def main() -> int:
             delivery, downgraded_from, reason = bd.classify_auto_execute(
                 ev, allowlist=allowlist)
             if downgraded_from:
-                # e-5803 review (AX-1): distinguish the two downgrade reasons so
-                # the notice does not misdiagnose a provenance failure as an
-                # "opt-in the channel" problem (the channel IS opted in there).
+                # e-5803 review (AX-1): distinguish the downgrade reasons so the
+                # notice does not misdiagnose one as another — the operator
+                # action differs for each (opt in / cannot fix / remove the
+                # stale opt-in).
+                #
+                # ms-185 e-7077: this used to be a 2-way branch whose ``else``
+                # meant "allowlist miss". Adding a third reason without touching
+                # it would have printed "opt in the channel" for a RETIRED
+                # channel — the exact opposite of the fix (the stale opt-in is
+                # the problem). Branch on each reason explicitly and count an
+                # unrecognised reason separately rather than folding it into
+                # allowlist-miss, so a future fourth reason is visible instead
+                # of silently mislabelled.
                 if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
                     downgraded_provenance += 1
-                else:
+                elif reason == getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None):
+                    downgraded_retired += 1
+                elif not reason:
                     downgraded_allowlist += 1
+                else:
+                    downgraded_other += 1
+                    downgraded_other_reasons.add(str(reason))
             elif (delivery == bd.AUTO_EXECUTE
                     and str(ev.get("channel") or "")
                     == bd.OPERATION_TRIGGER_CHANNEL):
@@ -389,6 +407,25 @@ def main() -> int:
             f"{downgraded_provenance} 件 — channel は allowlist 済だが、届いた "
             "envelope が T1-system でない (= project editor による偽装の恐れ) ため。"
             "channel を opt-in し直しても直りません。上の一覧に通常イベントとして "
+            "出ています。自動実行はしないでください。\n"
+        )
+    if downgraded_retired:
+        parts.append(
+            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"{downgraded_retired} 件 — channel は allowlist 済だが、"
+            "サーバが発行する channel ではなくなっています (= 古い opt-in が残った "
+            "状態、ms-185 e-7077)。opt-in し直しても直りません。直すには "
+            "`beacon bus auto-execute remove --channel <名前>` で古い opt-in を "
+            "外してください。上の一覧に通常イベントとして出ています。自動実行は "
+            "しないでください。\n"
+        )
+    if downgraded_other:
+        parts.append(
+            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"{downgraded_other} 件 — この hook が知らない理由タグです "
+            f"({', '.join(sorted(downgraded_other_reasons))})。降格自体は効いて "
+            "いますが、理由をここで説明できません (= bus_delivery 側に理由が "
+            "足され、この hook が追従していない)。上の一覧に通常イベントとして "
             "出ています。自動実行はしないでください。\n"
         )
     if gate_unavailable_autoexec:
