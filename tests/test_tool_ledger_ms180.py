@@ -377,7 +377,7 @@ def test_a_row_predating_grain_source_counts_as_defaulted():
 # ---------------------------------------------------------------------------
 # A declaration may not contradict POSITIVE evidence (e-7003 受入条件3).
 #
-# The guard grew beyond the 8 pinned built-ins: a name carrying a WRITE VERB is
+# The guard grew beyond the pinned built-ins: a name carrying a WRITE VERB is
 # positive evidence of effect, so 「読み取りだけ」 about it is a detectable lie.
 # What stays declarable is the case the ledger exists for — a name with no
 # recognisable verb, which the heuristic can only default-deny.

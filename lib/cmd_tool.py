@@ -76,6 +76,30 @@ def _actor():
 # tool add
 # ---------------------------------------------------------------------------
 
+def _refuse(message: str, json_mode: bool) -> None:
+    """Refuse, in the shape the caller asked to be answered in.
+
+    A refusal used to print a sentence to stderr and leave stdout empty even
+    under ``--json``, while the success path answered with a JSON object. An AI
+    committed to ``--json`` — the natural choice for a non-interactive caller —
+    then had to parse a natural-language sentence to learn WHY, or guess. Same
+    split the ledger's other surfaces already closed, so it is closed the same
+    way: one funnel every refusal in this command family goes through, rather
+    than remembering to branch at each ``sys.exit`` (independent AX review of
+    PR #808; the refusal that exposed it was the newly pinned ``Skill``, but the
+    shape was shared by every pinned name).
+
+    The sentence is unchanged — it stays the value of ``error`` — so a human
+    reading stderr sees exactly what they saw before.
+    """
+    if json_mode:
+        print(json.dumps({"error": message}, ensure_ascii=False),
+              file=sys.stderr)
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_tool_add():
     name = os.environ.get("BEACON_TOOL_NAME", "").strip()
     purpose = os.environ.get("BEACON_TOOL_PURPOSE", "")
@@ -86,21 +110,18 @@ def cmd_tool_add():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not name:
-        print("Error: 道具の名前が必要です "
-              "(例: beacon tool add mcp__gmail__send_email --purpose ... "
-              "--effect outward)", file=sys.stderr)
-        sys.exit(1)
+        _refuse("道具の名前が必要です "
+                "(例: beacon tool add mcp__gmail__send_email --purpose ... "
+                "--effect outward)", json_mode)
     if not effect:
-        print(f"Error: --effect が必要です ({', '.join(tl.EFFECTS)} のいずれか)。"
-              "作用は推測ではなく宣言するものなので既定値は置きません。",
-              file=sys.stderr)
-        sys.exit(1)
+        _refuse(f"--effect が必要です ({', '.join(tl.EFFECTS)} のいずれか)。"
+                "作用は推測ではなく宣言するものなので既定値は置きません。",
+                json_mode)
     if not purpose.strip():
-        print("Error: --purpose が必要です "
-              "(例: --purpose \"顧客にメールを送る\")。用途は後から「何のために"
-              "登録したのか」を読む唯一の列なので、空のままは登録できません。",
-              file=sys.stderr)
-        sys.exit(1)
+        _refuse("--purpose が必要です "
+                "(例: --purpose \"顧客にメールを送る\")。用途は後から「何のために"
+                "登録したのか」を読む唯一の列なので、空のままは登録できません。",
+                json_mode)
 
     try:
         row = tl.build_record(name, purpose=purpose, effect=effect,
@@ -108,8 +129,7 @@ def cmd_tool_add():
                               decline_reason=no_record,
                               at=_now_iso(), by=_actor())
     except tl.ToolLedgerError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+        _refuse(str(exc), json_mode)
 
     ledger = _load()
     existed = tl.lookup(ledger, name) is not None
