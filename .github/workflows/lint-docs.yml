@@ -20,22 +20,24 @@ name: Lint docs (ms-10 e-722)
 # surface wasn't updated. Strict mode (exit 1) blocks the PR.
 
 on:
+  # NO paths filter, on purpose (ms-180 follow-up).
+  #
+  # This job runs scripts/ci-strict-drift-guards.sh, and each guard in there
+  # declares its OWN scan scope inside the script: one walks every production
+  # Python file under lib/ bin/ beacon_cli/, another walks every test module and
+  # conftest. A paths list here is a SECOND, hand-kept copy of those scopes, and
+  # it fell behind immediately: two guards added in ms-180 did not run on the
+  # very commits they exist to catch (lib/*.py and tests/*.py were not in the
+  # list), while a test asserting "the guard is wired into the CI gate" passed by
+  # finding the script's filename in the shell script. The guard was present and
+  # inert, and the check for it was green.
+  #
+  # Rather than keep a YAML list in step with scopes defined in Python, the
+  # trigger is now "every pull request". The job takes under a minute, next to an
+  # 8-minute test job that already runs unconditionally, so there is nothing to
+  # buy by filtering. A guard that does not run is documentation
+  # (tests/test_drift_guards_actually_run_ms180.py pins this).
   pull_request:
-    paths:
-      - 'bin/beacon'
-      - 'lib/commands.py'
-      - 'lib/capability_ledger.py'
-      - 'lib/occupation.py'
-      - 'lib/core.py'
-      - 'beacon_cli/dispatch.py'
-      - 'README.md'
-      - 'INSTALL.md'
-      - 'skills/**'
-      - 'shared/skills/**'
-      - 'plugins/beacon/skills/**'
-      - 'scripts/check-*.py'
-      - 'scripts/ci-strict-drift-guards.sh'
-      - '.github/workflows/lint-docs.yml'
   push:
     branches: [main]
   workflow_dispatch:

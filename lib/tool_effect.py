@@ -66,6 +66,33 @@ BUILTIN_SIDE_EFFECT = frozenset({
     "WebFetch",
     "Task",
     "Agent",
+    # Dispatchers: they start work whose effects this classifier cannot see, so
+    # a ledger row must not be able to call them read-only. With such a row the
+    # gate answers for the WRAPPER instead of for a tool, and every call it
+    # cannot look inside passes an armed untrusted turn with no prompt — one row
+    # disarming a whole class of calls. ``Skill`` was found that way by an
+    # independent attainment review of ms-180 (before the ledger keyed Skills by
+    # their own name, such a row disarmed EVERY Skill call, so it was the
+    # remainder of an older hole); ``SlashCommand`` and ``KillShell`` by an
+    # independent AX review of the fix for it.
+    #
+    # Listing a dispatcher here does NOT change what classify_tool answers for
+    # it. For ``Skill`` the ``name == "Skill"`` branch above resolves the skill
+    # and decides first; for the others the verb heuristic already default-denied
+    # an unrecognised name. What changes is only that the name becomes PINNED, so
+    # ``--effect read-only`` is refused for it.
+    #
+    # THIS IS AN ENUMERATION, NOT A PROPERTY, and the distinction matters: this
+    # set is a hand-kept list of names from one harness, so when the harness
+    # gains another dispatcher, nothing here notices. Adding it is a manual step
+    # — ``test_an_unenumerated_dispatcher_can_still_be_declared_read_only`` pins
+    # that limit so a reader meets it instead of assuming it is covered. Beacon
+    # cannot enumerate the harness's tools, and the alternative (refusing every
+    # unrecognised bare name) would eat the ledger's own purpose, because a Skill
+    # and an unknown MCP tool are bare names too.
+    "Skill",
+    "SlashCommand",
+    "KillShell",
 })
 
 # Verb tokens that mark a WRITE / outward effect. Checked BEFORE read verbs so a
