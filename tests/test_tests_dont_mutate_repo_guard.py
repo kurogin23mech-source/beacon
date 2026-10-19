@@ -97,7 +97,16 @@ def test_the_real_suite_does_not_write_to_the_checkout():
 
 
 def test_the_guard_is_wired_into_the_strict_ci_gate():
-    """A guard nobody runs is documentation."""
+    """A guard nobody runs is documentation.
+
+    This checks only ONE end of "wired in" — that the gate script calls the
+    guard. It passed for weeks while the guard never actually ran, because the
+    workflow calling the script filtered pull requests by path and the guard's
+    trees were not in the list. The other end — that the gate fires for the
+    trees the guard walks — is
+    `tests/test_drift_guards_actually_run_ms180.py::test_the_pr_gate_fires_for_every_pull_request`.
+    Do not read this test alone as "the guard runs" (ms-180 follow-up).
+    """
     gate = (REPO / "scripts" / "ci-strict-drift-guards.sh").read_text(
         encoding="utf-8")
     assert "check-tests-dont-mutate-repo.py" in gate
