@@ -2,9 +2,10 @@
 """Tick-health monitor — notice when the production periodic tick stops (e-1391 / ms-66).
 
 Independent watchdog for the 2026-07-24 finding: the server-side periodic tick
-(``POST /api/system/tick``, which fires Operations + deadline reminders and
-rides along the Trek aggregation; ms-185 e-7065 moved it off the trek-named path
-Operation autonomy) lost its driver in the Cloud Run → VPS migration and
+(``POST /api/system/tick``, which drives Operation autonomy + deadline
+reminders and rides along the Trek aggregation; ms-185 e-7065 moved it off the
+trek-named path ``/api/system/trek-scheduler/tick``, which now forwards) lost
+its driver in the Cloud Run → VPS migration and
 silently stopped firing — noticed only by accident during a review. This is
 the *same class* of silent death that ``deploy-health-monitor.py`` guards for
 deploy freshness, so this monitor is deliberately its twin:

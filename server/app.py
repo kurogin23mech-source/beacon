@@ -2886,14 +2886,32 @@ def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
     return {k: env.get(k) for k in keep if k in env}
 
 
-class TrekSchedulerTickRequest(BaseModel):
-    """Body for POST /api/system/tick (ms-83 / e-1997; path moved off the
-    trek-named one in ms-185 e-7065, the old path forwards).
+class SystemTickRequest(BaseModel):
+    """Body for ``POST /api/system/tick`` — the driver of ALL server-side
+    autonomy (ms-83 / e-1997; renamed + re-addressed in ms-185 e-7065).
 
-    Cloud Scheduler calls this endpoint at a fixed cadence (= every minute
-    by default). The endpoint walks all active Treks, decides which are
-    due based on each trek's ``meta.cadence_minutes`` and previous fire
-    time, mints a T1-system envelope for each live member session, and
+    **Not trek-only — do not delete this with Trek (ms-185 e-7065 review,
+    raised independently by both the AX and the maintainability judge).**
+    This model is the body of the one entry point that drives three things:
+
+      1. **Operation firing** (= recurring operational work) and
+      2. **deadline reminders** (ms-139 e-4953) — both via the
+         target-agnostic ``lib/tick_scheduler`` seam, which has nothing to
+         do with Trek and must survive ms-185, and
+      3. the **Trek aggregation** (``_run_trek_tick``) — the part ms-185
+         folds away.
+
+    The previous name said "trek" while the endpoint had already been
+    re-addressed to the trek-neutral path, so an AI folding Trek could grep
+    the class name, conclude "trek-only type, safe to delete", and take
+    production autonomy down with it. The name now predicts the contents
+    (= it is the *system* tick, not the *trek* tick). The old path
+    ``POST /api/system/trek-scheduler/tick`` forwards here and is removed
+    only after the new path is measured in production (e-7066).
+
+    The Trek half of the tick: the endpoint walks all active Treks, decides
+    which are due based on each trek's ``meta.cadence_minutes`` and previous
+    fire time, mints a T1-system envelope for each live member session, and
     posts one ``dm``-channel bus event per session into that session's
     home project bus (= ms-95 / e-2639 dm-transport migration, per
     ms-97 SPEC 中心原則 6 「Wake 経路は DM と完全同一」).
@@ -2909,11 +2927,17 @@ class TrekSchedulerTickRequest(BaseModel):
     Authentication: ``X-Beacon-Scheduler-Key`` header (same key as
     T1-system mint endpoint — they share a trust boundary).
 
-    Body is empty by default; ``project_id`` / ``trek_ids`` overrides let
-    integration tests scope the tick to a single trek without iterating
-    every project in the backend.
+    Body is empty by default. The two fields below scope only the **Trek**
+    half of the tick; the target-agnostic half (Operation firing + deadline
+    reminders) has no scoping field and always runs over every project, so
+    do not read an empty body as "nothing fires". Adding a scoping field for
+    that half is deliberately not done here (it would need its own shape and
+    no caller needs it yet) — if one is added, name it so the two halves
+    stay distinguishable.
     """
-    # Optional scoping for tests / staged rollout. None = iterate all.
+    # Optional scoping for tests / staged rollout of the TREK half only.
+    # None = iterate all treks. Neither field affects Operation firing or
+    # deadline reminders (ms-185 e-7065 AX review).
     project_ids: Optional[list[str]] = None
     trek_ids: Optional[list[str]] = None
 
@@ -4670,7 +4694,7 @@ def _run_system_tick(body) -> dict:
 
 @app.post("/api/system/tick")
 def system_tick_endpoint(
-    body: TrekSchedulerTickRequest,
+    body: SystemTickRequest,
     request: Request,
 ):
     """定期発火の入口 (正本、ms-185 e-7065)。
@@ -4689,7 +4713,7 @@ def system_tick_endpoint(
 
 @app.post("/api/system/trek-scheduler/tick")
 def trek_scheduler_tick_endpoint(
-    body: TrekSchedulerTickRequest,
+    body: SystemTickRequest,
     request: Request,
 ):
     """旧入口。正本 ``POST /api/system/tick`` へ転送する (ms-185 e-7065)。

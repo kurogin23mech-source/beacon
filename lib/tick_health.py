@@ -2,9 +2,10 @@
 
 Companion to ``lib/deploy_health.py`` for a *different* silent-death failure
 mode. The 2026-07-24 Trek review found that the server-side periodic tick
-(``POST /api/system/tick``, which fires Operations + deadline reminders AND
-rides along the Treks; ms-185 e-7065 moved it off the trek-named path) rides-along
-Operations via ``lib/tick_scheduler``) lost its production driver in the
+(``POST /api/system/tick``, which fires Operations + deadline reminders via
+``lib/tick_scheduler`` and rides along the Trek aggregation; ms-185 e-7065
+moved it off the trek-named path ``/api/system/trek-scheduler/tick``, which
+now forwards) lost its production driver in the
 Cloud Run → VPS migration (ms-102 / ms-96). Nothing was hitting the endpoint,
 so Trek / Operation autonomy silently stopped firing in production and it was
 only noticed by accident during a review (e-1391 / ms-66).

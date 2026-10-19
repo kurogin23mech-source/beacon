@@ -473,9 +473,10 @@ def is_using_dev_scheduler_key() -> bool:
     """Return True iff the scheduler tick key is unsafe for production.
 
     Twin of ``is_using_dev_fallback()`` for the *other* internal secret. The
-    scheduler key gates ``POST /api/system/tick`` (ms-185 e-7065; the old
-    trek-named path forwards to it) which fires
-    Trek / Operation autonomy) and the T1-system envelope mint path; the dev
+    scheduler key gates ``POST /api/system/tick`` (which fires Operation /
+    Trek autonomy; ms-185 e-7065 moved it off the trek-named path
+    ``/api/system/trek-scheduler/tick``, which now forwards) and the
+    T1-system envelope mint path; the dev
     fallback (``_DEV_FALLBACK_SCHEDULER_KEY``) is visible in the public repo,
     so booting production with it would let anyone drive the tick / mint
     endpoints. Production startup checks this and refuses to boot (e-4115).
