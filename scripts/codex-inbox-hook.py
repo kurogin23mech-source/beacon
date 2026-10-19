@@ -218,6 +218,42 @@ def _hook_output(context: str, hook_event_name: str = "UserPromptSubmit") -> dic
     }
 
 
+def tally_downgrade_reasons(reasons, *, bd) -> dict:
+    """降格理由のリストを、理由ごとの件数に畳む (ms-185 e-7077 / 保守性レビュー)。
+
+    **なぜ純粋関数に切り出したか**: 以前この対応表は ``main()`` の走査ループに
+    inline で書かれており、テストは ``main()`` のソース文字列に理由タグの名前が
+    在るかしか見ていなかった。独立レビューが実測したところ、**どの理由をどの
+    カウンタに積むかだけを入れ替えても (トークンは全部残るので) テストは 7/7 緑
+    のまま**だった。配線が逆転すると、`non-system-envelope` の event に
+    「古い opt-in を外せ」と案内し、引退した channel の event に「直せません」と
+    案内する — 通知文と真因が入れ替わった状態になる。ソース文字列検査では
+    原理的に捕まえられないので、**値を返す関数**にして振る舞いで測れるようにした。
+
+    ``reasons`` は降格した event の理由タグの並び (空文字列 = 許可リスト漏れ)。
+    ``bd`` は ``lib/bus_delivery`` モジュール (理由タグの定数の出どころ)。
+
+    戻り値のキーは 4 つで固定: ``allowlist`` / ``provenance`` / ``retired`` /
+    ``other``。``other_reasons`` は未知のタグの集合 (開示用)。**未知のタグを
+    ``allowlist`` に畳まない** — 畳むと「opt-in しろ」という誤案内になる。
+    """
+    counts = {"allowlist": 0, "provenance": 0, "retired": 0, "other": 0}
+    other_reasons: set = set()
+    retired_tag = getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None)
+    for reason in reasons:
+        if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
+            counts["provenance"] += 1
+        elif retired_tag is not None and reason == retired_tag:
+            counts["retired"] += 1
+        elif not reason:
+            counts["allowlist"] += 1
+        else:
+            counts["other"] += 1
+            other_reasons.add(str(reason))
+    counts["other_reasons"] = other_reasons
+    return counts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Codex inbox hook (= ms-93 / e-2497).",
@@ -308,6 +344,7 @@ def main() -> int:
     # bus_auto_execute_channels) are downgraded — they stay in the generic list,
     # just without any imperative / forced Skill invoke.
     op_trigger_events: list[dict] = []
+    downgrade_reasons: list = []
     downgraded_allowlist = 0
     downgraded_provenance = 0
     downgraded_retired = 0
@@ -321,32 +358,20 @@ def main() -> int:
             delivery, downgraded_from, reason = bd.classify_auto_execute(
                 ev, allowlist=allowlist)
             if downgraded_from:
-                # e-5803 review (AX-1): distinguish the downgrade reasons so the
-                # notice does not misdiagnose one as another — the operator
-                # action differs for each (opt in / cannot fix / remove the
-                # stale opt-in).
-                #
-                # ms-185 e-7077: this used to be a 2-way branch whose ``else``
-                # meant "allowlist miss". Adding a third reason without touching
-                # it would have printed "opt in the channel" for a RETIRED
-                # channel — the exact opposite of the fix (the stale opt-in is
-                # the problem). Branch on each reason explicitly and count an
-                # unrecognised reason separately rather than folding it into
-                # allowlist-miss, so a future fourth reason is visible instead
-                # of silently mislabelled.
-                if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
-                    downgraded_provenance += 1
-                elif reason == getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None):
-                    downgraded_retired += 1
-                elif not reason:
-                    downgraded_allowlist += 1
-                else:
-                    downgraded_other += 1
-                    downgraded_other_reasons.add(str(reason))
+                # 理由ごとの件数は tally_downgrade_reasons (純粋関数) が持つ。
+                # ここで inline に分岐していた頃は、配線の逆転をテストで捕まえ
+                # られなかった (ms-185 e-7077 / 保守性レビュー)。
+                downgrade_reasons.append(reason)
             elif (delivery == bd.AUTO_EXECUTE
                     and str(ev.get("channel") or "")
                     == bd.OPERATION_TRIGGER_CHANNEL):
                 op_trigger_events.append(ev)
+        _tally = tally_downgrade_reasons(downgrade_reasons, bd=bd)
+        downgraded_allowlist = _tally["allowlist"]
+        downgraded_provenance = _tally["provenance"]
+        downgraded_retired = _tally["retired"]
+        downgraded_other = _tally["other"]
+        downgraded_other_reasons = _tally["other_reasons"]
     else:
         # e-5803 review (AX-2 / Maint-1): the shared gate module could not be
         # imported. No imperative is emitted (fail-safe direction, and

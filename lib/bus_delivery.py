@@ -150,8 +150,12 @@ def classify_auto_execute(
     event: dict,
     *,
     allowlist,
-    provenance_channels=SYSTEM_PROVENANCE_CHANNELS,
+    # 並びは **評価順** に合わせてある (allowlist → retired → provenance)。
+    # ms-185 e-7077 の AX レビュー: 並びと評価順が逆だと、文脈ゼロの読み手が
+    # 引数の順から優先順位を類推して逆に取る。優先順位が逆になっても降格自体は
+    # 変わらないが理由タグが変わり、消費側の案内が反転する。
     retired_channels=RETIRED_PROVENANCE_CHANNELS,
+    provenance_channels=SYSTEM_PROVENANCE_CHANNELS,
 ) -> tuple:
     """Resolve one event's effective delivery + downgrade metadata.
 
