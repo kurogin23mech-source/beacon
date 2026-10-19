@@ -139,12 +139,54 @@ def has_write_verb(name: str) -> bool:
     return bool(set(_tokens(target)) & WRITE_VERBS)
 
 
+def ledger_name(tool_name, tool_input) -> str:
+    """The name the TOOL LEDGER identifies this call by.
+
+    Both tool-call interrupts ask the ledger about a call — the PreToolUse gate
+    asks what the tool DOES, the PostToolUse recorder asks whether using it
+    leaves a record — and both used the harness's ``tool_name`` verbatim. For
+    every tool but one that is the same string the operator registers. The
+    exception is a Skill: the harness names the call ``Skill`` and carries the
+    skill in ``tool_input``, so a Skill registered WITH a record sink produced
+    no record and was debited as "`Skill` is not in the ledger", while
+    registering the literal name ``Skill`` recorded "Skill を使用" and lost which
+    skill it was. That is the "listed, and then silently not recorded" shape
+    this milestone exists to remove, in the very class of 道具 its background
+    names first (``~/.claude/skills``, ``/review``).
+
+    One definition, both callers: the parsing is ``_skill_name``'s, already
+    written for the effect heuristic — a second parser here could disagree with
+    it about the same payload.
+
+    When the skill cannot be read out of the payload, the bare ``Skill`` is
+    returned rather than "": an unreadable call is then debited under a name a
+    human can see, instead of being dropped for having no name at all.
+    """
+    name = tool_name.strip() if isinstance(tool_name, str) else ""
+    if name == "Skill":
+        return _skill_name(tool_input) or name
+    return name
+
+
 def _skill_name(tool_input) -> str:
     """Extract the skill name from a Skill tool invocation's input.
 
     The Skill tool carries the target skill in ``skill`` (Claude Code) or as the
     first token of ``command`` (leading slash tolerated). Returns "" if none
     found — the caller then falls back to default-deny on the bare "Skill" name.
+
+    PRECEDENCE, and the assumption under it: ``skill`` / ``name`` win over
+    ``command``. The explicit field is the harness's own answer to "which
+    skill", while ``command`` is a line a human typed that merely begins with
+    it. The two are assumed to agree, and that assumption is NOT verified here —
+    a payload carrying ``{"skill": "a", "command": "/b …"}`` resolves to ``a``
+    with no complaint. An independent AX review of PR #807 raised the mismatch
+    as a possible gap and could not find a harness that actually sends one
+    (its own stated limit), so no check was added for a shape nobody has
+    observed: a check would have to choose a behaviour for the mismatch, and
+    choosing one for a hypothetical is how a guard ends up protecting the wrong
+    thing. Written down here so the next reader inherits the assumption rather
+    than rediscovering it.
     """
     if not isinstance(tool_input, dict):
         return ""
@@ -240,6 +282,7 @@ __all__ = [
     "WRITE_VERBS",
     "READ_VERBS",
     "classify_tool",
+    "ledger_name",
     "has_write_verb",
     "is_side_effect",
 ]

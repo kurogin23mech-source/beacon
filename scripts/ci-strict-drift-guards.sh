@@ -152,4 +152,15 @@ echo "[ci-strict-drift-guards] テストが検査対象のリポジトリを書�
 # (ガードに path 引数が無ければ足す)。標準ライブラリのみ (pytest 非依存)。
 python3 "$ROOT/scripts/check-tests-dont-mutate-repo.py" --quiet
 
+echo "[ci-strict-drift-guards] Skill 名の解析が 1 箇所だけであること (ms-180)…"
+# ハーネスは Skill 呼び出しを `Skill` と名付け、どの Skill かは tool_input に載せる。
+# それを読み出す処理が「台帳 / 債務 / ターンの畳み込み / 承認ゲートがどの道具の話を
+# しているか」を決める。2 箇所が読むと同じ payload について食い違いうる — そのとき
+# **一方の道具をゲートし、別の道具を記録する** ことになる。
+#
+# 構文木で見る。最初の版は `'get("skill")'` という部分文字列一致で、独立保守性
+# レビューが単一引用符の同じ読み取りを植えたら緑のまま通った。引用符の書き方で
+# ガードが firing するか否かが決まってはならない。標準ライブラリのみ (pytest 非依存)。
+python3 "$ROOT/scripts/check-single-skill-parser.py" --quiet
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."

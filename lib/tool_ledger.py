@@ -165,6 +165,65 @@ NON_SOFTENABLE_EFFECT = {
 }
 
 
+def _collapsed(name: str) -> str:
+    """``name`` reduced to the form the pinned table is matched on.
+
+    Case folded, with everything that is not a letter or a digit removed, so
+    ``Bash`` / ``bash`` / ``BASH`` and ``NotebookEdit`` / ``notebook-edit`` /
+    ``notebook_edit`` all collapse to one key.
+
+    Why this is not ``tool_effect``'s tokeniser: that one SPLITS a name into
+    words to look for a verb, and the split itself is what makes it unsuitable
+    here — ``NotebookEdit`` tokenises to ``notebook edit`` while ``NOTEBOOKEDIT``
+    tokenises to ``notebookedit``, so matching on tokens would leave the
+    all-caps spelling unmatched. This asks a different question ("is this the
+    same NAME as a pinned one, however spelled"), so it gets its own answer,
+    defined once and used by both the decision and the message it prints.
+    """
+    return "".join(ch for ch in str(name or "").casefold() if ch.isalnum())
+
+
+def pinned_canonical_name(name: str) -> str:
+    """The pinned table's own spelling of ``name``, or "" if it is not pinned.
+
+    Scans ``NON_SOFTENABLE_EFFECT`` on each call rather than keeping a collapsed
+    index beside it. A first version did keep one, built at import time — and
+    that is a SECOND derived structure that can fall behind the table, which is
+    the hazard this module's derivation (and
+    ``test_inversion_a_copied_pin_set_would_miss_a_newly_added_builtin``) exists
+    to remove. That test caught it. The table has a handful of entries, so there
+    is nothing to buy by caching it.
+    """
+    target = _collapsed(name)
+    if not target:
+        return ""
+    for pinned in NON_SOFTENABLE_EFFECT:
+        if _collapsed(pinned) == target:
+            return pinned
+    return ""
+
+
+def pinned_effect(name: str) -> str:
+    """The effect the harness already knows for ``name``, or "" if none.
+
+    Matched on the collapsed spelling, NOT on the literal string. An exact-match
+    table let a near-miss spelling through: ``beacon tool add Bash --effect
+    read-only`` was refused while ``bash`` was accepted, and then — once a Skill
+    reached the ledger under its own name (ms-180 follow-up) — an armed untrusted
+    turn let ``Skill(bash)`` through the ms-169 gate with no prompt at all. The
+    pinned table's whole job is that a declaration cannot soften what the harness
+    already knows, and a spelling variant is not new knowledge (independent AX
+    review of PR #807, high).
+
+    Over-matching is the fail-safe direction here: a genuinely read-only tool
+    whose name collapses onto a pinned one cannot be declared read-only and
+    stays gated. That cost is real, and the refusal names the pinned spelling it
+    collided with so the author is not left guessing.
+    """
+    canonical = pinned_canonical_name(name)
+    return NON_SOFTENABLE_EFFECT.get(canonical, "") if canonical else ""
+
+
 def is_softening(name: str, effect: str) -> bool:
     """True when declaring ``effect`` for ``name`` would weaken what is already
     POSITIVELY known about it.
@@ -215,7 +274,7 @@ def is_softening(name: str, effect: str) -> bool:
     """
     if effect != EFFECT_READ_ONLY:
         return False
-    if name in NON_SOFTENABLE_EFFECT:
+    if pinned_effect(name):
         return True
     return _tool_effect.has_write_verb(name)
 
@@ -324,9 +383,12 @@ def build_record(name: str, *, purpose: str, effect: str,
         # leave the author guessing which rule they hit (and the two have
         # different right answers — one is "you cannot", the other is often
         # "you meant state-change / outward").
-        if tool in NON_SOFTENABLE_EFFECT:
-            why = (f"この道具はハーネス側で作用が既知で "
-                   f"({NON_SOFTENABLE_EFFECT[tool]})、推測ではありません")
+        if pinned_effect(tool):
+            canonical = pinned_canonical_name(tool)
+            collided = ("" if canonical == str(tool).strip()
+                        else f"『{canonical}』と同じ名前として扱われ、")
+            why = (f"この道具は{collided}ハーネス側で作用が既知で "
+                   f"({pinned_effect(tool)})、推測ではありません")
         else:
             why = ("この名前は書き込み / 送信を表す動詞を含んでいます "
                    "(= 作用の積極的な証拠)。宣言が「読み取りだけ」と言っても"
@@ -647,7 +709,8 @@ __all__ = [
     "SINK_SPECIFIED", "SINK_DECLINED", "SINK_UNDECIDED", "SINKS",
     "GRAIN_EACH", "GRAIN_TURN", "GRAINS",
     "RECORDER_SAVE", "RECORDER_EVIDENCE", "RECORDERS",
-    "NON_SOFTENABLE_EFFECT", "is_softening",
+    "NON_SOFTENABLE_EFFECT", "pinned_effect",
+    "pinned_canonical_name", "is_softening",
     "ToolLedgerError",
     "ledger_path", "empty_ledger", "load_ledger", "save_ledger",
     "build_record", "upsert", "remove",
