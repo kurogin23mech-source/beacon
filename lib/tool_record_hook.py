@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import tool_effect as _te
 import tool_ledger as _tl
 import tool_turn as _turn
 import tool_usage_debt as _debt
@@ -186,10 +187,23 @@ def handle(payload: dict, root: Path) -> int:
         if event != "PostToolUse":
             return 0
 
-        tool_name = str(payload.get("tool_name") or payload.get("tool") or "")
-        if not tool_name:
+        harness_name = str(payload.get("tool_name") or payload.get("tool") or "")
+        if not harness_name:
             return 0
         tool_input = payload.get("tool_input")
+
+        # The name the LEDGER keys this call by. For every tool but one it is the
+        # harness's own name; for a Skill the harness says ``Skill`` and carries
+        # the skill in ``tool_input``, so keying on the harness name meant a
+        # Skill registered WITH a record sink left no record and was debited as
+        # "`Skill` is not in the ledger" — "listed, and then silently not
+        # recorded", which this milestone exists to remove and which an
+        # independent attainment judge found still held for Skills. Resolved
+        # ONCE here, so the plan, the debt row, the turn fold, the summary and
+        # the recorded entry all name the same 道具 (ms-180 follow-up).
+        tool_name = _te.ledger_name(harness_name, tool_input)
+        if not tool_name:
+            return 0
 
         ledger = _tl.load_ledger(_tl.ledger_path(root))
         plan = _tl.record_plan(ledger, tool_name)

@@ -190,7 +190,18 @@ def main() -> None:
         # is a leaf that imports nothing from the ledger, so the declaration is
         # converted to its two-value vocabulary here rather than by reaching back
         # into tool_ledger from inside tool_effect (which was a deferred cycle).
-        declared = tl.gate_classification(ledger, tool_name)
+        # Looked up by the name the LEDGER keys this call by, not by the name the
+        # harness gave it: for a Skill those differ (``Skill`` vs the skill), so a
+        # Skill's declaration never reached this gate (ms-180 follow-up, the one
+        # counterexample an independent attainment judge found). Only the LOOKUP
+        # moves — ``is_side_effect`` below still receives the harness's own
+        # ``tool_name``, so its Skill branch and its fail-closed default are
+        # byte-identical to before and ms-169's gate cannot be loosened by this
+        # change. The protection that a declaration may tighten but never soften
+        # now applies to the skill's own name, which is the name that carries the
+        # verb evidence.
+        declared = tl.gate_classification(
+            ledger, te.ledger_name(tool_name, tool_input))
         # NOTE: the debt file is written by the PostToolUse recorder ONLY, not
         # here. Both interrupts see every call, so writing it on both sides
         # double-counted every use and the count stopped being an observed fact
