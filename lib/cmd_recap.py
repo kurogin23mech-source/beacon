@@ -309,6 +309,12 @@ def _print_targets(result: dict) -> None:
         for ev in t["evidence"]:
             print(f"        · {ev['at'][:19]}  {ev['kind']:<8} "
                   f"{ev['id']:<8} {ev['summary'][:64]}")
+    rows = (result.get("unattributed") or {}).get("evidence") or []
+    if rows:
+        print("  対象が特定できていない出荷:")
+        for ev in rows:
+            print(f"        · {ev['at'][:19]}  {ev['kind']:<8} "
+                  f"{ev['id']:<22} {ev['summary'][:50]}")
     _print_caveats(result)
 
 
@@ -318,6 +324,14 @@ def _print_caveats(result: dict) -> None:
     Printed for a zero result too — that is exactly when a reader is most
     likely to conclude "nothing happened" from "we could not tell".
     """
+    unattr = result.get("unattributed") or {}
+    if unattr.get("count"):
+        by_kind = unattr.get("by_kind") or {}
+        detail = (" (" + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items()))
+                  + ")") if by_kind else ""
+        print(f"  ※ どの対象の記録か分からない出荷: {unattr['count']} 件{detail}"
+              " — プロジェクトは動いていますが、対象が特定できていません")
+
     und = result.get("undated") or {}
     if und.get("count"):
         # The per-project answer breaks the count down by record kind; the
@@ -492,8 +506,10 @@ def _print_projects(result: dict) -> None:
         print("  この期間に動いたプロジェクトはありません。")
     for p in result["projects"]:
         print(f"  [{p['project_id']}] {p['name']}")
+        unattr_n = p.get("unattributed_count") or 0
+        extra = f" (うち対象未特定の出荷 {unattr_n} 件)" if unattr_n else ""
         print(f"      対象 {p['target_count']} 件 / 証跡 {p['evidence_count']} 件"
-              f"  最新 {p['last_evidence_at']}")
+              f"{extra}  最新 {p['last_evidence_at']}")
         for t in p["targets"][:3]:
             print(f"        · {t['target_id']} {t['label'][:56]} "
                   f"({t['evidence_count']})")

@@ -162,28 +162,15 @@ INVERSIONS = [
     (
         "the cross-project fold drops the caveats of the projects it omits",
         "lib/progress_window.py",
-        "        undated_total += int((result.get(\"undated\") or {}).get(\"count\") or 0)\n"
-        "        for src in result.get(\"sources_unavailable\") or []:\n"
-        "            if src not in missing_sources:\n"
-        "                missing_sources.append(src)\n",
+        '        undated_total += int((result.get("undated") or {}).get("count") or 0)\n        unattributed_total += int(\n            (result.get("unattributed") or {}).get("count") or 0)\n        for src in result.get("sources_unavailable") or []:\n            if src not in missing_sources:\n                missing_sources.append(src)\n',
         "",
         ["test_aggregate_carries_the_caveats_of_projects_it_dropped"],
     ),
     (
         "the fold accumulates caveats only for the movers it keeps",
         "lib/progress_window.py",
-        "        undated_total += int((result.get(\"undated\") or {}).get(\"count\") or 0)\n"
-        "        for src in result.get(\"sources_unavailable\") or []:\n"
-        "            if src not in missing_sources:\n"
-        "                missing_sources.append(src)\n"
-        "        if not result.get(\"moved\"):\n"
-        "            continue\n",
-        "        if not result.get(\"moved\"):\n"
-        "            continue\n"
-        "        undated_total += int((result.get(\"undated\") or {}).get(\"count\") or 0)\n"
-        "        for src in result.get(\"sources_unavailable\") or []:\n"
-        "            if src not in missing_sources:\n"
-        "                missing_sources.append(src)\n",
+        '        undated_total += int((result.get("undated") or {}).get("count") or 0)\n        unattributed_total += int(\n            (result.get("unattributed") or {}).get("count") or 0)\n        for src in result.get("sources_unavailable") or []:\n            if src not in missing_sources:\n                missing_sources.append(src)\n        if not result.get("moved"):\n            continue\n',
+        '        if not result.get("moved"):\n            continue\n        undated_total += int((result.get("undated") or {}).get("count") or 0)\n        unattributed_total += int(\n            (result.get("unattributed") or {}).get("count") or 0)\n        for src in result.get("sources_unavailable") or []:\n            if src not in missing_sources:\n                missing_sources.append(src)\n',
         ["test_aggregate_carries_the_caveats_of_projects_it_dropped"],
     ),
     (
@@ -257,6 +244,55 @@ INVERSIONS = [
         '_run_commands_py(root, "recap_targets", env)',
         '_run_commands_py(root, "recap_projects", env)',
         ["test_both_frontends_hand_commands_py_the_same_env"],
+    ),
+    (
+        'shipping stops counting, so a deploy-only day reads as nothing',
+        'lib/progress_window.py',
+        '    ship_per_target, unattributed, ship_undated = _walk_shipping(\n        project, window["from"], window["to"], set(per_target))\n',
+        '    ship_per_target, unattributed, ship_undated = {}, [], {}\n',
+        ['test_a_day_whose_only_story_is_shipping_counts_as_moved', 'test_shipping_is_attributed_to_every_target_it_names', 'test_unattributed_shipping_is_reported_not_dropped_or_guessed'],
+    ),
+    (
+        "moved goes back to 'some Target moved' (drops shipping-only days)",
+        'lib/progress_window.py',
+        '        "moved": bool(targets) or bool(unattributed),\n',
+        '        "moved": bool(targets),\n',
+        ['test_a_day_whose_only_story_is_shipping_counts_as_moved', 'test_a_project_that_moved_only_by_shipping_is_listed_in_the_fold'],
+    ),
+    (
+        'unattributed shipping is dropped instead of reported',
+        'lib/progress_window.py',
+        '            else:\n                unattributed.append(row)\n',
+        '            else:\n                pass\n',
+        ['test_unattributed_shipping_is_reported_not_dropped_or_guessed'],
+    ),
+    (
+        'a deploy is folded onto only the first Target it names',
+        'lib/progress_window.py',
+        '                for tid in dict.fromkeys(tids):   # de-dup, keep order\n',
+        '                for tid in list(dict.fromkeys(tids))[:1]:\n',
+        ['test_shipping_is_attributed_to_every_target_it_names'],
+    ),
+    (
+        'the two deploy spellings are counted twice',
+        'lib/progress_window.py',
+        '            if rid and dedup in seen:\n                continue\n',
+        '            if False:\n                continue\n',
+        ['test_the_two_deploy_collection_spellings_are_not_counted_twice'],
+    ),
+    (
+        'the cross-project fold drops a shipping-only project',
+        'lib/progress_window.py',
+        '            "unattributed_count": int(\n                (result.get("unattributed") or {}).get("count") or 0),\n',
+        '',
+        ['test_a_project_that_moved_only_by_shipping_is_listed_in_the_fold'],
+    ),
+    (
+        'attribution goes back to naming a profession-specific field',
+        'lib/progress_window.py',
+        '    direct = _target_ids_in(record, known_targets)\n',
+        '    direct = [t for t in (record.get("milestones") or [])\n              if t in known_targets]\n',
+        ['test_shipping_is_attributed_to_every_target_it_names', 'test_progress_window_hardcodes_no_arm_or_collection_name'],
     ),
     (
         "an unparseable period silently becomes the default window",
