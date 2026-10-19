@@ -66,6 +66,20 @@ BUILTIN_SIDE_EFFECT = frozenset({
     "WebFetch",
     "Task",
     "Agent",
+    # The dispatcher itself. ``Task`` and ``Agent`` are here because they start
+    # work whose effects this classifier cannot see; ``Skill`` is the same class
+    # and was missed. Listing it does NOT change what classify_tool answers for
+    # a Skill call — the ``name == "Skill"`` branch above resolves the skill and
+    # decides before this set is consulted. What it changes is that ``Skill``
+    # becomes a PINNED name, so `--effect read-only` can no longer be declared
+    # for it: with such a row, every Skill call whose payload the resolver
+    # cannot read (``{}``, ``{"skill": ""}``, a renamed key) passed an armed
+    # untrusted turn with no prompt, because the declaration answered for the
+    # wrapper. One row disarmed the gate for a whole class of calls
+    # (independent attainment review of ms-180; before the ledger keyed Skills
+    # by their own name it disarmed EVERY Skill call, so this is the remainder
+    # of an older hole, not a new one).
+    "Skill",
 })
 
 # Verb tokens that mark a WRITE / outward effect. Checked BEFORE read verbs so a
