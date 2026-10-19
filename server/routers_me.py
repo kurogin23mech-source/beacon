@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
@@ -45,6 +45,14 @@ import store_router as db  # e-1544: same backend-routing binding app.py uses
 # Same logger name as app.py's ``_server_logger`` (= logging.getLogger(
 # "beacon.server")), so log records keep landing on the identical logger.
 logger = logging.getLogger("beacon.server")
+
+#: Store/remote failures that legitimately mean "this source could not be
+#: read" (ms-184 e-7017). Mirrors ``lib/cmd_recap._REMOTE_ERRORS`` so the two
+#: halves of the same feature treat the same failure class the same way. A
+#: ``TypeError`` / ``AttributeError`` is NOT here: that is a bug in this file
+#: and must not be reported as an unavailable source.
+_STORE_ERRORS = (RuntimeError, ConnectionError, TimeoutError, OSError,
+                 ValueError, KeyError)
 
 
 class MeMachineUpsert(BaseModel):
@@ -94,6 +102,7 @@ def make_router(
     stamp_session_liveness: Callable[..., None],
     session_is_live: Callable[..., bool],
     is_member: Callable[[dict, str], bool],
+    load_project: Optional[Callable[[str, dict], dict]] = None,
 ) -> APIRouter:
     """Build the /api/me/* router with the host app's auth + liveness helpers.
 
@@ -222,6 +231,96 @@ def make_router(
                 "role": role,
             })
         return result
+
+    @router.get("/api/me/recap")
+    def me_recap(from_: Optional[str] = Query(default=None, alias="from"),
+                 to: Optional[str] = None,
+                 limit: int = 0,
+                 user: dict = Depends(require_auth)):
+        """Which of the caller's projects moved in a period (ms-184 / e-7017).
+
+        The cross-project period query SPEC 方針 3 asks for. The truth for all
+        of the caller's projects already lives in this one store, so this
+        reads each project and runs the SAME derivation
+        (``progress_window.derive``) the single-project CLI path runs — there
+        is no second definition of "progressed", and nothing is asked to
+        publish a summary that could drift from the records.
+
+        Projects that did NOT move are omitted (方針 2: a list where every
+        project looks the same is the thing this replaces). Projects that
+        could not be READ come back under ``unavailable`` instead of being
+        dropped, so "nothing happened" stays distinguishable from "we could
+        not tell" (受入条件 8).
+        """
+        import progress_window as _pw     # noqa: PLC0415 (lib import at call time)
+
+        uid = user.get("sub")
+        if not uid:
+            raise HTTPException(status_code=401, detail="user has no sub claim")
+        if load_project is None:
+            # The host app did not inject a loader: say so rather than return
+            # an empty sweep that reads like "nothing moved".
+            raise HTTPException(status_code=501,
+                                detail="recap is not wired on this server")
+
+        window = {"from": (from_ or "").strip(), "to": (to or "").strip()}
+        rows = []
+        for item in db.list_projects(user_id=uid, include_archived=False) or []:
+            pid = (item.get("project_id") or "").strip()
+            if not pid:
+                continue
+            name = item.get("name", "") or pid
+            try:
+                data = load_project(pid, user)
+            except Exception as exc:    # noqa: BLE001 — one bad project must
+                # not abort the sweep; it is REPORTED, not skipped. Broad on
+                # purpose here (unlike the two reads below): ANY failure to
+                # load one project is information the caller needs, and it is
+                # surfaced in ``unavailable`` rather than swallowed. Logged so
+                # a programming error is not only visible as a per-project
+                # error string.
+                logger.warning("me_recap: load_project(%s) failed: %s",
+                               pid, exc)
+                rows.append({"project_id": pid, "name": name,
+                             "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            # Narrow, and LOG. The CLI half of this same milestone deliberately
+            # narrowed its tuple with a comment saying this exact mistake —
+            # swallowing a bug in the handler's own code as "source
+            # unavailable" — had been made and caught. The server half kept
+            # a bare ``except Exception`` with no log, so a real TypeError
+            # here would read as a transient read failure forever (an
+            # independent maintainability review caught the asymmetry,
+            # PR#803). Store/remote failures still degrade to None (= "not
+            # consulted"); a programming error now surfaces.
+            try:
+                documents = db.list_documents(pid) or []
+            except _STORE_ERRORS as exc:
+                logger.warning("me_recap: list_documents(%s) failed: %s",
+                               pid, exc)
+                documents = None
+            try:
+                decisions = db.list_decision_events(pid, limit=500) or []
+            except _STORE_ERRORS as exc:
+                logger.warning("me_recap: list_decision_events(%s) failed: %s",
+                               pid, exc)
+                decisions = None
+            rows.append({
+                "project_id": pid, "name": name,
+                "result": _pw.derive(data,
+                                     from_date=window["from"],
+                                     to_date=window["to"],
+                                     documents=documents,
+                                     decisions=decisions,
+                                     evidence_limit=0),
+            })
+
+        out = _pw.aggregate(rows, from_date=window["from"], to_date=window["to"])
+        out["projects_scanned"] = len(rows)
+        out["source"] = "server"
+        if limit and limit > 0:
+            out["projects"] = out["projects"][:limit]
+        return out
 
     @router.get("/api/me/sessions")
     def me_list_sessions(

@@ -1293,6 +1293,11 @@ _NOUN_SCOPE = {
     # ms-170 e-6344 — 盤の閲覧。status と同じく occupation の投影越しに
     # Target を読むだけで、職種固有のコレクションを直読みしない。
     "view": "L2",
+    # ms-184 — 期間内に進捗した対象の導出 (recap projects / recap targets)。
+    # progress_window が occupation.target_collections + target_decomposition の
+    # 宣言越しに Target と その arm を読むだけで、職種固有のコレクション名や
+    # arm 名をコードに持たない。status / view / deliverable と同じ L2。
+    "recap": "L2",
     # deliverable: the produced-value projection of adopted target-classes via the
     # abstraction (occupation.project_deliverables + deliverable_resolve); rule is
     # profession-shared — dev surfaces milestone→機能, sales would surface
@@ -1664,6 +1669,10 @@ _SKILL_SCOPE = {
     "beacon-map": "L2", "beacon-member": "L1", "beacon-note": "L1",
     "beacon-onboard": "L1", "beacon-pr-create": "L3", "beacon-push": "L3",
     "beacon-retro": "L2", "beacon-retrospect": "L2", "beacon-roadmap": "L2",
+    # ms-184 — 「昨日何やったっけ」の動線。recap 動詞と同じく occupation の宣言
+    # 越しに Target と証跡を読むだけで、職種固有のコレクション / arm を知らない。
+    # beacon-retrospect (過去の問い合わせ) と同じ L2。
+    "beacon-recap": "L2",
     "beacon-spec": "L2", "beacon-task": "L3", "beacon-vision": "L2",
     # ms-134 e-5061 review 分割: the code-review instrument skills (dir-form,
     # each skills/<name>/SKILL.md + review-type.json) review CODE — a dev-specific
