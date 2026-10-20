@@ -3639,6 +3639,42 @@ def _remove_binding_from_target_review_due(target_id: str, review_type: str) -> 
     return True
 
 
+def _review_gate_is_in_use() -> bool:
+    """Whether this repository actually uses the ``beacon-review-gate`` check.
+
+    ms-181 e-7103 受入条件 5/6 — **環境変数を不要にした方**を採った。
+
+    以前はここが ``BEACON_REVIEW_GATE_CI=1`` という **env の opt-in** だった。
+    つまり「レビューをやった」と記録しても、operator がその env を覚えていない
+    限り GitHub の印は pending のまま残る。2026-10-19 に ms-185 fork が実測し、
+    2026-10-20 に本セッションでも踏んだ: `beacon review done` を打っても印は
+    pending で、env を付けて**打ち直して**初めて success になった。関門には表裏
+    2 つの穴があり (作成直後は関門が立たない / 実施しても印が押されない)、これは
+    裏側。片方だけ直すと「素通りする」か「レビュー済みのつもりで取り込みが
+    塞がれ続ける」のどちらかが残る。
+
+    「このリポジトリは関門を使っているか」の **真値源は operator の shell では
+    なく GitHub の repo 変数** — ワークフロー (`.github/workflows/review-gate.yml`)
+    自身がその変数で自分を有効化する。だからそれに訊く。env は明示的な上書きと
+    して残す (CI 自身や、変数を読めない環境で強制したいとき)。
+
+    読めなかったとき (gh 未設定 / 認証切れ / 網不通) は **押さない**。押せない
+    ことを呼び出し側が必ず表示するので、黙って pending にはならない。
+    """
+    override = os.environ.get("BEACON_REVIEW_GATE_CI", "")
+    if override == "1":
+        return True
+    if override == "0":
+        return False
+    try:
+        proc = subprocess.run(
+            ["gh", "variable", "get", "BEACON_REVIEW_GATE_CI"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "1"
+
+
 def _ci_flip_review_gate_success(pr_number: str) -> None:
     """``beacon-review-gate`` の印を PR head に success で押す (ms-119 e-4073)。
 
@@ -3666,10 +3702,10 @@ def _ci_flip_review_gate_success(pr_number: str) -> None:
     食い違っていたら押さずに断り、先に push することを促す (印を古い sha に付けて
     しまう方が、押さないより始末が悪い)。
     """
-    if os.environ.get("BEACON_REVIEW_GATE_CI", "") != "1":
-        print("  (ゲートの印は触っていません: BEACON_REVIEW_GATE_CI=1 が無いため。"
-              "この PR がゲート必須なら push 済の head に対して "
-              "BEACON_REVIEW_GATE_CI=1 を付けて再実行してください)", file=sys.stderr)
+    if not _review_gate_is_in_use():
+        print("  (ゲートの印は触っていません: このリポジトリはレビュー関門を"
+              "使っていません。使うなら "
+              "`gh variable set BEACON_REVIEW_GATE_CI 1`)", file=sys.stderr)
         return
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
