@@ -43,6 +43,8 @@ say "N records could not be judged" instead of implying they did not happen
 
 from __future__ import annotations
 
+import json
+
 from typing import Optional
 
 import date_window as _dw
@@ -68,7 +70,41 @@ _NON_EVIDENCE_TYPES = frozenset({
 
 #: The evidence sources :func:`derive` can consult. Reported back so a caller
 #: can tell "nothing happened" from "we did not look" (方針 8 again).
-EVIDENCE_SOURCES = ("entry", "document", "decision")
+EVIDENCE_SOURCES = ("entry", "document", "decision", "shipping")
+
+#: Project-level records of SHIPPING — pushing, deploying, cutting a release.
+#:
+#: These do not live on a Target's arm; they sit directly on the project, each
+#: naming the Target(s) it carried. Leaving them out meant the derivation could
+#: only see work that landed *under* a Target, so a day whose whole story was
+#: "we put it in production" read as "nothing happened" (ms-184 / e-7055).
+#: Measured before this change: of 32 days with a deploy, the recap mentioned
+#: the deploy on **zero** of them, and one day (5 deploys, nothing attached to
+#: a Target) came back as 0 件 — a confident wrong answer to the one question
+#: this milestone exists to answer.
+#:
+#: Each entry declares only where the collection lives, what to call the
+#: evidence, and which fields date it. It deliberately does NOT name the field
+#: that holds the Target ids: the first version did (``milestones``), and this
+#: module's own guard caught that as profession coupling — a deploy's
+#: ``milestones`` field is dev-era schema, so a sales project's shipping record
+#: would never match it. :func:`_shipping_targets` discovers the attribution by
+#: looking for values that ARE known Target ids instead, which works for any
+#: class without this table knowing one.
+#:
+#: ``via`` is the one structural hop: a release names its deploys, and the
+#: deploys name the Targets.
+SHIPPING_SOURCES = (
+    {"collection": "pushes", "kind": "push",
+     "stamps": ("pushed_at", "created_at")},
+    {"collection": "deployments", "kind": "deploy",
+     "stamps": ("deployed_at", "date")},
+    {"collection": "deploys", "kind": "deploy",      # legacy spelling
+     "stamps": ("deployed_at", "date")},
+    {"collection": "releases", "kind": "release",
+     "stamps": ("date", "created_at"),
+     "via": {"collection": ("deployments", "deploys"), "id_list": "deploy_ids"}},
+)
 
 
 def _stamps(record: dict) -> list:
@@ -149,6 +185,144 @@ def _target_rows(project: dict) -> list:
     return rows
 
 
+#: Fields of a SHIPPING record that are never attribution, whatever they hold.
+#:
+#: Attribution is found by value (see :func:`_target_ids_in`), which is what
+#: keeps it occupation-generic. But value-matching alone is not a guarantee —
+#: an independent review constructed a push whose git author name happened to
+#: be ``ms-7`` and watched it get attributed to that milestone (PR#810). The
+#: first docstring here claimed sibling fields "simply do not resolve"; that
+#: was a coincidence about id shapes, asserted as a property.
+#:
+#: These names are fields of the project-level shipping records themselves
+#: (author, hashes, branch, free text, version) — NOT profession concretes, so
+#: excluding them by name introduces no occupation coupling. The residual risk
+#: is stated honestly in :func:`_target_ids_in`: a field not on this list whose
+#: value collides with a Target id still resolves.
+NON_ATTRIBUTION_FIELDS = frozenset({
+    "pushed_by", "from_hash", "to_hash", "branch", "git_hash",
+    "commit_hashes", "commits", "description", "summary", "semver",
+    "environment", "type", "id", "linked_release", "unassigned_commits",
+})
+
+
+def _target_ids_in(record: dict, known_targets) -> list:
+    """Target ids this record carries, in any field not excluded by name.
+
+    Finds attribution by VALUE, not by a positive list of field names. A deploy
+    happens to use ``milestones`` today, but that field name is dev-era schema;
+    naming it here would mean a sales project's shipping record could never be
+    attributed, and this module's own coupling guard rightly rejects the
+    literal. Matching against the project's real Target ids needs no field name
+    and works for every class.
+
+    **The residual risk, stated plainly**: this is not a structural guarantee.
+    Fields known never to carry attribution are excluded by name
+    (``NON_ATTRIBUTION_FIELDS``), which covers the shipping records' own author
+    / hash / free-text / version fields. A field OUTSIDE that set whose value
+    happens to equal a Target id will still be read as attribution. That is a
+    coincidence about id shapes, not something this function prevents — so if
+    the Target id scheme ever becomes short or human-word-like, revisit this.
+    """
+    found = []
+    for field, value in (record or {}).items():
+        if field in NON_ATTRIBUTION_FIELDS:
+            continue
+        if isinstance(value, str):
+            if value in known_targets:
+                found.append(value)
+        elif isinstance(value, (list, tuple)):
+            found.extend(v for v in value
+                         if isinstance(v, str) and v in known_targets)
+    return found
+
+
+def _shipping_targets(project: dict, record: dict, spec: dict,
+                      known_targets) -> list:
+    """The Target ids a shipping record names, following any declared hop.
+
+    Returns ``[]`` when the record names none — a real state, not an error:
+    measured on this project, 13 of 958 pushes and 7 of 65 deploys carry no
+    attribution. The caller keeps those as ``unattributed`` rather than
+    dropping them or picking a Target for them (e-7055 受入条件 3, the same
+    rule the date logic uses for a record it cannot judge).
+    """
+    direct = _target_ids_in(record, known_targets)
+    if direct:
+        return direct
+    via = spec.get("via") or {}
+    if not via:
+        return []
+    # A release names deploys, and the deploys name the Targets. Walking the
+    # hop keeps a release attributed instead of permanently unattributed.
+    wanted = {i for i in (record.get(via.get("id_list")) or [])
+              if isinstance(i, str)}
+    out = []
+    for coll in via.get("collection", ()):
+        for dep in project.get(coll, []) or []:
+            if isinstance(dep, dict) and dep.get("id") in wanted:
+                out.extend(_target_ids_in(dep, known_targets))
+    return out
+
+
+def _walk_shipping(project: dict, from_date: str, to_date: str,
+                   known_targets) -> tuple:
+    """Return ``(per_target, unattributed, undated)`` for the shipping records.
+
+    ``per_target`` maps a Target id to the evidence rows it carried;
+    ``unattributed`` holds the in-window records that named no reachable
+    Target. Both are reported — the project moved either way, and which Target
+    moved is a separate question from whether anything shipped.
+    """
+    per_target: dict = {}
+    unattributed: list = []
+    undated: dict = {}
+    seen: set = set()
+
+    for spec in SHIPPING_SOURCES:
+        for rec in project.get(spec["collection"], []) or []:
+            if not isinstance(rec, dict):
+                continue
+            rid = rec.get("id") or ""
+            # ``deployments`` / ``deploys`` are two spellings of one collection;
+            # a project carrying both must not count a record twice. Keying the
+            # de-dup on the id ALONE silently gave up on records that have no
+            # id — legacy data does — and an independent review reproduced the
+            # double count with exactly that shape (PR#810). The fallback key
+            # is the record's own content, so an id-less record de-dups too.
+            dedup = (spec["kind"], rid) if rid else (
+                spec["kind"], tuple(sorted(
+                    (k, json.dumps(v, ensure_ascii=False, sort_keys=True)
+                     if isinstance(v, (list, dict)) else v)
+                    for k, v in rec.items())))
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+
+            stamps = _dw.stamps_of(rec, spec["stamps"])
+            verdict = _dw.classify_any(stamps, from_date, to_date)
+            if verdict == _dw.UNDATED:
+                undated[spec["kind"]] = undated.get(spec["kind"], 0) + 1
+                continue
+            if verdict != _dw.IN_WINDOW:
+                continue
+
+            row = {
+                "kind": spec["kind"],
+                "id": rid,
+                "at": _dw.latest_in_window(stamps, from_date, to_date),
+                "summary": _summary(rec)[:160],
+            }
+            tids = _shipping_targets(project, rec, spec, known_targets)
+            if tids:
+                for tid in dict.fromkeys(tids):   # de-dup, keep order
+                    per_target.setdefault(tid, []).append(dict(row))
+            else:
+                unattributed.append(row)
+
+    return per_target, unattributed, undated
+
+
 def derive(
     project: dict,
     *,
@@ -171,7 +345,7 @@ def derive(
     """
     window = {"from": (from_date or "").strip(), "to": (to_date or "").strip()}
 
-    consulted = ["entry"]
+    consulted = ["entry", "shipping"]
     unavailable = []
     for name, value in (("document", documents), ("decision", decisions)):
         (consulted if value is not None else unavailable).append(name)
@@ -266,6 +440,20 @@ def derive(
              _dw.latest_in_window(stamps, window["from"], window["to"]),
              dec.get("what") or dec.get("decision") or dec.get("rationale", ""))
 
+    # ---- evidence source 4: project-level shipping records ---------------
+    # Attributed rows join the Target that carried them; unattributed ones are
+    # kept separately (e-7055). A deploy naming several Targets is attached to
+    # each — folding it into one would misreport which work shipped.
+    ship_per_target, unattributed, ship_undated = _walk_shipping(
+        project, window["from"], window["to"], set(per_target))
+    for kind, count in ship_undated.items():
+        _note_undated(kind)
+        for _ in range(count - 1):
+            _note_undated(kind)
+    for tid, rows in ship_per_target.items():
+        for row in rows:
+            _add(tid, row["kind"], row["id"], row["at"], row["summary"])
+
     # ---- assemble --------------------------------------------------------
     targets = []
     evidence_total = 0
@@ -292,13 +480,44 @@ def derive(
 
     targets.sort(key=lambda r: r["last_evidence_at"], reverse=True)
 
+    unattributed.sort(key=lambda r: r["at"], reverse=True)
+    unattributed_by_kind: dict = {}
+    for row in unattributed:
+        unattributed_by_kind[row["kind"]] = \
+            unattributed_by_kind.get(row["kind"], 0) + 1
+
+    # A day whose whole story is "we put it in production" moved, even when no
+    # Target claims the deploy. Keying ``moved`` off the Target list alone was
+    # how such a day came back as 0 件 (e-7055 受入条件 1). The two halves stay
+    # separately countable, because "which Target moved" and "did anything
+    # ship" are different questions.
+    last_at = max(
+        [t["last_evidence_at"] for t in targets]
+        + [r["at"] for r in unattributed]
+    ) if (targets or unattributed) else ""
+
     return {
         "window": window,
-        "moved": bool(targets),
+        "moved": bool(targets) or bool(unattributed),
         "targets": targets,
         "target_count": len(targets),
-        "evidence_count": evidence_total,
-        "last_evidence_at": targets[0]["last_evidence_at"] if targets else "",
+        # 期間内と**判定できた**証跡の総数 = 対象に紐づいた分 + 対象不明の出荷。
+        # ``undated`` は含めない — あれは「期間で判定できなかった」ものなので、
+        # 証跡として数えると「判定できた量」が嘘になる。この非対称は意図的で、
+        # 名前から読めないという指摘 (AX review PR#810) に対し、分けて数えられる
+        # ように attributed_evidence_count を併記する。
+        "evidence_count": evidence_total + len(unattributed),
+        "attributed_evidence_count": evidence_total,
+        "last_evidence_at": last_at,
+        # Shipping records that named no reachable Target. Neither dropped nor
+        # assigned to an arbitrary Target — the project moved, and WHICH target
+        # is simply unknown (受入条件 3).
+        "unattributed": {
+            "count": len(unattributed),
+            "by_kind": dict(sorted(unattributed_by_kind.items())),
+            "evidence": unattributed if evidence_limit <= 0
+            else unattributed[:evidence_limit],
+        },
         "undated": {
             "count": sum(undated_by_kind.values()),
             "by_kind": undated_by_kind,
@@ -322,6 +541,7 @@ def aggregate(rows, *, from_date: str = "", to_date: str = "") -> dict:
     moved = []
     unavailable = []
     undated_total = 0
+    unattributed_total = 0
     missing_sources: list = []
     for row in rows or []:
         pid = (row.get("project_id") or "").strip()
@@ -339,6 +559,8 @@ def aggregate(rows, *, from_date: str = "", to_date: str = "") -> dict:
         # second consumer of the signal derive() emits; wiring only the first
         # one is the exact gap this MS is about.
         undated_total += int((result.get("undated") or {}).get("count") or 0)
+        unattributed_total += int(
+            (result.get("unattributed") or {}).get("count") or 0)
         for src in result.get("sources_unavailable") or []:
             if src not in missing_sources:
                 missing_sources.append(src)
@@ -350,6 +572,11 @@ def aggregate(rows, *, from_date: str = "", to_date: str = "") -> dict:
             "target_count": result.get("target_count", 0),
             "evidence_count": result.get("evidence_count", 0),
             "last_evidence_at": result.get("last_evidence_at", ""),
+            # How much of this project's movement names no Target. A project
+            # that moved ONLY by shipping is listed with target_count 0 and a
+            # non-zero count here, rather than dropped for having no Targets.
+            "unattributed_count": int(
+                (result.get("unattributed") or {}).get("count") or 0),
             "targets": [
                 {
                     "target_id": t["target_id"],
@@ -371,8 +598,9 @@ def aggregate(rows, *, from_date: str = "", to_date: str = "") -> dict:
         # Same two caveats derive() reports, folded across every project that
         # was read — including the ones omitted as non-movers.
         "undated": {"count": undated_total},
+        "unattributed": {"count": unattributed_total},
         "sources_unavailable": [s for s in EVIDENCE_SOURCES if s in missing_sources],
     }
 
 
-__all__ = ["EVIDENCE_SOURCES", "derive", "aggregate"]
+__all__ = ["EVIDENCE_SOURCES", "SHIPPING_SOURCES", "derive", "aggregate"]

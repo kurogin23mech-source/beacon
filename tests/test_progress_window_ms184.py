@@ -358,7 +358,11 @@ def test_derive_says_which_sources_it_did_not_consult():
     looked = pw.derive(_dev_project(), from_date=YESTERDAY[0],
                        to_date=YESTERDAY[1], documents=[], decisions=[])
     assert looked["sources_unavailable"] == []
-    assert set(looked["sources_consulted"]) == {"entry", "document", "decision"}
+    # shipping always counts as consulted: those records ride in the project
+    # dict the caller already handed over, so there is no separate read that
+    # could fail (ms-184 e-7055).
+    assert set(looked["sources_consulted"]) == {
+        "entry", "document", "decision", "shipping"}
 
     blind = pw.derive(_dev_project(), from_date=YESTERDAY[0], to_date=YESTERDAY[1])
     assert blind["sources_unavailable"] == ["document", "decision"]
@@ -374,6 +378,210 @@ def test_derive_caps_evidence_rows_without_understating_the_count():
     t = result["targets"][0]
     assert len(t["evidence"]) == 3
     assert t["evidence_count"] == 10, "a capped list must not lower the count"
+
+
+# ---------------------------------------------------------------------------
+# e-7055 — shipping (push / deploy / release) is evidence too
+# ---------------------------------------------------------------------------
+
+def _shipping_project() -> dict:
+    """A project whose only in-window activity is shipping."""
+    return {
+        "project_id": "p-ship", "name": "Ship",
+        "milestones": [
+            {"id": "ms-1", "title": "carried", "status": "observing",
+             "created_at": "2026-01-01T00:00:00Z", "entries": []},
+            {"id": "ms-2", "title": "untouched", "status": "todo",
+             "created_at": "2026-01-01T00:00:00Z", "entries": []},
+        ],
+        "pushes": [
+            {"id": "push-1", "summary": "pushed the fix", "ms_id": "ms-1",
+             "pushed_at": "2026-10-14T09:00:00Z"},
+            {"id": "push-2", "summary": "no target named", "ms_id": "",
+             "pushed_at": "2026-10-14T10:00:00Z"},
+        ],
+        "deployments": [
+            {"id": "deploy-1", "description": "shipped to production",
+             "milestones": ["ms-1", "ms-2"], "date": "2026-10-14T11:00:00Z"},
+            {"id": "deploy-2", "description": "hotfix, target unknown",
+             "milestones": [], "date": "2026-10-14T12:00:00Z"},
+        ],
+        "releases": [
+            {"id": "rel-1", "semver": "v1.2.3", "description": "cut v1.2.3",
+             "deploy_ids": ["deploy-1"], "date": "2026-10-14T13:00:00Z"},
+        ],
+    }
+
+
+def test_a_day_whose_only_story_is_shipping_counts_as_moved():
+    """受入条件 1: deploying is not "nothing happened".
+
+    Measured before the fix on this project's own history: of 32 days with a
+    deploy the recap mentioned it on ZERO, and one day (5 deploys, nothing
+    attached to a Target) came back as 0 件 — a confident wrong answer to the
+    single question this milestone exists to answer.
+    """
+    project = _shipping_project()
+    # strip every Target-attached entry so shipping is the ONLY evidence
+    for m in project["milestones"]:
+        m["entries"] = []
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1])
+    assert result["moved"] is True, \
+        "a day that shipped to production must not read as 'nothing happened'"
+    assert result["evidence_count"] > 0
+
+
+def test_shipping_is_attributed_to_every_target_it_names():
+    """A deploy carrying several Targets attaches to each.
+
+    Measured on real data: a deploy names up to 21 Targets, so folding it into
+    one would misreport which work shipped.
+    """
+    result = pw.derive(_shipping_project(), from_date=YESTERDAY[0],
+                       to_date=YESTERDAY[1], evidence_limit=0)
+    by_target = {t["target_id"]: t["evidence_by_kind"] for t in result["targets"]}
+    assert by_target["ms-1"].get("push") == 1
+    assert by_target["ms-1"].get("deploy") == 1
+    assert by_target["ms-2"].get("deploy") == 1, \
+        "the second Target the deploy named must receive it too"
+    # the release reaches its Targets through the deploy it names
+    assert by_target["ms-1"].get("release") == 1
+
+
+def test_unattributed_shipping_is_reported_not_dropped_or_guessed():
+    """受入条件 3: neither silently dropped nor pinned on some Target.
+
+    Real data has 13 of 958 pushes and 7 of 65 deploys with no attribution, so
+    this is a state the derivation must represent — the same three-valued
+    honesty the date logic uses for a record it cannot judge.
+    """
+    result = pw.derive(_shipping_project(), from_date=YESTERDAY[0],
+                       to_date=YESTERDAY[1], evidence_limit=0)
+    unattr = result["unattributed"]
+    assert unattr["count"] == 2, "the push and deploy naming nothing"
+    assert unattr["by_kind"] == {"deploy": 1, "push": 1}
+    ids = {r["id"] for r in unattr["evidence"]}
+    assert ids == {"push-2", "deploy-2"}
+
+    # ... and they were NOT pinned on a Target
+    for t in result["targets"]:
+        assert "push-2" not in {e["id"] for e in t["evidence"]}
+        assert "deploy-2" not in {e["id"] for e in t["evidence"]}
+
+
+def test_shipping_outside_the_window_does_not_count():
+    project = _shipping_project()
+    result = pw.derive(project, from_date=ANCIENT[0], to_date=ANCIENT[1])
+    assert result["moved"] is False
+    assert result["unattributed"]["count"] == 0
+
+
+def test_the_two_deploy_collection_spellings_are_not_counted_twice():
+    """``deployments`` and ``deploys`` are two names for one collection."""
+    project = _shipping_project()
+    project["deploys"] = list(project["deployments"])
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1],
+                       evidence_limit=0)
+    ms1 = next(t for t in result["targets"] if t["target_id"] == "ms-1")
+    assert ms1["evidence_by_kind"]["deploy"] == 1, \
+        "a project carrying both spellings must not double-count the deploy"
+    assert result["unattributed"]["by_kind"]["deploy"] == 1
+
+
+def test_a_colliding_unrelated_field_is_not_read_as_attribution():
+    """A field that is not attribution must not become one by coincidence.
+
+    Attribution is found by VALUE, which is what keeps it occupation-generic —
+    but value-matching is not a guarantee. An independent review built a push
+    whose git author name happened to be a real Target id and watched it get
+    attributed there (PR#810); the docstring had claimed sibling fields "simply
+    do not resolve", which was a coincidence about id shapes asserted as a
+    property. Fields known never to carry attribution are now excluded by name,
+    and the residual risk is stated rather than claimed away.
+    """
+    project = {
+        "project_id": "p", "name": "P",
+        "milestones": [{"id": "ms-7", "title": "m", "status": "todo",
+                        "created_at": "2026-01-01T00:00:00Z", "entries": []}],
+        "pushes": [{"id": "push-1", "summary": "ms-7",   # free text, not attribution
+                    "pushed_by": "ms-7",                 # author name collision
+                    "branch": "ms-7",
+                    "pushed_at": "2026-10-14T09:00:00Z"}],
+    }
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1],
+                       evidence_limit=0)
+    assert result["target_count"] == 0, \
+        "an author name / branch / free text equal to a Target id is not attribution"
+    assert result["unattributed"]["count"] == 1, \
+        "it is still a shipping record, so it belongs in unattributed"
+    assert result["moved"] is True
+
+
+def test_id_less_records_are_not_counted_twice_across_spellings():
+    """De-dup must not give up on records with no id.
+
+    Keying it on the id alone silently skipped id-less records — legacy data
+    has them — and an independent review reproduced the double count with
+    exactly that shape (PR#810). The test that claimed "the two spellings are
+    not counted twice" only covered the id-populated case, so it was a guard
+    whose name promised more than it checked.
+    """
+    dep = {"description": "shipped", "milestones": ["ms-7"],
+           "date": "2026-10-14T11:00:00Z"}            # no "id"
+    project = {
+        "project_id": "p", "name": "P",
+        "milestones": [{"id": "ms-7", "title": "m", "status": "todo",
+                        "created_at": "2026-01-01T00:00:00Z", "entries": []}],
+        "deployments": [dict(dep)], "deploys": [dict(dep)],
+    }
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1],
+                       evidence_limit=0)
+    ms7 = next(t for t in result["targets"] if t["target_id"] == "ms-7")
+    assert ms7["evidence_by_kind"]["deploy"] == 1, \
+        "the same id-less deploy under both spellings is one deploy"
+
+
+def test_evidence_count_says_which_things_it_counts():
+    """``evidence_count`` = judged-in-window evidence, attributed or not.
+
+    It deliberately excludes ``undated`` (those could not be judged, so
+    counting them would make "how much was judged" untrue). An AX review noted
+    the asymmetry is not readable from the name, so the attributed half is now
+    reported separately.
+    """
+    project = _shipping_project()
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1],
+                       evidence_limit=0)
+    attributed = sum(t["evidence_count"] for t in result["targets"])
+    assert result["attributed_evidence_count"] == attributed
+    assert result["evidence_count"] == attributed + result["unattributed"]["count"]
+
+
+def test_a_project_that_moved_only_by_shipping_is_listed_in_the_fold():
+    """受入条件 1 at the cross-project altitude.
+
+    A project with zero progressed Targets but a deploy still moved. Dropping
+    it for having no Targets would reproduce the bug one altitude up.
+    """
+    project = _shipping_project()
+    for m in project["milestones"]:
+        m["entries"] = []
+    project["pushes"] = []
+    project["releases"] = []
+    project["deployments"] = [
+        {"id": "deploy-9", "description": "production, target unknown",
+         "milestones": [], "date": "2026-10-14T12:00:00Z"}]
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1])
+    assert result["target_count"] == 0 and result["moved"] is True
+
+    out = pw.aggregate([{"project_id": "p-ship", "name": "Ship",
+                         "result": result}],
+                       from_date=YESTERDAY[0], to_date=YESTERDAY[1])
+    assert [p["project_id"] for p in out["projects"]] == ["p-ship"], \
+        "a project that moved only by shipping must still be listed"
+    assert out["projects"][0]["target_count"] == 0
+    assert out["projects"][0]["unattributed_count"] == 1
+    assert out["unattributed"]["count"] == 1
 
 
 # ---------------------------------------------------------------------------

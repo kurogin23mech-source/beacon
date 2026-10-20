@@ -295,8 +295,18 @@ def _print_targets(result: dict) -> None:
     w = result["window"]
     header = f"{w['from']}..{w['to']} [{w.get('spec', '')}] — {result['project_name']}"
     print(header)
-    if not result["targets"]:
+    # 分岐は moved を見る (targets ではない)。`moved` は「対象が動いた or
+    # プロジェクト直下の記録が付いた」なので、出荷だけの日は対象ゼロでも動いて
+    # いる。targets で分岐していたせいで、2 行目が「進んだ対象はありません」と
+    # 断定した直後に下の行が「プロジェクトは動いています」と訂正する、同一出力
+    # 内で矛盾する形になっていた (AX review PR#810 high)。先頭の断定行だけ読む
+    # 読み手には「何もなかった」と読め、この task が直した誤答が表示にだけ再発
+    # していた。
+    if not result.get("moved"):
         print("  この期間に進んだ対象はありません。")
+    elif not result["targets"]:
+        print(f"  対象別に進んだものはありませんが、出荷の証跡が "
+              f"{result['evidence_count']} 件あります")
     else:
         print(f"  進んだ対象 {result['target_count']} 件 / "
               f"証跡 {result['evidence_count']} 件")
@@ -309,6 +319,12 @@ def _print_targets(result: dict) -> None:
         for ev in t["evidence"]:
             print(f"        · {ev['at'][:19]}  {ev['kind']:<8} "
                   f"{ev['id']:<8} {ev['summary'][:64]}")
+    rows = (result.get("unattributed") or {}).get("evidence") or []
+    if rows:
+        print("  対象が特定できていない出荷:")
+        for ev in rows:
+            print(f"        · {ev['at'][:19]}  {ev['kind']:<8} "
+                  f"{ev['id']:<22} {ev['summary'][:50]}")
     _print_caveats(result)
 
 
@@ -318,6 +334,14 @@ def _print_caveats(result: dict) -> None:
     Printed for a zero result too — that is exactly when a reader is most
     likely to conclude "nothing happened" from "we could not tell".
     """
+    unattr = result.get("unattributed") or {}
+    if unattr.get("count"):
+        by_kind = unattr.get("by_kind") or {}
+        detail = (" (" + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items()))
+                  + ")") if by_kind else ""
+        print(f"  ※ どの対象の記録か分からない出荷: {unattr['count']} 件{detail}"
+              " — プロジェクトは動いていますが、対象が特定できていません")
+
     und = result.get("undated") or {}
     if und.get("count"):
         # The per-project answer breaks the count down by record kind; the
@@ -492,8 +516,10 @@ def _print_projects(result: dict) -> None:
         print("  この期間に動いたプロジェクトはありません。")
     for p in result["projects"]:
         print(f"  [{p['project_id']}] {p['name']}")
+        unattr_n = p.get("unattributed_count") or 0
+        extra = f" (うち対象未特定の出荷 {unattr_n} 件)" if unattr_n else ""
         print(f"      対象 {p['target_count']} 件 / 証跡 {p['evidence_count']} 件"
-              f"  最新 {p['last_evidence_at']}")
+              f"{extra}  最新 {p['last_evidence_at']}")
         for t in p["targets"][:3]:
             print(f"        · {t['target_id']} {t['label'][:56]} "
                   f"({t['evidence_count']})")
