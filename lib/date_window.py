@@ -65,6 +65,33 @@ _END_OF_DAY = "~"
 
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+
+def is_calendar_date(value: str) -> bool:
+    """Whether ``value`` is ``YYYY-MM-DD`` **and** a day that exists.
+
+    The shape regex above only counts digits, so ``2026-13-01`` / ``2026-02-30``
+    / ``2026-00-00`` used to sail through every period entry point: they sort
+    like dates, so a bound built from one silently answered a period nobody
+    could have meant. ``2026-13-01`` was worse than silent — being
+    lexicographically large it tripped :func:`validate_range` instead, so the
+    caller was told its range was *inverted* and went off swapping the flags,
+    never learning that month 13 does not exist (measured by an independent AX
+    review of PR #811). A misdirecting error is a wrong answer with a louder
+    voice.
+
+    Kept as a predicate rather than folded into the regex because both the
+    parser and the explicit-range validator need it, and the point of this
+    module is that they share one rule.
+    """
+    value = (value or "").strip()
+    if not _DATE_ONLY.match(value):
+        return False
+    try:
+        datetime.date(int(value[0:4]), int(value[5:7]), int(value[8:10]))
+    except ValueError:
+        return False
+    return True
+
 # ---------------------------------------------------------------------------
 # Which stamps a period question reads — DECLARED, because there are two
 # legitimate questions and they must not look like one by accident.
@@ -92,6 +119,17 @@ CREATION_STAMPS = ("created_at", "date", "pushed_at")
 
 MOVEMENT_STAMPS = ("done_at", "created_at", "date", "pushed_at",
                    "deployed_at", "updated_at", "approved_at")
+
+# ``RETRO_ENTRY_STAMPS`` — "when was this entry raised", as the weekly retro
+# narrative asks it (ms-181 e-7101). It is CREATION_STAMPS minus ``pushed_at``,
+# and it is named here rather than left as an inline ``or``-chain in
+# ``core.collect_retro_entries`` because an unnamed third list is invisible to
+# the next change: a maintainability review of PR #811 pointed out that adding a
+# stamp to CREATION_STAMPS would reach ``search`` and silently miss retro, with
+# nothing in either file to say so. The difference is deliberate — retro groups
+# a Target's own entry tree, where a push record is attributed to the push
+# facet, not to the narrative — so it gets a name instead of a coincidence.
+RETRO_ENTRY_STAMPS = ("created_at", "date")
 
 
 def stamps_of(record, fields) -> list:
@@ -149,6 +187,13 @@ def validate_range(from_date: str, to_date: str, *,
     or the advice sends the reader to a flag their command does not have.
     """
     lo, hi = (from_date or "").strip(), (to_date or "").strip()
+    # Calendar validity BEFORE ordering: a bound like 2026-13-01 sorts after
+    # every real date, so the ordering check fired first and reported an
+    # inverted range — sending the reader to swap the flags instead of telling
+    # them month 13 does not exist (ms-181 e-7101, AX review of PR #811).
+    for value, flag in ((lo, lower_flag), (hi, upper_flag)):
+        if value and _DATE_ONLY.match(value) and not is_calendar_date(value):
+            return f"{flag} {value} is not a real calendar date."
     if lo and hi and lo > hi:
         return f"{lower_flag} {lo} is after {upper_flag} {hi}."
     return ""
@@ -268,7 +313,7 @@ def parse_since(spec: str, *, today: Optional[datetime.date] = None) -> Tuple[st
     if ".." in raw:
         lo, _, hi = raw.partition("..")
         lo, hi = lo.strip(), hi.strip()
-        if _DATE_ONLY.match(lo) and _DATE_ONLY.match(hi):
+        if is_calendar_date(lo) and is_calendar_date(hi):
             if lo > hi:
                 raise ValueError(f"period start {lo} is after end {hi}")
             return lo, hi
@@ -276,6 +321,10 @@ def parse_since(spec: str, *, today: Optional[datetime.date] = None) -> Tuple[st
 
     # A single explicit day
     if _DATE_ONLY.match(raw):
+        if not is_calendar_date(raw):
+            raise ValueError(
+                f"{raw!r} is not a real calendar date "
+                f"(month 1-12, and a day that exists in that month)")
         return raw, raw
 
     m = _RELATIVE.match(raw)
@@ -305,9 +354,46 @@ def parse_since(spec: str, *, today: Optional[datetime.date] = None) -> Tuple[st
     )
 
 
+def is_duration_spec(spec: str) -> bool:
+    """Whether ``spec`` names a LENGTH of time rather than a point in it.
+
+    ``3d`` / ``2w`` / ``6h`` / ``2m`` answer "how far back from now", so they
+    define a period's lower end and leave its upper end at the present moment.
+    That makes them meaningful for a "since" flag and meaningless for an
+    "until" one: :func:`parse_since` returns today as the upper bound for every
+    one of them, so ``--until 3d`` resolved to exactly ``--until today``.
+    Accepted, echoed back, and silently ignored — an independent AX review of
+    PR #811 measured ``--since 7d --until 3d`` and ``--since 7d --until today``
+    producing byte-identical windows, with exit 0 and no warning.
+
+    A caller who has just learned that ``--since 3d`` means "3 days ago" will
+    read ``--until 3d`` as "up to 3 days ago" and get "up to right now"
+    instead. So the caller is told, rather than quietly given a different
+    period. Point-in-time forms (``today`` / ``yesterday`` / ``last-week`` /
+    an explicit date or range) carry their own upper bound and stay accepted.
+    """
+    return bool(_RELATIVE.match((spec or "").strip().lower()))
+
+
+def undated_block(tally) -> dict:
+    """Render an "could not be judged by date" tally for a result payload.
+
+    One renderer, so every verb reports this with the same keys. ``search`` and
+    this function agree by construction; ``recap``/``progress_window`` still
+    spell it ``count``/``by_kind`` and are migrated separately (an AX review of
+    PR #811 found the two shapes and was right that a caller who learns one
+    gets a ``KeyError`` on the other — that convergence touches recap's own
+    consumers, so it is its own change rather than a drive-by here).
+    """
+    tally = tally or {}
+    return {"excluded": sum(tally.values()),
+            "by_type": dict(sorted(tally.items()))}
+
+
 __all__ = [
     "IN_WINDOW", "OUT_OF_WINDOW", "UNDATED", "SINCE_FORMS",
-    "CREATION_STAMPS", "MOVEMENT_STAMPS", "stamps_of",
+    "CREATION_STAMPS", "MOVEMENT_STAMPS", "RETRO_ENTRY_STAMPS", "stamps_of",
     "classify", "classify_any", "latest_in_window", "validate_range",
-    "normalize_bound", "parse_since",
+    "normalize_bound", "parse_since", "is_calendar_date", "is_duration_spec",
+    "undated_block",
 ]

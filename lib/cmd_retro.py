@@ -73,6 +73,17 @@ def _resolve_window(since_spec: str, until_spec: str):
             # spec here means "no bound on this side" — reachable only from a
             # direct/programmatic call, where unbounded is the honest reading.
             return ""
+        if end and _dw.is_duration_spec(spec):
+            # A length of time has no upper end of its own: parse_since puts
+            # today there, so this used to be accepted and silently mean
+            # ``--until today``. Refused rather than reinterpreted — guessing
+            # which end the caller meant is how the original defect worked.
+            print(f"Error: {flag} takes a point in time, not a length of one "
+                  f"({spec!r} means a span back from now, so it has no upper "
+                  f"end of its own). Use a day (today / yesterday / last-week) "
+                  f"or a date (YYYY-MM-DD). A span belongs on --since.",
+                  file=sys.stderr)
+            sys.exit(1)
         try:
             lo, hi = _dw.parse_since(spec)
         except ValueError as exc:
@@ -214,12 +225,19 @@ def cmd_retro_prepare():
         # ``--since yesterday`` printed ``"since": "yesterday"`` beside an
         # empty answer and read as if the period had been honoured. For an
         # ISO-date argument (every call the Skill makes) the value is
-        # unchanged; ``requested`` keeps what was actually typed so a resolved
-        # window is never invisible and never mistaken for the input.
+        # unchanged; ``received`` keeps the spec this handler was handed, so a
+        # resolved window is never invisible and never mistaken for the input.
+        #
+        # Deliberately ``received`` and not ``requested``: both CLI fronts fill
+        # their own default before calling, so what arrives here is NOT
+        # necessarily what a person typed, and an AX review of PR #811 was
+        # right that the name promised a distinction the value cannot make.
+        # Telling "typed" from "defaulted" needs the fronts to say which — see
+        # the follow-up task, not a name that implies we already know.
         "period": {
             "since": since,
             "until": until,
-            "requested": {"since": since_spec, "until": until_spec},
+            "received": {"since": since_spec, "until": until_spec},
         },
         "summary": data.get("summary", ""),
         "milestones": weekly_milestones,
@@ -227,11 +245,9 @@ def cmd_retro_prepare():
         "source_breakdown": source_breakdown,
         # Records carrying no stamp at all: excluded from the period (as
         # before) but counted, so "we could not judge these" cannot read as
-        # "these did not happen". Same shape as ``search``'s own block.
-        "undated": {
-            "excluded": sum(undated.values()),
-            "by_type": dict(sorted(undated.items())),
-        },
+        # "these did not happen". Rendered by ``date_window`` so the keys are
+        # the same wherever this is reported, rather than each module choosing.
+        "undated": _dw.undated_block(undated),
     }
 
     # ms-79 / e-1837 (UC5-F2): catch-up batch info.

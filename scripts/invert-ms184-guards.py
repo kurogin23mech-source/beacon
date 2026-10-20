@@ -288,8 +288,8 @@ INVERSIONS = [
     (
         "retro's resolved window goes back to echoing what was typed",
         "lib/cmd_retro.py",
-        '            "requested": {"since": since_spec, "until": until_spec},\n',
-        '            "requested": {"since": since, "until": until},\n',
+        '            "received": {"since": since_spec, "until": until_spec},\n',
+        '            "received": {"since": since, "until": until},\n',
         ["test_the_resolved_window_is_not_the_echo_of_what_was_typed"],
     ),
     (
@@ -321,10 +321,7 @@ INVERSIONS = [
     (
         "retro stops reporting the records it could not judge",
         "lib/cmd_retro.py",
-        '        "undated": {\n'
-        '            "excluded": sum(undated.values()),\n'
-        '            "by_type": dict(sorted(undated.items())),\n'
-        "        },\n",
+        '        "undated": _dw.undated_block(undated),\n',
         '        "undated": {"excluded": 0, "by_type": {}},\n',
         ["test_undated_entries_are_excluded_and_reported",
          "test_a_deploy_with_no_date_is_counted_too"],
@@ -354,6 +351,88 @@ INVERSIONS = [
         '"--since <period>", "--until <period>"]',
         '{"command": "beacon retro", "flags": []',
         ["test_the_help_registry_documents_the_flags_and_their_period"],
+    ),
+    # --- ms-181 e-7101, round 2: the PR #811 review findings ----------------
+    (
+        "`--until <N>d` is accepted again and silently means today",
+        "lib/cmd_retro.py",
+        "        if end and _dw.is_duration_spec(spec):\n",
+        "        if False:\n",
+        ["test_until_refuses_a_length_of_time_instead_of_meaning_today"],
+    ),
+    (
+        "the duration predicate stops recognising a span",
+        "lib/date_window.py",
+        '    return bool(_RELATIVE.match((spec or "").strip().lower()))\n',
+        "    return False\n",
+        ["test_until_refuses_a_length_of_time_instead_of_meaning_today"],
+    ),
+    (
+        "the duration refusal also swallows a real point in time",
+        "lib/date_window.py",
+        '    return bool(_RELATIVE.match((spec or "").strip().lower()))\n',
+        "    return True\n",
+        ["test_until_still_takes_a_point_in_time"],
+    ),
+    (
+        "a date-shaped string that is not a date passes as a bound again",
+        "lib/date_window.py",
+        "    try:\n"
+        "        datetime.date(int(value[0:4]), int(value[5:7]), int(value[8:10]))\n"
+        "    except ValueError:\n"
+        "        return False\n"
+        "    return True\n",
+        "    return True\n",
+        ["test_a_date_shaped_string_that_is_not_a_date_is_refused"],
+    ),
+    (
+        "an impossible date is reported as an inverted range (the misdirection)",
+        "lib/date_window.py",
+        "    for value, flag in ((lo, lower_flag), (hi, upper_flag)):\n"
+        "        if value and _DATE_ONLY.match(value) and not is_calendar_date(value):\n"
+        '            return f"{flag} {value} is not a real calendar date."\n',
+        "",
+        ["test_an_explicit_range_bound_that_is_not_a_date_is_refused"],
+    ),
+    (
+        "retro's stamp set goes back to an unnamed inline chain",
+        "lib/core.py",
+        "        stamps = date_window.stamps_of(entry, date_window.RETRO_ENTRY_STAMPS)\n"
+        '        date = stamps[0] if stamps else ""\n',
+        '        date = entry.get("created_at") or entry.get("date") or ""\n',
+        ["test_the_retro_walker_reads_the_declared_stamp_set"],
+    ),
+    (
+        "retro's stamp set silently widens to include pushes",
+        "lib/date_window.py",
+        'RETRO_ENTRY_STAMPS = ("created_at", "date")\n',
+        'RETRO_ENTRY_STAMPS = ("created_at", "date", "pushed_at")\n',
+        ["test_the_retro_stamp_set_is_named_not_an_inline_chain"],
+    ),
+    (
+        "the undated tally is rendered per-module again",
+        "lib/date_window.py",
+        '    return {"excluded": sum(tally.values()),\n'
+        '            "by_type": dict(sorted(tally.items()))}\n',
+        '    return {"count": sum(tally.values()), "by_kind": dict(tally)}\n',
+        ["test_the_undated_block_is_rendered_by_the_shared_renderer",
+         "test_undated_entries_are_excluded_and_reported"],
+    ),
+    (
+        "the registry hand-types a partial period vocabulary again",
+        "lib/commands.py",
+        '<period> = " + " | ".join(_since_forms_for_help()) + "。',
+        "<period> = today | yesterday | this-week | 3d | YYYY-MM-DD …。",
+        ["test_both_help_surfaces_list_the_same_period_vocabulary"],
+    ),
+    (
+        "the python front's help vocabulary falls back to its own copy",
+        "beacon_cli/dispatch.py",
+        "        _ensure_lib_on_path()\n"
+        "        import date_window as _dw  # type: ignore[import-not-found]\n"
+        "        return tuple(_dw.SINCE_FORMS)\n",
+        "        raise ImportError('forced')\n",
+        ["test_both_help_surfaces_list_the_same_period_vocabulary"],
     ),
 ]
 

@@ -3856,9 +3856,15 @@ def collect_retro_entries(entries: list, since: str, until: str,
     dropped. :func:`date_window.normalize_bound` widens a date-only bound to
     the whole day in one place instead of here as well.
 
-    WHICH stamp is read is deliberately unchanged (``created_at``, else
-    ``date``): that chooses which *question* retro asks, and moving it would
-    silently repopulate every weekly retro. Only the comparison moved.
+    WHICH stamp is read is deliberately unchanged — it is now NAMED, as
+    ``date_window.RETRO_ENTRY_STAMPS`` (``created_at``, else ``date``), rather
+    than left as an inline ``or``-chain. The set chooses which *question* retro
+    asks, so moving it would silently repopulate every weekly retro; but an
+    unnamed copy is invisible to the next change, which is what a
+    maintainability review of PR #811 caught (a stamp added to
+    ``CREATION_STAMPS`` would reach ``search`` and miss this walker, with
+    nothing in either file to say so). Only the comparison moved; the set now
+    says out loud that it differs.
 
     ``undated`` is an optional caller-owned tally, same idiom as
     ``search._in_window``: an entry carrying no stamp at all cannot be judged
@@ -3868,7 +3874,8 @@ def collect_retro_entries(entries: list, since: str, until: str,
     """
     result = []
     for entry in entries:
-        date = entry.get("created_at") or entry.get("date") or ""
+        stamps = date_window.stamps_of(entry, date_window.RETRO_ENTRY_STAMPS)
+        date = stamps[0] if stamps else ""
         status = entry.get("status", "")
         if status == "cancelled":
             continue

@@ -7075,6 +7075,27 @@ def _registry_usage_line(command_tail: str) -> str:
     raise KeyError(f"help registry に {command_tail!r} の行がありません")
 
 
+def _since_forms_for_help():
+    """The accepted ``<period>`` spellings, read from the parser that owns them.
+
+    ms-181 e-7101: `beacon retro` / `beacon recap` both read a period with
+    ``date_window.parse_since``, so the help text is generated from that
+    module's ``SINCE_FORMS``. A list typed beside a parser drifts from it
+    silently and then advertises a vocabulary the command does not accept —
+    the same class of defect as a period the command accepts but ignores.
+    Degrades to the bare spellings if the module is unreachable (partial
+    install): help should thin out, never crash the registry every other
+    help surface renders from.
+    """
+    try:
+        import date_window as _dw  # noqa: PLC0415
+        return tuple(_dw.SINCE_FORMS)
+    except Exception:
+        return ("today", "yesterday", "this-week", "last-week", "this-month",
+                "<N>d", "<N>w", "<N>h", "<N>m", "YYYY-MM-DD",
+                "YYYY-MM-DD..YYYY-MM-DD")
+
+
 def _help_registry():
     """Single source of truth for the CLI command reference (ms-120 e-3897).
 
@@ -7251,11 +7272,16 @@ def _help_registry():
         # ms-181 e-7101: the flags were absent here, so `beacon retro --help`
         # (rendered from this registry) never mentioned the two flags the
         # command actually reads — and the period they take was undocumented
-        # on every help surface. <period> intentionally points at recap rather
-        # than re-typing the list: both verbs parse it with
-        # date_window.parse_since, and a second copy of the vocabulary is how
-        # help starts advertising forms the parser does not accept.
-        {"command": "beacon retro", "flags": ["--prepare", "--catch-up", "--since <period>", "--until <period>"], "description": "Start weekly retrospective (interactive). --since / --until はそれぞれ期間の下端 / 上端で、<period> は recap と同じ語彙 (today | yesterday | this-week | 3d | YYYY-MM-DD …)。解釈できない期間は拒否する (黙って別の期間を答えない)"},
+        # on every help surface.
+        #
+        # The vocabulary is DERIVED from date_window.SINCE_FORMS, not typed.
+        # The first version of this row hand-typed a partial subset ending in
+        # "…", omitting last-week / this-month / <N>w / <N>h / <N>m / A..B —
+        # all of which the parser accepts. An AX review of PR #811 caught it
+        # and was right that it is the same antipattern this change had just
+        # criticised elsewhere, made worse by the bash front being the DEFAULT
+        # path on macOS: the incomplete list was the one most readers reach.
+        {"command": "beacon retro", "flags": ["--prepare", "--catch-up", "--since <period>", "--until <period>"], "description": "Start weekly retrospective (interactive). --since は期間の下端、--until は上端 (--until は時点のみ。3d のような長さは下端専用なので拒否される)。<period> = " + " | ".join(_since_forms_for_help()) + "。解釈できない期間は拒否する (黙って別の期間を答えない)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         # ms-178 e-6654: note was absent from this registry, so `--help` missed,
         # fell through to the dispatcher, and `note clear --help` deleted the

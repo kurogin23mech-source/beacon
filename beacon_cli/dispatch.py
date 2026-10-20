@@ -4557,6 +4557,22 @@ _SINCE_FORMS_FALLBACK = (
 )
 
 
+def _ensure_lib_on_path() -> None:
+    """Put the install's ``lib/`` on ``sys.path`` (idempotent).
+
+    The entry point normally does this at startup; handlers that import a lib
+    module defensively repeat it in case they run before that wiring. It is one
+    helper rather than the three-line idiom copied per call site, so a repo
+    layout change (the ``parents[1]`` hop) has one place to be fixed — a
+    maintainability review of PR #811 flagged the second copy this change had
+    just introduced.
+    """
+    import sys as _sys
+    _lib_path = str(Path(__file__).resolve().parents[1] / "lib")
+    if _lib_path not in _sys.path:
+        _sys.path.insert(0, _lib_path)
+
+
 def _since_forms() -> tuple:
     """The accepted ``--since`` period spellings, read from the parser itself.
 
@@ -4568,10 +4584,7 @@ def _since_forms() -> tuple:
     the command accepts but does not honour.
     """
     try:
-        import sys as _sys
-        _lib_path = str(Path(__file__).resolve().parents[1] / "lib")
-        if _lib_path not in _sys.path:
-            _sys.path.insert(0, _lib_path)
+        _ensure_lib_on_path()
         import date_window as _dw  # type: ignore[import-not-found]
         return tuple(_dw.SINCE_FORMS)
     except Exception:
@@ -5572,10 +5585,7 @@ def _do_cloud_open(root: Path, project_id: str, no_browser: bool) -> int:
     try:
         # lib/ is on sys.path via the entry point's runtime setup, but be
         # defensive in case this Python entry point runs before that wiring.
-        import sys as _sys
-        _lib_path = str(Path(__file__).resolve().parents[1] / "lib")
-        if _lib_path not in _sys.path:
-            _sys.path.insert(0, _lib_path)
+        _ensure_lib_on_path()
         import profile as _profile  # type: ignore[import-not-found]
         api_url = _profile.resolve_active_profile().api_url
     except Exception:
