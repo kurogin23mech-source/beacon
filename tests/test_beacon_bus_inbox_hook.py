@@ -87,11 +87,27 @@ _SENTINEL = object()
 def _t1_system_envelope(scope: str = "trek:tk-abc12345") -> dict:
     """Minimal server-minted T1-system envelope, as persisted on the event.
 
-    ms-97 P2: the inbox-hook now requires this provenance before routing an
-    auto-execute event into a Level 3 imperative block, so the on-wire fixtures
-    must carry it (production cadence events always do — server/app.py mints
-    them via ``issue_t1_system_envelope``)."""
+    ms-97 P2: the inbox-hook requires this provenance before routing a ``trek-*``
+    auto-execute event into a Level 3 imperative block, so those on-wire fixtures
+    must carry it (production Trek cadence events do — server/app.py mints them
+    via ``issue_t1_system_envelope``).
+
+    ms-185 e-7078 — this docstring used to say "production cadence events always
+    do", and the ``operation-trigger`` fixture below defaulted to this shape on
+    that basis. Measured and false for Operations: ``_fire_operation`` attaches the
+    T2 envelope the human approved, never a T1-system one (whose issuer refuses to
+    mint without a ``trek_id``). Every real operation trigger was being downgraded
+    while these tests were green. Use ``_operation_envelope`` for that channel."""
     return {"tier": "T1-system", "issuer": "beacon-system", "scope": scope}
+
+
+def _operation_envelope(op_id: str) -> dict:
+    """The envelope ``_fire_operation`` actually attaches to an operation trigger.
+
+    Minted at ``beacon operation approve`` (``tier=T2``, ``issuer=`` the approving
+    user, ``scope=`` the op_id). The scope must name the Operation being fired, or
+    an approval for one Operation would authorize autonomy on another."""
+    return {"tier": "T2", "issuer": "someone@example.com", "scope": op_id}
 
 
 def _operation_trigger_event(eid: str = "ev-op-1", *, op_id="op-42",
@@ -116,7 +132,10 @@ def _operation_trigger_event(eid: str = "ev-op-1", *, op_id="op-42",
         },
         "created_at": "2026-06-09T01:00:00.000000Z",
     }
-    envelope = _t1_system_envelope() if envelope is _SENTINEL else envelope
+    # ms-185 e-7078: an operation trigger's proof is its own approved
+    # envelope, scoped to the op_id being fired.
+    envelope = (_operation_envelope(op_id)
+                if envelope is _SENTINEL else envelope)
     if envelope is not None:
         ev["envelope"] = envelope
     return ev

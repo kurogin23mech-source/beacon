@@ -6,8 +6,14 @@
 自動実行の判定 ``lib/bus_delivery.classify_auto_execute`` は 2 つを独立に見る:
 
   1. その channel をプロジェクトが明示的に opt-in したか (``bus_auto_execute_channels``)
-  2. その channel がサーバ発行で、届いた event に T1-system 署名が在るか
-     (``SYSTEM_PROVENANCE_CHANNELS`` + ``has_system_provenance``)
+  2. その channel が「人間が許可した証拠」を要求する側で、届いた event にその証拠が在るか
+     (``SYSTEM_PROVENANCE_CHANNELS`` + ``has_required_provenance``)
+
+     ms-185 e-7078 で、要求する証拠は channel ごとに違う形になった
+     (``PROVENANCE_REQUIREMENTS``)。operation-trigger が求めるのは「人間が
+     ``beacon operation approve`` で承認した封筒 (T2) が、いま発火する op_id を
+     名指している」こと。かつては Trek だけが発行できるサーバ署名を求めており、
+     Operation は一度もそれを満たせていなかった。
 
 2 の検査は **1 に入っている channel のうち、サーバ発行と宣言されたものだけ**に掛かる。これは
 意図的な設計で、「人間が opt-in した独自 channel は署名なしでも信頼する」(= opt-in そのものが
@@ -54,9 +60,13 @@ import bus_delivery as bd  # noqa: E402
 # 名前を消したときに期待値も一緒に消えてテストが素通りする (= 自分を検証できないガードに
 # なる)。族の名前は仕様であってコードの写しではないので、ここに固定して置く。
 #
-# 新しいサーバ発行 channel を増やしたら、ここにも足す (足し忘れると
-# test_every_known_server_minted_channel_is_classified が赤くなるので気付ける)。
-KNOWN_SERVER_MINTED_CHANNELS = frozenset({
+# 新しい gated channel を増やしたら、ここにも足す (足し忘れると
+# test_every_known_gated_channel_is_classified が赤くなるので気付ける)。
+# ms-185 e-7078: "server-minted" was renamed to "gated" in this comment because
+# operation-trigger is no longer gated on a SERVER signature — its proof is the
+# envelope a human approved. The family membership rule is unchanged: a gated name
+# must sit in exactly one of the two sets.
+KNOWN_GATED_CHANNELS = frozenset({
     "operation-trigger",
     "trek-trigger",
     "trek-progress-check",
@@ -66,16 +76,23 @@ KNOWN_SERVER_MINTED_CHANNELS = frozenset({
 
 _T1 = {"tier": "T1-system", "issuer": "beacon-system"}
 
+# ms-185 e-7078: the proof operation-trigger now demands — the T2 envelope a human
+# minted at ``beacon operation approve``, scoped to the op_id being fired.
+_OP = {"tier": "T2", "issuer": "someone@example.com", "scope": "op-3"}
+
 
 def _evt(channel: str, envelope=None) -> dict:
-    ev = {"channel": channel, "delivery": "auto-execute"}
+    # payload carries op_id so an operation-trigger event can satisfy its
+    # requirement (the approval must name the Operation being fired).
+    ev = {"channel": channel, "delivery": "auto-execute",
+          "payload": {"op_id": "op-3"}}
     if envelope is not None:
         ev["envelope"] = envelope
     return ev
 
 
 class TestClassificationCoverage:
-    def test_every_known_server_minted_channel_is_classified(self):
+    def test_every_known_gated_channel_is_classified(self):
         """族の各 channel が「現役」か「引退済み」のどちらかに居る。
 
         ``SYSTEM_PROVENANCE_CHANNELS`` から名前を消しただけ (= 引退先に足し忘れ) だと
@@ -83,9 +100,9 @@ class TestClassificationCoverage:
         唯一の機械的な歯止め。
         """
         classified = bd.SYSTEM_PROVENANCE_CHANNELS | bd.RETIRED_PROVENANCE_CHANNELS
-        unclassified = KNOWN_SERVER_MINTED_CHANNELS - classified
+        unclassified = KNOWN_GATED_CHANNELS - classified
         assert not unclassified, (
-            "サーバが発行する channel "
+            "gated channel "
             + ", ".join(sorted(unclassified))
             + " が、現役 (SYSTEM_PROVENANCE_CHANNELS) にも引退済み "
             "(RETIRED_PROVENANCE_CHANNELS) にも居ません。provenance から名前を消すなら "
@@ -175,9 +192,13 @@ class TestRetiredChannelIsDowngraded:
 class TestNothingElseChanged:
     """引退の判定を足したことで、既存の 3 つの経路が変わっていないことを見る。"""
 
-    def test_signed_live_provenance_channel_still_kept(self):
+    def test_authorized_live_provenance_channel_still_kept(self):
+        # ms-185 e-7078: the accepted proof is the human-approved Operation
+        # envelope, not the server-minted T1-system one (Trek was its only
+        # issuer). Asserting the T1-system shape here is what made this file
+        # green while production downgraded every operation trigger.
         assert bd.classify_auto_execute(
-            _evt("operation-trigger", envelope=_T1),
+            _evt("operation-trigger", envelope=_OP),
             allowlist=["operation-trigger"],
         ) == (bd.AUTO_EXECUTE, "", "")
 

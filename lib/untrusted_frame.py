@@ -93,7 +93,7 @@ def _is_kept_system_imperative(ev: dict) -> bool:
         return False
     if channel not in bd.SYSTEM_PROVENANCE_CHANNELS:
         return False
-    return bd.has_system_provenance(ev)
+    return bd.has_required_provenance(ev)
 
 
 def is_untrusted_event(ev: dict) -> bool:

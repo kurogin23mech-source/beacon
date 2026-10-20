@@ -481,7 +481,7 @@ _TREK_SCHEDULER_CHANNELS = {
 # Skill invoke with an attacker-controlled id is structurally impossible.
 # ms-160 e-5803: the T1-system provenance constants + gate AND the auto-execute
 # downgrade decision moved to lib/bus_delivery.py (SYSTEM_PROVENANCE_CHANNELS /
-# has_system_provenance / classify_auto_execute) so the Codex inbox hook shares
+# has_required_provenance / classify_auto_execute) so the Codex inbox hook shares
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
 # Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
