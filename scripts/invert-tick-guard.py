@@ -7,6 +7,12 @@
 赤くなることを確認する。全ケースで「壊したのに緑」が 0 件であることが、ガードが
 本物である根拠になる。
 
+ms-185 e-7066 で 2 つ足した: (a) source の登録簿 (Operation の発火 / 締切リマインド)
+を壊すケース群、(b) ``scripts/invert_harness.py`` の共有部品への載せ替え
+(= バイトコードキャッシュの隔離と、実行後にベースラインが緑へ戻ることの実測)。
+このハーネスは元々その 2 つを持っておらず、**ハーネス自身が偽の結果を作りうる**
+形だった (経緯は invert_harness.py の docstring)。
+
 使い方: python3 scripts/invert-tick-guard.py
 終了コード: 全ケースで期待どおり赤くなれば 0、1 件でも「壊したのに緑」なら 1。
 ``server/app.py`` は毎ケース必ず元に戻す (finally)。
@@ -15,13 +21,17 @@ from __future__ import annotations
 
 import pathlib
 import re
-import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import invert_harness as ih  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP = ROOT / "server" / "app.py"
 AST_TEST = "tests/test_tick_now_iso_binding.py"
 WIRE_TEST = "tests/test_system_tick_entrypoint_e7065.py"
+SOURCE_TEST = "tests/test_scheduled_source_registry_e7066.py"
+BASELINE = [AST_TEST, WIRE_TEST, SOURCE_TEST]
 
 
 def mutate_now_iso_into_branch(src: str) -> str:
@@ -107,6 +117,87 @@ def mutate_drop_scheduled_fires_from_response(src: str) -> str:
     return src.replace(anchor, "", 1)
 
 
+# --- ms-185 e-7066: 相乗りしている source の観測 -----------------------------
+
+def mutate_drop_deadline_source(src: str) -> str:
+    """締切リマインドを登録簿から外す (= Operation だけ回って緑に見える形)。
+
+    **これが e-7066 の本丸。** 相乗りは 2 つあるので、片方を落としても tick は
+    毎分走り続け、liveness だけ見ていると緑のまま。"""
+    anchor = '    ("deadline", _fire_due_deadlines),\n'
+    assert anchor in src, "anchor not found (mutate_drop_deadline_source)"
+    return src.replace(anchor, "", 1)
+
+
+# ``list(SCHEDULED_SOURCE_NAMES)`` を出す場所は 3 つある (直近 tick の記録 /
+# tick の応答 / tick-health の endpoint)。**3 つとも別々に壊して測る** —
+# 1 箇所だけ壊して緑なら「他の 2 箇所は誰も見ていない」ということなので、
+# まとめて 1 ケースにすると、どの面が無防備かが隠れる。
+# (実際このハーネスが、最初に書いた 1 ケース版は応答ではなく記録の側を壊して
+#  いて、テストは素通りしていた = 偽の緑を作りかけていた。)
+_LITERAL = '["operation", "deadline"],  # MUTANT'
+
+
+def _literalize(src: str, preceding: str, what: str) -> str:
+    """``preceding`` の直後に来る ``scheduled_sources`` だけを literal に変える。"""
+    i = src.index(preceding) if preceding in src else -1
+    assert i >= 0, f"anchor not found ({what}: preceding)"
+    target = '"scheduled_sources": list(SCHEDULED_SOURCE_NAMES),'
+    j = src.find(target, i)
+    assert j >= 0, f"anchor not found ({what}: target)"
+    return src[:j] + f'"scheduled_sources": {_LITERAL}' + src[j + len(target):]
+
+
+def mutate_literal_in_last_tick_report(src: str) -> str:
+    """直近 tick の記録の source 一覧を手書き literal にする。"""
+    return _literalize(src, '"scheduled_fires": len(scheduled_fires)',
+                       "mutate_literal_in_last_tick_report")
+
+
+def mutate_literal_in_tick_response(src: str) -> str:
+    """tick の応答の source 一覧を手書き literal にする。
+
+    実体 (回す対象) と報告が別の出所になると、source を落としても報告だけ
+    「両方回っています」と言い続けられる = 嘘がつける形。"""
+    return _literalize(src, "# ms-185 e-7066 — どの source を回したか",
+                       "mutate_literal_in_tick_response")
+
+
+def mutate_literal_in_tick_health(src: str) -> str:
+    """tick-health endpoint の source 一覧を手書き literal にする。"""
+    return _literalize(src, '"last_tick_report": _last_tick_report,',
+                       "mutate_literal_in_tick_health")
+
+
+def mutate_drop_source_stamp(src: str) -> str:
+    """report entry への出所の刻印をやめる (= 合計に潰れて内訳が読めない)。"""
+    anchor = '                _entry.setdefault("source", _source_name)'
+    assert anchor in src, "anchor not found (mutate_drop_source_stamp)"
+    return src.replace(anchor, "                pass  # MUTANT", 1)
+
+
+def mutate_tick_health_hides_sources(src: str) -> str:
+    """/api/system/tick-health から scheduled_sources を落とす。
+
+    箱の外の watchdog はこの endpoint しか読めないので、ここが消えると
+    source の欠落は本番で誰にも気付かれない。"""
+    anchor = '        "scheduled_sources": list(SCHEDULED_SOURCE_NAMES),\n    }'
+    assert anchor in src, "anchor not found (mutate_tick_health_hides_sources)"
+    return src.replace(anchor, "    }", 1)
+
+
+def mutate_call_deadline_outside_registry(src: str) -> str:
+    """登録簿を回しつつ、締切リマインドだけ直呼びも残す (= 二重の出所)。
+
+    「登録簿から消しても動き続ける」形。報告と実体が静かにズレる。"""
+    anchor = "        if changed:\n            try:\n                db.save_project(pid, project)"
+    assert anchor in src, "anchor not found (mutate_call_deadline_outside_registry)"
+    return src.replace(
+        anchor,
+        "        _fire_due_deadlines(pid, project, now_iso, report)  # MUTANT\n"
+        + anchor, 1)
+
+
 CASES = [
     ("now_iso を条件分岐の中へ (ms-66 の穴)", mutate_now_iso_into_branch,
      "test_now_iso_bound_unconditionally_before_fire_due_scheduled"),
@@ -131,46 +222,68 @@ CASES = [
      WIRE_TEST + "::test_tick_health_sees_a_tick_from_the_new_entrypoint"),
     ("応答から scheduled_fires を落とす", mutate_drop_scheduled_fires_from_response,
      WIRE_TEST + "::test_new_trek_neutral_entrypoint_runs_a_tick"),
+    # --- source の観測 (tests/test_scheduled_source_registry_e7066.py) ---
+    ("締切リマインドを登録簿から外す", mutate_drop_deadline_source,
+     SOURCE_TEST + "::test_one_tick_fires_both_sources_and_reports_them_separately"),
+    ("締切リマインドを外す (watchdog の期待値との突合)", mutate_drop_deadline_source,
+     SOURCE_TEST + "::test_watchdog_required_sources_are_all_actually_driven"),
+    ("source 一覧を literal 化 (tick の応答)", mutate_literal_in_tick_response,
+     SOURCE_TEST + "::test_dropping_one_source_is_visible_in_the_report"),
+    ("source 一覧を literal 化 (直近 tick の記録)", mutate_literal_in_last_tick_report,
+     SOURCE_TEST + "::test_dropping_one_source_is_visible_in_the_report"),
+    ("source 一覧を literal 化 (tick-health endpoint)", mutate_literal_in_tick_health,
+     SOURCE_TEST + "::test_dropping_one_source_is_visible_in_the_report"),
+    ("report entry の出所の刻印をやめる", mutate_drop_source_stamp,
+     SOURCE_TEST + "::test_one_tick_fires_both_sources_and_reports_them_separately"),
+    ("tick-health から source 一覧を隠す", mutate_tick_health_hides_sources,
+     SOURCE_TEST + "::test_tick_health_exposes_the_driven_sources"),
+    ("登録簿の外から締切リマインドを直呼びする", mutate_call_deadline_outside_registry,
+     SOURCE_TEST + "::test_scheduled_sources_are_driven_only_through_the_registry"),
 ]
 
 
-def run_one(test_name: str) -> tuple[bool, str]:
-    """(赤くなったか, 出力の末尾)"""
+# pytest が「テストを集められなかった」ときの印。変異が構文を壊すと**どの**
+# テストも赤くなるので、赤いこと自体はガードが効いた証拠にならない。これを
+# 成功として数えると、壊し方が下手なだけのケースが「守られている」に化ける
+# (= 偽の安全をハーネスが作る)。実際この 3 ケースで一度踏んだ: literal 化の
+# 置換が末尾のカンマをコメントに飲ませて SyntaxError を作り、2 件が OK に
+# 見えていた。
+_COLLECTION_FAILURE_MARKS = ("found no collectors", "SyntaxError",
+                             "errors in", "error in")
+
+
+def run_one(test_name: str) -> tuple:
+    """(ガードが捕まえたか, 出力の末尾)。収集エラーは「捕まえた」に数えない。"""
     target = test_name if "::" in test_name and test_name.startswith("tests/") \
         else f"{AST_TEST}::{test_name}"
-    r = subprocess.run(
-        [sys.executable, "-m", "pytest", target, "-q",
-         "--no-header", "-p", "no:cacheprovider"],
-        cwd=ROOT, capture_output=True, text=True)
-    out = (r.stdout + r.stderr).strip().split("\n")[-1]
-    return (r.returncode != 0, out)
+    went_red, tail, r = ih.run_pytest(target, ROOT)
+    combined = r.stdout + r.stderr
+    if any(mark in combined for mark in _COLLECTION_FAILURE_MARKS):
+        return (False, "INVALID (テストを収集できていない — 変異が構文を壊した"
+                       f"か、対象名が違う): {tail}")
+    return (went_red, tail)
 
 
 def main() -> int:
-    original = APP.read_text(encoding="utf-8")
+    originals = {APP: APP.read_text(encoding="utf-8")}
     # まず壊していない状態で全件緑を確認 (= ベースライン)
-    base = subprocess.run(
-        [sys.executable, "-m", "pytest", AST_TEST, WIRE_TEST, "-q", "--no-header",
-         "-p", "no:cacheprovider"],
-        cwd=ROOT, capture_output=True, text=True)
-    if base.returncode != 0:
-        print("BASELINE RED — 壊す前からガードが落ちている。先にそれを直すこと。")
-        print((base.stdout + base.stderr)[-2000:])
+    if not ih.check_baseline(BASELINE, ROOT):
         return 1
-    print(f"baseline: {(base.stdout).strip().splitlines()[-1]}\n")
 
     bad = 0
     for label, mutate, test_name in CASES:
         try:
-            APP.write_text(mutate(original), encoding="utf-8")
+            APP.write_text(mutate(originals[APP]), encoding="utf-8")
+            ih.invalidate_bytecode_cache(APP, ROOT)
             went_red, tail = run_one(test_name)
         except AssertionError as exc:
+            ih.restore(originals, ROOT)
             print(f"  SKIP  {label}: 当てる場所が見つからない ({exc}) "
                   f"— SKIP は緑と同じ害なので、壊し方を実装に合わせて直すこと")
             bad += 1
             continue
         finally:
-            APP.write_text(original, encoding="utf-8")
+            ih.restore(originals, ROOT)
         mark = "  OK  " if went_red else " MISS "
         if not went_red:
             bad += 1
@@ -181,6 +294,10 @@ def main() -> int:
         print(f"NG: {bad} 件が「壊したのに赤くならない」か SKIP。"
               f"偽の安全なので直すこと。")
         return 1
+    # ハーネスが環境を汚したまま終わらないことを最後に実測する。
+    if not ih.check_not_polluted(BASELINE, ROOT):
+        return 1
+    print()
     print(f"OK: {len(CASES)} 件すべて、守る対象を壊すと赤くなった。")
     return 0
 

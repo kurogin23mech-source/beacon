@@ -16,13 +16,12 @@
 """
 from __future__ import annotations
 
-import os
 import pathlib
-import shutil
 import subprocess
 import sys
-import tempfile
-import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import invert_harness as ih  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BD = ROOT / "lib" / "bus_delivery.py"
@@ -32,24 +31,20 @@ GUARD_TEST = "tests/test_retired_provenance_channels_e7077.py"
 PINNED_TEST = "tests/test_bus_delivery.py"
 CONSUMER_TEST = "tests/test_codex_retired_channel_notice_e7077.py"
 
-# この実行専用のバイトコードキャッシュ置き場。
-#
-# **なぜ要るか (2026-10-19 実測)**: macOS 同梱の Python は
-# ``~/Library/Caches/com.apple.python/<ソースの絶対パス>`` に ``.pyc`` を書く。
-# このハーネスは同じパスのファイルを変異させては戻すので、**変異版の ``.pyc`` が
-# 共有キャッシュに残り、ハーネス実行後の通常のテストがソースと食い違う結果を返す**。
-# 実測ではハーネス後に単体テストが 2 件、偽の赤になった。向きが逆なら**偽の緑**にも
-# なる = ハーネス自身が「偽の安全」を作る。キャッシュを後から消す形は、subprocess が
-# 書く時刻とこちらが消す時刻が競合して取りこぼす。**書かせる場所を毎回変える**方が確実。
-_RUN_CACHE_DIR = pathlib.Path(tempfile.mkdtemp(prefix="invert-pycache-"))
-
-
+# バイトコードキャッシュの隔離と、実行後にベースラインが緑へ戻ることの実測は
+# ``scripts/invert_harness.py`` が持つ (なぜその形かの経緯もそこに在る)。
+# e-7066 以前はこのファイルと invert-tick-guard.py に別々の実装が並んでおり、
+# 片方 (tick 側) だけが穴を持ったままだった — 写すのではなく 1 箇所にした理由。
 def _isolated_env() -> dict:
-    """バイトコードキャッシュを隔離した環境変数 (上の ``_RUN_CACHE_DIR`` 参照)。"""
-    env = dict(os.environ)
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONPYCACHEPREFIX"] = str(_RUN_CACHE_DIR)
-    return env
+    return ih.isolated_env()
+
+
+def _invalidate_bytecode_cache(path: pathlib.Path) -> None:
+    ih.invalidate_bytecode_cache(path, ROOT)
+
+
+def _restore(originals: dict) -> None:
+    ih.restore(originals, ROOT)
 
 
 # --- lib/bus_delivery.py への壊し方 -----------------------------------------
@@ -234,49 +229,6 @@ CASES = [
      claude_swaps_retired_and_provenance_advice,
      CONSUMER_TEST + "::TestClaudeHookRendersPerReasonAdvice"),
 ]
-
-
-def _invalidate_bytecode_cache(path: pathlib.Path) -> None:
-    """``path`` のバイトコードキャッシュを無効化する。
-
-    **なぜ必要か (2026-10-19 に実測)**: このハーネスは対象ファイルを書き換えて
-    pytest を走らせる。Apple の Python は ``~/Library/Caches/com.apple.python/``
-    配下に、ソースの**絶対パスをそのまま掘った**場所へ ``.pyc`` を書く。復元して
-    内容を元に戻しても、**変異版の ``.pyc`` が再利用されることがある** — 実測では
-    ハーネス実行後に単体テストが 2 件落ちた (ソースは正しいのに、入れ替えた
-    案内文が返ってきた)。これは単なるフレークより悪い: **偽の赤**を作り、
-    変異の向きによっては**偽の緑**も作れる。``python3 -B`` は書き込みを止めるだけで
-    読み込みは止めないので対策にならない。
-
-    2 重に無効化する: (1) キャッシュの実体を ``.trash/`` へ退避する
-    (このプロジェクトは ``rm`` 禁止なので消さずに移す)、(2) ソースの更新時刻を
-    先に進めてキャッシュ鍵を確実に変える。
-    """
-    # (1) Apple のキャッシュ実体を退避
-    cache_root = pathlib.Path.home() / "Library" / "Caches" / "com.apple.python"
-    if cache_root.is_dir():
-        # キャッシュは絶対パスをそのまま掘った場所に置かれる
-        mirrored = cache_root / str(path.resolve()).lstrip("/")
-        for cached in mirrored.parent.glob(mirrored.stem + ".*.pyc"):
-            trash = ROOT / ".trash" / "pycache-invert-harness"
-            trash.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.move(str(cached), str(trash / cached.name))
-            except OSError:
-                pass
-    # (2) 更新時刻を先に進めてキャッシュ鍵を変える
-    try:
-        future = time.time() + 2
-        os.utime(path, (future, future))
-    except OSError:
-        pass
-
-
-def _restore(originals: dict) -> None:
-    """全対象ファイルを元に戻し、バイトコードキャッシュも無効化する。"""
-    for p, text in originals.items():
-        p.write_text(text, encoding="utf-8")
-        _invalidate_bytecode_cache(p)
 
 
 def run(target: str) -> tuple:
