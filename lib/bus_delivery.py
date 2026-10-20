@@ -37,6 +37,30 @@ OPERATION_TRIGGER_CHANNEL = "operation-trigger"
 # Channels whose auto-execute events are routed into a Level 3 imperative block.
 # An auto-execute event here is only honored when it also carries a server-minted
 # T1-system envelope (see has_system_provenance); otherwise it is downgraded.
+#
+# ms-185 e-7078 — **この集合を「満たせる発行者が居ないから無意味」と読んではいけない。**
+# 2026-10-20 に実測した事実:
+#
+#   * 本番で発火する Operation (``operation-trigger``) が運ぶのは、人間が
+#     ``beacon operation approve`` で発行した **T2** の署名である
+#     (server/routers_projects.py ``operation_approve`` → ``TIER_T2``)。
+#   * T2 は T1-system ではないので、この集合に ``operation-trigger`` が在る限り
+#     発火イベントは必ず降格される:
+#     ``classify_auto_execute`` → ``("propose-to-ai", "auto-execute",
+#     "non-system-envelope")``。
+#   * ``operation-trigger`` をこの集合から外すと、**同じイベントが署名なしのまま
+#     自動実行として通る** (実測: ``("auto-execute", "", "")``)。
+#
+# つまりこの集合の役目は「発行者を要求すること」ではなく **ゲートそのもの** —
+# 許可リストに入れただけでは自動実行させない、という一段である。Trek を畳むと
+# T1-system の発行者 (= 現状 10 箇所すべて Trek 経路) は 0 になるが、**ゲートは
+# 発行者が居なくても働く** (= 常に降格側に倒れる)。これは動かない判定ではなく、
+# 危険側に倒れないための現役の判定である。
+#
+# **将来 Operation を本当に無確認で自律実行させるなら**、Operation 側が発火時に
+# T1-system を発行する必要がある (= 人間が approve 時に承認した内容を、サーバが
+# 発火時に再証明する形)。そのとき初めて発行者が生まれる。その判断は本番の自律の
+# 姿勢を変えるので、人間が決める (ms-185 e-7078 の判断記録を参照)。
 SYSTEM_PROVENANCE_CHANNELS = frozenset({
     "operation-trigger",
     "trek-trigger",

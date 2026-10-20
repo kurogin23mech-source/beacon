@@ -715,6 +715,24 @@ def issue_t1_system_envelope(
         (= strict, no wildcards) — high-risk actions (deploy / etc.)
         are rejected by the verify pipeline regardless.
 
+    ms-185 e-7078 — **この発行関数と、受信側のゲートは別物として扱う。**
+    Trek を畳むと、この関数の呼び出し元 10 箇所 (= すべて Trek 経路) は無くなり、
+    **T1-system を発行する者が 0 になる**。それでも T1-system の層は残す。理由は
+    受信側のゲートが発行者の有無と無関係に働くからで、実測した事実はこう:
+
+      * 本番で発火する Operation が運ぶのは人間が approve した **T2** の署名。
+      * ``operation-trigger`` は ``bus_delivery.SYSTEM_PROVENANCE_CHANNELS`` に
+        在るので、T2 では足りず発火イベントは ``propose-to-ai`` に降格される。
+      * ゲート側 (= この tier を要求する判定) を消すと、**同じイベントが署名なしで
+        自動実行として通る**。つまり層を消すのは緩める方向。
+
+    **将来この関数の発行者になりうるのは Operation である** (= 人間が approve 時に
+    承認した内容を、サーバが発火時に再証明する形)。それをやると Operation が本当に
+    無確認で自律実行するようになるので、本番の自律の姿勢を変える判断であり、人間が
+    決める。やる場合は ``trek_id`` 引数をスコープの一般形 (= 何の権限で発行したかを
+    表す文字列) に置き換える必要がある — 今の形は ``scope="trek:<id>"`` を強制して
+    おり、Trek 以外の発行者を受け付けない。
+
     Returns a signed envelope dict ready to attach to a bus event.
     """
     if not trek_id:
