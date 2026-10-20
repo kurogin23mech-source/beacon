@@ -5,10 +5,11 @@ Description=Run Beacon periodic scheduler tick every minute
 
 [Timer]
 # 起動 1 分後から動き出し、以降 1 分間隔で tick endpoint を叩く。
-# tick endpoint は due な Trek/Operation のみ発火するので、cadence (Trek 既定
-# 10 分 / Operation 個別) より細かく叩いても空振りが安いだけで害はない。1 分
-# 粒度にすることで Operation の hourly watch や Trek idle escalation が時刻に
-# 対して遅れず発火する。
+# tick endpoint は due なものだけ発火するので、各 source の cadence
+# (Operation は個別設定 / 締切リマインドは日付単位) より細かく叩いても空振りが
+# 安いだけで害はない。1 分粒度にすることで Operation の hourly watch が時刻に
+# 対して遅れず発火する (ms-185 e-7066: 間隔の根拠を Trek の cadence から
+# source 側の cadence に付け替えた)。
 OnBootSec=1min
 OnUnitActiveSec=1min
 # 複数 VPS を並べても負荷が偏らないよう軽く散らす (単一構成では影響なし)。
