@@ -45,7 +45,7 @@ CMD = _load_check_map_drift()
 def test_enumerate_cli_includes_known_leaves():
     cli = CMD.enumerate_cli()
     assert "task_done" in cli
-    assert "trek_create" in cli
+    assert "claim_view" in cli
     # shell-handled top-level commands are included (not in dispatch dict)
     assert "status" in cli
     # internal-only keys are excluded
@@ -90,7 +90,7 @@ def test_bare_command_in_prose_is_not_a_wedge():
 def small_surface(monkeypatch):
     """Isolate reconcile()'s matching logic from Beacon's real surface."""
     monkeypatch.setattr(CMD, "enumerate_cli",
-                        lambda: {"task_add", "task_done", "trek_create"})
+                        lambda: {"task_add", "task_done", "claim_view"})
     monkeypatch.setattr(CMD, "enumerate_api",
                         lambda: {"GET /api/x", "POST /api/x/y"})
     monkeypatch.setattr(CMD, "enumerate_skills", lambda: {"/beacon-map"})
@@ -98,7 +98,7 @@ def small_surface(monkeypatch):
 
 def test_reconcile_clean_map_has_no_drift(small_surface):
     text = (
-        "- t `cli:beacon task *` `cli:beacon trek create` "
+        "- t `cli:beacon task *` `cli:beacon claim view` "
         "`api:* /api/x` `skill:/beacon-map`\n"
     )
     res = CMD.reconcile(text)
@@ -107,15 +107,15 @@ def test_reconcile_clean_map_has_no_drift(small_surface):
 
 
 def test_reconcile_detects_missing_cli(small_surface):
-    # covers task_* but not trek_create → trek_create is 書き漏れ
+    # covers task_* but not claim_view → claim_view is 書き漏れ
     text = "- t `cli:beacon task *` `api:* /api/x` `skill:/beacon-map`\n"
     res = CMD.reconcile(text)
-    assert "trek_create" in res["missing"]["cli"]
+    assert "claim_view" in res["missing"]["cli"]
     assert res["counts"]["missing"] == 1
 
 
 def test_reconcile_detects_phantom_cli_family(small_surface):
-    text = ("- t `cli:beacon task *` `cli:beacon trek create` `cli:beacon ghost *` "
+    text = ("- t `cli:beacon task *` `cli:beacon claim view` `cli:beacon ghost *` "
             "`api:* /api/x` `skill:/beacon-map`\n")
     res = CMD.reconcile(text)
     assert any("ghost" in p for p in res["phantom"]["cli_family"])
@@ -123,14 +123,14 @@ def test_reconcile_detects_phantom_cli_family(small_surface):
 
 def test_reconcile_api_family_prefix_covers_subpaths(small_surface):
     # `api:* /api/x` must cover both GET /api/x and POST /api/x/y
-    text = ("- t `cli:beacon task *` `cli:beacon trek create` "
+    text = ("- t `cli:beacon task *` `cli:beacon claim view` "
             "`api:* /api/x` `skill:/beacon-map`\n")
     res = CMD.reconcile(text)
     assert res["missing"]["api"] == []
 
 
 def test_reconcile_detects_phantom_api_and_skill(small_surface):
-    text = ("- t `cli:beacon task *` `cli:beacon trek create` `api:* /api/x` "
+    text = ("- t `cli:beacon task *` `cli:beacon claim view` `api:* /api/x` "
             "`api:GET /api/nope` `skill:/beacon-map` `skill:/beacon-ghost`\n")
     res = CMD.reconcile(text)
     assert "GET /api/nope" in res["phantom"]["api_exact"]
@@ -139,7 +139,7 @@ def test_reconcile_detects_phantom_api_and_skill(small_surface):
 
 def test_reconcile_file_wedge_existence(small_surface, tmp_path):
     # existing repo file → ok; nonexistent → phantom
-    text = ("- t `cli:beacon task *` `cli:beacon trek create` `api:* /api/x` "
+    text = ("- t `cli:beacon task *` `cli:beacon claim view` `api:* /api/x` "
             "`skill:/beacon-map` `file:scripts/check-map-drift.py` "
             "`file:scripts/does-not-exist-xyz.py`\n")
     res = CMD.reconcile(text)
