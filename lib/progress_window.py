@@ -43,6 +43,8 @@ say "N records could not be judged" instead of implying they did not happen
 
 from __future__ import annotations
 
+import json
+
 from typing import Optional
 
 import date_window as _dw
@@ -183,21 +185,49 @@ def _target_rows(project: dict) -> list:
     return rows
 
 
+#: Fields of a SHIPPING record that are never attribution, whatever they hold.
+#:
+#: Attribution is found by value (see :func:`_target_ids_in`), which is what
+#: keeps it occupation-generic. But value-matching alone is not a guarantee —
+#: an independent review constructed a push whose git author name happened to
+#: be ``ms-7`` and watched it get attributed to that milestone (PR#810). The
+#: first docstring here claimed sibling fields "simply do not resolve"; that
+#: was a coincidence about id shapes, asserted as a property.
+#:
+#: These names are fields of the project-level shipping records themselves
+#: (author, hashes, branch, free text, version) — NOT profession concretes, so
+#: excluding them by name introduces no occupation coupling. The residual risk
+#: is stated honestly in :func:`_target_ids_in`: a field not on this list whose
+#: value collides with a Target id still resolves.
+NON_ATTRIBUTION_FIELDS = frozenset({
+    "pushed_by", "from_hash", "to_hash", "branch", "git_hash",
+    "commit_hashes", "commits", "description", "summary", "semver",
+    "environment", "type", "id", "linked_release", "unassigned_commits",
+})
+
+
 def _target_ids_in(record: dict, known_targets) -> list:
-    """Target ids this record carries, in any field, at any shallow depth.
+    """Target ids this record carries, in any field not excluded by name.
 
-    Finds attribution by VALUE, not by field name. A deploy happens to use
-    ``milestones`` today, but that field name is dev-era schema; naming it here
-    would mean a sales project's shipping record could never be attributed, and
-    this module's own coupling guard rightly rejects the literal. Matching
-    against the project's real Target ids needs no field name and works for
-    every class.
+    Finds attribution by VALUE, not by a positive list of field names. A deploy
+    happens to use ``milestones`` today, but that field name is dev-era schema;
+    naming it here would mean a sales project's shipping record could never be
+    attributed, and this module's own coupling guard rightly rejects the
+    literal. Matching against the project's real Target ids needs no field name
+    and works for every class.
 
-    Only values that are actual Target ids match, so sibling fields carrying
-    commit hashes or release ids simply do not resolve.
+    **The residual risk, stated plainly**: this is not a structural guarantee.
+    Fields known never to carry attribution are excluded by name
+    (``NON_ATTRIBUTION_FIELDS``), which covers the shipping records' own author
+    / hash / free-text / version fields. A field OUTSIDE that set whose value
+    happens to equal a Target id will still be read as attribution. That is a
+    coincidence about id shapes, not something this function prevents — so if
+    the Target id scheme ever becomes short or human-word-like, revisit this.
     """
     found = []
-    for value in (record or {}).values():
+    for field, value in (record or {}).items():
+        if field in NON_ATTRIBUTION_FIELDS:
+            continue
         if isinstance(value, str):
             if value in known_targets:
                 found.append(value)
@@ -255,12 +285,19 @@ def _walk_shipping(project: dict, from_date: str, to_date: str,
                 continue
             rid = rec.get("id") or ""
             # ``deployments`` / ``deploys`` are two spellings of one collection;
-            # a project that carries both must not count a record twice.
-            dedup = (spec["kind"], rid)
-            if rid and dedup in seen:
+            # a project carrying both must not count a record twice. Keying the
+            # de-dup on the id ALONE silently gave up on records that have no
+            # id — legacy data does — and an independent review reproduced the
+            # double count with exactly that shape (PR#810). The fallback key
+            # is the record's own content, so an id-less record de-dups too.
+            dedup = (spec["kind"], rid) if rid else (
+                spec["kind"], tuple(sorted(
+                    (k, json.dumps(v, ensure_ascii=False, sort_keys=True)
+                     if isinstance(v, (list, dict)) else v)
+                    for k, v in rec.items())))
+            if dedup in seen:
                 continue
-            if rid:
-                seen.add(dedup)
+            seen.add(dedup)
 
             stamps = _dw.stamps_of(rec, spec["stamps"])
             verdict = _dw.classify_any(stamps, from_date, to_date)
@@ -464,7 +501,13 @@ def derive(
         "moved": bool(targets) or bool(unattributed),
         "targets": targets,
         "target_count": len(targets),
+        # 期間内と**判定できた**証跡の総数 = 対象に紐づいた分 + 対象不明の出荷。
+        # ``undated`` は含めない — あれは「期間で判定できなかった」ものなので、
+        # 証跡として数えると「判定できた量」が嘘になる。この非対称は意図的で、
+        # 名前から読めないという指摘 (AX review PR#810) に対し、分けて数えられる
+        # ように attributed_evidence_count を併記する。
         "evidence_count": evidence_total + len(unattributed),
+        "attributed_evidence_count": evidence_total,
         "last_evidence_at": last_at,
         # Shipping records that named no reachable Target. Neither dropped nor
         # assigned to an arbitrary Target — the project moved, and WHICH target

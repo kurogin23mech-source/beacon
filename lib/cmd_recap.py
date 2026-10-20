@@ -295,8 +295,18 @@ def _print_targets(result: dict) -> None:
     w = result["window"]
     header = f"{w['from']}..{w['to']} [{w.get('spec', '')}] — {result['project_name']}"
     print(header)
-    if not result["targets"]:
+    # 分岐は moved を見る (targets ではない)。`moved` は「対象が動いた or
+    # プロジェクト直下の記録が付いた」なので、出荷だけの日は対象ゼロでも動いて
+    # いる。targets で分岐していたせいで、2 行目が「進んだ対象はありません」と
+    # 断定した直後に下の行が「プロジェクトは動いています」と訂正する、同一出力
+    # 内で矛盾する形になっていた (AX review PR#810 high)。先頭の断定行だけ読む
+    # 読み手には「何もなかった」と読め、この task が直した誤答が表示にだけ再発
+    # していた。
+    if not result.get("moved"):
         print("  この期間に進んだ対象はありません。")
+    elif not result["targets"]:
+        print(f"  対象別に進んだものはありませんが、出荷の証跡が "
+              f"{result['evidence_count']} 件あります")
     else:
         print(f"  進んだ対象 {result['target_count']} 件 / "
               f"証跡 {result['evidence_count']} 件")

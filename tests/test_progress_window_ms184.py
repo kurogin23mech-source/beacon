@@ -488,6 +488,75 @@ def test_the_two_deploy_collection_spellings_are_not_counted_twice():
     assert result["unattributed"]["by_kind"]["deploy"] == 1
 
 
+def test_a_colliding_unrelated_field_is_not_read_as_attribution():
+    """A field that is not attribution must not become one by coincidence.
+
+    Attribution is found by VALUE, which is what keeps it occupation-generic —
+    but value-matching is not a guarantee. An independent review built a push
+    whose git author name happened to be a real Target id and watched it get
+    attributed there (PR#810); the docstring had claimed sibling fields "simply
+    do not resolve", which was a coincidence about id shapes asserted as a
+    property. Fields known never to carry attribution are now excluded by name,
+    and the residual risk is stated rather than claimed away.
+    """
+    project = {
+        "project_id": "p", "name": "P",
+        "milestones": [{"id": "ms-7", "title": "m", "status": "todo",
+                        "created_at": "2026-01-01T00:00:00Z", "entries": []}],
+        "pushes": [{"id": "push-1", "summary": "ms-7",   # free text, not attribution
+                    "pushed_by": "ms-7",                 # author name collision
+                    "branch": "ms-7",
+                    "pushed_at": "2026-10-14T09:00:00Z"}],
+    }
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1],
+                       evidence_limit=0)
+    assert result["target_count"] == 0, \
+        "an author name / branch / free text equal to a Target id is not attribution"
+    assert result["unattributed"]["count"] == 1, \
+        "it is still a shipping record, so it belongs in unattributed"
+    assert result["moved"] is True
+
+
+def test_id_less_records_are_not_counted_twice_across_spellings():
+    """De-dup must not give up on records with no id.
+
+    Keying it on the id alone silently skipped id-less records — legacy data
+    has them — and an independent review reproduced the double count with
+    exactly that shape (PR#810). The test that claimed "the two spellings are
+    not counted twice" only covered the id-populated case, so it was a guard
+    whose name promised more than it checked.
+    """
+    dep = {"description": "shipped", "milestones": ["ms-7"],
+           "date": "2026-10-14T11:00:00Z"}            # no "id"
+    project = {
+        "project_id": "p", "name": "P",
+        "milestones": [{"id": "ms-7", "title": "m", "status": "todo",
+                        "created_at": "2026-01-01T00:00:00Z", "entries": []}],
+        "deployments": [dict(dep)], "deploys": [dict(dep)],
+    }
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1],
+                       evidence_limit=0)
+    ms7 = next(t for t in result["targets"] if t["target_id"] == "ms-7")
+    assert ms7["evidence_by_kind"]["deploy"] == 1, \
+        "the same id-less deploy under both spellings is one deploy"
+
+
+def test_evidence_count_says_which_things_it_counts():
+    """``evidence_count`` = judged-in-window evidence, attributed or not.
+
+    It deliberately excludes ``undated`` (those could not be judged, so
+    counting them would make "how much was judged" untrue). An AX review noted
+    the asymmetry is not readable from the name, so the attributed half is now
+    reported separately.
+    """
+    project = _shipping_project()
+    result = pw.derive(project, from_date=YESTERDAY[0], to_date=YESTERDAY[1],
+                       evidence_limit=0)
+    attributed = sum(t["evidence_count"] for t in result["targets"])
+    assert result["attributed_evidence_count"] == attributed
+    assert result["evidence_count"] == attributed + result["unattributed"]["count"]
+
+
 def test_a_project_that_moved_only_by_shipping_is_listed_in_the_fold():
     """受入条件 1 at the cross-project altitude.
 

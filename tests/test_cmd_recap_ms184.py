@@ -444,6 +444,80 @@ def test_document_read_failure_is_not_reported_as_zero(monkeypatch):
 # The caveats must survive into the rendered text, not only the JSON
 # ---------------------------------------------------------------------------
 
+def _shipping_only_project():
+    """A project whose only in-window activity is an unattributable deploy."""
+    return {
+        "project_id": "p", "name": "P",
+        "milestones": [{"id": "ms-1", "title": "m", "status": "todo",
+                        "created_at": "2026-01-01T00:00:00Z", "entries": []}],
+        "deployments": [{"id": "deploy-9", "description": "本番に出した",
+                         "milestones": [],
+                         "date": _YESTERDAY_FROM + "T12:00:00Z"}],
+    }
+
+
+def test_text_output_does_not_contradict_itself_on_a_shipping_only_day(
+        monkeypatch, capsys):
+    """The printed text must not say "nothing progressed" and then correct it.
+
+    The branch keyed off ``targets`` while ``moved`` had been widened to
+    "targets OR unattributed shipping", so a day whose whole story was a
+    deploy printed 「この期間に進んだ対象はありません。」 on line 2 and
+    「プロジェクトは動いています」 three lines later — one output, two answers
+    (AX review PR#810). A reader who trusts the leading assertion and stops
+    gets exactly the wrong answer this milestone exists to remove.
+    """
+    monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: False)
+    monkeypatch.setattr(cmd_recap, "load_project", _shipping_only_project)
+    _stub_store(monkeypatch)
+    monkeypatch.setenv("BEACON_SINCE", "yesterday")
+    cmd_recap.cmd_recap_targets()
+    out = capsys.readouterr().out
+
+    assert "進んだ対象はありません" not in out, \
+        "a day that shipped must not be announced as nothing having progressed"
+    assert "出荷の証跡" in out, "it must say what DID happen"
+    assert "対象が特定できていない出荷" in out, \
+        "the unattributed rows themselves must be listed"
+    assert "deploy-9" in out
+
+
+def test_text_output_still_says_nothing_when_nothing_happened(
+        monkeypatch, capsys):
+    """The mirror case: widening ``moved`` must not make every day look busy."""
+    monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: False)
+    monkeypatch.setattr(cmd_recap, "load_project", _shipping_only_project)
+    _stub_store(monkeypatch)
+    monkeypatch.setenv("BEACON_FROM", "2020-01-01")
+    monkeypatch.setenv("BEACON_TO", "2020-01-02")
+    cmd_recap.cmd_recap_targets()
+    out = capsys.readouterr().out
+    assert "進んだ対象はありません" in out
+    assert "出荷の証跡" not in out
+
+
+def test_breadth_view_says_how_much_movement_names_no_target(
+        monkeypatch, capsys):
+    """`recap projects` must carry the same caveat at its own altitude."""
+    def _rows(lo, hi):
+        import progress_window as pw
+        res = pw.derive(_shipping_only_project(), from_date=lo, to_date=hi,
+                        documents=[], decisions=[], evidence_limit=0)
+        return [{"project_id": "p", "name": "P", "result": res}], 1, "cloud"
+
+    monkeypatch.setattr(cmd_recap, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_recap, "_server_recap",
+                        lambda lo, hi: (None, "no endpoint"))
+    monkeypatch.setattr(cmd_recap, "_scan_owned_projects", _rows)
+    monkeypatch.setenv("BEACON_SINCE", "yesterday")
+    cmd_recap.cmd_recap_projects()
+    out = capsys.readouterr().out
+    assert "動いたプロジェクト 1 件" in out, \
+        "a project that moved only by shipping must be listed"
+    assert "対象未特定の出荷 1 件" in out
+    assert "どの対象の記録か分からない出荷" in out
+
+
 def test_text_output_states_what_could_not_be_judged(monkeypatch, capsys):
     """Printed for a ZERO result too — that is when a reader is likeliest to
     read "could not tell" as "nothing happened"."""

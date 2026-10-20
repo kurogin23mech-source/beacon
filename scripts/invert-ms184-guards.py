@@ -275,10 +275,10 @@ INVERSIONS = [
     ),
     (
         'the two deploy spellings are counted twice',
-        'lib/progress_window.py',
-        '            if rid and dedup in seen:\n                continue\n',
+        "lib/progress_window.py",
+        '            if dedup in seen:\n                continue\n            seen.add(dedup)\n',
         '            if False:\n                continue\n',
-        ['test_the_two_deploy_collection_spellings_are_not_counted_twice'],
+        ["test_the_two_deploy_collection_spellings_are_not_counted_twice"],
     ),
     (
         'the cross-project fold drops a shipping-only project',
@@ -293,6 +293,34 @@ INVERSIONS = [
         '    direct = _target_ids_in(record, known_targets)\n',
         '    direct = [t for t in (record.get("milestones") or [])\n              if t in known_targets]\n',
         ['test_shipping_is_attributed_to_every_target_it_names', 'test_progress_window_hardcodes_no_arm_or_collection_name'],
+    ),
+    (
+        'the text renderer branches on targets again (self-contradicting output)',
+        'lib/cmd_recap.py',
+        '    if not result.get("moved"):\n',
+        '    if not result["targets"]:\n',
+        ['test_text_output_does_not_contradict_itself_on_a_shipping_only_day'],
+    ),
+    (
+        'an unrelated field colliding with a target id is read as attribution',
+        'lib/progress_window.py',
+        '        if field in NON_ATTRIBUTION_FIELDS:\n            continue\n',
+        '        if False:\n            continue\n',
+        ['test_a_colliding_unrelated_field_is_not_read_as_attribution'],
+    ),
+    (
+        'an id-less record is no longer de-duplicated across the two spellings',
+        'lib/progress_window.py',
+        '            if dedup in seen:\n                continue\n            seen.add(dedup)\n',
+        '            if rid and dedup in seen:\n                continue\n            if rid:\n                seen.add(dedup)\n',
+        ['test_id_less_records_are_not_counted_twice_across_spellings'],
+    ),
+    (
+        'the Skill-caveat guard goes back to a hardcoded key list',
+        "lib/progress_window.py",
+        '        "undated": {\n',
+        '        "a_brand_new_caveat_the_skill_never_mentions": {"count": 1},\n        "undated": {\n',
+        ["test_skill_mentions_every_caveat_the_derivation_returns"],
     ),
     (
         "an unparseable period silently becomes the default window",
@@ -314,7 +342,13 @@ def _scratch_tree() -> str:
     reintroduces a data-corrupting bug.
     """
     tmp = tempfile.mkdtemp(prefix="ms184-inversion-")
-    for sub in ("lib", "scripts", "tests", "bin", "beacon_cli"):
+    # ``shared`` / ``skills`` / ``plugins`` joined the copy set when a guard
+    # started reading the Skill's three synchronized copies: the scratch tree
+    # must hold everything the selected tests read, or the BASELINE fails and
+    # the harness cannot measure anything (which is how this gap announced
+    # itself — loudly, at the baseline check, rather than as a false green).
+    for sub in ("lib", "scripts", "tests", "bin", "beacon_cli",
+                "shared", "skills", "plugins"):
         shutil.copytree(os.path.join(REPO, sub), os.path.join(tmp, sub),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     return tmp
