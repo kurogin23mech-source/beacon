@@ -44,6 +44,15 @@ import untrusted_frame as uf  # noqa: E402
 
 _T1_ENVELOPE = {"tier": "T1-system", "issuer": "beacon-system"}
 
+# ms-185 e-7078: operation-trigger's proof is the T2 envelope the human
+# approved for that op_id — not the server-minted T1-system one (Trek is its
+# only issuer). Pinning the T1-system shape here asserted a shape production
+# cannot produce, which is why these stayed green while every real operation
+# trigger was downgraded.
+_OP_ENVELOPE = {"tier": "T2", "issuer": "someone@example.com",
+                "scope": "op-3"}
+_OP_PAYLOAD = {"op_id": "op-3", "trigger_name": "daily"}
+
 
 def _dm(**over) -> dict:
     ev = {
@@ -83,16 +92,17 @@ def test_downgraded_auto_execute_is_untrusted():
 
 
 def test_kept_system_imperative_is_trusted():
-    # The sole exception: a kept, opt-in, system-minted autonomous imperative
-    # (auto-execute on a system-provenance channel WITH a T1-system envelope).
+    # The sole exception: a kept, opt-in autonomous imperative (auto-execute on a
+    # gated channel WITH the proof that channel demands — for operation-trigger,
+    # the approved Operation envelope naming this op_id).
     ev = _dm(channel="operation-trigger", delivery="auto-execute",
-             envelope=_T1_ENVELOPE)
+             envelope=_OP_ENVELOPE, payload=_OP_PAYLOAD)
     assert uf.is_untrusted_event(ev) is False
 
 
 def test_auto_execute_without_system_envelope_is_untrusted():
-    # auto-execute on a provenance channel but WITHOUT a T1-system envelope is
-    # not a trusted imperative — a project editor could have forged it.
+    # auto-execute on a gated channel but WITHOUT its required proof is not a
+    # trusted imperative — a project editor could have forged it.
     ev = _dm(channel="operation-trigger", delivery="auto-execute")
     assert uf.is_untrusted_event(ev) is True
 
@@ -148,7 +158,7 @@ def test_claude_hook_kept_imperative_not_framed_untrusted(claude_hook):
     # A poll carrying ONLY a kept system imperative must not be fenced untrusted
     # (it is the opt-in autonomous path, rendered in its own block).
     kept = _dm(channel="operation-trigger", delivery="auto-execute",
-               envelope=_T1_ENVELOPE)
+               envelope=_OP_ENVELOPE, payload=_OP_PAYLOAD)
     ctx = claude_hook._render_context([kept], 0, False)
     assert uf.UNTRUSTED_FRAME_HEADER not in ctx
 

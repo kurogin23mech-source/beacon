@@ -21,6 +21,15 @@ HOOK = REPO / "scripts" / "codex-inbox-hook.py"
 CODEX_SID = "codex-1787000000000-abcdef01"
 _T1_ENVELOPE = {"tier": "T1-system", "issuer": "beacon-system"}
 
+# ms-185 e-7078: operation-trigger's proof is the T2 envelope the human
+# approved for that op_id — not the server-minted T1-system one (Trek is its
+# only issuer). Pinning the T1-system shape here asserted a shape production
+# cannot produce, which is why these stayed green while every real operation
+# trigger was downgraded.
+# scope names op-9 because that is the op_id _op_trigger_event fires.
+_OP_ENVELOPE = {"tier": "T2", "issuer": "someone@example.com",
+                "scope": "op-9"}
+
 
 def _setup(tmp_path: Path, *, auto_execute_channels) -> Path:
     cwd = tmp_path / "proj"
@@ -66,7 +75,7 @@ def _op_trigger_event(*, envelope=None) -> dict:
 
 def test_opted_in_operation_trigger_emits_imperative(tmp_path):
     cwd = _setup(tmp_path, auto_execute_channels=["operation-trigger"])
-    _seed(cwd, _op_trigger_event(envelope=_T1_ENVELOPE))
+    _seed(cwd, _op_trigger_event(envelope=_OP_ENVELOPE))
     ctx = _run(cwd)
     assert "AUTONOMOUS ACTION" in ctx
     assert "/beacon-operation-execute op-9" in ctx

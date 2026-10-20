@@ -54,17 +54,20 @@ def _isolated_env() -> dict:
 
 # --- lib/bus_delivery.py への壊し方 -----------------------------------------
 
-def drop_from_provenance_only(src: str) -> str:
-    """trek-trigger を provenance から消すだけ (= 引退先に足し忘れる)。
+def drop_from_both_sets(src: str) -> str:
+    """trek-trigger をどちらの集合からも落とす (= 族の名前を取りこぼす)。
 
     **これが本番の事故そのもの。** 畳む作業で起きる最も自然な間違いで、古い opt-in が
     残っているプロジェクトで署名なし自動実行が通る。
+
+    ms-185 e-7078 時点では trek-* はまだ現役 (SYSTEM) 側に居るので、落とす先はそこ。
+    Trek の bus 面を外す e-7080 / e-7070 で引退済みへ移ったら、当てる場所もそちらへ
+    移る (どちらの集合から落ちても「族の名前がどちらにも居ない」状態は同じで、被覆の
+    テストが赤くなる)。
     """
     anchor = '    "trek-trigger",\n    "trek-progress-check",'
-    assert anchor in src, "anchor not found (drop_from_provenance_only)"
+    assert anchor in src, "anchor not found (drop_from_both_sets)"
     return src.replace(anchor, '    "trek-progress-check",', 1)
-
-
 def retire_without_removing(src: str) -> str:
     """現役と引退済みの両方に入れる (= 判定の順序に依存する曖昧な状態)。"""
     anchor = "RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset()"
@@ -89,7 +92,7 @@ def move_retired_check_after_provenance(src: str) -> str:
                "        return (PROPOSE_TO_AI, AUTO_EXECUTE, "
                "DOWNGRADE_RETIRED_CHANNEL)\n")
     prov = ("    if channel in provenance_channels and not "
-            "has_system_provenance(event):\n"
+            "has_required_provenance(event):\n"
             "        return (PROPOSE_TO_AI, AUTO_EXECUTE, "
             "DOWNGRADE_NON_SYSTEM_ENVELOPE)\n")
     assert retired + prov in src, "anchor not found (move_retired_check_after_provenance)"
@@ -111,9 +114,9 @@ def break_custom_channel_optin(src: str) -> str:
     これ。固定テストが守っているので赤くなる。
     """
     anchor = ("    if channel in provenance_channels and not "
-              "has_system_provenance(event):")
+              "has_required_provenance(event):")
     assert anchor in src, "anchor not found (break_custom_channel_optin)"
-    return src.replace(anchor, "    if not has_system_provenance(event):", 1)
+    return src.replace(anchor, "    if not has_required_provenance(event):", 1)
 
 
 # --- scripts/codex-inbox-hook.py への壊し方 ---------------------------------
@@ -197,11 +200,94 @@ def claude_swaps_retired_and_provenance_advice(src: str) -> str:
     return src.replace(prov, '@@P@@', 1).replace(ret, prov, 1).replace('@@P@@', ret, 1)
 
 
+# --- ms-185 e-7078: ゲートの張り替えを守る反転 -------------------------------
+#
+# 張り替えで新しく主張した性質は 4 つ。どれも「壊したら赤くなる」ことを測る。
+# 偽の緑を 1 度生んだ箇所なので、ここを無ガードで置くのは特に危ない。
+
+def accept_the_retired_proof_again(src: str) -> str:
+    """operation-trigger が T1-system 署名を再び受け付けるようにする。
+
+    **これが張り替え前の状態そのもの** = 本番が一度も満たせない証拠を要求し、
+    試験だけが合成した形で緑になる偽の緑。
+    """
+    anchor = "    OPERATION_TRIGGER_CHANNEL: has_approved_operation_envelope,"
+    assert anchor in src, "anchor not found (accept_the_retired_proof_again)"
+    return src.replace(
+        anchor, "    OPERATION_TRIGGER_CHANNEL: has_server_minted_envelope,", 1)
+
+
+def drop_the_scope_match(src: str) -> str:
+    """承認が「いま発火する op_id」を名指しているかを見なくする。
+
+    op-1 への承認で op-9 の自律実行が通る状態。承認自体は本物なので、
+    封筒の有無を見るだけの検査では捕まえられない。
+    """
+    anchor = ("    return bool(scope) and bool(op_id) and scope == op_id")
+    assert anchor in src, "anchor not found (drop_the_scope_match)"
+    return src.replace(anchor, "    return True", 1)
+
+
+def treat_absence_as_a_match(src: str) -> str:
+    """scope も op_id も無いときに一致と見なす (= 不在を合致に畳む)。
+
+    ms-184 が期間フィルタで踏んだのと同じ型。空 == 空 で通ると、scope の無い
+    封筒が op_id の無いトリガーを承認してしまう。
+    """
+    anchor = ("    return bool(scope) and bool(op_id) and scope == op_id")
+    assert anchor in src, "anchor not found (treat_absence_as_a_match)"
+    return src.replace(anchor, "    return scope == op_id", 1)
+
+
+def fail_open_on_undeclared_channel(src: str) -> str:
+    """要求を宣言していない channel に何も求めない (= 開いた門を閉じて見せる)。
+
+    **実装中に私が実際に書いた形。** 反転ハーネスがこれを捕まえ、順序の反転と
+    opt-in の反転という既存 2 件の歯が同時に抜けていたことが分かった。
+    """
+    anchor = "    if requirement is None:\n        return False"
+    assert anchor in src, "anchor not found (fail_open_on_undeclared_channel)"
+    return src.replace(
+        anchor, "    if requirement is None:\n        return True", 1)
+
+
+def let_the_set_and_map_drift(src: str) -> str:
+    """gated 集合に、要求を宣言していない channel を足す。
+
+    集合と要求表がズレた状態。fail-closed なので実害は「黙って降格し続ける」で、
+    まさに e-7078 が消した「誰も満たせない判定」の再生産。
+    """
+    anchor = 'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",'
+    assert anchor in src, "anchor not found (let_the_set_and_map_drift)"
+    return src.replace(
+        anchor,
+        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "nobody-declares-me",'
+        '\n    "operation-trigger",', 1)
+
+
 CASES = [
     # (ラベル, 対象ファイル, 壊し方, 赤くなるべきテスト)
-    ("provenance から消すだけ (= 本番の事故そのもの)", BD, drop_from_provenance_only,
+    # --- ms-185 e-7078: 張り替えたゲートを守る ---
+    ("operation-trigger が引退した証拠を再び受け付ける (= 偽の緑に戻す)", BD,
+     accept_the_retired_proof_again,
+     PINNED_TEST + "::TestClassifyAutoExecute::"
+     "test_retired_server_minted_shape_no_longer_passes"),
+    ("承認が発火する op_id を名指しているかを見ない", BD, drop_the_scope_match,
+     PINNED_TEST + "::TestClassifyAutoExecute::"
+     "test_approval_for_a_different_operation_is_rejected"),
+    ("不在を合致に畳む (scope も op_id も空で通す)", BD, treat_absence_as_a_match,
+     PINNED_TEST + "::TestHasApprovedOperationEnvelope::"
+     "test_empty_scope_and_empty_op_id_do_not_match"),
+    ("要求未宣言の channel に何も求めない (= 開いた門を閉じて見せる)", BD,
+     fail_open_on_undeclared_channel,
+     PINNED_TEST + "::TestHasRequiredProvenance::"
+     "test_undeclared_channel_fails_closed"),
+    ("gated 集合と要求表をズラす", BD, let_the_set_and_map_drift,
+     PINNED_TEST + "::TestHasRequiredProvenance::"
+     "test_gated_channels_match_their_requirements"),
+    ("どちらの集合からも落とす (= 本番の事故そのもの)", BD, drop_from_both_sets,
      GUARD_TEST + "::TestClassificationCoverage::"
-     "test_every_known_server_minted_channel_is_classified"),
+     "test_every_known_gated_channel_is_classified"),
     ("現役と引退済みの両方に入れる", BD, retire_without_removing,
      GUARD_TEST + "::TestClassificationCoverage::test_the_two_sets_do_not_overlap"),
     ("引退の判定そのものを外す", BD, remove_the_retired_check,
