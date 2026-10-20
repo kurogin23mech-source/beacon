@@ -387,6 +387,5 @@ beacon member remove <email> --confirm "<email>" --json
 
 ## 関連 Skill (= 役割分担)
 
-- `/beacon-trek` の `member-invite` subaction — **trek 単位** のメンバー招待 (= trek = 分散協奏作業領域)。本 Skill は **project 単位** のメンバー操作。両者は重ならない (project member は project に紐づき、trek member は trek に紐づく)。
 - `/beacon-cloud` — cloud sync の操作 (= push / pull / off / open)。member 操作の前提となる cloud mode の入口。
 - `/beacon-dm-send` — メンバー間のメッセージ送信。役割変更 / 削除の事前合意取りに使う。

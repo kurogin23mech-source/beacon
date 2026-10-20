@@ -526,18 +526,6 @@ KNOWN_GAPS: dict = {
         "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
     ("task_cancel", "BEACON_JSON", "bash"):
         "bash 未配線 / python は渡す — bash 側の取りこぼし",
-    ("trek_pulse_ack", "BEACON_TREK_BLOCKERS", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("trek_pulse_ack", "BEACON_TREK_NEEDS_LEADER", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("trek_pulse_ack", "BEACON_TREK_STATE_SUMMARY", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("trek_pulse_ack", "BEACON_TREK_TIME_ON_TASK", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("trek_task_state", "BEACON_TREK_ATTAINMENT_VERDICT", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("trek_task_state", "BEACON_TREK_VERDICT", "python"):
-        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("trigger_fire", "BEACON_TRIGGER_TREK_ID", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("view", "BEACON_VIEW_SKIP_HANDSHAKE", "bash"):

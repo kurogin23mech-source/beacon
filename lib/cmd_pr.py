@@ -1156,36 +1156,19 @@ def cmd_pr_request_changes():
         if rationale:
             print(f"  Reason: {rationale}")
 
-def _trek_finalize_consent_active() -> bool:
-    """ms-92 / e-2169 — Trek 終結 1 confirm path opt-in detection.
-
-    The structural ban on AI-session pr-merge (see below) has one explicit
-    escape hatch: the ``/beacon-trek-finalize`` 1-confirm collective
-    merge path. That Skill exports ``BEACON_TREK_FINALIZE_CONSENT=1``
-    before delegating to ``beacon pr merge`` so the ban knows the merge
-    is happening with user collective approval, not as an AI-side
-    individual-PR self-merge.
-
-    The env var is **per-process** (not persisted), so a forgotten leak
-    cannot turn a future AI session into an unrestricted merger.
-    """
-    return os.environ.get("BEACON_TREK_FINALIZE_CONSENT", "") == "1"
-
 def _ai_session_merge_ban_active() -> bool:
     """ms-92 / e-2169 — refuse AI-session individual PR merge.
 
     See CORE doc ``pr-review-autonomy-boundary`` for the rationale: AI
     sessions are authorised to approve / reject / request-changes on
-    PRs, but **merge** belongs to the Trek-unit user collective
-    confirmation (= ``/beacon-trek-finalize``) so the AI can't
+    PRs, but **merge** belongs to the target-unit user confirmation so
+    the AI can't
     self-loop "I wrote it, I approved it, I merged it" without the
     user ever exercising codebase ownership.
 
     The ban is on by default for AI sessions and bypassed only when
-    one of three explicit signals is present:
+    one of two explicit signals is present:
 
-      * ``BEACON_TREK_FINALIZE_CONSENT=1`` — Trek-finalize Skill is
-        the merger (= the 1-confirm collective approval path).
       * ``BEACON_PR_MERGE_USER_OVERRIDE=1`` — user explicit opt-in
         escape hatch (= user prompt phrased the merge directly).
       * ``BEACON_SESSION_KIND=human`` — non-AI session (= straight
@@ -1193,10 +1176,16 @@ def _ai_session_merge_ban_active() -> bool:
         treated as AI for safety; humans wanting straight-line merge
         can either set the env var globally or use the override.
 
+    ms-185 e-7069: 3 つ目の抜け道 ``BEACON_TREK_FINALIZE_CONSENT=1`` を**消した**。
+    これは「Trek 終結 Skill が 1 confirm で一括 merge する経路」のための例外で、
+    その Skill と Trek の動線を落とした以上、裏付けの無い環境変数だけが残る形に
+    なる。**環境変数 1 つで AI セッションが merge できる抜け道が、誰の承認も
+    伴わずに生き残る**のは危険側なので、判定ごと削除した (= 消えた機構を指す
+    抜け道を残さない)。人間が 1 回限りで merge させたいときは
+    ``BEACON_PR_MERGE_USER_OVERRIDE=1`` を使う。
+
     Returns True if the ban should fire (= refuse the merge).
     """
-    if _trek_finalize_consent_active():
-        return False
     if os.environ.get("BEACON_PR_MERGE_USER_OVERRIDE", "") == "1":
         return False
     kind = (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower()
@@ -1211,21 +1200,20 @@ def cmd_pr_merge():
         print("Error: entry ID required", file=sys.stderr)
         sys.exit(1)
     # ms-92 / e-2169 — AI-session merge ban. Refuses the call when the
-    # 3 escape hatches (Trek-finalize consent / user override / human
-    # session kind) are all absent. The error message names every escape
-    # so a stuck user can pick the right one for their context.
+    # 2 escape hatches (user override / human session kind) are both absent.
+    # The error message names every escape so a stuck user can pick the right
+    # one. (ms-185 e-7069: 3 つ目だった Trek 終結の抜け道は、その動線ごと
+    # 落としたので判定からも消した。)
     if _ai_session_merge_ban_active():
         print(
             "Error: individual PR merge from an AI session is refused "
             "(ms-92 / e-2169 structural ban).\n"
             "  See CORE doc `pr-review-autonomy-boundary` for the role "
-            "split (= AI approves, Trek-unit user merges, user releases).\n"
+            "split (= AI approves, the target's user merges, user releases).\n"
             "  Bypass paths (= one of these makes the merge proceed):\n"
-            "    1. /beacon-trek-finalize <trek-id> — 1-confirm "
-            "collective merge with the rest of the Trek's PRs.\n"
-            "    2. BEACON_PR_MERGE_USER_OVERRIDE=1 — explicit user "
+            "    1. BEACON_PR_MERGE_USER_OVERRIDE=1 — explicit user "
             "opt-in for one-off merges.\n"
-            "    3. BEACON_SESSION_KIND=human — declare the calling "
+            "    2. BEACON_SESSION_KIND=human — declare the calling "
             "session is human-driven (= straight terminal use).",
             file=sys.stderr,
         )

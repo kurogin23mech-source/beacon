@@ -400,26 +400,6 @@ python3 "$(beacon _install-root)/scripts/session-start-dm-inbox.py" 2>/dev/null
 
 local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。この Step は **読み取り専用**。
 
-## Step 1o / 1o-2: Trek 状態の取得 (ms-75 e-1813 + e-1854 + e-2047、ms-85 e-3180 で統合)
-
-Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に関する 2 つの可視化を session-start で行う:
-
-- **join 中 Trek 一覧** (Step 1o / e-1813 + e-1854): join 済 trek のリストと goal_state / halt 状態。ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、「自分が今どの Trek の blanket 例外を受けているか」を毎セッション可視化する。
-- **armed セルフチェック** (Step 1o-2 / e-2047): active Trek に join 中なら、このセッションが armed (= 自律実行モード) かを確認する。`--no-arm` opt-out / 旧バージョン join / 別 worktree の budget 不在で not-armed が起こりうる。
-
-e-3180 でこの 2 つを **1 スクリプトに統合**: `beacon trek list --joined` を 1 回だけ叩き、active trek がある時だけ armed 判定用の `beacon bus auto-execute list` / `beacon bus budget show` を追加取得する。Bash ツールで実行:
-
-```bash
-python3 "$(beacon _install-root)/scripts/session-start-trek-status.py" 2>/dev/null
-```
-
-出力が空ならセクションごと省略。空でなければ **Step 3 ヘッダにそのまま転記**。整形/判定は `lib/trek_status` (`format_joined_treks` / `has_active_trek` / `is_armed`、単体テスト済み) が所管し、以下を保証する:
-
-- 各 trek: `[trek_id] title` / `status` / `halt` non-null 時「⚠ HALTED: {reason}」/ `goal_state` 非空時「目標: {goal_state}」/ 自分以外の数「他 N 名」。
-- **自動承認リマインダは出さない (ms-185 e-7068)**: 以前は active な作業空間に参加していると「あなたは今 blanket 自動承認の対象です」と毎セッション添えていた。参加を根拠に DM の確認を省く規則が判定ごと削除されたため、この注意書きは**事実でなくなった**。参加していても、別のユーザー宛で action を伴う DM は必ず受信側の人間の承認を要する。消えた機構を指す注意書きを残すと、読み手は「省略されるはず」と誤った前提で動く。
-- active trek に join 中かつ not-armed なら「⚠ Trek 参加中だが自律実行モードが not-armed」警告を添える (armed 条件 AND: trek 系 channel が auto-execute allowlist にある かつ budget が total > 0 / used < total)。armed なら何も出さない。planning / archived のみの join は判定不要。
-
-local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。この Step は **読み取り専用**。
 
 ## Step 1p: 締切超過 (overdue) work items の surface (ms-139 e-4952)
 

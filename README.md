@@ -27,7 +27,6 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 - **Always-visible dashboard** — Tauri Desktop App or Web UI shows live progress alongside your working shell
 - **Audit trail** — every commit and task is recorded under a milestone, making AI session handoffs transparent and human-auditable
 - **CLI-first design** — structured JSON output enables seamless integration with Claude Code Skills
-- **Trek (cross-project協奏作業領域)** — `beacon trek` で複数プロジェクト・複数セッションをまたぐ協奏作業を 1 枚の trek にまとめて追跡できる。CLI でも Web UI でも同じ trek を見て協奏でき、参加・離脱・対象 (scope) 編集・非常停止 (halt) も CLI 1 行で。詳細は [CLI Commands → Treks](#treks)
 - **Injection-safe parallel coordination** — 並行セッション間の DM 連携で、外部から届いた文面 (別ユーザーの DM 本文など) に AI が誘導されて副作用ツール (ファイル書き込み・コマンド実行・外部送信) を勝手に実行しないよう、人間承認ゲートで構造的に防ぐ。AI 開発を安全に並列化するための土台 (ms-169)
 
 ## Requirements
@@ -496,45 +495,6 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 | `beacon incident escalate <id> -m <ms-id>` | Escalate incident to a Milestone task / Milestoneタスクに昇格 |
 
 The `/beacon-operation-setup` Skill walks through setup conversationally and auto-generates a SPEC document (log fetch instructions). The `/beacon-operation-review` Skill reads that SPEC, fetches logs, interprets them, and records the result — triggered automatically by `operation_check_<op-id>` triggers at session start.
-
-### Treks
-
-Treks (= 協奏作業領域) are cross-project, cross-session work areas. While a Milestone lives inside one project, a trek bundles work that spans several projects (and several teammates' sessions) — for example "v0.35.0 release rehearsal across Beacon + PE + LPS" or "Daily cross-team standup" — and keeps members, scope (= work items in / out of focus), live status, and halt (= Andon cord) state in one place. CLI / Web UI / Tauri Desktop all see the same trek, so a CLI user and a Web UI user can co-drive without diverging.
-
-| Command | Description |
-|---------|-------------|
-| `beacon trek create "title" [--type temporary\|persistent] [--description "..."] [--goal-state "<criterion>"]` | Create a trek; caller becomes leader. `--goal-state` (ms-75 / e-1865) は完了マーカー (acceptance_criteria 相当) |
-| `beacon trek list [--status s] [--include-archived] [--all-actors] [--joined] [--json]` | List treks visible to the caller. `--joined` で自分が join 済の trek だけに絞る (ms-75 / e-1813) |
-| `beacon trek show <trek-id> [--all] [--json]` | Trek 詳細 + scope に紐付く task / commit / 配下 doc の集約ビュー (ms-75 / e-1864)。`--all` で要約 cap を解除 |
-| `beacon trek review-verdicts <trek-id> <task-id> [--json]` | leader_review target の verdict 集合 (completion / halt-rescue を halt_reason で分岐、ms-128 / e-4374)。`/beacon-trek-review` が呼ぶ単一 source |
-| `beacon trek timeline <trek-id> [--limit N] [--json]` | Trek の lifecycle / scope 内 commit / task done / 配下 doc を時系列で参照 (ms-75 / e-1867) |
-| `beacon trek start <trek-id>` | Transition planning → active / planning から active へ |
-| `beacon trek archive <trek-id>` | Archive (= terminal); restart by creating a new trek / 完了化、再開は新 trek 起票 |
-| `beacon trek invite <trek-id> --actor <email> [--notify]` | Invite a user by email; `--notify` sends a live DM (`--notify` is acknowledged but live DM lands later) / メンバー招待 |
-| `beacon trek join <trek-id>` | Accept own invitation / 招待を accept |
-| `beacon trek leave <trek-id>` | Remove self (leader must `transfer-leader` first; last member must `archive` instead) / 離脱 |
-| `beacon trek plan <trek-id> --add-scope <project:ref>` | Add a scope entry (`ms-X` / `op-X` / `e-X` ref, or omit for project-wide) / scope 追加 |
-| `beacon trek plan <trek-id> --remove-scope <project:ref>` | Remove a scope entry / scope 削除 |
-| `beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> \| --operation <op-id> \| --task <e-id>]` | Canonical scope-add verb (= flag-style alias of `plan --add-scope`, ms-97 / AC23 e-2626) |
-| `beacon trek scope-approve <trek-id> <pending-id>` | Commit a staged scope op (= apply add or remove, ms-97 / AC25 e-2611) |
-| `beacon trek scope-reject <trek-id> <pending-id>` | Drop a staged scope op (ms-97 / AC25) |
-| `beacon trek blanket-approve <trek-id> --category <cat>` | Pre-approve scope-add for a category (ms-97 / AC24 e-2603). Category: `operation` / `milestone` / `task` / `project:<pid>` / `milestone:<ms-id>` |
-| `beacon trek blanket-revoke <trek-id> --category <cat>` | Drop a blanket pre-approval (ms-97 / AC24) |
-| `beacon trek slot add <trek-id> --project <pid> --milestone\|--task\|--operation <id> [--children e-A,e-B]` | Stage a slot-add with a fresh `sl-<8 hex>` id (ms-99 / e-2829). MS slot は `--children` で子タスクを opt-in (= 個別許可) 指定できる。承認は既存の `scope-approve` を通す (staging path) |
-| `beacon trek slot amend <trek-id> <slot-id> [--add-child <e-id> ...] [--remove-child <e-id> ...]` | Stage a child-list edit on an existing MS slot (ms-99 / e-2829)。legacy null (= 全 include) は承認時に明示 list へ材料化される |
-| `beacon trek slot claim <trek-id> <slot-id> [--session <sid> \| --unclaim]` | Stage a claim stamp (state 変更なし、SPEC 方針 4)。空 `--session` または `--unclaim` で担当解除 (ms-99 / e-2829) |
-| `beacon trek slot list <trek-id> [--json]` | Materialise slot rows (target_kind / target_id / included_task_ids / claim) の一覧を表示 (ms-99 / e-2829) |
-| `beacon trek plan <trek-id> --goal-state "<criterion>"` | Trek の完了マーカーを設定 (空文字で clear、ms-75 / e-1865) |
-| `beacon trek stop <trek-id> [--reason "..."]` | Pull the Andon cord (= halt signal, sessions pause) / 非常停止 |
-| `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |
-| `beacon trek transfer-leader <trek-id> --to <session-id>` | Hand off `leader_session_id` to another session / leader 引き継ぎ |
-| `beacon trek take-over <trek-id>` | Re-bind `leader_session_id` to a fresh session of the same leader user (= dead-session recovery without the prior leader's authorization, ms-88 e-2089) |
-| `beacon trek kickoff <trek-id> [--session-id <sid>] [--kickoff-dm-event-id <eid>]` | Mark a session's Kickoff Ritual DM as sent (= `/beacon-trek-pulse` Step 0.4 が叩く、ms-88 e-2138)。kickoff_status を立てるまで pulse-ack は `kickoff_required` で reject される |
-| `beacon trek reconcile <trek-id> [--apply]` | Trek の `task_states` を task pool と整合させる (= 「pool で done だが Trek stamp が waiting-review / leader_review / working で残ってる」 stuck 状態を一括検知 + 修復、default dry-run、`--apply` で実適用、ms-88 e-2167) |
-
-In the Web UI / Tauri Desktop, the **Treks** tab on a project page lists every trek that includes the current project in its scope (= active と archived を別表示)。各 trek の詳細では members / scope / status / 関連 docs が並ぶ。逆に milestone / operation / task の詳細を開くと、その作業項目を scope に含む trek 一覧が **Related Treks** widget としてインラインで出る。
-
-Trek の作成・編集・状態遷移はすべて CLI から。Web UI は閲覧と監査 (= 誰が何を見ているか・どこで halt がかかっているか) に専念し、ユーザーをターミナルに戻さない。
 
 ### Session Notes
 

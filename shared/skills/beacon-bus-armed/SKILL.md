@@ -6,7 +6,6 @@ version: 1.0.0
 
 # Beacon Bus Armed (autonomous DM mode)
 
-> ⚠ **Trek 用途外**: Trek の進行管理は `/beacon-trek-execute` を使う。 本 Skill は
 > 一般 DM の自動応答デバッグ用に格下げ済 (= ms-97 中心原則 6)。
 
 > 「会話してなくても、別セッションから DM が来たら気付いて、N 往復まで自動返答する」状態にこのセッションを切り替える。
@@ -133,7 +132,6 @@ channel (MCP bus 通知) 経由で DM event (= `<channel source="beacon-bus">...
 1. event を読む
 2. payload の `text` / `to` / `in_reply_to` を確認、payload に明示的指示があれば従う
 3. event の `channel` を見て分岐:
-   - `channel == "trek-trigger"`: ms-75 / e-1870 由来。`/beacon-trek-execute <trek-id>` を起動して Trek scope を autonomous で進める (= user 確認なし)
    - `channel == "operation-trigger"`: ms-60 由来。`/beacon-operation-execute <op-id>` を起動
    - `channel == "dm"` / `"session-dm"`: 次の step で action 種別判定 → DM 返答ロジックへ
 4. DM channel の場合、**action 種別を分類** (= 4.1 表のどれに該当するか):
@@ -166,7 +164,6 @@ armed の価値は「AI が席にいなくても自律的に返信する」こ�
 
 つまり armed の自律返信で確認を省けるのは「通常会話」(上の B芯) と、上記の 2 つだけ。作業空間の参加を根拠に省略してはならない。
 
-`/beacon-trek-execute` を起動済の場合、本 Skill (armed mode) は同 Trek scope の DM については重ねて処理しないこと (= 二重応答の防止)。
 
 ### budget exhausted 時
 

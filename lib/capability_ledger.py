@@ -269,11 +269,6 @@ PROFESSION_CONCRETE_COLLECTIONS = {
 # would miss a sales project's targets. Where the gap is a whole deferred effort
 # it is tracked by its own milestone; the inline note says which.
 KNOWN_COLLECTION_COUPLING = {
-    # trek aggregation is dev-bound (commits/tasks) but Trek is a profession-
-    # generic feature — it should aggregate work-item/evidence across all target
-    # arms. Deferred until cross-profession demand is clear: ms-137 (waiting).
-    ("trek_show", "milestones"),
-    ("trek_timeline", "milestones"),
     # session rescue finds other sessions by session_id in target entries; sales
     # stores those under activities/communications arms, not ``entries``. Needs
     # arm-aware walking. Deferred: ms-138 (waiting).
@@ -1263,7 +1258,7 @@ _NOUN_SCOPE = {
     # ms-151 e-5474: `machine-key issue/list/revoke` — headless machine 認証の鍵
     # 管理。全職種共通の認証基盤 (auth / operation / run と同じ L1 infra)。
     "machine": "L1",
-    "stop": "L1", "trek": "L1", "trigger": "L1",
+    "stop": "L1", "trigger": "L1",
     # ms-180 e-7000 — 道具台帳 (the declared registry of tools a project uses).
     # L1: the ledger declares 道具 (Skills / MCP tools / CLI verbs) and is identical
     # for every profession — it does not touch a Target at all (no phase, no
@@ -1640,7 +1635,6 @@ def summary() -> dict:
 _SKILL_PREFIX_SCOPE = (
     ("beacon-sales-", "L3"),      # sales profession skills
     ("beacon-operation-", "L1"),  # operations = cross-profession scheduling
-    ("beacon-trek-", "L1"),       # trek coordination substrate
     ("beacon-session-", "L1"),    # session management
     ("beacon-dm-", "L1"),         # cross-user DM
     ("beacon-review", "L2"),      # review* verbs/skills = the review PLUMBING +

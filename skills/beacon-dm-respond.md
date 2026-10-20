@@ -27,7 +27,7 @@ triggers:
 - 自分自身の別セッションから届いた DM (= 同一ユーザー)
 - サーバ自身が発行した署名 (T1-system) が付いた DM (= Operation の定期発火など、人間が事前に承認した経路)
 
-user が picker で見る envelope は「Trek 経由ではない他人の AI からの要求」 が原則。「Trek 内の member から来たのに何故 picker に並ぶの?」 と質問されたら、上記いずれかに該当している可能性を案内する。
+user が picker で見る envelope は「他人の AI からの action 付き要求」 が原則。
 
 ## 文章の書き方 (Beacon 全体の哲学)
 
