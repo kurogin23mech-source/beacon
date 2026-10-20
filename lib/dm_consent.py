@@ -55,22 +55,24 @@ from typing import Iterable, Optional
 
 
 # ---------------------------------------------------------------------------
-# Trek-scoped / operation channel reuse (single source of truth = dm_qualgate)
+# 事前承認済み channel の判定を再利用する (真値源は dm_qualgate)
 # ---------------------------------------------------------------------------
 #
-# ``dm_qualgate.is_trek_scoped_channel`` already classifies the pre-approved
-# channels (operation-trigger / trek-*). Reuse it so the sender-consent
-# carve-out never drifts from the qualitative gate. Dual import supports both
-# contexts: bare when lib is on sys.path (CLI / tests), package-qualified when
-# the server imports lib as a package.
+# ``dm_qualgate.is_pre_approved_channel`` が事前承認済み channel を**完全一致で**
+# 判定する。それを再利用することで、送信側の確認免除が定性ゲートの判定から
+# ズレない。一覧を 2 箇所に持つと片方だけ直されるので、ここには持たない。
+# (ms-185 e-7067: 以前は ``trek-`` の前方一致だった。経緯は dm_qualgate の
+# ``PRE_APPROVED_CHANNELS`` の注記。) Dual import supports both contexts: bare
+# when lib is on sys.path (CLI / tests), package-qualified when the server
+# imports lib as a package.
 try:  # pragma: no cover - import shim, both branches exercised across contexts
     import dm_qualgate as _qualgate
 except ImportError:  # pragma: no cover
     from lib import dm_qualgate as _qualgate
 
 
-def _is_trek_scoped_channel(channel: str) -> bool:
-    return _qualgate.is_trek_scoped_channel(channel)
+def _is_pre_approved_channel(channel: str) -> bool:
+    return _qualgate.is_pre_approved_channel(channel)
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +83,7 @@ def _is_trek_scoped_channel(channel: str) -> bool:
 # consent NOT required (send may proceed without a fresh recipient confirm):
 CONSENT_SKIP_SAME_USER = "same_user"
 CONSENT_SKIP_UNRESOLVED = "unresolved_identity"
-CONSENT_SKIP_TREK_SCOPE = "trek_scoped_channel"
+CONSENT_SKIP_PRE_APPROVED = "pre_approved_channel"
 CONSENT_SKIP_NON_DM = "non_dm_channel"
 CONSENT_SKIP_OPERATION = "operation_envelope"
 CONSENT_SKIP_REPLY = "reply_derived_recipient"
@@ -114,8 +116,9 @@ CONSENT_REASON_EXPLANATIONS = {
     CONSENT_SKIP_UNRESOLVED:
         "送信元か宛先の身元が解決できず、別人と断定できないので確認は求めません "
         "(別プロジェクトの自分宛を塞いでしまわないため)。",
-    CONSENT_SKIP_TREK_SCOPE:
-        "Trek (= 事前承認済みの作業空間) の channel なので、確認は要りません。",
+    CONSENT_SKIP_PRE_APPROVED:
+        "人間が事前に承認した発火が載る channel なので、確認は要りません "
+        "(現在は operation-trigger のみ)。",
     CONSENT_SKIP_NON_DM:
         "dm 以外の channel は特定の相手に向けた送信ではないので、確認は要りません。",
     CONSENT_SKIP_OPERATION:
@@ -149,18 +152,41 @@ def channel_is_recognized(channel: str) -> bool:
     c = str(channel or "")
     if not c:
         return True  # 未指定は呼び出し側が "dm" を補う (= 既知)
-    return c == "dm" or _is_trek_scoped_channel(c)
+    return c == "dm" or _is_pre_approved_channel(c)
+
+
+# 引退した判定理由の語彙 (ms-185 e-7067)。
+#
+# 判定理由の文字列は **監査記録に永続化される** (server/app.py の
+# ``audit_record["sender_consent"]["reason"]``)。規則を消すと、その規則で免除され
+# た過去の記録が「説明が未登録です」としか読めなくなる — 記録は残っているのに
+# 製品のどの面からも意味が読めない状態で、監査可能性そのものが落ちる。
+#
+# そこで **生きている規則** (``CONSENT_REASON_EXPLANATIONS``) と **引退した語彙**
+# (ここ) を分けた。引退側には定数を置かない (= 誰もセットしない判定を残さない)。
+# 読む側だけが過去を読める。
+RETIRED_CONSENT_REASON_EXPLANATIONS = {
+    "trek_scoped_channel":
+        "【引退した判定】当時は Trek (= 共同作業空間) の channel を事前承認済みと "
+        "見なして確認を省いていました。ms-185 でこの規則は廃止され、現在は "
+        "operation-trigger のみが事前承認済みです。",
+}
 
 
 def explain_consent_reason(reason: str) -> str:
     """Return the one-line explanation for a ``CONSENT_*`` reason.
 
-    Unknown reasons return a self-describing fallback rather than raising: this
-    is called on a display path, and a送信 must never fail because a new reason
-    has no prose yet (the coverage test is what catches that, at build time).
+    生きている規則を先に引き、無ければ引退した語彙を引く (= 過去の監査記録を
+    読めるようにする、ms-185 e-7067)。Unknown reasons return a self-describing
+    fallback rather than raising: this is called on a display path, and a送信
+    must never fail because a new reason has no prose yet (the coverage test is
+    what catches that, at build time).
     """
-    return CONSENT_REASON_EXPLANATIONS.get(
-        reason, f"判定理由 '{reason}' の説明が未登録です (lib/dm_consent.py)。")
+    if reason in CONSENT_REASON_EXPLANATIONS:
+        return CONSENT_REASON_EXPLANATIONS[reason]
+    if reason in RETIRED_CONSENT_REASON_EXPLANATIONS:
+        return RETIRED_CONSENT_REASON_EXPLANATIONS[reason]
+    return f"判定理由 '{reason}' の説明が未登録です (lib/dm_consent.py)。"
 
 
 # ---------------------------------------------------------------------------
@@ -241,9 +267,9 @@ def classify_send_consent(
     if sender_user_id and sender_user_id == recipient_user_id:
         return (False, CONSENT_SKIP_SAME_USER)
 
-    # Rule 2: Trek-scoped / operation channel → pre-approved working scope.
-    if _is_trek_scoped_channel(channel):
-        return (False, CONSENT_SKIP_TREK_SCOPE)
+    # Rule 2: 事前承認済み channel (完全一致) → 人間が既に承認した発火。
+    if _is_pre_approved_channel(channel):
+        return (False, CONSENT_SKIP_PRE_APPROVED)
 
     # Rule 2b: only the ``dm`` channel is person-directed. Broadcast /
     # coordination channels (claim-signal / ops / test-*) have no single
@@ -557,7 +583,7 @@ def evaluate_send(
 __all__ = [
     "CONSENT_SKIP_SAME_USER",
     "CONSENT_SKIP_UNRESOLVED",
-    "CONSENT_SKIP_TREK_SCOPE",
+    "CONSENT_SKIP_PRE_APPROVED",
     "CONSENT_SKIP_NON_DM",
     "CONSENT_SKIP_OPERATION",
     "CONSENT_SKIP_REPLY",
@@ -569,6 +595,7 @@ __all__ = [
     "SEND_DENY_MISSING_CONFIRMATION",
     "SEND_DENY_RECIPIENT_MISMATCH",
     "CONSENT_REASON_EXPLANATIONS",
+    "RETIRED_CONSENT_REASON_EXPLANATIONS",
     "classify_send_consent",
     "channel_is_recognized",
     "explain_consent_reason",
