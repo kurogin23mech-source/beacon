@@ -686,7 +686,7 @@ def _format_pending_approval_block(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _downgrade_advice(reason: str, channel: str = "") -> str:
+def _downgrade_advice(reason: str) -> str:
     """理由ごとの「何が起きて、どう直すか」の 1 行 (ms-185 e-7077 / AX レビュー)。
 
     **直した穴**: 以前はここが無く、``_format_event`` が
@@ -717,19 +717,6 @@ def _downgrade_advice(reason: str, channel: str = "") -> str:
         return (f"理由タグ '{reason}' (bus_delivery を読めないため説明を "
                 "解決できません)")
     if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
-        # ms-185 e-7078 で実測して分かった取り違え: ``operation-trigger`` は
-        # **設計上ずっと T1-system を持たない**。人間が approve 時に発行するのは
-        # T2 なので、Operation の発火は毎回ここに落ちる。それを「偽装の恐れ」と
-        # 案内すると、operator は自分の Operation に対してセキュリティ事故を
-        # 探し始める (= 真因と逆の調査に入る。#809 で踏んだ型と同じ)。
-        # 設計どおりの降格と、本当に署名が欠けている降格を文面で分ける。
-        if channel == bd.OPERATION_TRIGGER_CHANNEL:
-            return ("Operation の発火は設計上ここに落ちます (人間が approve 時に "
-                    "発行するのは T2 で、サーバ署名 T1-system は付きません)。"
-                    "異常ではないので、この提案を読んで "
-                    "/beacon-operation-execute を起動してください。"
-                    "無確認の自律実行にしたい場合は人間の判断が必要です "
-                    "(ms-185 e-7078 の判断記録を参照)")
         return ("channel は allowlist 済だが envelope が T1-system でない "
                 "(= 偽装の恐れ)。opt-in し直しても直りません")
     if reason == getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None):
@@ -761,7 +748,7 @@ def _format_event(ev: dict) -> str:
     if downgraded_from:
         delivery_line += (
             f"  [auto-execute downgraded from '{downgraded_from}'"
-            f" — {_downgrade_advice(ev.get('_downgrade_reason', ''), str(ev.get('channel') or ''))}]"
+            f" — {_downgrade_advice(ev.get('_downgrade_reason', ''))}]"
         )
     return (
         f"{delivery_line}\n"
