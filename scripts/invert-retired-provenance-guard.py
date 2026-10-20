@@ -31,6 +31,8 @@ CLAUDE = ROOT / "bin" / "beacon-bus-inbox-hook.py"
 GUARD_TEST = "tests/test_retired_provenance_channels_e7077.py"
 PINNED_TEST = "tests/test_bus_delivery.py"
 CONSUMER_TEST = "tests/test_codex_retired_channel_notice_e7077.py"
+#: ms-181 e-7112 受入条件 3 — 理由の集合と案内の分岐の集合を突き合わせる側。
+COVERAGE_TEST = "tests/test_downgrade_reason_coverage_ms181.py"
 
 # この実行専用のバイトコードキャッシュ置き場。
 #
@@ -197,6 +199,23 @@ def claude_swaps_retired_and_provenance_advice(src: str) -> str:
     return src.replace(prov, '@@P@@', 1).replace(ret, prov, 1).replace('@@P@@', ret, 1)
 
 
+def declare_a_reason_without_advice(src: str) -> str:
+    """理由を 1 つ増やし、案内の分岐を足し忘れた状態 (ms-181 e-7112 受入条件 3)。
+
+    これが本番で起きる形: 誰かが降格理由を足し、``_downgrade_advice`` と
+    ``tally_downgrade_reasons`` の追従を忘れる。実装は fail-safe なので落ちず、
+    「この hook が知りません」と ``other`` に落ちるだけ — **つまり黙って案内が
+    消える**。既存のテストは理由を手書きで並べているので、この状態でも全部緑
+    だった (2026-10-20 実測)。集合を突き合わせる検査だけが捕まえられる。
+    """
+    anchor = 'DOWNGRADE_RETIRED_CHANNEL = "retired-provenance-channel"'
+    assert anchor in src, "anchor not found (declare_a_reason_without_advice)"
+    return src.replace(
+        anchor,
+        anchor + '\nDOWNGRADE_FUTURE_REASON_FOR_INVERSION = "future-reason"',
+        1)
+
+
 CASES = [
     # (ラベル, 対象ファイル, 壊し方, 赤くなるべきテスト)
     ("provenance から消すだけ (= 本番の事故そのもの)", BD, drop_from_provenance_only,
@@ -233,6 +252,13 @@ CASES = [
     ("Claude 側の案内文だけを逆転させる", CLAUDE,
      claude_swaps_retired_and_provenance_advice,
      CONSUMER_TEST + "::TestClaudeHookRendersPerReasonAdvice"),
+    # ms-181 e-7112 受入条件 3: 理由を足して案内を忘れたら赤くなるか。
+    ("理由を足して案内の分岐を忘れる (Claude 側)", BD,
+     declare_a_reason_without_advice,
+     COVERAGE_TEST + "::test_every_declared_reason_has_advice_of_its_own"),
+    ("理由を足してカウンタを忘れる (Codex 側)", BD,
+     declare_a_reason_without_advice,
+     COVERAGE_TEST + "::test_every_declared_reason_lands_in_its_own_counter"),
 ]
 
 

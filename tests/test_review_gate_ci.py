@@ -61,21 +61,79 @@ def test_plan_subcommand_prints_payload():
     assert out["state"] == "pending" and out["pr"] == "7"
 
 
-# --- local flip is OFF by default ------------------------------------------
+# --- the local flip follows the REPOSITORY, not the operator's shell -------
+#
+# ms-181 e-7103 changed the question this asks. It used to pin "no env var →
+# touch nothing at all", which protected repositories that do not use the gate
+# but ALSO meant an operator who ran `beacon review done` without remembering
+# `BEACON_REVIEW_GATE_CI=1` left the check pending — measured twice (ms-185's
+# fork 2026-10-19, PR #811 2026-10-20) and the second half of e-7103's
+# two-sided hole. The protected property is kept: a repository that has not
+# opted in is still left alone. What changed is who is asked — the repo
+# variable the workflow itself is gated on, instead of a shell the operator has
+# to remember.
 
-def test_ci_flip_is_noop_by_default(monkeypatch):
-    """Without BEACON_REVIEW_GATE_CI=1 the local flip must not shell out to gh
-    (default OFF — the CI gate is opt-in scaffolding, spends nothing)."""
+def test_ci_flip_leaves_a_repo_that_has_not_opted_in_alone(monkeypatch):
+    """No env var + repo variable unset → no status is pushed.
+
+    This is what the old "no-op by default" test was really protecting, and it
+    must keep holding: deriving the opt-in must not start stamping commit
+    statuses onto repositories that never asked for the gate.
+    """
     monkeypatch.delenv("BEACON_REVIEW_GATE_CI", raising=False)
-    called = {"n": 0}
+    calls = []
+
+    class _Unset:
+        returncode = 1
+        stdout = ""
+
+    def rec(argv, *a, **k):
+        calls.append(argv)
+        return _Unset()
+
+    monkeypatch.setattr(commands.subprocess, "run", rec)
+    commands._ci_flip_review_gate_success("42")
+    # It may ASK (one `gh variable get`), but it must not go on to resolve a
+    # head sha or invoke the gate script.
+    assert all("headRefOid" not in " ".join(c) for c in calls), calls
+    assert all("review-gate-ci.py" not in " ".join(c) for c in calls), calls
+
+
+def test_ci_flip_needs_no_env_var_when_the_repo_uses_the_gate(monkeypatch):
+    """受入条件 5: the stamp lands without anyone remembering a variable."""
+    monkeypatch.delenv("BEACON_REVIEW_GATE_CI", raising=False)
+    calls = []
+
+    class R:
+        returncode = 0
+
+        def __init__(self, argv):
+            # `gh variable get` answers "1"; the sha probes answer a sha.
+            self.stdout = "1\n" if "variable" in argv else "abc123sha\n"
+
+    def rec(argv, *a, **k):
+        calls.append(argv)
+        return R(argv)
+
+    monkeypatch.setattr(commands.subprocess, "run", rec)
+    commands._ci_flip_review_gate_success("42")
+    assert any("variable" in " ".join(c) for c in calls), calls
+    assert any("headRefOid" in " ".join(c) for c in calls), calls
+
+
+def test_ci_flip_can_still_be_turned_off_explicitly(monkeypatch):
+    """`BEACON_REVIEW_GATE_CI=0` asks nothing and pushes nothing.
+
+    Keeps an escape hatch for a repository that has the variable set but a
+    context where stamping is wrong (a probe, a replay, someone else's PR).
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "0")
 
     def boom(*a, **k):
-        called["n"] += 1
-        raise AssertionError("subprocess should not run when gate CI is OFF")
+        raise AssertionError("an explicit 0 must not consult gh at all")
 
     monkeypatch.setattr(commands.subprocess, "run", boom)
-    commands._ci_flip_review_gate_success("42")  # must be a no-op
-    assert called["n"] == 0
+    commands._ci_flip_review_gate_success("42")
 
 
 def test_ci_flip_attempts_gh_when_enabled(monkeypatch):

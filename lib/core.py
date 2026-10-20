@@ -12,6 +12,7 @@ import functools as _functools
 import datetime as _dt
 import re
 
+import date_window  # ms-181 e-7101: the one module that answers a period question
 import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
 import transition_approval as _ta  # ms-119 e-3912: 職種中立な目的達成レビュー primitive
@@ -2609,8 +2610,31 @@ def _find_approval_target(data: dict, target_id: str) -> dict:
     )
 
 
+def _all_target_task_ids(target: dict) -> list:
+    """Every task work-item on ``target``, nested sub-tasks included (e-6999).
+
+    The *gate* reads only ``unstarted_priority_tasks``; this wider walk exists so a
+    disposition can be RECORDED for any task the judge looked at, gated or not.
+    Keeping the two separate is deliberate: widening what may be recorded must not
+    widen what blocks. Pure."""
+    out = []
+
+    def _walk(entries):
+        for e in entries or []:
+            if (e.get("type") or "task") == "task":
+                out.append(e)
+            _walk(e.get("entries", []))
+
+    _walk(target.get("entries", []))
+    return out
+
+
 def unstarted_priority_tasks(target: dict) -> list:
-    """Collect a target's UNSTARTED highest/high tasks (ms-119 / e-4579).
+    """Collect a target's UNSTARTED tasks at a GATED priority (ms-119 / e-4579).
+
+    Gated = highest / high / untriaged / unset (ms-181 e-6999 — an unjudged tier is
+    not a low one). The name is kept for its callers; the set it returns is defined
+    by ``transition_approval.BACKLOG_GATED_PRIORITIES``, not by this docstring.
 
     The backlog cross-check for the 目的達成 gate: an unstarted highest/high task is
     a known, encoded piece of important work: leaving it untouched while claiming
@@ -2827,14 +2851,25 @@ def target_transition_approval_attach_disposition(data: dict, entry_id: str, *,
         raise ValueError(
             f"Entry {entry_id} is not pending (status={entry.get('status')}); "
             f"disposition は verdict の前に記録します")
-    # Guard: task_id must be a real gated backlog task on THIS target, so a typo or a
-    # stray id cannot fake-satisfy the gate for a different task that is still blocking.
-    backlog_ids = {t.get("id") for t in unstarted_priority_tasks(target)}
-    if task_id not in backlog_ids:
+    # Guard: task_id must be a real task on THIS target, so a typo or a stray id
+    # cannot fake-satisfy the gate for a different task that is still blocking.
+    #
+    # ms-181 e-6999 widened this from "gated backlog only" to "any task on this
+    # target". The narrow version refused the judge's own findings: on ms-166's
+    # attainment review (2026-10-15) an independent judge returned a disposition for
+    # each of 16 remaining tasks and ALL 16 were rejected, because none were
+    # highest/high. The determinations were real work with nowhere to land, so they
+    # were written into the evidence prose by hand and left the ledger — the exact
+    # "判断軌跡が落ちる" this milestone is about. Recording a disposition for an
+    # ungated task is harmless (the gate still reads only the gated subset) and
+    # keeps "we looked at this and judged it unnecessary" on the record.
+    task_ids = {t.get("id") for t in _all_target_task_ids(target)}
+    if task_id not in task_ids:
         raise ValueError(
-            f"{task_id} is not an unstarted highest/high task of "
-            f"{entry['meta'].get('target_id')} — disposition applies only to the "
-            f"gated backlog (done/in-flight/lower-priority tasks are not gated)")
+            f"{task_id} is not a task of {entry['meta'].get('target_id')} — "
+            f"a disposition must name a task that exists on this target "
+            f"(check the id; dispositions for other targets belong on their own "
+            f"approval entry)")
     _ta.append_disposition(entry, task_id=task_id, verdict=verdict, reason=reason,
                            source=source, actor=actor, at=_now_iso())
     return entry
@@ -3837,22 +3872,56 @@ def milestone_prepare_info(ms: dict) -> dict:
     }
 
 
-def collect_retro_entries(entries: list, since: str, until: str) -> list:
-    """Recursively collect entries within date range for retrospective."""
+def collect_retro_entries(entries: list, since: str, until: str,
+                          undated: dict | None = None) -> list:
+    """Recursively collect entries within date range for retrospective.
+
+    The period question is answered by :mod:`date_window`, the one module that
+    decides it (ms-181 e-7101). This walker used to compare the stamps as raw
+    text against the raw bounds, which made retro disagree with itself: the
+    same ``beacon retro`` payload builds ``source_breakdown`` through
+    ``search``/``date_window`` but built ``milestones`` here, so for the window
+    ``2026-10-19..2026-10-20`` a commit stamped ``2026-10-20T08:00:00Z``
+    counted in the breakdown (2 human events) and was absent from the
+    narrative (0 milestones) — measured on 2026-10-20. The cause is the
+    date-only upper bound: ``"2026-10-20T08:00:00Z" > "2026-10-20"`` as text,
+    so a full timestamp anywhere *during* the final day fell out of the week.
+    ``--until today`` is retro's default, so the day's own work was the part it
+    dropped. :func:`date_window.normalize_bound` widens a date-only bound to
+    the whole day in one place instead of here as well.
+
+    WHICH stamp is read is deliberately unchanged — it is now NAMED, as
+    ``date_window.RETRO_ENTRY_STAMPS`` (``created_at``, else ``date``), rather
+    than left as an inline ``or``-chain. The set chooses which *question* retro
+    asks, so moving it would silently repopulate every weekly retro; but an
+    unnamed copy is invisible to the next change, which is what a
+    maintainability review of PR #811 caught (a stamp added to
+    ``CREATION_STAMPS`` would reach ``search`` and miss this walker, with
+    nothing in either file to say so). Only the comparison moved; the set now
+    says out loud that it differs.
+
+    ``undated`` is an optional caller-owned tally, same idiom as
+    ``search._in_window``: an entry carrying no stamp at all cannot be judged
+    against a period, so it is excluded (as before) but counted by ``type``,
+    so a caller can report "N records could not be judged" instead of letting
+    them read as "nothing happened".
+    """
     result = []
     for entry in entries:
-        date = entry.get("created_at") or entry.get("date") or ""
+        stamps = date_window.stamps_of(entry, date_window.RETRO_ENTRY_STAMPS)
+        date = stamps[0] if stamps else ""
         status = entry.get("status", "")
         if status == "cancelled":
             continue
-        in_range = True
-        if since and date < since:
-            in_range = False
-        if until and date > until:
-            in_range = False
+        verdict = date_window.classify(date, since, until)
+        in_range = verdict == date_window.IN_WINDOW
+        if verdict == date_window.UNDATED and undated is not None:
+            key = entry.get("type", "") or "unknown"
+            undated[key] = undated.get(key, 0) + 1
 
         children = entry.get("entries", [])
-        child_results = collect_retro_entries(children, since, until) if children else []
+        child_results = collect_retro_entries(
+            children, since, until, undated) if children else []
 
         if in_range or child_results:
             item = {

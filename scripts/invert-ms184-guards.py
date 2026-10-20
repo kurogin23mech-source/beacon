@@ -34,7 +34,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEST_FILES = ("tests/test_progress_window_ms184.py",
               "tests/test_cmd_recap_ms184.py",
               "tests/test_recap_entrypath_ms184.py",
-              "tests/test_recap_frontend_parity_ms184.py")
+              "tests/test_recap_frontend_parity_ms184.py",
+              # ms-181 e-7101 brought `beacon retro` onto this same period
+              # surface (it had its own text comparisons and no validation at
+              # all). One surface, one harness — a second inversion script
+              # would drift from this one.
+              "tests/test_retro_period_ms181.py")
 #: Runs the harness itself — excluded or the harness would recurse forever.
 SELF_TEST = "test_inversion_harness_is_wired"
 
@@ -213,7 +218,10 @@ INVERSIONS = [
     (
         "the range-order rule is copied back into the CLI boundary",
         "lib/date_window.py",
-        '    if lo and hi and lo > hi:\n        return f"--from {lo} is after --to {hi}."\n',
+        # ms-181 e-7101 parametrised the flag names in this message; the
+        # snippet follows the code rather than the inversion being dropped.
+        '    if lo and hi and lo > hi:\n'
+        '        return f"{lower_flag} {lo} is after {upper_flag} {hi}."\n',
         '    return ""  # noqa\n    if False:\n        return ""\n',
         ["test_inverted_explicit_range_is_refused"],
     ),
@@ -331,6 +339,165 @@ INVERSIONS = [
         "    return _d(base - datetime.timedelta(days=6)), _d(base)\n",
         ["test_parse_since_refuses_rather_than_substituting_a_window"],
     ),
+    # --- ms-181 e-7101: `beacon retro` joins this period surface -----------
+    (
+        "retro takes the period strings on trust again (the e-7101 bug)",
+        "lib/cmd_retro.py",
+        "    since, until = _resolve_window(since_spec, until_spec)\n",
+        "    since, until = since_spec, until_spec\n",
+        ["test_an_unreadable_period_exits_nonzero_instead_of_an_empty_week",
+         "test_retro_reads_the_same_period_words_as_recap",
+         "test_an_inverted_window_is_refused_in_this_verb_s_own_flag_names"],
+    ),
+    (
+        "retro's resolved window goes back to echoing what was typed",
+        "lib/cmd_retro.py",
+        '            "received": {"since": since_spec, "until": until_spec},\n',
+        '            "received": {"since": since, "until": until},\n',
+        ["test_the_resolved_window_is_not_the_echo_of_what_was_typed"],
+    ),
+    (
+        "retro's entry walker compares the stamps as raw text again",
+        "lib/core.py",
+        "        verdict = date_window.classify(date, since, until)\n"
+        "        in_range = verdict == date_window.IN_WINDOW\n",
+        "        in_range = True\n"
+        "        if since and date < since:\n"
+        "            in_range = False\n"
+        "        if until and date > until:\n"
+        "            in_range = False\n"
+        "        verdict = date_window.classify(date, since, until)\n",
+        ["test_a_full_timestamp_on_the_final_day_is_inside_the_window",
+         "test_every_facet_of_one_payload_sees_the_same_record",
+         "test_retro_reads_the_same_period_words_as_recap"],
+    ),
+    (
+        "retro's deploy facet goes back to truncate-then-compare",
+        "lib/cmd_retro.py",
+        '        dep_verdict = _dw.classify(dep.get("date") or "", since, until)\n'
+        '        if dep_verdict == _dw.UNDATED:\n'
+        '            undated["deploy"] = undated.get("deploy", 0) + 1\n'
+        "        if dep_verdict == _dw.IN_WINDOW:\n",
+        '        dep_date = (dep.get("date") or "")[:10]\n'
+        "        if (not since or dep_date >= since) and (not until or dep_date <= until):\n",
+        ["test_a_deploy_with_no_date_is_counted_too"],
+    ),
+    (
+        "retro stops reporting the records it could not judge",
+        "lib/cmd_retro.py",
+        '        "undated": _dw.undated_block(undated),\n',
+        '        "undated": {"excluded": 0, "by_type": {}},\n',
+        ["test_undated_entries_are_excluded_and_reported",
+         "test_a_deploy_with_no_date_is_counted_too"],
+    ),
+    (
+        "the inverted-range message names flags the verb does not have",
+        "lib/date_window.py",
+        '        return f"{lower_flag} {lo} is after {upper_flag} {hi}."\n',
+        '        return f"--from {lo} is after --to {hi}."\n',
+        ["test_an_inverted_window_is_refused_in_this_verb_s_own_flag_names"],
+    ),
+    (
+        "the python front resolves the period itself (a second parser)",
+        "beacon_cli/dispatch.py",
+        "    if not since:\n        since = _compute_default_since()\n",
+        "    import sys as _s\n"
+        '    _s.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))\n'
+        "    import date_window as _dw2\n"
+        "    if since:\n        since = _dw2.parse_since(since)[0]\n"
+        "    if not since:\n        since = _compute_default_since()\n",
+        ["test_neither_front_interprets_the_period_itself"],
+    ),
+    (
+        "`beacon retro --help` stops listing the flags it reads",
+        "lib/commands.py",
+        '{"command": "beacon retro", "flags": ["--prepare", "--catch-up", '
+        '"--since <period>", "--until <period>"]',
+        '{"command": "beacon retro", "flags": []',
+        ["test_the_help_registry_documents_the_flags_and_their_period"],
+    ),
+    # --- ms-181 e-7101, round 2: the PR #811 review findings ----------------
+    (
+        "`--until <N>d` is accepted again and silently means today",
+        "lib/cmd_retro.py",
+        "        if end and _dw.is_duration_spec(spec):\n",
+        "        if False:\n",
+        ["test_until_refuses_a_length_of_time_instead_of_meaning_today"],
+    ),
+    (
+        "the duration predicate stops recognising a span",
+        "lib/date_window.py",
+        '    return bool(_RELATIVE.match((spec or "").strip().lower()))\n',
+        "    return False\n",
+        ["test_until_refuses_a_length_of_time_instead_of_meaning_today"],
+    ),
+    (
+        "the duration refusal also swallows a real point in time",
+        "lib/date_window.py",
+        '    return bool(_RELATIVE.match((spec or "").strip().lower()))\n',
+        "    return True\n",
+        ["test_until_still_takes_a_point_in_time"],
+    ),
+    (
+        "a date-shaped string that is not a date passes as a bound again",
+        "lib/date_window.py",
+        "    try:\n"
+        "        datetime.date(int(value[0:4]), int(value[5:7]), int(value[8:10]))\n"
+        "    except ValueError:\n"
+        "        return False\n"
+        "    return True\n",
+        "    return True\n",
+        ["test_a_date_shaped_string_that_is_not_a_date_is_refused"],
+    ),
+    (
+        "an impossible date is reported as an inverted range (the misdirection)",
+        "lib/date_window.py",
+        "    for value, flag in ((lo, lower_flag), (hi, upper_flag)):\n"
+        "        if value and _DATE_ONLY.match(value) and not is_calendar_date(value):\n"
+        '            return f"{flag} {value} is not a real calendar date."\n',
+        "",
+        ["test_an_explicit_range_bound_that_is_not_a_date_is_refused"],
+    ),
+    (
+        "retro's stamp set goes back to an unnamed inline chain",
+        "lib/core.py",
+        "        stamps = date_window.stamps_of(entry, date_window.RETRO_ENTRY_STAMPS)\n"
+        '        date = stamps[0] if stamps else ""\n',
+        '        date = entry.get("created_at") or entry.get("date") or ""\n',
+        ["test_the_retro_walker_reads_the_declared_stamp_set"],
+    ),
+    (
+        "retro's stamp set silently widens to include pushes",
+        "lib/date_window.py",
+        'RETRO_ENTRY_STAMPS = ("created_at", "date")\n',
+        'RETRO_ENTRY_STAMPS = ("created_at", "date", "pushed_at")\n',
+        ["test_the_retro_stamp_set_is_named_not_an_inline_chain"],
+    ),
+    (
+        "the undated tally is rendered per-module again",
+        "lib/date_window.py",
+        '    return {"excluded": sum(tally.values()),\n'
+        '            "by_type": dict(sorted(tally.items()))}\n',
+        '    return {"count": sum(tally.values()), "by_kind": dict(tally)}\n',
+        ["test_the_undated_block_is_rendered_by_the_shared_renderer",
+         "test_undated_entries_are_excluded_and_reported"],
+    ),
+    (
+        "the registry hand-types a partial period vocabulary again",
+        "lib/commands.py",
+        '<period> = " + " | ".join(_since_forms_for_help()) + "。',
+        "<period> = today | yesterday | this-week | 3d | YYYY-MM-DD …。",
+        ["test_both_help_surfaces_list_the_same_period_vocabulary"],
+    ),
+    (
+        "the python front's help vocabulary falls back to its own copy",
+        "beacon_cli/dispatch.py",
+        "        _ensure_lib_on_path()\n"
+        "        import date_window as _dw  # type: ignore[import-not-found]\n"
+        "        return tuple(_dw.SINCE_FORMS)\n",
+        "        raise ImportError('forced')\n",
+        ["test_both_help_surfaces_list_the_same_period_vocabulary"],
+    ),
 ]
 
 
@@ -354,14 +521,29 @@ def _scratch_tree() -> str:
     return tmp
 
 
-def _run(tree: str, tests) -> subprocess.CompletedProcess:
+def _run(tree: str, tests, *, tag: str = "base") -> subprocess.CompletedProcess:
+    """Run the named tests against ``tree``, with the bytecode cache isolated.
+
+    ``-B`` / ``PYTHONDONTWRITEBYTECODE`` stop this process WRITING ``.pyc``
+    files; they do not stop it READING a cache written earlier. On macOS the
+    system Python keeps one under ``~/Library/Caches/com.apple.python`` keyed
+    by absolute source path, so a harness that mutates a file and puts it back
+    can be answered by the mutated version's bytecode — a false red, or (worse,
+    since it reads as safety) a false green when the inversion is the thing
+    cached. The scratch tree already lives at a fresh absolute path per run;
+    ``PYTHONPYCACHEPREFIX`` per inversion closes the remaining door between
+    one inversion and the next within a run.
+    """
     expr = " or ".join(tests)
+    cache = os.path.join(tempfile.gettempdir(),
+                         f"ms184-inv-pyc-{os.getpid()}-{tag}")
     return subprocess.run(
         [sys.executable, "-B", "-m", "pytest", *TEST_FILES, "-q",
          "-p", "no:randomly", "-p", "no:cacheprovider",
          "-k", f"({expr}) and not {SELF_TEST}"],
         cwd=tree, capture_output=True, text=True, timeout=600,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+             "PYTHONPYCACHEPREFIX": cache},
     )
 
 
@@ -377,7 +559,7 @@ def main() -> int:
             return 1
         print(f"baseline green ({len(all_tests)} tests)\n")
 
-        for name, rel, old, new, tests in INVERSIONS:
+        for idx, (name, rel, old, new, tests) in enumerate(INVERSIONS):
             path = os.path.join(tree, rel)
             with open(path, encoding="utf-8") as f:
                 original = f.read()
@@ -390,7 +572,7 @@ def main() -> int:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(original.replace(old, new, 1))
             try:
-                proc = _run(tree, tests)
+                proc = _run(tree, tests, tag=f"inv{idx}")
                 if proc.returncode == 0:
                     failures.append(
                         f"{name}: reverted the fix in {rel} and "
@@ -402,6 +584,19 @@ def main() -> int:
             finally:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(original)
+
+        # Every inversion was put back — prove it. A restore that silently
+        # failed (or a stale bytecode cache answering for a mutated file)
+        # would otherwise leave the LAST inversion's red counted as a pass
+        # for the next run, which is the failure mode this harness exists to
+        # catch, turned on itself.
+        after = _run(tree, all_tests, tag="final")
+        if after.returncode != 0:
+            failures.append(
+                "the tree did not come back green after the inversions were "
+                "reverted — a restore or the bytecode cache is at fault, so "
+                "every 'red as expected' above is unproven:\n"
+                + after.stdout[-2000:])
     finally:
         shutil.rmtree(tree, ignore_errors=True)
 

@@ -82,6 +82,37 @@ def _pr_number_from_url(url: str) -> str:
     n = core._extract_pr_number_from_url(url)
     return str(n) if n is not None else ""
 
+def _after_pr_recorded(url: str, title: str, intent: str, *, pr_repo=None) -> None:
+    """Everything that must happen once a PR has become a beacon record.
+
+    ONE place, called by every verb that records a PR (ms-181 e-7103). Before
+    this, ``beacon pr add`` remembered to derive the intent decision and fire
+    the PR-open review triggers, and ``beacon pr create`` — which calls
+    ``core.pr_add`` directly — remembered neither. So a PR created through the
+    wrapper had **no review gate standing on it** and no intent on the decision
+    arm, and ``beacon pr approve`` would sail through for want of a review that
+    was never requested. The backstop
+    (``_auto_fire_pr_open_review_triggers_for_open_prs``) only runs from
+    ``beacon trigger tick``, so the window stayed open from creation until the
+    next tick — measured on 2026-10-19: PRs #806/#803 had no gate before a
+    tick and both had ax/maintainability gates after one.
+
+    Two call sites each holding their own memory of "what else recording a PR
+    implies" is the defect, not the forgotten line. A third verb added later
+    calls this and is correct by construction.
+    """
+    number = _pr_number_from_url(url)
+    # ms-166 e-5972: write-through — derive a pr-intent decision from the PR's
+    # declared intent at record time, so the "why" of this change lands on the
+    # decision arm without a separate `beacon decision record`.
+    _derive_pr_intent_decision(number, title, intent)
+    # ms-119 e-4003: a recorded PR is the beacon-owned PR-open 契機 — auto-bind
+    # every PR-bound review (AX + maintainability, data-driven from the
+    # registry) so they fire structurally at the 節目, not only when a human
+    # remembers /beacon-review-run. Advisory, non-blocking.
+    _fire_pr_open_review_triggers(number, title, url, pr_repo=pr_repo)
+
+
 def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> None:
     """Refuse ``action`` (approve / merge) while independent reviews are still
     owed for this PR, unless BEACON_PR_REVIEW_OVERRIDE=1 (which proceeds but
@@ -286,17 +317,7 @@ def cmd_pr_add():
         sys.exit(1)
     save_project(data)
 
-    # ms-166 e-5972: write-through — derive a pr-intent decision from the PR's
-    # declared intent at record time, so the "why" of this change lands on the
-    # decision arm without a separate `beacon decision record` (成果物からの導出).
-    _derive_pr_intent_decision(_pr_number_from_url(url), title, intent)
-
-    # ms-119 e-4003: a recorded PR is the beacon-owned PR-open 契機 — auto-bind
-    # every PR-bound review (AX + maintainability, data-driven from the registry)
-    # so they fire structurally at the 節目 (not only when a human remembers
-    # /beacon-review-run). Advisory, non-blocking.
-    _fire_pr_open_review_triggers(_pr_number_from_url(url), title, url,
-                                  pr_repo=_new_repo)
+    _after_pr_recorded(url, title, intent, pr_repo=_new_repo)
 
     # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
     # を author に知らせる (= 警告のみ、block しない)。
@@ -1615,6 +1636,8 @@ def cmd_pr_create():
         print(f"Warning: beacon pr record failed: {e}", file=sys.stderr)
         return
     save_project(data)
+    _after_pr_recorded(pr_url, title, intent,
+                       pr_repo=core.extract_pr_repo_from_url(pr_url))
     print(f"Beacon: PR recorded [{eid}]: {title or pr_url}")
     if commits:
         print(f"  Commits: {len(commits)} linked")

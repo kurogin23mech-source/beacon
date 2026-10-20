@@ -163,4 +163,24 @@ echo "[ci-strict-drift-guards] Skill 名の解析が 1 箇所だけであるこ�
 # ガードが firing するか否かが決まってはならない。標準ライブラリのみ (pytest 非依存)。
 python3 "$ROOT/scripts/check-single-skill-parser.py" --quiet
 
+echo "[ci-strict-drift-guards] 動詞 → 内部処理の対応が両フロントで一致するか (ms-181 e-7102)…"
+# 両フロントは commands.py に渡す内部処理名を **文字列で** 指定する
+# (`_run_commands_py(root, "recap_targets", …)` と `$COMMANDS_PY recap_targets`)。
+# 片方がこれを別の動詞のものに取り違えると、その端末だけが黙って違う動詞の答えを
+# 返す — 終了コードは 0 で出力も妥当な JSON なので、呼び出し側には区別がつかない。
+#
+# 既存のガードはこれを **原理的に見られない** (2026-10-20、同じ取り違えを仕込んで
+# 実測): check-cli-help-drift は旗の集合、check-verb-ledger は動詞が台帳に載って
+# いるか、check-capability-scope は共有スコープ層を見る。3 つとも緑→緑のまま通った。
+# 「動詞が在る / 旗が在る / 層が正しい」を見る検査は揃っていたが、**その動詞が
+# どこへ行くかを見る検査が 1 つも無かった**。
+#
+# 静的な抽出は偽の緑だった: `recap` の sub 動詞の振り分けは case arm ではなく
+# `if [ "$recap_sub" = "targets" ]` なので、arm 単位で領域を切る方法では
+# recap_targets と recap_projects が混ざって見え、取り違えても集合が交差する。
+# なので **両フロントを実際に起動して渡される処理名を観測する**。封じ込めは
+# スタブ commands.py と PATH shim (git / 網 / ブラウザを無効化) の 2 枚で、
+# 実データには触らない。標準ライブラリのみ (pytest 非依存)。
+python3 "$ROOT/scripts/check-cli-handler-parity.py" --strict
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."

@@ -120,9 +120,14 @@ def _backlog_undisposed_message(eid: str, target_id: str, undisposed: list) -> s
     body = _ta.format_backlog_gap(undisposed, target_id=target_id,
                                   spec_updated_at=_spec_updated_at_for_target(target_id))
     return (
-        f"Error: 承認依頼 {eid} は未着手の重要タスク (highest/high) の disposition が"
-        f"未完です (ms-119 / e-4579)。\n"
-        f"  attainment は AC (アウトカム) 軸で定義しますが、未着手の highest/high は"
+        f"Error: 承認依頼 {eid} は未着手タスクの disposition が未完です "
+        f"(ms-119 / e-4579、区分は ms-181 / e-6999)。\n"
+        f"  **数える区分**: {' / '.join(_ta.BACKLOG_GATED_PRIORITIES)} + 優先度未設定。\n"
+        f"  **数えない区分**: {' / '.join(_ta.BACKLOG_UNGATED_PRIORITIES)} "
+        f"(見た上で低いと判断済なので残余として扱う)。\n"
+        f"  untriaged は『低い』ではなく『人がまだ判断していない』印なので数える側です"
+        f" — 判断していないものを低いものとして扱わないため。\n"
+        f"  attainment は AC (アウトカム) 軸で定義しますが、未着手の重要作業は"
         f"『必要と符号化された既知作業』であり、掃除機がある≠掃除した の穴です。\n"
         f"  各タスクに done / superseded[理由] / blocks-attainment のいずれかを付ける"
         f"まで、この承認は構造的に未完成として通りません。\n"
