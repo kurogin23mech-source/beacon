@@ -2243,7 +2243,7 @@ def _resolve_bus_event_user_ids(
     string for that side; the caller (``dm_gate.should_gate_dm_action``)
     treats empty-string sender / receiver as "unknown" and falls through
     to the standard rule set (= same_user skip is impossible when sender
-    is blank, but the no_actions / shared_trek rules still apply).
+    is blank, but the no_actions rule still applies).
 
     Used only by the post_bus_event gate (ms-70 / e-1713). Kept off the
     hot path of normal lookups — one ``list_sessions`` call per bus
@@ -2261,8 +2261,8 @@ def _resolve_bus_event_user_ids(
         sessions = db.list_sessions(project_id)
     except Exception:
         # Backend unavailable / table missing in a fresh project: treat
-        # both ids as unknown. The gate's no_actions / shared_trek rules
-        # still cover the safe defaults.
+        # both ids as unknown. The gate's no_actions rule still covers
+        # the safe default.
         return ("", "")
     for s in sessions:
         sid = s.get("session_id") or ""
@@ -2518,48 +2518,30 @@ async def post_bus_event(
     env_actions = (body.envelope or {}).get("actions_authorized") or []
     env_tier = (body.envelope or {}).get("tier", "") or ""
     env_issuer = (body.envelope or {}).get("issuer", "") or ""
-    gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
-        # Sender-side trek visibility is sufficient — Trek membership
-        # query is symmetric (creator OR members) on either backend.
-        # ms-97 / e-2659 Phase 3 (G4): the lookup is invoked fresh per
-        # bus event — no list reuse — so a member removed between
-        # events stops granting bypass on the next invocation.
-        lambda uid: db.list_treks(actor_id=uid) if uid else [],
-    )
-    # ms-97 / e-2659 Phase 3 (AC18): pass session ids so phase A+ treks
-    # are evaluated session-grain. Recipient sid is resolved from the
-    # payload (= same shape used by ``_resolve_bus_event_user_ids``).
-    recipient_sid_for_gate = ""
+    # 受信者の session id は payload から解決する (= ``_resolve_bus_event_user_ids``
+    # と同じ形)。下の送信側 consent 判定が使う。
+    recipient_sid = ""
     if isinstance(body.payload, dict):
-        recipient_sid_for_gate = str(
-            body.payload.get("recipient_session_id") or ""
-        )
+        recipient_sid = str(body.payload.get("recipient_session_id") or "")
     # ms-83 / e-1995: pass tier+issuer so the gate can recognise
     # T1-system server-mint envelopes as T1-equivalent (= bypass).
-    should_gate, gate_reason, gate_trek_id = dm_gate_mod.should_gate_dm_action(
+    #
+    # ms-185 e-7068: ここに「送信者と受信者が同じ Trek の参加者か」を引く
+    # lookup の組み立てと、その結果を監査に刻む bypass / trek_id が在った。
+    # 規則ごと削除したので、組み立ても刻みも消してある (= 常に空の field を
+    # 残さない)。別人宛の action 付き DM は必ず人間の確認を要求する側に倒れる。
+    should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id=authoritative_sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
-        shared_trek_lookup=gate_lookup,
         envelope_tier=env_tier,
         envelope_issuer=env_issuer,
-        sender_session_id=body.sender_session_id or "",
-        receiver_session_id=recipient_sid_for_gate,
     )
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
         "reason": gate_reason,
         "sender_user_id": authoritative_sender_uid,
         "receiver_user_id": receiver_uid,
-        # ms-97 / e-2659 Phase 3 (AC19): bypass flag + matched trek_id.
-        # bypass=True when the gate let an action-bearing cross-user
-        # envelope through *because* of a shared trek membership. The
-        # trek_id makes the audit log searchable by trek.
-        "bypass": (
-            (not should_gate)
-            and gate_reason == dm_gate_mod.GATE_REASON_SHARED_TREK
-        ),
-        "trek_id": gate_trek_id,
     }
     if should_gate:
         # Force a safe, non-auto-execute delivery so legacy receivers
@@ -2615,7 +2597,6 @@ async def post_bus_event(
             channel=body.channel,
             is_reply=consent_is_reply,
             operation_envelope=consent_operation_env,
-            shared_trek=False,
         )
         consent_allow = not consent_required
         if consent_required:
@@ -2625,26 +2606,17 @@ async def post_bus_event(
             _decision = dm_consent_mod.evaluate_send(
                 sender_user_id=consent_sender_uid,
                 recipient_user_id=receiver_uid,
-                recipient_session_id=recipient_sid_for_gate,
+                recipient_session_id=recipient_sid,
                 channel=body.channel,
                 is_reply=consent_is_reply,
                 operation_envelope=consent_operation_env,
-                shared_trek=False,
                 consent_claim=consent_claim,
             )
             consent_allow = _decision["allow"]
             consent_reason = _decision["reason"]
-            if not consent_allow and consent_sender_uid and receiver_uid:
-                # Last resort before rejecting: a shared-Trek pair is
-                # pre-approved (§1). Only now pay for the Trek lookup (fresh per
-                # event). Reuse the session-grain lookup ms-70 built above.
-                _c_matched, _c_trek_id = gate_lookup(
-                    consent_sender_uid, receiver_uid,
-                    body.sender_session_id or "", recipient_sid_for_gate,
-                )
-                if _c_matched:
-                    consent_allow = True
-                    consent_reason = dm_consent_mod.CONSENT_SKIP_SHARED_TREK
+            # ms-185 e-7068: ここに「拒否する前の最後の救済 — 同じ Trek の
+            # 参加者同士なら通す」が在った。規則ごと削除してある (= 救済の根拠
+            # が消えたので、確認の無い別人宛の新規送信はそのまま拒否される)。
     audit_record["sender_consent"] = {
         "enforced": consent_enforced,
         "allow": consent_allow,
@@ -2719,15 +2691,15 @@ async def post_bus_event(
     # common path is byte-unchanged (no extra keys) — the no-regression
     # guarantee pinned by test. This is the SERVER choke point, reaching paths
     # the CLI-side advisory can't (MCP reply / headless). Best-effort.
-    if body.channel == "dm" and recipient_sid_for_gate:
+    if body.channel == "dm" and recipient_sid:
         try:
             _send_verdict = _classify_recipient_send_delivery(
-                project_id, recipient_sid_for_gate,
+                project_id, recipient_sid,
                 datetime.datetime.now(datetime.timezone.utc))
         except Exception as _reach_exc:  # pragma: no cover - defensive
             logging.getLogger(__name__).warning(
                 "recipient reachability check failed for recipient=%s: %s",
-                recipient_sid_for_gate, _reach_exc)
+                recipient_sid, _reach_exc)
             _send_verdict = None
         if _send_verdict == bus_liveness.SEND_WEDGED:
             data["recipient_wedged"] = True

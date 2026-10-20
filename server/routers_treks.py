@@ -3378,11 +3378,15 @@ def make_router(
         membership (it is server-side state), so it pre-flights this endpoint
         before consuming budget.
 
-        Single source of truth: reuses ``dm_gate``'s session-grain shared-Trek
-        lookup (``build_shared_trek_lookup_from_lists``) — the SAME rule the
-        receiver-side action gate applies (halt / archived filtered, phase-A
-        session grain, live per-call trek fetch). Covers cross-project replies via
-        ``recipient_project_id``.
+        判定は ``lib/trek.build_shared_trek_lookup_from_lists`` (halt / archived
+        を除外、phase-A は session 粒度、呼び出しごとに trek を再取得)。
+        ``recipient_project_id`` でプロジェクト跨ぎの返信も見る。
+
+        ms-185 e-7068: この判定はもともと ``dm_gate`` に在り、「同じ Trek の
+        参加者なら人間の確認を省く」規則と**同じ規則**だった。その規則は削除された
+        ので、ここが参照するのは Trek 自身の module に移した判定である。
+        つまりこれは **予算の最適化だけ**に効く問い合わせで、認可の境界ではない
+        (認可の境界は bus POST 側の dm_gate、そちらに Trek の例外はもう無い)。
 
         Read-only. Best-effort: returns ``trek_internal=false`` on any unresolved
         id so a failed lookup keeps the budget gate in force — never a silent
@@ -3404,13 +3408,11 @@ def make_router(
         receiver_uid = _sid_to_uid(rpid, recipient_session_id)
         if not sender_uid or not receiver_uid:
             return {"trek_internal": False, "trek_id": ""}
-        lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
+        lookup = trek_mod.build_shared_trek_lookup_from_lists(
             lambda uid: db.list_treks(actor_id=uid) if uid else [],
         )
-        matched, trek_id = dm_gate_mod._coerce_lookup_result(
-            lookup(sender_uid, receiver_uid,
-                   sender_session_id, recipient_session_id)
-        )
+        matched, trek_id = lookup(
+            sender_uid, receiver_uid, sender_session_id, recipient_session_id)
         return {"trek_internal": bool(matched), "trek_id": trek_id or ""}
 
     return router

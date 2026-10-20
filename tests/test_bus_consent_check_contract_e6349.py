@@ -154,13 +154,18 @@ def test_trek_named_channels_are_now_flagged_as_unknown(monkeypatch, channel):
 
 
 def test_unchecked_carve_outs_are_disclosed(monkeypatch):
-    """判定に使わなかった 2 軸を出力で明かす (A-4)。
+    """判定に使わなかった軸を出力で明かす (A-4)。
 
-    安全側 (過剰確認) に倒すこと自体は正しいが、倒したと黙っていると、Trek /
+    安全側 (過剰確認) に倒すこと自体は正しいが、倒したと黙っていると、
     Operation 文脈で「必要」と出た呼び手が理由を誤診して無関係な所をデバッグする。
+
+    ms-185 e-7068: 以前は 2 軸 (operation_envelope / shared_trek) だった。
+    共有 Trek の carve-out が規則ごと消えたので、**開示する軸も 1 つに減る** —
+    存在しない carve-out を「未検証」と言い続けると、呼び手は「Trek 参加中なら
+    本当は不要かも」と誤った希望を持つ (= 消えた機構を指す開示は誤誘導)。
     """
     got = _json_run(monkeypatch)
-    assert set(got["carve_outs_not_checked"]) == {"operation_envelope", "shared_trek"}
+    assert set(got["carve_outs_not_checked"]) == {"operation_envelope"}
 
 
 def test_missing_recipient_is_a_usage_error(monkeypatch):

@@ -221,8 +221,15 @@ def test_reply_cross_user_passes_without_claim(wired):
     assert resp.status_code == 200, resp.text
 
 
-def test_shared_trek_cross_user_passes_without_claim(wired):
-    """Cross-user but both in the same active Trek → pre-approved scope."""
+def test_shared_trek_cross_user_is_now_rejected_without_claim(wired):
+    """同じ Trek の参加者同士でも、確認の証跡が無い新規 DM は拒否される。
+
+    **消した裏返しを実機 (HTTP) で固定する** (ms-185 e-7068)。以前はここで
+    active な共有 Trek を 1 件置くだけで 200 が返っていた — サーバが「双方
+    Trek 参加済みなので事前承認」と判断していたため。その規則を判定ごと削除
+    したので、同じ状況で 403 になるのが正しい。削除の向きが fail-closed だと
+    いう証拠は、単体試験ではなくこの経路で取る (サーバが本当に拒否するか)。
+    """
     _treks.append({
         "trek_id": "tk-shared",
         "status": "active",
@@ -233,7 +240,8 @@ def test_shared_trek_cross_user_passes_without_claim(wired):
         ],
     })
     resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob")
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "sender_consent_required"
 
 
 def test_non_dm_broadcast_cross_user_passes(wired):

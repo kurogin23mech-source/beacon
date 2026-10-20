@@ -257,19 +257,14 @@ def test_t1_system_cannot_request_deploy(nonce_store, parent_lookup):
 # (8) dm_gate recognises T1-system as a bypass
 # ---------------------------------------------------------------------------
 
-def _never(_a, _b):
-    return False
-
-
 def test_dm_gate_t1_system_bypass_even_cross_user():
-    """Even with cross-user + actions + no shared Trek, a T1-system
-    envelope signals "user pre-approved at trek activation" and the
-    cross-user human gate steps aside."""
-    should_gate, reason, _trek_id = dm_gate_mod.should_gate_dm_action(
+    """別人 + action 付きでも、サーバ自身が発行した T1-system 署名は
+    人間の確認ゲートを通す (= 別の権限)。ms-185 e-7068 で共有 Trek の規則は
+    消えたが、この権限は残っている (去就は e-7078)。"""
+    should_gate, reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id="u-alice",
         receiver_user_id="u-bob",
         actions_authorized=["dm.send"],
-        shared_trek_lookup=_never,
         envelope_tier="T1-system",
         envelope_issuer="beacon-system",
     )
@@ -281,11 +276,10 @@ def test_dm_gate_t1_system_issuer_must_be_beacon_system():
     """Spoofed tier (= claiming T1-system with the wrong issuer) does
     NOT bypass the gate. This is belt + braces alongside the envelope
     verify pipeline."""
-    should_gate, reason, _trek_id = dm_gate_mod.should_gate_dm_action(
+    should_gate, reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id="u-alice",
         receiver_user_id="u-bob",
         actions_authorized=["dm.send"],
-        shared_trek_lookup=_never,
         envelope_tier="T1-system",
         envelope_issuer="user@example.com",  # wrong
     )
@@ -296,11 +290,10 @@ def test_dm_gate_t1_system_issuer_must_be_beacon_system():
 def test_dm_gate_backward_compat_default_args():
     """Existing callers that don't pass envelope_tier / issuer must still
     behave as before (= no regression for ms-70 ms-76 paths)."""
-    should_gate, reason, _trek_id = dm_gate_mod.should_gate_dm_action(
+    should_gate, reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id="u-alice",
         receiver_user_id="u-bob",
         actions_authorized=["dm.send"],
-        shared_trek_lookup=_never,
     )
     assert should_gate is True
     assert reason == dm_gate_mod.GATE_REASON_CROSS_USER_ACTION

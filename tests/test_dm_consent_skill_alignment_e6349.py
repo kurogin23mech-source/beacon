@@ -80,7 +80,7 @@ def test_ci_guards_script_does_not_invoke_pytest():
 
 def _consent(**kw):
     base = dict(sender_user_id="", recipient_user_id="", channel="dm",
-                is_reply=False, operation_envelope=False, shared_trek=False)
+                is_reply=False, operation_envelope=False)
     base.update(kw)
     return dm_consent.classify_send_consent(**base)
 
@@ -116,7 +116,6 @@ def test_same_user_is_the_only_identity_based_skip():
     ({"is_reply": True}, dm_consent.CONSENT_SKIP_REPLY),
     ({"channel": "claim-signal"}, dm_consent.CONSENT_SKIP_NON_DM),
     ({"operation_envelope": True}, dm_consent.CONSENT_SKIP_OPERATION),
-    ({"shared_trek": True}, dm_consent.CONSENT_SKIP_SHARED_TREK),
 ])
 def test_carve_outs_hold_for_a_cross_user_pair(kw, expected_reason):
     """各 carve-out は「別ユーザー同士」でも確認を免除する (= 既存経路の非退行)。"""
@@ -139,6 +138,26 @@ def test_every_reason_constant_has_a_one_line_explanation():
     # 逆向き (説明だけ在って定数が消えた) も掃除させる。
     stale = set(dm_consent.CONSENT_REASON_EXPLANATIONS) - constants
     assert not stale, f"対応する定数が無い説明: {sorted(stale)}"
+
+
+def test_retired_reasons_live_in_their_own_map_not_the_live_one():
+    """引退した判定理由は生きている規則の辞書に混ぜない (ms-185 e-7068)。
+
+    判定理由は監査記録に永続化されるので、規則を消しても**過去の記録を読む**ため
+    に説明は要る。一方で生きている辞書に残すと、上の双方向チェックが「定数が無い
+    説明」として掃除を要求し、消すと過去が読めなくなる — どちらに倒しても間違う。
+    だから 2 つの辞書に分けてある。ここでは混ざっていないことを固定する。
+    """
+    live = set(dm_consent.CONSENT_REASON_EXPLANATIONS)
+    retired = set(dm_consent.RETIRED_CONSENT_REASON_EXPLANATIONS)
+    assert not (live & retired), f"両方に在る判定理由: {sorted(live & retired)}"
+    # 引退側は定数を持たない (= 誰もセットしない判定を残さない)。
+    constants = {v for k, v in vars(dm_consent).items()
+                 if k.startswith("CONSENT_SKIP_") or k.startswith("CONSENT_REQUIRED_")}
+    assert not (retired & constants), "引退させた理由が定数として生きている"
+    # それでも読める。
+    for reason in retired:
+        assert "未登録" not in dm_consent.explain_consent_reason(reason)
 
 
 def test_unknown_reason_explains_itself_instead_of_raising():

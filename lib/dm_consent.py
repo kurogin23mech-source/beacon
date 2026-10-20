@@ -87,7 +87,6 @@ CONSENT_SKIP_PRE_APPROVED = "pre_approved_channel"
 CONSENT_SKIP_NON_DM = "non_dm_channel"
 CONSENT_SKIP_OPERATION = "operation_envelope"
 CONSENT_SKIP_REPLY = "reply_derived_recipient"
-CONSENT_SKIP_SHARED_TREK = "shared_trek_member"
 
 # consent REQUIRED (a human must confirm the recipient first):
 CONSENT_REQUIRED_CROSS_USER = "cross_user_new_send"
@@ -125,8 +124,6 @@ CONSENT_REASON_EXPLANATIONS = {
         "Operation の事前承認 (envelope) で送るので、確認は要りません。",
     CONSENT_SKIP_REPLY:
         "返信は宛先を親メッセージから導くので別人に飛ばず、確認は要りません。",
-    CONSENT_SKIP_SHARED_TREK:
-        "相手と同じ Trek に参加しており、双方が AI 間のやり取りに同意済みです。",
     CONSENT_REQUIRED_CROSS_USER:
         "宛先が自分とは別のユーザー (別の人間) への新規 DM なので、人間が宛先を "
         "確認した証跡が要ります。無いとサーバが 403 で拒否します。"
@@ -166,6 +163,10 @@ def channel_is_recognized(channel: str) -> bool:
 # (ここ) を分けた。引退側には定数を置かない (= 誰もセットしない判定を残さない)。
 # 読む側だけが過去を読める。
 RETIRED_CONSENT_REASON_EXPLANATIONS = {
+    "shared_trek_member":
+        "【引退した判定】当時は送信者と受信者が同じ Trek に参加していれば、双方が "
+        "AI 間のやり取りに同意済みとみなして確認を省いていました。ms-185 でこの "
+        "規則は廃止され、別人宛の action 付き DM は必ず人間の確認を要します。",
     "trek_scoped_channel":
         "【引退した判定】当時は Trek (= 共同作業空間) の channel を事前承認済みと "
         "見なして確認を省いていました。ms-185 でこの規則は廃止され、現在は "
@@ -194,8 +195,8 @@ def explain_consent_reason(reason: str) -> str:
 # ---------------------------------------------------------------------------
 
 # NOTE (ms-141 / e-4968): ``cross_user_send_advisory`` (below) is a caller that
-# pins ``operation_envelope=False`` and ``shared_trek=False`` because the client
-# pre-flight cannot cheaply resolve those. If a new carve-out parameter is added
+# pins ``operation_envelope=False`` because the client pre-flight cannot cheaply
+# resolve it. If a new carve-out parameter is added
 # here, review that caller so its advisory does not silently diverge from this
 # rule (it is non-blocking, so drift only mis-shows a hint — but keep them in
 # sync).
@@ -206,15 +207,13 @@ def classify_send_consent(
     channel: str = "dm",
     is_reply: bool = False,
     operation_envelope: bool = False,
-    shared_trek: bool = False,
 ) -> tuple[bool, str]:
     """Return ``(consent_required, reason)`` for one outbound send.
 
     Pure function — reads no globals, writes no state. The caller resolves
     the facts (user_ids via ``_resolve_bus_event_user_ids`` server-side or
-    ``_resolve_creator_identity`` + recipient lookup client-side; Trek
-    membership via ``dm_gate.build_shared_trek_lookup_from_lists``) and
-    passes them in, exactly like ``dm_gate.should_gate_dm_action``.
+    ``_resolve_creator_identity`` + recipient lookup client-side) and passes
+    them in, exactly like ``dm_gate.should_gate_dm_action``.
 
     Parameters
     ----------
@@ -243,10 +242,6 @@ def classify_send_consent(
     operation_envelope : bool
         True when the send rides an Operation (T2 scope) envelope — an
         already pre-approved autonomous path — skip consent (§1).
-    shared_trek : bool
-        True when sender and recipient are both members of the same active
-        Trek (resolved via the same lookup ms-70 uses). Skip consent (§1).
-
     Returns
     -------
     (consent_required, reason) : tuple[bool, str]
@@ -257,8 +252,8 @@ def classify_send_consent(
     Precedence
     ----------
     Carve-outs are checked *before* the cross-user default so that armed
-    auto-reply, Trek协奏, and Operation autonomy keep working (SPEC AC5 —
-    no regression) even when recipient user_id resolution fails. Same-user
+    auto-reply と Operation の自律が動き続ける (SPEC AC5 — no regression)
+    — recipient user_id の解決に失敗したときでも。Same-user
     is the cheapest definitive skip and is checked first, matching
     ``dm_gate`` ordering.
     """
@@ -288,10 +283,9 @@ def classify_send_consent(
     if is_reply:
         return (False, CONSENT_SKIP_REPLY)
 
-    # Rule 5: shared Trek membership → both humans already opted into
-    # AI-to-AI exchange in that scope. Mirrors dm_gate Rule 2.
-    if shared_trek:
-        return (False, CONSENT_SKIP_SHARED_TREK)
+    # ms-185 e-7068: ここに「同じ Trek の参加者なら確認を省く」規則が在った
+    # (dm_gate の Rule 2 の鏡)。両方とも判定ごと削除してある。常に偽を返す
+    # 引数を残すと、誰もセットしない carve-out が 1 つ生まれる。
 
     # Rule 6 (e-3492 P1 fix): only a PROVEN cross-user pair may require
     # consent — both identities resolved AND different. If either side is
@@ -344,7 +338,6 @@ def cross_user_send_advisory(
         channel=channel,
         is_reply=is_reply,
         operation_envelope=False,
-        shared_trek=False,
     )
     if not required:
         return None
@@ -528,7 +521,6 @@ def evaluate_send(
     channel: str = "dm",
     is_reply: bool = False,
     operation_envelope: bool = False,
-    shared_trek: bool = False,
     consent_claim: object = None,
 ) -> dict:
     """Decide whether a send is allowed, and why.
@@ -551,7 +543,6 @@ def evaluate_send(
         channel=channel,
         is_reply=is_reply,
         operation_envelope=operation_envelope,
-        shared_trek=shared_trek,
     )
     if not consent_required:
         return {"allow": True, "consent_required": False, "reason": verdict}
@@ -587,7 +578,6 @@ __all__ = [
     "CONSENT_SKIP_NON_DM",
     "CONSENT_SKIP_OPERATION",
     "CONSENT_SKIP_REPLY",
-    "CONSENT_SKIP_SHARED_TREK",
     "CONSENT_REQUIRED_CROSS_USER",
     "RECIPIENT_CONFIRMED_KIND",
     "CONSENT_CLAIM_KEY",

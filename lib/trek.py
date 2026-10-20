@@ -4965,3 +4965,172 @@ def remove_member(trek_doc: dict, *,
     trek_doc["members"] = new_members
     trek_doc["updated_at"] = utcnow_iso()
     return trek_doc
+
+
+# ---------------------------------------------------------------------------
+# 共有 Trek メンバー判定 (ms-185 e-7068 で server/dm_gate.py から移設)
+# ---------------------------------------------------------------------------
+#
+# **なぜここに在るか**: この判定はもともと ``server/dm_gate.py`` (= 誰の DM に
+# 人間の確認が要るかを決める共有の判定器) に置かれ、「送信者と受信者が同じ Trek
+# の参加者なら確認を省く」規則の裏付けとして使われていた。ms-185 でその規則を
+# **判定ごと削除**したので、共有の判定器が Trek を知っている理由は無くなった。
+#
+# それでも消さずに移したのは、Trek 自身の 1 経路がまだ使っているため:
+# ``GET /api/system/trek-internal-send`` (= 同じ Trek の参加者同士の返信は
+# 自動返信の予算を消費しない、という client 側の最適化の問い合わせ先)。この
+# 経路と呼び出し側 (``channel/bus.mjs``) は e-7080 で一緒に落ちるので、それまで
+# Trek 自身の module に置いておく。**人間の確認ゲートの判定には、もう誰も
+# これを使っていない。**
+#
+# 向きの注意: ここが False を返す側に倒れると「予算を消費する」= 安全側。
+# 呼び出し側も問い合わせ失敗時は False に倒す (fail-closed)。
+
+
+def _coerce_lookup_result(result: object) -> tuple[bool, str]:
+    """Normalize lookup return into ``(matched, trek_id)``.
+
+    The legacy lookup returns a plain ``bool``; the new lookup returns
+    ``(bool, str)``. This shim accepts either so the gate stays
+    backward compatible during the rollout.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        matched, trek_id = result
+        return (bool(matched), str(trek_id or ""))
+    return (bool(result), "")
+
+
+def build_shared_trek_lookup_from_lists(
+    list_treks_for_user: Callable[[str], list[dict]],
+) -> Callable[..., tuple[bool, str]]:
+    """Construct a ``shared_trek_lookup`` callback from a per-user trek
+    list function.
+
+    The caller supplies ``list_treks_for_user(user_id) -> list[dict]``
+    (= the same shape returned by ``firestore_client.list_treks(actor_id=
+    user_id)``). The returned callback fetches the sender's visible
+    treks and walks each one's members list checking for receiver_uid.
+
+    ms-97 / e-2659 Phase 3 (G3 + G4 + AC18) — the lookup is now
+    session-grain aware:
+
+      * Return shape is ``(matched: bool, trek_id: str)`` so the caller
+        can record which trek granted the bypass into the audit log
+        (= AC19).
+      * For ``phase A+`` treks (= ``is_session_id_keyed`` true; members[]
+        carries session_id field), BOTH ``sender_session_id`` and
+        ``receiver_session_id`` must appear in the trek's members[]
+        for bypass to apply (= strict session-grain check).
+      * For ``pre-A`` treks (= legacy user_id keyed), the user_id grain
+        check is preserved verbatim.
+      * **G4 live check**: each invocation re-fetches the trek list via
+        ``list_treks_for_user`` (= no caching), so a member removed
+        between invocations stops granting bypass on the next call.
+
+    Two design choices worth pinning:
+
+      * **Active-only filtering is the caller's job.** This module does
+        not know what "active" means for a project. ``list_treks``
+        already hides archived by default; this lookup additionally
+        skips halted + archived treks regardless of caller filter.
+      * **Sender-side query is sufficient.** Trek membership is
+        symmetric on Firestore (creator + members), so listing from
+        sender's POV and checking receiver presence is equivalent to
+        the reverse, with one fewer round-trip.
+    """
+    def _is_phase_a_plus(trek: dict) -> bool:
+        # ms-185 e-7068: dm_gate から移設。元は循環 import を避けるための
+        # 遅延 import だったが、この module 自身が is_session_id_keyed を
+        # 持っているので直接呼ぶ。
+        return is_session_id_keyed(trek)
+
+    def _lookup(
+        sender_uid: str,
+        receiver_uid: str,
+        sender_sid: str = "",
+        receiver_sid: str = "",
+    ) -> tuple[bool, str]:
+        if not sender_uid or not receiver_uid:
+            return (False, "")
+        # ms-97 / e-2659 G4 — live check. The caller-supplied
+        # ``list_treks_for_user`` is invoked per call (= no caching),
+        # so a member kicked between two DMs stops granting bypass.
+        treks = list_treks_for_user(sender_uid) or []
+        for t in treks:
+            # ms-97 / e-2612 (AC32) — halt 中の trek は DM bypass の根拠に
+            # ならない。 leader が Andon cord を引いた状態で「同じ Trek の
+            # 仲間だから」 と autonomous cross-user action DM を通すのは
+            # halt の意図と矛盾する。 該当 trek は跨ぐが他に halt 無しの
+            # 共有 trek があればそちらで bypass 成立、 共有 trek が halt
+            # しかなければ通常の cross-user budget gate に fallback する。
+            if t.get("halt"):
+                continue
+            # ms-75 e-4116 follow-up (PR #491 parent review 1): only an
+            # ACTIVE trek grants bypass. Previously only ``archived`` was
+            # excluded, which let a ``planning`` trek (still being set up,
+            # not yet a live pre-approved work scope) grant the bypass. A
+            # non-active trek is not a consented AI-action scope, so it must
+            # not short-circuit the cross-user gate / budget. This also
+            # subsumes the old archived exclusion.
+            if (t.get("status") or "") != "active":
+                continue
+
+            trek_id = t.get("trek_id") or ""
+            members = t.get("members") or []
+            creator_uid = (t.get("creator_actor") or {}).get("user_id") or ""
+
+            if _is_phase_a_plus(t):
+                # ms-97 / e-2659 Phase 3 AC18 — strict session-grain.
+                # Both sender_sid AND receiver_sid must be present in
+                # members[]. The user_id is informational (= same human
+                # can have multiple sessions in the same trek; only the
+                # listed ones grant bypass).
+                #
+                # e-4116 follow-up (PR #491 parent re-review): matching by
+                # session_id presence is ITSELF the invited-vs-joined guard.
+                # ``accept_invitation`` writes ``session_id`` and ``joined_at``
+                # together on join, while an invite placeholder has neither, so
+                # a member carrying a session_id is already a joined member. An
+                # earlier fix added a separate ``joined_at`` requirement here;
+                # that broke every joined member whose fixture / legacy row
+                # omits joined_at (regressed test_audit_log_trek_id), so it is
+                # removed — the session_id match is the correct grain.
+                if not sender_sid or not receiver_sid:
+                    # Missing session ids — cannot verify session-grain
+                    # membership; fall through to next trek.
+                    continue
+                sender_in = False
+                receiver_in = False
+                for m in members:
+                    msid = m.get("session_id") or ""
+                    if msid and msid == sender_sid:
+                        sender_in = True
+                    if msid and msid == receiver_sid:
+                        receiver_in = True
+                    if sender_in and receiver_in:
+                        break
+                if sender_in and receiver_in:
+                    return (True, trek_id)
+                # Not in this trek — try next one.
+                continue
+
+            # pre-A trek: user_id grain (legacy behaviour preserved verbatim).
+            #
+            # e-4116 follow-up (PR #491 parent re-review): ``joined_at`` is
+            # deliberately NOT required here. The invited-but-not-joined hole is
+            # a *session-grain* concept — only phase-A members carry both a
+            # session_id and a joined_at, so only there can we distinguish an
+            # invited-but-not-joined session from a joined one. A pre-A
+            # (legacy, user_id-keyed) member predates joined_at tracking; by the
+            # legacy contract it is already a joined member. Imposing joined_at
+            # here would 403 the DMs of any trek whose members were recorded
+            # before joined_at existed (a backward-compat break — regressed
+            # tests/test_sender_consent_backstop.py). The active + halt filters
+            # above still apply to pre-A treks.
+            if creator_uid and creator_uid == receiver_uid:
+                return (True, trek_id)
+            for m in members:
+                if m.get("user_id") == receiver_uid:
+                    return (True, trek_id)
+        return (False, "")
+    return _lookup
