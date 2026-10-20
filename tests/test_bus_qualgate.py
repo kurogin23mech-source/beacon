@@ -72,10 +72,18 @@ def test_cross_project_dm_is_external():
                       "recipientProjectId": "p2"}) == "external"
 
 
-def test_trek_channel_cross_project_is_normal_chat():
-    # Trek-scoped channel = pre-approved shared scope, even cross-project.
+def test_trek_named_channel_cross_project_is_external_now():
+    """``trek-`` で始まる名前は事前承認済みではない (ms-185 e-7067)。
+
+    以前は前方一致で "normal_chat" に落ち、armed なセッションが別プロジェクトへ
+    自律送信できた。任意の名前が前方一致に当たるため、裏付け (= 人間の承認) と
+    判定が切り離されていた。今は保留 (= 人間に回す) 側に倒れる。
+    """
     assert _classify({"channel": "trek-progress-check", "senderProjectId": "p1",
-                      "recipientProjectId": "p2"}) == "normal_chat"
+                      "recipientProjectId": "p2"}) == "external"
+    # 任意の名前でも同じ (前方一致の復活をここで捕まえる)
+    assert _classify({"channel": "trek-anything", "senderProjectId": "p1",
+                      "recipientProjectId": "p2"}) == "external"
 
 
 def test_operation_trigger_channel_is_normal_chat():
