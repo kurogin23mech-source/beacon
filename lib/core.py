@@ -12,6 +12,7 @@ import functools as _functools
 import datetime as _dt
 import re
 
+import date_window  # ms-181 e-7101: the one module that answers a period question
 import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
 import transition_approval as _ta  # ms-119 e-3912: 職種中立な目的達成レビュー primitive
@@ -3837,22 +3838,49 @@ def milestone_prepare_info(ms: dict) -> dict:
     }
 
 
-def collect_retro_entries(entries: list, since: str, until: str) -> list:
-    """Recursively collect entries within date range for retrospective."""
+def collect_retro_entries(entries: list, since: str, until: str,
+                          undated: dict | None = None) -> list:
+    """Recursively collect entries within date range for retrospective.
+
+    The period question is answered by :mod:`date_window`, the one module that
+    decides it (ms-181 e-7101). This walker used to compare the stamps as raw
+    text against the raw bounds, which made retro disagree with itself: the
+    same ``beacon retro`` payload builds ``source_breakdown`` through
+    ``search``/``date_window`` but built ``milestones`` here, so for the window
+    ``2026-10-19..2026-10-20`` a commit stamped ``2026-10-20T08:00:00Z``
+    counted in the breakdown (2 human events) and was absent from the
+    narrative (0 milestones) — measured on 2026-10-20. The cause is the
+    date-only upper bound: ``"2026-10-20T08:00:00Z" > "2026-10-20"`` as text,
+    so a full timestamp anywhere *during* the final day fell out of the week.
+    ``--until today`` is retro's default, so the day's own work was the part it
+    dropped. :func:`date_window.normalize_bound` widens a date-only bound to
+    the whole day in one place instead of here as well.
+
+    WHICH stamp is read is deliberately unchanged (``created_at``, else
+    ``date``): that chooses which *question* retro asks, and moving it would
+    silently repopulate every weekly retro. Only the comparison moved.
+
+    ``undated`` is an optional caller-owned tally, same idiom as
+    ``search._in_window``: an entry carrying no stamp at all cannot be judged
+    against a period, so it is excluded (as before) but counted by ``type``,
+    so a caller can report "N records could not be judged" instead of letting
+    them read as "nothing happened".
+    """
     result = []
     for entry in entries:
         date = entry.get("created_at") or entry.get("date") or ""
         status = entry.get("status", "")
         if status == "cancelled":
             continue
-        in_range = True
-        if since and date < since:
-            in_range = False
-        if until and date > until:
-            in_range = False
+        verdict = date_window.classify(date, since, until)
+        in_range = verdict == date_window.IN_WINDOW
+        if verdict == date_window.UNDATED and undated is not None:
+            key = entry.get("type", "") or "unknown"
+            undated[key] = undated.get(key, 0) + 1
 
         children = entry.get("entries", [])
-        child_results = collect_retro_entries(children, since, until) if children else []
+        child_results = collect_retro_entries(
+            children, since, until, undated) if children else []
 
         if in_range or child_results:
             item = {

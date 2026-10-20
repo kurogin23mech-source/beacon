@@ -129,7 +129,9 @@ def normalize_bound(value: str, *, end: bool) -> str:
     return value
 
 
-def validate_range(from_date: str, to_date: str) -> str:
+def validate_range(from_date: str, to_date: str, *,
+                   lower_flag: str = "--from",
+                   upper_flag: str = "--to") -> str:
     """Return an error message for an unusable explicit range, else "".
 
     The ONE place that knows an inverted range is nonsense. ``parse_since``
@@ -139,10 +141,16 @@ def validate_range(from_date: str, to_date: str) -> str:
     "no period comparisons outside this module" caught exactly that during
     ms-184). Returns a message rather than raising so a CLI caller can print
     it on stderr with its own exit convention.
+
+    ``lower_flag`` / ``upper_flag`` name the caller's own spelling of the two
+    ends: ``recap`` says ``--from``/``--to`` while ``retro`` says
+    ``--since``/``--until`` (ms-181 e-7101). The rule is shared; the flag
+    names in the message must still be the ones the caller actually accepts,
+    or the advice sends the reader to a flag their command does not have.
     """
     lo, hi = (from_date or "").strip(), (to_date or "").strip()
     if lo and hi and lo > hi:
-        return f"--from {lo} is after --to {hi}."
+        return f"{lower_flag} {lo} is after {upper_flag} {hi}."
     return ""
 
 

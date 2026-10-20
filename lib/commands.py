@@ -7248,7 +7248,14 @@ def _help_registry():
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
         {"command": "beacon pr sync", "flags": ["--dry-run", "--json"], "description": "Align beacon PR entries with GitHub state (merged/closed) — ms-61 / e-2005"},
-        {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
+        # ms-181 e-7101: the flags were absent here, so `beacon retro --help`
+        # (rendered from this registry) never mentioned the two flags the
+        # command actually reads — and the period they take was undocumented
+        # on every help surface. <period> intentionally points at recap rather
+        # than re-typing the list: both verbs parse it with
+        # date_window.parse_since, and a second copy of the vocabulary is how
+        # help starts advertising forms the parser does not accept.
+        {"command": "beacon retro", "flags": ["--prepare", "--catch-up", "--since <period>", "--until <period>"], "description": "Start weekly retrospective (interactive). --since / --until はそれぞれ期間の下端 / 上端で、<period> は recap と同じ語彙 (today | yesterday | this-week | 3d | YYYY-MM-DD …)。解釈できない期間は拒否する (黙って別の期間を答えない)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         # ms-178 e-6654: note was absent from this registry, so `--help` missed,
         # fell through to the dispatcher, and `note clear --help` deleted the

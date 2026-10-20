@@ -4546,6 +4546,44 @@ def _handle_trigger(root: Path, args: argparse.Namespace) -> int:
 
 # ---- recap (ms-184) ----
 
+#: Spelled out only if ``lib/date_window`` cannot be imported (a partial
+#: install). Kept short on purpose: the authoritative list is the module's,
+#: and a fallback that tries to stay exhaustive is a second source of truth
+#: pretending to be a fallback.
+_SINCE_FORMS_FALLBACK = (
+    "today", "yesterday", "this-week", "last-week", "this-month",
+    "<N>d", "<N>w", "<N>h", "<N>m", "YYYY-MM-DD",
+    "YYYY-MM-DD..YYYY-MM-DD",
+)
+
+
+def _since_forms() -> tuple:
+    """The accepted ``--since`` period spellings, read from the parser itself.
+
+    ms-181 e-7101: every verb that takes a period (``recap``, ``retro``) reads
+    it with ``date_window.parse_since``, so the help text is derived from that
+    module's ``SINCE_FORMS`` rather than re-typed per verb. A help list typed
+    beside a parser drifts from it silently — and then advertises a vocabulary
+    the command does not accept, which is the same class of defect as a period
+    the command accepts but does not honour.
+    """
+    try:
+        import sys as _sys
+        _lib_path = str(Path(__file__).resolve().parents[1] / "lib")
+        if _lib_path not in _sys.path:
+            _sys.path.insert(0, _lib_path)
+        import date_window as _dw  # type: ignore[import-not-found]
+        return tuple(_dw.SINCE_FORMS)
+    except Exception:
+        return _SINCE_FORMS_FALLBACK
+
+
+#: Kept as prose that matches bin/beacon's own `recap` usage block word for
+#: word — the two fronts print this on the same surface (`beacon recap` with
+#: no subcommand), so deriving it here alone would make one front phrase the
+#: vocabulary differently from the other. Collapsing BOTH onto
+#: ``date_window.SINCE_FORMS`` is help-coverage work (ms-181 e-6955), not
+#: period-interpretation work, and is deliberately left to that task.
 _RECAP_USAGE = (
     "Usage:\n"
     "  beacon recap projects [--since <period>] [--from A --to B] [--limit N] [--json]\n"
@@ -5879,12 +5917,16 @@ def _handle_retro(root: Path, args: argparse.Namespace) -> int:
     if args.show_help:
         print(
             "Usage: beacon retro [--prepare] [--catch-up] "
-            "[--since YYYY-MM-DD] [--until YYYY-MM-DD]"
+            "[--since PERIOD] [--until PERIOD]"
         )
         print(
             "       beacon retro save --week YYYY-WNN [--content T | --stdin] [--json]"
         )
         print("       beacon retro done")
+        # ms-181 e-7101: PERIOD is the same vocabulary `beacon recap --since`
+        # accepts, read by lib/date_window.parse_since — listed from that
+        # module so the two verbs cannot drift into different vocabularies.
+        print("  PERIOD: " + "; ".join(_since_forms()))
         return 0
 
     sub_cmd = getattr(args, "retro_cmd", None)

@@ -78,10 +78,10 @@ Bash ツールで以下を **並列に** 実行:
 ### 1a. beacon エントリ
 ```bash
 # 通常モード:
-cd "$PROJECT_DIR" && beacon retro --prepare [--since YYYY-MM-DD] [--until YYYY-MM-DD]
+cd "$PROJECT_DIR" && beacon retro --prepare [--since <period>] [--until <period>]
 
 # catch-up モード (= Step 0 で選択時、ms-79 e-1837):
-cd "$PROJECT_DIR" && beacon retro --catch-up [--since YYYY-MM-DD] [--until YYYY-MM-DD]
+cd "$PROJECT_DIR" && beacon retro --catch-up [--since <period>] [--until <period>]
 ```
 - デフォルト挙動 (ms-43 e-570 で柔軟化):
   - `.beacon/retro/.reviewed` がある → 「最後にreviewした週の翌週月曜」が since
@@ -89,8 +89,11 @@ cd "$PROJECT_DIR" && beacon retro --catch-up [--since YYYY-MM-DD] [--until YYYY-
   - 後方互換: 古い install は date 演算で「今週月曜 (月曜起動時は先週月曜)」にフォールバック
 - これにより **金曜 retro を忘れて翌週火曜に retro した場合でも、先週月曜〜今週火曜の全期間がカバーされる**
 - catch-up モード時は payload に `catch_up: { overdue_slots, count, since_first_overdue }` が同梱される (= ms-79 e-1837)。Step 2 / Step 3 はこのリストを順に処理する
-- ユーザーが期間を指定した場合は `--since` / `--until` を付加
+- ユーザーが期間を指定した場合は `--since` / `--until` を付加。**ユーザーの言葉をそのまま渡してよい** (ms-181 e-7101): `<period>` は `/beacon-recap` と同じ語彙 (`today` / `yesterday` / `this-week` / `last-week` / `this-month` / `3d` / `2w` / `YYYY-MM-DD` …) を受け付け、`--since` はその期間の下端・`--until` は上端になる。日付を AI が自分で計算しないこと (週や月の境界で黙ってずれる)
+- 解釈できない期間は **終了コード 1 で拒否され、受け付ける書式が stderr に出る**。以前は終了コード 0 で空の週を返していたので、「その期間には何もなかった」と読めてしまった。空の結果が返ったら、まず終了コードを確認する
+- payload の `period.since` / `period.until` は **解決後の ISO 日付**、`period.requested` が実際に渡した文字列。Step 2 で期間を書くときは解決後の値を使う
 - payload は ms-79 / e-1836 で `source_breakdown` (= human N / auto-op M / dm K の facet) も同梱する。Step 2 の出力でこの内訳を「数字で示す事実セクション」 に反映できる
+- payload の `undated: { excluded, by_type }` は **期間で判定できなかった記録の件数** (日付を持たない entry)。0 件でないときは「この週に無かった」ではなく「判定できなかった」ものが居るので、Step 2 で件数に言及する
 
 ### 1b. git コミット一覧（コンテキスト補完用）
 ```bash
