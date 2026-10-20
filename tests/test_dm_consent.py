@@ -53,15 +53,29 @@ def test_same_user_skips_consent():
     assert reason == dm_consent.CONSENT_SKIP_SAME_USER
 
 
-def test_shared_trek_skips_consent():
-    """Cross-user but both in the same active Trek → pre-approved scope."""
+def test_shared_trek_is_no_longer_a_carve_out():
+    """同じ Trek の参加者という理由で確認を省く経路が無い (ms-185 e-7068)。
+
+    **消した裏返しを固定する。** 以前は ``shared_trek=True`` を渡すと
+    ``shared_trek_member`` を理由に確認を省いた。Trek を畳むと「双方が同意
+    済み」と言える根拠が消えるので、引数ごと削除した (= 常に偽になる引数を
+    残さない)。渡そうとすると TypeError になるのが正しい状態。
+    """
+    import pytest as _pytest
+    with _pytest.raises(TypeError):
+        dm_consent.classify_send_consent(
+            sender_user_id="uid-alice",
+            recipient_user_id="uid-bob",
+            shared_trek=True,
+        )
+    # 引数が無いので、この組み合わせは確認が必要な側に倒れる。
     required, reason = dm_consent.classify_send_consent(
         sender_user_id="uid-alice",
         recipient_user_id="uid-bob",
-        shared_trek=True,
     )
-    assert required is False
-    assert reason == dm_consent.CONSENT_SKIP_SHARED_TREK
+    assert required is True
+    assert reason == dm_consent.CONSENT_REQUIRED_CROSS_USER
+    assert not hasattr(dm_consent, "CONSENT_SKIP_SHARED_TREK")
 
 
 def test_operation_envelope_skips_consent():

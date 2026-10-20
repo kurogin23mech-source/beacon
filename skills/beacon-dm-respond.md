@@ -19,14 +19,13 @@ triggers:
 >
 > 背景: ms-70 (= cross-user DM 承認の SPEC) で「approval は terminal Claude Code 内での user 直接判断のみ」と決めた。AI が独断で approve してしまうと「他人の AI が自分のプロジェクトを操作する」入口になりかねないため、人間の y/n を必ず構造的に挟む。本 Skill が無いと、user は素の `beacon dm respond approve <envelope-id>` を手で打つことになり、envelope id 取り違え / channel 取り違え / approve すべきでないものを誤承認する病理が再生産される。
 
-### Trek 参加中の例外 (ms-75 / e-1856)
+### 共有作業空間による例外は廃止された (ms-185 e-7068)
 
-送信者と受信者が同じ Trek (= 缶詰の徹夜作業部屋 / 事前承認スコープ) の member の場合、server 側 `dm_gate.py` が `shared_trek_member` 判定で **gate を bypass** する。受信側 AI は本 Skill を起動せず、envelope を直接受信して自律的に処理する (= Trek scope 内の事前承認が成立しているため)。
+以前は「送信者と受信者が同じ共同作業空間 (Trek) の参加者なら server 側の確認ゲートを素通りし、受信側 AI が本 Skill を起動せず自律処理する」例外があった。**この規則は判定ごと削除されている。**
 
-その結果、本 Skill の picker (Step 1) に並ぶのは以下のいずれか:
-- Trek 外の cross-user DM (= 従来通り user 判断必須)
-- Trek member だが Trek scope 外の action を要求する DM (= 安全側 gate trigger、user 判断必須)
-- envelope が壊れていて Trek 関係を判定できなかった DM (= 安全側 gate trigger)
+その結果、本 Skill の picker (Step 1) に並ぶのは「別のユーザーから届いた action 付きの DM」すべてである (以前は作業空間の内外で分かれていた)。確認を要しないのは次の 2 つだけで、それらはそもそも picker に並ばない:
+- 自分自身の別セッションから届いた DM (= 同一ユーザー)
+- サーバ自身が発行した署名 (T1-system) が付いた DM (= Operation の定期発火など、人間が事前に承認した経路)
 
 user が picker で見る envelope は「Trek 経由ではない他人の AI からの要求」 が原則。「Trek 内の member から来たのに何故 picker に並ぶの?」 と質問されたら、上記いずれかに該当している可能性を案内する。
 

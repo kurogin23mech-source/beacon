@@ -100,7 +100,7 @@ cd "$PROJECT_DIR" && LEADER_SID=$(beacon trek show "<trek-id>" --json 2>/dev/nul
 /beacon-dm-send  # 引数: --to "$LEADER_SID" --channel dm --payload '{"text":"<kickoff DM 本文>"}'
 ```
 
-Trek scope 内 DM なので server 側 `dm_gate.py` が `shared_trek_member` 判定で blanket bypass (= 受信側 user の都度承認なし、 cross-user 承認 ms-70 の例外、 ms-75 / e-1854)。 送信に成功したら返ってきた `event_id` (= bus.send レスポンスの `event_id` field) を控える。 次の Step 0.4 で stamp に使う。
+**受信側の確認が省略されるという前提は無効 (ms-185 e-7068)**: 以前は Trek scope 内 DM なら server が確認ゲートを素通りしていたが、その判定は削除された。相手が別のユーザーなら相手側の人間の承認を待つ (同じユーザーの別セッション宛なら従来通り即届く)。 送信に成功したら返ってきた `event_id` (= bus.send レスポンスの `event_id` field) を控える。 次の Step 0.4 で stamp に使う。
 
 直接 CLI で送る場合 (= Skill 経由が難しい dogfood 等):
 

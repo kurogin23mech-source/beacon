@@ -416,7 +416,7 @@ python3 "$(beacon _install-root)/scripts/session-start-trek-status.py" 2>/dev/nu
 出力が空ならセクションごと省略。空でなければ **Step 3 ヘッダにそのまま転記**。整形/判定は `lib/trek_status` (`format_joined_treks` / `has_active_trek` / `is_armed`、単体テスト済み) が所管し、以下を保証する:
 
 - 各 trek: `[trek_id] title` / `status` / `halt` non-null 時「⚠ HALTED: {reason}」/ `goal_state` 非空時「目標: {goal_state}」/ 自分以外の数「他 N 名」。
-- active trek が 1 つ以上あれば blanket 自動承認リマインダを 1 行添える (e-1854 AC 1: 「自分が今 blanket 自動承認の対象になっている」ことを毎セッション可視化)。撤回は `beacon trek leave <trek-id>`、デプロイ / リリースのみ user 確認境界。実際の承認は server 側 dm_gate.py が `shared_trek_member` 判定で行う。
+- **自動承認リマインダは出さない (ms-185 e-7068)**: 以前は active な作業空間に参加していると「あなたは今 blanket 自動承認の対象です」と毎セッション添えていた。参加を根拠に DM の確認を省く規則が判定ごと削除されたため、この注意書きは**事実でなくなった**。参加していても、別のユーザー宛で action を伴う DM は必ず受信側の人間の承認を要する。消えた機構を指す注意書きを残すと、読み手は「省略されるはず」と誤った前提で動く。
 - active trek に join 中かつ not-armed なら「⚠ Trek 参加中だが自律実行モードが not-armed」警告を添える (armed 条件 AND: trek 系 channel が auto-execute allowlist にある かつ budget が total > 0 / used < total)。armed なら何も出さない。planning / archived のみの join は判定不要。
 
 local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。この Step は **読み取り専用**。
