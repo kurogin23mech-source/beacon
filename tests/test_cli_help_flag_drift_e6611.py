@@ -183,7 +183,9 @@ def test_main_dispatch_switch_is_the_last_column0_case():
     """bin/beacon has an earlier column-0 ``case`` (project-root relocation).
     Picking the first makes every inline noun resolve as absent."""
     mod = _load_checker()
-    for noun in ("claim", "stop", "resume", "trek"):
+    # sample set keeps 4 column-0 inline nouns; "trek" was one until its
+    # inline arm was removed (ms-185 e-7069), replaced by "cycle".
+    for noun in ("claim", "stop", "resume", "cycle"):
         flags = mod.bash_flags_for_path([noun])
         assert flags is not None, f"inline noun {noun!r} did not resolve in bash"
 

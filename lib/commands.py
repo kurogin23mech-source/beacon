@@ -514,30 +514,6 @@ from commands_shared import (  # noqa: F401
     _spec_updated_at_for_target,
 )
 
-# ms-127 e-4820: trek family moved to cmd_trek.py, plus its docs/frontmatter/
-# project-id leaf helpers + DEFAULT_SCOPE promoted to commands_shared. Re-export
-# the 4 helpers + DEFAULT_SCOPE so the many commands.py callers (cmd_doc_* /
-# _auto_fire_operation_triggers / account / table-doc) keep resolving them by
-# bare name. Trek-handler callers resolve these inside cmd_trek, so tests driving
-# cmd_trek_* patch at cmd_trek._X (the e-4320 monkeypatch-trap rule).
-from commands_shared import (  # noqa: F401
-    _current_project_id, _get_docs_dir, _parse_frontmatter, _read_local_doc,
-    DEFAULT_SCOPE,
-)
-# Public trek handlers only (family-private helpers stay canonical in cmd_trek,
-# patched there — see the e-4320 rule above).
-from cmd_trek import (  # noqa: F401
-    cmd_trek_create, cmd_trek_list, cmd_trek_review_verdicts, cmd_trek_show,
-    cmd_trek_timeline, cmd_trek_start, cmd_trek_archive, cmd_trek_invite,
-    cmd_trek_join, cmd_trek_stop, cmd_trek_resume, cmd_trek_pulse_ack,
-    cmd_trek_kickoff, cmd_trek_take_over, cmd_trek_reconcile,
-    cmd_trek_transfer_leader, cmd_trek_task_state, cmd_trek_block,
-    cmd_trek_unblock, cmd_trek_blockers, cmd_trek_extend_ttl,
-    cmd_trek_summary_sent, cmd_trek_plan, cmd_trek_slot_add, cmd_trek_slot_amend,
-    cmd_trek_slot_claim, cmd_trek_slot_list, cmd_trek_scope_approve,
-    cmd_trek_scope_reject, cmd_trek_blanket_approve, cmd_trek_blanket_revoke,
-    cmd_trek_task_add, cmd_trek_leave,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -3386,6 +3362,20 @@ def cmd_channel_status():
 # load_project, which is consistent with task_list / milestone_list and
 # does not need atomicity.
 
+
+# ms-127 e-4820: docs/frontmatter/project-id leaf helpers + DEFAULT_SCOPE live
+# in commands_shared. Re-export the 4 helpers + DEFAULT_SCOPE so the many
+# commands.py callers (cmd_doc_* / _auto_fire_operation_triggers / account /
+# table-doc) keep resolving them by bare name.
+#
+# ms-185 e-7069: この import 文は元々 trek handler の再公開と同じ塊に在った。
+# trek 側を落とすときに塊ごと消すと、**trek と無関係なこの 4 ヘルパーまで道連れ**
+# になる (実測: cmd_init が NameError: _get_docs_dir で落ちた)。塊の境界と
+# 責務の境界が一致していなかったので、ここで分けてある。
+from commands_shared import (  # noqa: F401
+    _current_project_id, _get_docs_dir, _parse_frontmatter, _read_local_doc,
+    DEFAULT_SCOPE,
+)
 
 # Trek CLI (ms-69) moved to lib/cmd_trek.py (ms-127 e-4820) — handlers are
 # re-imported for dispatch at the top of this file; family-private helpers and
@@ -7277,32 +7267,6 @@ def _help_registry():
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
         {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
         # ms-69 e-1652+: Trek = cross-project / cross-session collaboration area
-        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent (default persistent)", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域). Requires an identified live session (the caller's session/email becomes the trek leader, ms-69) — run it from a real bclaude session, not a bare script. --goal-state は ms-75/e-1865 完了マーカー"},
-        {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--joined", "--json"], "description": "List treks visible to the caller. --joined で自分が join 済の trek だけ"},
-        {"command": "beacon trek show <trek-id>", "flags": ["--all", "--json"], "description": "Show trek detail + 集約ビュー (task / commit / doc, ms-75/e-1864). --all で cap 解除"},
-        {"command": "beacon trek review-verdicts <trek-id> <task-id>", "flags": ["--json"], "description": "leader_review target の verdict 集合を返す (completion / halt-rescue を halt_reason で分岐、ms-128/e-4374)。/beacon-trek-review が呼ぶ単一 source"},
-        {"command": "beacon trek timeline <trek-id>", "flags": ["--limit N", "--json"], "description": "Trek の lifecycle / commit / task done / doc を時系列で参照 (ms-75/e-1867)"},
-        {"command": "beacon trek start <trek-id>", "flags": ["--json"], "description": "Transition trek planning → active"},
-        {"command": "beacon trek archive <trek-id>", "flags": ["--json"], "description": "Archive trek (= terminal); restart by creating a new one"},
-        {"command": "beacon trek invite <trek-id> --actor <email>", "flags": ["--notify", "--json"], "description": "Invite a user (by email) into the trek"},
-        {"command": "beacon trek join <trek-id>", "flags": ["--json"], "description": "Accept own invitation"},
-        {"command": "beacon trek leave <trek-id>", "flags": ["--json"], "description": "Remove self from the trek (leader must transfer first)"},
-        {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--goal-state <criterion>", "--json"], "description": "Edit trek scope or goal_state (ms-75/e-1865)"},
-        {"command": "beacon trek scope-add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--json"], "description": "Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23 e-2626). Target = target-entity; legacy task refs are auto-migrated to their parent milestone at read (ms-128 方針3)"},
-        {"command": "beacon trek scope-approve <trek-id> <pending-id>", "flags": ["--json"], "description": "Commit a staged scope op (= apply add or remove, ms-97/AC25 e-2611)"},
-        {"command": "beacon trek scope-reject <trek-id> <pending-id>", "flags": ["--json"], "description": "Drop a staged scope op (ms-97/AC25)"},
-        {"command": "beacon trek blanket-approve <trek-id> --category <cat>", "flags": ["--json"], "description": "Pre-approve scope-add for a category (ms-97/AC24 e-2603). Category: operation | milestone | task | project:<pid> | milestone:<ms-id>"},
-        {"command": "beacon trek blanket-revoke <trek-id> --category <cat>", "flags": ["--json"], "description": "Drop a blanket pre-approval (ms-97/AC24)"},
-        {"command": "beacon trek slot add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--children e-A,e-B", "--json"], "description": "(ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id. Target = target-entity (milestone/operation); --task is rejected (ms-128 方針3, narrow via --children)"},
-        {"command": "beacon trek slot amend <trek-id> <slot-id>", "flags": ["--add-child <e-id>", "--remove-child <e-id>", "--json"], "description": "(ms-99/e-2829) Stage a child-list edit on an existing MS slot"},
-        {"command": "beacon trek slot claim <trek-id> <slot-id>", "flags": ["--session <sid>", "--unclaim", "--json"], "description": "(ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4)"},
-        {"command": "beacon trek slot list <trek-id>", "flags": ["--json"], "description": "(ms-99/e-2829) Materialise slot rows for the trek"},
-        {"command": "beacon trek stop <trek-id>", "flags": ["--reason <text>", "--json"], "description": "Pull the Andon cord (= halt signal, sessions pause)"},
-        {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
-        {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
-        {"command": "beacon trek take-over <trek-id>", "flags": ["--json"], "description": "Fresh session (= same user, leader role) を新 leader_session_id に bind し直す (= dead session 引き継ぎ、ms-88 e-2089)"},
-        {"command": "beacon trek kickoff <trek-id>", "flags": ["--session-id <sid>", "--kickoff-dm-event-id <eid>", "--json"], "description": "Kickoff Ritual の完了 stamp (= /beacon-trek-pulse Step 0.4 が叩く、 ms-88 e-2138)。 server endpoint だけ先に land した PR #177 の CLI wrapper 補完 (e-2139 残作業 #1)"},
-        {"command": "beacon trek reconcile <trek-id>", "flags": ["--apply", "--json"], "description": "task pool ↔ Trek stamp 同期の reconcile (= 「pool で done だが Trek stamp が waiting-review / leader_review / working で残ってる」 stuck 状態を一括修復、 default dry-run、 ms-88 e-2167)"},
         # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
         {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
         {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
@@ -11936,45 +11900,12 @@ if __name__ == "__main__":
         "org_remove_member": cmd_org_remove_member,
         "org_delete": cmd_org_delete,
         "org_rehome": cmd_org_rehome,
-        "trek_create": cmd_trek_create,
-        "trek_list": cmd_trek_list,
-        "trek_show": cmd_trek_show,
-        "trek_review_verdicts": cmd_trek_review_verdicts,
-        "trek_start": cmd_trek_start,
-        "trek_archive": cmd_trek_archive,
-        "trek_invite": cmd_trek_invite,
-        "trek_join": cmd_trek_join,
-        "trek_leave": cmd_trek_leave,
-        "trek_plan": cmd_trek_plan,
         # ms-97 / e-2611 AC25 — scope mutation approval flow.
-        "trek_scope_approve": cmd_trek_scope_approve,
-        "trek_scope_reject": cmd_trek_scope_reject,
         # ms-99 / e-2829 — slot verbs (schema v2).
-        "trek_slot_add": cmd_trek_slot_add,
-        "trek_slot_amend": cmd_trek_slot_amend,
-        "trek_slot_claim": cmd_trek_slot_claim,
-        "trek_slot_list": cmd_trek_slot_list,
         # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
-        "trek_blanket_approve": cmd_trek_blanket_approve,
-        "trek_blanket_revoke": cmd_trek_blanket_revoke,
-        "trek_task_state": cmd_trek_task_state,
-        "trek_block": cmd_trek_block,
-        "trek_unblock": cmd_trek_unblock,
-        "trek_blockers": cmd_trek_blockers,
-        "trek_extend_ttl": cmd_trek_extend_ttl,
         # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後
         # に meta.summary_sent_at を stamp する CLI wrapper。
-        "trek_summary_sent": cmd_trek_summary_sent,
         # ms-92 / e-2141 — cross-project task add via Trek scope
-        "trek_task_add": cmd_trek_task_add,
-        "trek_stop": cmd_trek_stop,
-        "trek_resume": cmd_trek_resume,
-        "trek_pulse_ack": cmd_trek_pulse_ack,
-        "trek_take_over": cmd_trek_take_over,
-        "trek_kickoff": cmd_trek_kickoff,
-        "trek_reconcile": cmd_trek_reconcile,
-        "trek_transfer_leader": cmd_trek_transfer_leader,
-        "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "help_render": cmd_help_render,

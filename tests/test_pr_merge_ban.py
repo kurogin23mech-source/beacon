@@ -74,27 +74,34 @@ class _EnvOverride:
 def test_merge_ban_default_active_for_ai_session():
     """Default env (= no escape signals) → ban fires."""
     with _with_env({
-        "BEACON_TREK_FINALIZE_CONSENT": None,
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": None,
     }):
         assert cmd_pr._ai_session_merge_ban_active() is True
 
 
-def test_merge_ban_bypassed_by_trek_finalize_consent():
-    """Escape #1: BEACON_TREK_FINALIZE_CONSENT=1 (= Skill 1-confirm path)."""
+def test_the_removed_trek_hatch_no_longer_bypasses_the_ban():
+    """ms-185 e-7069 — 消した抜け道が、環境変数だけで生き残っていないこと。
+
+    **消した裏返しを固定する。** 以前は ``BEACON_TREK_FINALIZE_CONSENT=1`` が
+    抜け道 #1 で、Trek 終結 Skill (= 1 confirm で一括 merge) がこれを export して
+    から merge を呼んでいた。その Skill と Trek の動線を落とした以上、裏付けの
+    無い環境変数だけが残る形は **環境変数 1 つで AI セッションが merge できる
+    抜け道**になる。判定ごと消したので、立てても ban は firing し続ける。
+    """
     with _with_env({
-        "BEACON_TREK_FINALIZE_CONSENT": "1",
+        "BEACON_TREK_FINALIZE_CONSENT": "1",   # 消した抜け道
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": None,
     }):
-        assert cmd_pr._ai_session_merge_ban_active() is False
+        assert cmd_pr._ai_session_merge_ban_active() is True
+    assert not hasattr(cmd_pr, "_trek_finalize_consent_active"), (
+        "判定関数が残っている — 誰もセットしない判定を残さない")
 
 
 def test_merge_ban_bypassed_by_user_override():
-    """Escape #2: BEACON_PR_MERGE_USER_OVERRIDE=1 (= explicit one-off opt-in)."""
+    """Escape #1: BEACON_PR_MERGE_USER_OVERRIDE=1 (= explicit one-off opt-in)."""
     with _with_env({
-        "BEACON_TREK_FINALIZE_CONSENT": None,
         "BEACON_PR_MERGE_USER_OVERRIDE": "1",
         "BEACON_SESSION_KIND": None,
     }):
@@ -102,9 +109,8 @@ def test_merge_ban_bypassed_by_user_override():
 
 
 def test_merge_ban_bypassed_by_human_session_kind():
-    """Escape #3: BEACON_SESSION_KIND=human (= non-AI session, terminal use)."""
+    """Escape #2: BEACON_SESSION_KIND=human (= non-AI session, terminal use)."""
     with _with_env({
-        "BEACON_TREK_FINALIZE_CONSENT": None,
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": "human",
     }):
@@ -113,13 +119,11 @@ def test_merge_ban_bypassed_by_human_session_kind():
 
 def test_merge_ban_session_kind_case_insensitive():
     with _with_env({
-        "BEACON_TREK_FINALIZE_CONSENT": None,
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": "Human",  # any casing
     }):
         assert cmd_pr._ai_session_merge_ban_active() is False
     with _with_env({
-        "BEACON_TREK_FINALIZE_CONSENT": None,
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": "  HUMAN  ",  # padded
     }):
@@ -130,94 +134,47 @@ def test_merge_ban_unknown_session_kind_still_blocks():
     """Anything other than ``human`` → still treated as AI for safety."""
     for kind in ("claude", "anthropic", "ai", "bot", "agent", ""):
         with _with_env({
-            "BEACON_TREK_FINALIZE_CONSENT": None,
             "BEACON_PR_MERGE_USER_OVERRIDE": None,
             "BEACON_SESSION_KIND": kind,
         }):
             assert cmd_pr._ai_session_merge_ban_active() is True, kind
 
 
-def test_trek_finalize_consent_active_helper_pinned():
-    """The Skill exports this env before delegating; test the read side."""
-    with _with_env({"BEACON_TREK_FINALIZE_CONSENT": "1"}):
-        assert cmd_pr._trek_finalize_consent_active() is True
-    with _with_env({"BEACON_TREK_FINALIZE_CONSENT": "0"}):
-        assert cmd_pr._trek_finalize_consent_active() is False
-    with _with_env({"BEACON_TREK_FINALIZE_CONSENT": None}):
-        assert cmd_pr._trek_finalize_consent_active() is False
-
-
 # ---------------------------------------------------------------------------
-# /beacon-trek-finalize Skill markdown — structural enforcement
+# 落とした入口 — 消した裏返しを固定する (ms-185 e-7069)
 # ---------------------------------------------------------------------------
+#
+# ここには元々 ``/beacon-trek-finalize`` Skill の markdown に対する構造試験が
+# 8 件あった (= 存在する / 3 段境界を書いている / 抜け道の環境変数を export する /
+# 衝突の事前検知を書いている 等)。Skill と Trek の動線を落としたので、その 8 件は
+# 固定する対象を失った。元のブロックは ``.trash/ms-185-e7069/`` に退避してある。
+#
+# **空にせず裏返しを置く理由**: 入口を落としたことの証拠は、落ちていることを
+# 名指しで測るしかない。復活させたら赤くなる形にしておく。
 
 
-FINALIZE_SKILL = REPO / "skills" / "beacon-trek-finalize.md"
+def test_the_trek_finalize_skill_is_gone_from_every_copy():
+    """3 コピーすべてから消えている (= 1 箇所に残ると そこから起動できる)。"""
+    leftovers = [
+        p for p in (
+            REPO / "skills" / "beacon-trek-finalize.md",
+            REPO / "shared" / "skills" / "beacon-trek-finalize" / "SKILL.md",
+            REPO / "plugins" / "beacon" / "skills" / "beacon-trek-finalize" / "SKILL.md",
+        ) if p.exists()
+    ]
+    assert not leftovers, f"落としたはずの Skill が残っている: {leftovers}"
 
 
-def test_trek_finalize_skill_exists():
-    """The Skill markdown must exist — it's the user-facing entry to the
-    1-confirm merge path."""
-    assert FINALIZE_SKILL.exists(), (
-        "skills/beacon-trek-finalize.md must exist (= ms-92 / e-2169 "
-        "Trek 終結 merge UX)"
-    )
+def test_the_merge_ban_error_does_not_point_at_the_removed_entry():
+    """ban の案内文が、消えた入口を「ここから merge しろ」と指していない。
 
-
-def test_trek_finalize_skill_references_e_2169_and_core_doc():
-    body = FINALIZE_SKILL.read_text(encoding="utf-8")
-    assert "e-2169" in body
-    assert "pr-review-autonomy-boundary" in body, (
-        "the Skill must cite the CORE doc that establishes the AI / Trek-unit "
-        "user / user role split — drilling there is the path to the rationale"
-    )
-
-
-def test_trek_finalize_skill_documents_three_segment_boundary():
-    """The 3-segment boundary (approve = AI / merge = Trek user / release =
-    user) is the Skill's reason for existing — must be inline."""
-    body = FINALIZE_SKILL.read_text(encoding="utf-8")
-    assert "approve = AI" in body
-    assert "merge = Trek 単位 user" in body
-    assert "release = user" in body
-
-
-def test_trek_finalize_skill_uses_consent_env_to_bypass_ban():
-    """The Skill must export BEACON_TREK_FINALIZE_CONSENT to bypass the
-    AI-session merge ban — otherwise the merge call refuses inside the
-    Skill itself."""
-    body = FINALIZE_SKILL.read_text(encoding="utf-8")
-    assert "BEACON_TREK_FINALIZE_CONSENT=1" in body, (
-        "the Skill must export BEACON_TREK_FINALIZE_CONSENT=1 before "
-        "delegating to `beacon pr merge`, otherwise the e-2169 ban refuses"
-    )
-
-
-def test_trek_finalize_skill_documents_drilldown_and_partial_paths():
-    """The 4-choice prompt (yes / drilldown / partial / cancel) must be
-    in the Skill body so the user has escape routes from blind 1-confirm."""
-    body = FINALIZE_SKILL.read_text(encoding="utf-8")
-    assert "drilldown" in body
-    assert "partial" in body
-    assert "cancel" in body
-
-
-def test_trek_finalize_skill_documents_conflict_pre_detection():
-    """AC #7: conflict pre-detection must be in the Skill body."""
-    body = FINALIZE_SKILL.read_text(encoding="utf-8")
-    assert "CONFLICTING" in body or "conflict" in body.lower()
-
-
-def test_trek_finalize_skill_links_to_release_path():
-    """AC #5: post-finalize, the Skill must surface the release ceremony
-    path (= /beacon-push) as a follow-on action."""
-    body = FINALIZE_SKILL.read_text(encoding="utf-8")
-    assert "/beacon-push" in body or "release.yml" in body
-
-
-def test_trek_finalize_skill_documents_leader_role_gate():
-    """The Skill must refuse to run for executor-role sessions so the
-    leader stance contract (e-2166) holds."""
-    body = FINALIZE_SKILL.read_text(encoding="utf-8")
-    assert "leader" in body.lower()
-    assert "executor" in body.lower()
+    消えた動線を指す案内は、読み手を存在しないコマンドへ送る (= Skill を直した
+    のと同じ理由)。残る抜け道 2 つは名前で出ていること。
+    """
+    src = (REPO / "lib" / "cmd_pr.py").read_text(encoding="utf-8")
+    i = src.index("individual PR merge from an AI session is refused")
+    block = src[i:i + 1200]
+    assert "/beacon-trek-finalize" not in block, (
+        "ban の案内が消えた Skill を指している")
+    assert "BEACON_PR_MERGE_USER_OVERRIDE=1" in block
+    assert "BEACON_SESSION_KIND=human" in block

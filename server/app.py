@@ -2243,7 +2243,7 @@ def _resolve_bus_event_user_ids(
     string for that side; the caller (``dm_gate.should_gate_dm_action``)
     treats empty-string sender / receiver as "unknown" and falls through
     to the standard rule set (= same_user skip is impossible when sender
-    is blank, but the no_actions / shared_trek rules still apply).
+    is blank, but the no_actions rule still applies).
 
     Used only by the post_bus_event gate (ms-70 / e-1713). Kept off the
     hot path of normal lookups — one ``list_sessions`` call per bus
@@ -2261,8 +2261,8 @@ def _resolve_bus_event_user_ids(
         sessions = db.list_sessions(project_id)
     except Exception:
         # Backend unavailable / table missing in a fresh project: treat
-        # both ids as unknown. The gate's no_actions / shared_trek rules
-        # still cover the safe defaults.
+        # both ids as unknown. The gate's no_actions rule still covers
+        # the safe default.
         return ("", "")
     for s in sessions:
         sid = s.get("session_id") or ""
@@ -2518,48 +2518,30 @@ async def post_bus_event(
     env_actions = (body.envelope or {}).get("actions_authorized") or []
     env_tier = (body.envelope or {}).get("tier", "") or ""
     env_issuer = (body.envelope or {}).get("issuer", "") or ""
-    gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
-        # Sender-side trek visibility is sufficient — Trek membership
-        # query is symmetric (creator OR members) on either backend.
-        # ms-97 / e-2659 Phase 3 (G4): the lookup is invoked fresh per
-        # bus event — no list reuse — so a member removed between
-        # events stops granting bypass on the next invocation.
-        lambda uid: db.list_treks(actor_id=uid) if uid else [],
-    )
-    # ms-97 / e-2659 Phase 3 (AC18): pass session ids so phase A+ treks
-    # are evaluated session-grain. Recipient sid is resolved from the
-    # payload (= same shape used by ``_resolve_bus_event_user_ids``).
-    recipient_sid_for_gate = ""
+    # 受信者の session id は payload から解決する (= ``_resolve_bus_event_user_ids``
+    # と同じ形)。下の送信側 consent 判定が使う。
+    recipient_sid = ""
     if isinstance(body.payload, dict):
-        recipient_sid_for_gate = str(
-            body.payload.get("recipient_session_id") or ""
-        )
+        recipient_sid = str(body.payload.get("recipient_session_id") or "")
     # ms-83 / e-1995: pass tier+issuer so the gate can recognise
     # T1-system server-mint envelopes as T1-equivalent (= bypass).
-    should_gate, gate_reason, gate_trek_id = dm_gate_mod.should_gate_dm_action(
+    #
+    # ms-185 e-7068: ここに「送信者と受信者が同じ Trek の参加者か」を引く
+    # lookup の組み立てと、その結果を監査に刻む bypass / trek_id が在った。
+    # 規則ごと削除したので、組み立ても刻みも消してある (= 常に空の field を
+    # 残さない)。別人宛の action 付き DM は必ず人間の確認を要求する側に倒れる。
+    should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id=authoritative_sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
-        shared_trek_lookup=gate_lookup,
         envelope_tier=env_tier,
         envelope_issuer=env_issuer,
-        sender_session_id=body.sender_session_id or "",
-        receiver_session_id=recipient_sid_for_gate,
     )
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
         "reason": gate_reason,
         "sender_user_id": authoritative_sender_uid,
         "receiver_user_id": receiver_uid,
-        # ms-97 / e-2659 Phase 3 (AC19): bypass flag + matched trek_id.
-        # bypass=True when the gate let an action-bearing cross-user
-        # envelope through *because* of a shared trek membership. The
-        # trek_id makes the audit log searchable by trek.
-        "bypass": (
-            (not should_gate)
-            and gate_reason == dm_gate_mod.GATE_REASON_SHARED_TREK
-        ),
-        "trek_id": gate_trek_id,
     }
     if should_gate:
         # Force a safe, non-auto-execute delivery so legacy receivers
@@ -2615,7 +2597,6 @@ async def post_bus_event(
             channel=body.channel,
             is_reply=consent_is_reply,
             operation_envelope=consent_operation_env,
-            shared_trek=False,
         )
         consent_allow = not consent_required
         if consent_required:
@@ -2625,26 +2606,17 @@ async def post_bus_event(
             _decision = dm_consent_mod.evaluate_send(
                 sender_user_id=consent_sender_uid,
                 recipient_user_id=receiver_uid,
-                recipient_session_id=recipient_sid_for_gate,
+                recipient_session_id=recipient_sid,
                 channel=body.channel,
                 is_reply=consent_is_reply,
                 operation_envelope=consent_operation_env,
-                shared_trek=False,
                 consent_claim=consent_claim,
             )
             consent_allow = _decision["allow"]
             consent_reason = _decision["reason"]
-            if not consent_allow and consent_sender_uid and receiver_uid:
-                # Last resort before rejecting: a shared-Trek pair is
-                # pre-approved (§1). Only now pay for the Trek lookup (fresh per
-                # event). Reuse the session-grain lookup ms-70 built above.
-                _c_matched, _c_trek_id = gate_lookup(
-                    consent_sender_uid, receiver_uid,
-                    body.sender_session_id or "", recipient_sid_for_gate,
-                )
-                if _c_matched:
-                    consent_allow = True
-                    consent_reason = dm_consent_mod.CONSENT_SKIP_SHARED_TREK
+            # ms-185 e-7068: ここに「拒否する前の最後の救済 — 同じ Trek の
+            # 参加者同士なら通す」が在った。規則ごと削除してある (= 救済の根拠
+            # が消えたので、確認の無い別人宛の新規送信はそのまま拒否される)。
     audit_record["sender_consent"] = {
         "enforced": consent_enforced,
         "allow": consent_allow,
@@ -2719,15 +2691,15 @@ async def post_bus_event(
     # common path is byte-unchanged (no extra keys) — the no-regression
     # guarantee pinned by test. This is the SERVER choke point, reaching paths
     # the CLI-side advisory can't (MCP reply / headless). Best-effort.
-    if body.channel == "dm" and recipient_sid_for_gate:
+    if body.channel == "dm" and recipient_sid:
         try:
             _send_verdict = _classify_recipient_send_delivery(
-                project_id, recipient_sid_for_gate,
+                project_id, recipient_sid,
                 datetime.datetime.now(datetime.timezone.utc))
         except Exception as _reach_exc:  # pragma: no cover - defensive
             logging.getLogger(__name__).warning(
                 "recipient reachability check failed for recipient=%s: %s",
-                recipient_sid_for_gate, _reach_exc)
+                recipient_sid, _reach_exc)
             _send_verdict = None
         if _send_verdict == bus_liveness.SEND_WEDGED:
             data["recipient_wedged"] = True
@@ -4661,12 +4633,23 @@ def _run_system_tick(body) -> dict:
     # tick (≤1 min) re-baselines it.
     global _last_tick_at, _last_tick_report
     _last_tick_at = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    # ms-185 e-7066 — source 単位の内訳も刻む。合計 (``scheduled_fires``) だけ
+    # では「締切リマインドが止まっても tick は緑」のままなので、外から
+    # (= /api/system/tick-health を読む watchdog から) 片方の消失に気付けない。
+    # ``scheduled_sources`` は**実際に回した登録簿から導く**ので、回していない
+    # source を報告することはできない。
+    _scheduled_by_source = tick_health_mod.summarize_scheduled_fires(
+        scheduled_fires if isinstance(scheduled_fires, list) else [],
+        SCHEDULED_SOURCE_NAMES,
+    )
     _last_tick_report = {
         "candidates": len(candidate_treks),
         "due": len(due_treks),
         "fired": len(fired) if isinstance(fired, list) else fired,
         "scheduled_fires": len(scheduled_fires)
         if isinstance(scheduled_fires, list) else 0,
+        "scheduled_sources": list(SCHEDULED_SOURCE_NAMES),
+        "scheduled_by_source": _scheduled_by_source,
     }
 
     return {
@@ -4689,6 +4672,11 @@ def _run_system_tick(body) -> dict:
         "skipped_no_id": trek["skipped_no_id"],
         # ms-107 e-3434 chunk 3b — scheduled things fired on this tick.
         "scheduled_fires": scheduled_fires,
+        # ms-185 e-7066 — どの source を回したか / source ごとの内訳。
+        # journal (scripts/vps-tick.sh が body をそのまま残す) で 1 tick 単位に
+        # 「Operation と締切リマインドの両方が回った」ことを読めるようにする。
+        "scheduled_sources": list(SCHEDULED_SOURCE_NAMES),
+        "scheduled_by_source": _scheduled_by_source,
     }
 
 
@@ -4756,6 +4744,11 @@ def tick_health_endpoint():
     return {
         **health,
         "last_tick_report": _last_tick_report,
+        # ms-185 e-7066 — この server が実際に回している定期発火の source。
+        # 登録簿 (SCHEDULED_SOURCES) から導くので、宣言と実体がズレない。
+        # watchdog (scripts/tick-health-monitor.py) がこれを読んで
+        # 「ティックは生きているが片方の job が消えた」を検知する。
+        "scheduled_sources": list(SCHEDULED_SOURCE_NAMES),
     }
 
 
@@ -4941,17 +4934,73 @@ def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> 
     return changed
 
 
-def _fire_due_scheduled(now_iso: str) -> list:
-    """ms-107 e-3434 chunk 3b — fire due *scheduled* things on the shared Trek
-    scheduler tick ("相乗り"), using the target-agnostic ``lib/tick_scheduler``
-    primitive.
+def _fire_source_operations(pid: str, project: dict, now_iso: str,
+                            report: list) -> bool:
+    """source: Operation (= 繰り返す運用業務の永続ターゲット) の発火 — ms-107 e-3434。
 
-    Source registry: each source yields ``(item, descriptor, fire)`` where the
-    descriptor is entity-free ({enabled, cadence_minutes, last_fired_at}) and
-    ``fire`` performs the source-specific activation. Today the only source is
-    **Operations** (dev/sales persistent target); Account 定期連絡 and
-    short-lived communication watch tasks plug in the same way later — the tick
-    stays unaware of what it is firing.
+    ``SCHEDULED_SOURCES`` の 1 要素。登録簿の契約は
+    ``(pid, project, now_iso, report) -> changed``: ``report`` に per-fire を積み、
+    プロジェクト文書に印を刻んだら True を返す (呼び出し側が保存する)。
+    締切リマインド (``_fire_due_deadlines``) と同じ形なので、どちらも同じ扱いで
+    回せる = 片方だけ特別扱いされて観測から漏れることがない。"""
+    changed = False
+    for op in (project.get("operations", []) or []):
+        if not tick_scheduler.is_due(_operation_schedule_descriptor(op), now_iso):
+            continue
+        # 2026-08-20 / e-5366 — 直前に失敗しているなら待ち時間が明けるまで
+        # 試さない。失敗が状態を進めないと「期限到来」のまま毎分同じ失敗を
+        # 繰り返す (44 日間 6 万回空回りして本番を落とした形)。
+        _op_meta = op.setdefault("meta", {})
+        if tick_scheduler.failure_backoff_active(_op_meta, now_iso):
+            continue
+        result = _fire_operation(pid, project, op, now_iso)
+        report.append(result)
+        if result.get("fired"):
+            _op_meta["last_fired_at"] = now_iso
+            tick_scheduler.clear_failure(_op_meta)
+            changed = True
+        else:
+            # 失敗も必ず刻む (刻まないと次の tick でまた来る)。
+            result["consecutive_failures"] = tick_scheduler.record_failure(
+                _op_meta, now_iso)
+            changed = True
+    return changed
+
+
+# ms-185 e-7066 — 定期発火に相乗りしている source の**唯一の登録簿**。
+#
+# 相乗りは 1 つではなく 2 つある (Operation の発火 / 締切リマインド)。以前は
+# ``_fire_due_scheduled`` の中に 2 つが直書きされており、tick の応答にも
+# 「何件出たか」の合計しか載っていなかった。そのため **締切リマインドを落としても
+# tick は緑のまま**で、外からは気付けなかった (ms-145 / e-4104 で一度踏んだ
+# 「駆動役が黙って消えて事故で気付く」型の、source 単位版)。
+#
+# この tuple が (a) 実際に回す対象であり、同時に (b) tick 応答 /
+# ``/api/system/tick-health`` に載る ``scheduled_sources`` の出所でもある。
+# 片方を消せばもう片方も必ず消えるので、「回していないのに回していると報告する」
+# 状態が作れない。watchdog 側 (``lib/tick_health.py`` の
+# ``REQUIRED_SCHEDULED_SOURCES``) は**あえて独立に**同じ名前を宣言しており、
+# ここから source が消えると本番で alert が上がる (= 外から気付く経路)。
+# 両者の整合は tests/test_scheduled_source_registry_e7066.py が固定する。
+SCHEDULED_SOURCES = (
+    ("operation", _fire_source_operations),
+    ("deadline", _fire_due_deadlines),
+)
+SCHEDULED_SOURCE_NAMES = tuple(name for name, _ in SCHEDULED_SOURCES)
+
+
+def _fire_due_scheduled(now_iso: str) -> list:
+    """ms-107 e-3434 chunk 3b — fire due *scheduled* things on the periodic
+    tick ("相乗り"), using the target-agnostic ``lib/tick_scheduler`` primitive.
+    (ms-185 e-7065 で入口を Trek 非依存の ``POST /api/system/tick`` に移した。)
+
+    Source registry: ``SCHEDULED_SOURCES`` (above) lists every source this tick
+    drives, each a ``(name, fire)`` pair with the entity-free contract
+    ``fire(pid, project, now_iso, report) -> changed``. Today there are **two**:
+    Operations (dev/sales persistent target) and deadline reminders (ms-139
+    e-4953). Account 定期連絡 and short-lived communication watch tasks plug in
+    the same way later — the tick stays unaware of what it is firing, and the
+    observability surface (``scheduled_sources``) follows the registry for free.
 
     Best-effort throughout; a project's failure is captured and skipped. The
     ``meta.last_fired_at`` stamp advances the cadence gate (the dedup that stops
@@ -4990,33 +5039,26 @@ def _fire_due_scheduled(now_iso: str) -> list:
         if not project:
             continue
         changed = False
-        # --- source: Operations (persistent targets opted into server-tick) ---
-        for op in (project.get("operations", []) or []):
-            if not tick_scheduler.is_due(_operation_schedule_descriptor(op), now_iso):
-                continue
-            # 2026-08-20 / e-5366 — 直前に失敗しているなら待ち時間が明けるまで
-            # 試さない。失敗が状態を進めないと「期限到来」のまま毎分同じ失敗を
-            # 繰り返す (44 日間 6 万回空回りして本番を落とした形)。
-            _op_meta = op.setdefault("meta", {})
-            if tick_scheduler.failure_backoff_active(_op_meta, now_iso):
-                continue
-            result = _fire_operation(pid, project, op, now_iso)
-            report.append(result)
-            if result.get("fired"):
-                _op_meta["last_fired_at"] = now_iso
-                tick_scheduler.clear_failure(_op_meta)
-                changed = True
-            else:
-                # 失敗も必ず刻む (刻まないと次の tick でまた来る)。
-                result["consecutive_failures"] = tick_scheduler.record_failure(
-                    _op_meta, now_iso)
-                changed = True
-        # --- source: deadline reminders (ms-139 e-4953) — 締切超過の work item を
-        #     claim 者セッションへ 1 回 DM。Operations と同じ tick に相乗りする。 ---
-        if _fire_due_deadlines(pid, project, now_iso, report):
-            changed = True
-        # --- future sources (Account 定期連絡 / short-lived watch tasks) plug
-        #     in here with their own descriptor adapter + fire callback ---
+        # ms-185 e-7066 — source は 1 箇所の登録簿 (SCHEDULED_SOURCES) から回す。
+        # 以前は Operation と締切リマインドがここに直書きされており、片方を
+        # 落としても tick の応答は何も変わらなかった (= 気付けない)。登録簿を
+        # 回す形にして、応答に載る source 名を**実際に回した登録簿から導く**。
+        # 新しい source (Account 定期連絡 / 短命の watch タスク) は登録簿に 1 行
+        # 足すだけで、観測面にも自動で載る。
+        for _source_name, _fire_source in SCHEDULED_SOURCES:
+            _before = len(report)
+            try:
+                if _fire_source(pid, project, now_iso, report):
+                    changed = True
+            except Exception as exc:  # pragma: no cover - defensive isolation
+                # 1 つの source の失敗が他の source を道連れにしない (相乗りして
+                # いる以上、締切リマインドの失敗で Operation が止まってはいけない)。
+                report.append({"project_id": pid,
+                               "error": f"{_source_name}: {type(exc).__name__}: {exc}"})
+            # 出所の刻印。観測側 (tick-health / journal) が「どの source が
+            # 何件出したか」を数えられるようにする。
+            for _entry in report[_before:]:
+                _entry.setdefault("source", _source_name)
         if changed:
             try:
                 db.save_project(pid, project)

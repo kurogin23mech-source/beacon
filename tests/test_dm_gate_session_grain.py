@@ -1,4 +1,10 @@
-"""ms-97 / e-2659 Phase 3 (AC18) — dm_gate session-grain authorization tests.
+"""ms-97 / e-2659 Phase 3 (AC18) — 共有 Trek メンバー判定の session 粒度試験。
+
+**ms-185 e-7068 の変更**: この判定はもともと ``dm_gate`` (= 確認ゲートの判定器)
+の bypass 根拠だったが、その規則は削除され、判定自体は ``lib/trek`` へ移った
+(= 予算の最適化という別用途でまだ使われている)。以下の AC18 は **判定の正しさ**
+として読む — 「在籍が証明できたら確認を省く」という結論は、もう続かない。
+
 
 AC18: dm_gate (= cross-user DM 承認 judge) は phase A+ trek (= members[]
 が session_id keyed に cutover 済) の bypass 判定で sender + recipient の
@@ -32,9 +38,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import dm_gate  # noqa: E402
+import trek as trek_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +104,7 @@ def test_phase_a_bypass_when_both_session_ids_in_members():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
     matched, trek_id = lookup(
@@ -106,10 +114,16 @@ def test_phase_a_bypass_when_both_session_ids_in_members():
     assert trek_id == "tk-cross"
 
 
-def test_phase_a_bypass_judge_full_pipeline():
-    """End-to-end: should_gate_dm_action with phase A+ lookup.
+def test_phase_a_membership_no_longer_reaches_the_judge():
+    """ms-185 e-7068 — session 粒度で在籍が証明できても、判定器には届かない。
 
-    Confirms the 3-tuple return + audit-log-shaped trek_id propagation.
+    以前はこの組み合わせ (= 両 session_id が同じ active trek の members[] に
+    在籍) が確認ゲートの bypass 根拠だった。判定器から規則ごと削除したので、
+    **在籍の証明が立っていても** 別人宛の action 付き DM は確認を要する。
+
+    下の在籍判定そのもの (= 移設先 ``lib/trek``) はこのファイルが測り続ける:
+    予算の最適化という別の用途でまだ使われているため。**在籍が真であることと、
+    確認が省かれることが、もう繋がっていない**ことをここで固定する。
     """
     treks_by_uid = {
         "uid-alice": [
@@ -124,20 +138,19 @@ def test_phase_a_bypass_judge_full_pipeline():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
-    should_gate, reason, trek_id = dm_gate.should_gate_dm_action(
+    # 在籍は真 (= 判定そのものは生きている)
+    assert lookup("uid-alice", "uid-bob", "sv-a", "sv-b") == (True, "tk-e2e")
+    # それでも確認ゲートは通らない
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="uid-alice",
         receiver_user_id="uid-bob",
         actions_authorized=["commit"],
-        shared_trek_lookup=lookup,
-        sender_session_id="sv-a",
-        receiver_session_id="sv-b",
     )
-    assert should_gate is False
-    assert reason == dm_gate.GATE_REASON_SHARED_TREK
-    assert trek_id == "tk-e2e"
+    assert should_gate is True
+    assert reason == dm_gate.GATE_REASON_CROSS_USER_ACTION
 
 
 def test_phase_pre_a_bypass_still_user_grain():
@@ -153,7 +166,7 @@ def test_phase_pre_a_bypass_still_user_grain():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
     # No session ids passed — pre-A grain still resolves bypass on user
@@ -192,7 +205,7 @@ def test_mixed_phase_a_and_pre_a_only_phase_a_grants_session_grain():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
     matched, trek_id = lookup(
@@ -203,34 +216,16 @@ def test_mixed_phase_a_and_pre_a_only_phase_a_grants_session_grain():
     assert trek_id == "tk-legacy"
 
 
-def test_shared_trek_member_helper_phase_a_path():
-    """``dm_gate.shared_trek_member`` convenience helper for AC18 test
-    surface (= the upstream Skill / CLI callers ask this question with
-    pure session ids)."""
-    treks_by_uid = {
-        "uid-alice": [
-            _trek_phase_a(
-                trek_id="tk-helper",
-                members=[
-                    {"user_id": "uid-alice", "session_id": "sv-1"},
-                    {"user_id": "uid-bob", "session_id": "sv-2"},
-                ],
-            ),
-        ],
-    }
-    assert dm_gate.shared_trek_member(
-        sender_session_id="sv-1",
-        recipient_session_id="sv-2",
-        list_treks_for_user=lambda uid: treks_by_uid.get(uid, []),
-        sender_user_id="uid-alice",
-        recipient_user_id="uid-bob",
-    ) is True
+def test_the_convenience_probe_is_gone_with_its_rule():
+    """``dm_gate.shared_trek_member`` は規則と一緒に消えた (ms-185 e-7068)。
 
-
-# ---------------------------------------------------------------------------
-# Negative: phase A+ strict session-grain rejection
-# ---------------------------------------------------------------------------
-
+    AC18 当時この helper は「2 つの session_id が同じ active phase A+ trek に
+    居るか」を 1 行で問うための便利関数で、**呼び出し元はテストだけ**だった
+    (本番コードからの参照ゼロを実測して消した)。規則を消すときに helper だけ
+    残すと、誰も呼ばない判定が 1 つ生き続ける。判定本体は ``lib/trek`` 側に
+    移してあり、そちらは実際の呼び出し元 (予算の最適化) と一緒に生きている。
+    """
+    assert not hasattr(dm_gate, "shared_trek_member")
 def test_phase_a_no_bypass_when_sender_session_absent():
     """Phase A+ trek で sender の session_id が members[] に居ない → no bypass。"""
     treks_by_uid = {
@@ -246,7 +241,7 @@ def test_phase_a_no_bypass_when_sender_session_absent():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
     matched, _ = lookup(
@@ -268,7 +263,7 @@ def test_phase_a_no_bypass_when_recipient_session_absent():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
     matched, _ = lookup(
@@ -296,7 +291,7 @@ def test_phase_a_no_bypass_for_same_user_fork_session():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
     matched, trek_id = lookup(
@@ -319,7 +314,7 @@ def test_phase_a_no_bypass_when_session_ids_blank():
             ),
         ],
     }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
     matched, _ = lookup("uid-alice", "uid-bob", "", "sv-b")
@@ -356,7 +351,7 @@ def test_lookup_invokes_list_treks_for_user_fresh_each_call():
         call_count["n"] += 1
         return live_treks.get(uid, [])
 
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(_live_list)
+    lookup = trek_mod.build_shared_trek_lookup_from_lists(_live_list)
     matched_1, _ = lookup("uid-alice", "uid-bob", "sv-a", "sv-b")
     assert matched_1 is True
 

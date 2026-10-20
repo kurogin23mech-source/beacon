@@ -99,7 +99,9 @@ def test_removing_a_snapshot_entry_turns_it_red():
     # Use a still-deferred entry as the victim ("phase add" left the snapshot
     # once e-4643 backfilled it — its guard is now proven by parity, not the
     # snapshot). Any remaining bash-only sub-verb demonstrates the mechanism.
-    victim = "trek block"
+    # ms-185 e-7069: victim was "trek block" until the trek verbs were removed.
+    # Any remaining bash-only sub-verb demonstrates the mechanism equally well.
+    victim = "channel uninstall"
     assert victim in mod.ALLOW_SUBVERB_MISSING_FROM_PYTHON
     original = set(mod.ALLOW_SUBVERB_MISSING_FROM_PYTHON)
     try:

@@ -316,12 +316,11 @@ def _add_send_flags(parser, *, with_channel: bool) -> None:
     parser.add_argument("--in-reply-to", dest="in_reply_to", default="")
     parser.add_argument("--project", dest="bus_project_id", default="")
     # ms-73 / e-1763 + ms-75 / e-1858: `--to` is the cross-user DM target and is
-    # repeatable (one send addressing several session ids); `--to-trek` expands
-    # a trek's members into one send each. `--action` is the Tier-1 envelope's
+    # repeatable (one send addressing several session ids). `--action` is the
+    # Tier-1 envelope's
     # authorized action (repeatable, comma-joined server-side, e-1290), and
     # `--no-envelope` opts out of envelope issuance (debug / legacy).
     parser.add_argument("--to", dest="bus_to", action="append", default=[])
-    parser.add_argument("--to-trek", dest="bus_to_trek", default="")
     parser.add_argument("--action", dest="bus_action", action="append", default=[])
     # ms-120 / e-3901: explicit human-approved override of the armed auto-reply
     # gate, so an armed session is not fail-closed with no way to send a one-off.
@@ -1516,225 +1515,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_op_envelope_verify.add_argument("op_id", nargs="?", default="")
     p_op_envelope_verify.add_argument("action", nargs="?", default="")
     p_op_envelope_verify.add_argument("--json", action="store_true")
-
-    # ---- trek (ms-69) ----
-    # Top-level cross-project collaboration area. Storage is local-only
-    # (~/.beacon/treks/) until the HTTP path lands in e-1656.
-    p_trek = sub.add_parser("trek", help="Trek operations (ms-69)", add_help=False)
-    p_trek.add_argument("--help", "-h", action="store_true", dest="show_help")
-    trek_sub = p_trek.add_subparsers(dest="trek_cmd", metavar="<subcmd>")
-
-    p_trek_create = trek_sub.add_parser("create", add_help=False)
-    p_trek_create.add_argument("title", nargs="?", default="")
-    p_trek_create.add_argument("--type", dest="trek_type", default="")
-    p_trek_create.add_argument("--description", "--desc", dest="trek_desc", default="")
-    # ms-75 / e-1865: optional acceptance criterion at creation time.
-    p_trek_create.add_argument("--goal-state", dest="goal_state", default="")
-    p_trek_create.add_argument("--json", action="store_true")
-
-    p_trek_list = trek_sub.add_parser("list", aliases=["ls"], add_help=False)
-    p_trek_list.add_argument("--status", default="")
-    p_trek_list.add_argument("--all", "--include-archived",
-                             dest="include_archived", action="store_true")
-    p_trek_list.add_argument("--all-actors", dest="all_actors", action="store_true")
-    # ms-75 / e-1813: filter to treks the current user has actually joined
-    # (= joined_at non-empty for the calling user). Skipping invitees that
-    # have not accepted yet — they show up via plain list / status.
-    p_trek_list.add_argument("--joined", dest="joined_only", action="store_true",
-                             help="Show only treks the current user has joined")
-    p_trek_list.add_argument("--json", action="store_true")
-
-    p_trek_show = trek_sub.add_parser("show", aliases=["get"], add_help=False)
-    p_trek_show.add_argument("trek_id", nargs="?", default="")
-    # ms-75 / e-1864: uncap the recent-task / commit lists in the aggregation
-    # block. Default caps lists at 10 / 5 for readability.
-    p_trek_show.add_argument("--all", "--detail", dest="show_all",
-                             action="store_true",
-                             help="Expand all entries in the aggregation block")
-    p_trek_show.add_argument("--json", action="store_true")
-
-    p_trek_start = trek_sub.add_parser("start", add_help=False)
-    p_trek_start.add_argument("trek_id", nargs="?", default="")
-    p_trek_start.add_argument("--json", action="store_true")
-
-    p_trek_archive = trek_sub.add_parser("archive", add_help=False)
-    p_trek_archive.add_argument("trek_id", nargs="?", default="")
-    p_trek_archive.add_argument("--json", action="store_true")
-
-    p_trek_invite = trek_sub.add_parser("invite", add_help=False)
-    p_trek_invite.add_argument("trek_id", nargs="?", default="")
-    p_trek_invite.add_argument("--actor", default="")
-    p_trek_invite.add_argument("--notify", action="store_true")
-    p_trek_invite.add_argument("--json", action="store_true")
-
-    p_trek_join = trek_sub.add_parser("join", add_help=False)
-    p_trek_join.add_argument("trek_id", nargs="?", default="")
-    p_trek_join.add_argument("--json", action="store_true")
-    # ms-88 / e-2090 — Trek 参加 = scope 内 DM blanket 自動承認 (= ms-70 / e-1854)
-    # + autonomous loop 入場の合算で turn 制限なく AI を動かす権限委譲。 CLI 直叩きで
-    # 無音成立すると user が consequence を理解せず参加する構造的危険があるため、
-    # 明示同意 gate を挟む。 long flag は意味理解の forcing function (= short flag
-    # では typo / 反射的 -y で bypass される温床)。
-    p_trek_join.add_argument(
-        "--i-understand-the-implications", dest="consent_ack",
-        action="store_true",
-        help="Skip the typed-ack prompt (= 自動化 / bot 用 bypass)。 "
-             "Trek 参加が turn 制限なく AI を走らせる権限委譲であることを "
-             "理解している前提で使う。",
-    )
-    # ms-75 / e-2047 — opt-out flag for the post-join auto-arm sequence.
-    p_trek_join.add_argument("--no-arm", dest="no_arm", action="store_true")
-
-    p_trek_leave = trek_sub.add_parser("leave", add_help=False)
-    p_trek_leave.add_argument("trek_id", nargs="?", default="")
-    p_trek_leave.add_argument("--json", action="store_true")
-
-    p_trek_plan = trek_sub.add_parser("plan", add_help=False)
-    p_trek_plan.add_argument("trek_id", nargs="?", default="")
-    p_trek_plan.add_argument("--add-scope", dest="add_scope", default="")
-    p_trek_plan.add_argument("--remove-scope", dest="remove_scope", default="")
-    # ms-75 / e-1865: optional goal_state setter. Sentinel value separately
-    # records "user passed --goal-state" so we can distinguish empty string
-    # (= clear) from "did not pass" (= preserve existing).
-    p_trek_plan.add_argument("--goal-state", dest="goal_state", default=None)
-    p_trek_plan.add_argument("--json", action="store_true")
-
-    # ms-75 / e-1867: chronological view of trek-scoped events.
-    p_trek_timeline = trek_sub.add_parser("timeline", add_help=False)
-    p_trek_timeline.add_argument("trek_id", nargs="?", default="")
-    p_trek_timeline.add_argument("--limit", default="50",
-                                 help="Cap event count (default: 50)")
-    p_trek_timeline.add_argument("--json", action="store_true")
-
-    p_trek_stop = trek_sub.add_parser("stop", add_help=False)
-    p_trek_stop.add_argument("trek_id", nargs="?", default="")
-    p_trek_stop.add_argument("--reason", default="")
-    p_trek_stop.add_argument("--json", action="store_true")
-
-    p_trek_resume = trek_sub.add_parser("resume", add_help=False)
-    p_trek_resume.add_argument("trek_id", nargs="?", default="")
-    p_trek_resume.add_argument("--json", action="store_true")
-
-    p_trek_xfer = trek_sub.add_parser("transfer-leader", add_help=False)
-    p_trek_xfer.add_argument("trek_id", nargs="?", default="")
-    p_trek_xfer.add_argument("--to", dest="to_session_id", default="")
-    p_trek_xfer.add_argument("--json", action="store_true")
-
-    # ms-88 / e-2089 — fresh session recovery (dead leader_session_id 引き継ぎ)
-    p_trek_take_over = trek_sub.add_parser("take-over", add_help=False)
-    p_trek_take_over.add_argument("trek_id", nargs="?", default="")
-    p_trek_take_over.add_argument("--json", action="store_true")
-
-    # ms-88 / e-2138 — Kickoff Ritual completion stamp (= /beacon-trek-pulse Step 0.4)
-    p_trek_kickoff = trek_sub.add_parser("kickoff", add_help=False)
-    p_trek_kickoff.add_argument("trek_id", nargs="?", default="")
-    p_trek_kickoff.add_argument("--session-id", dest="session_id_override",
-                                 default="")
-    p_trek_kickoff.add_argument("--kickoff-dm-event-id",
-                                 dest="kickoff_dm_event_id", default="")
-    p_trek_kickoff.add_argument("--json", action="store_true")
-
-    # ms-88 / e-2106 — pulse-ack (= /beacon-trek-pulse self-report)
-    p_trek_pulse = trek_sub.add_parser("pulse-ack", add_help=False)
-    p_trek_pulse.add_argument("trek_id", nargs="?", default="")
-    p_trek_pulse.add_argument("--picked-choice", dest="picked_choice",
-                              default="")
-    p_trek_pulse.add_argument("--note", default="")
-    p_trek_pulse.add_argument("--json", action="store_true")
-
-    # ms-88 / e-2167 — reconcile task pool ↔ Trek stamp 同期
-    p_trek_reconcile = trek_sub.add_parser("reconcile", add_help=False)
-    p_trek_reconcile.add_argument("trek_id", nargs="?", default="")
-    p_trek_reconcile.add_argument("--apply", action="store_true")
-    p_trek_reconcile.add_argument("--json", action="store_true")
-
-    # ms-75 / e-2048 — Trek task state machine declaration
-    p_trek_state = trek_sub.add_parser("task-state", add_help=False)
-    p_trek_state.add_argument("trek_id", nargs="?", default="")
-    p_trek_state.add_argument("task_id", nargs="?", default="")
-    p_trek_state.add_argument("state", nargs="?", default="")
-    p_trek_state.add_argument("--note", default="")
-    p_trek_state.add_argument("--json", action="store_true")
-
-    # ms-97 / e-2626 (AC23) — canonical scope-add verb (= flag-style alias of
-    # plan --add-scope <project>:<ref>). The action delegates to cmd_trek_plan
-    # so the staging machinery (= pending_scope_ops + scope-approve flow) is
-    # shared with the existing --add-scope path.
-    p_trek_scope_add = trek_sub.add_parser("scope-add", add_help=False)
-    p_trek_scope_add.add_argument("trek_id", nargs="?", default="")
-    p_trek_scope_add.add_argument("--project", dest="scope_add_project",
-                                  default="")
-    p_trek_scope_add.add_argument("--milestone", "--ms",
-                                  dest="scope_add_milestone", default="")
-    p_trek_scope_add.add_argument("--operation", "--op",
-                                  dest="scope_add_operation", default="")
-    p_trek_scope_add.add_argument("--task", "--e",
-                                  dest="scope_add_task", default="")
-    p_trek_scope_add.add_argument("--json", action="store_true")
-
-    # ms-97 / e-2611 (AC25) — commit a staged scope op.
-    p_trek_scope_approve = trek_sub.add_parser("scope-approve", add_help=False)
-    p_trek_scope_approve.add_argument("trek_id", nargs="?", default="")
-    p_trek_scope_approve.add_argument("pending_id", nargs="?", default="")
-    p_trek_scope_approve.add_argument("--json", action="store_true")
-
-    # ms-97 / e-2611 (AC25) — drop a staged scope op without applying.
-    p_trek_scope_reject = trek_sub.add_parser("scope-reject", add_help=False)
-    p_trek_scope_reject.add_argument("trek_id", nargs="?", default="")
-    p_trek_scope_reject.add_argument("pending_id", nargs="?", default="")
-    p_trek_scope_reject.add_argument("--json", action="store_true")
-
-    # ms-95 / e-2308 — extend TTL on a single Trek task (= leader 代替 reaffirm
-    # for Agent-tool subagent dispatch path)
-    p_trek_extend = trek_sub.add_parser("extend-ttl", add_help=False)
-    p_trek_extend.add_argument("trek_id", nargs="?", default="")
-    p_trek_extend.add_argument("task_id", nargs="?", default="")
-    p_trek_extend.add_argument("--minutes", default="")
-    p_trek_extend.add_argument("--reason", default="")
-    p_trek_extend.add_argument("--json", action="store_true")
-
-    # ms-99 / e-2829 — slot verbs (nested subcommand). Trek scope entries
-    # become first-class slots under Trek schema v2; the four CLI verbs
-    # (add / amend / claim / list) all flow through the pending_scope_ops
-    # queue so AC 15 (= all slot CLI ops via staging) holds.
-    p_trek_slot = trek_sub.add_parser("slot", add_help=False)
-    slot_sub = p_trek_slot.add_subparsers(dest="slot_cmd", metavar="<subcmd>")
-
-    p_slot_add = slot_sub.add_parser("add", add_help=False)
-    p_slot_add.add_argument("trek_id", nargs="?", default="")
-    p_slot_add.add_argument("--project", dest="slot_project", default="")
-    p_slot_add.add_argument("--milestone", "--ms", dest="slot_milestone",
-                            default="")
-    p_slot_add.add_argument("--operation", "--op", dest="slot_operation",
-                            default="")
-    p_slot_add.add_argument("--task", "--e", dest="slot_task", default="")
-    # ``--children e-A,e-B`` — MS slot opt-in child list. Comma-separated
-    # so scriptable; empty string = legacy null (= all-include).
-    p_slot_add.add_argument("--children", dest="slot_children", default="")
-    p_slot_add.add_argument("--json", action="store_true")
-
-    p_slot_amend = slot_sub.add_parser("amend", add_help=False)
-    p_slot_amend.add_argument("trek_id", nargs="?", default="")
-    p_slot_amend.add_argument("slot_id", nargs="?", default="")
-    p_slot_amend.add_argument("--add-child", dest="slot_add_child",
-                              action="append", default=[])
-    p_slot_amend.add_argument("--remove-child", dest="slot_remove_child",
-                              action="append", default=[])
-    p_slot_amend.add_argument("--json", action="store_true")
-
-    p_slot_claim = slot_sub.add_parser("claim", add_help=False)
-    p_slot_claim.add_argument("trek_id", nargs="?", default="")
-    p_slot_claim.add_argument("slot_id", nargs="?", default="")
-    # ``--session <sid>`` overrides the resolved session; empty string
-    # via ``--unclaim`` clears the claim.
-    p_slot_claim.add_argument("--session", dest="slot_session", default="")
-    p_slot_claim.add_argument("--unclaim", dest="slot_unclaim",
-                              action="store_true")
-    p_slot_claim.add_argument("--json", action="store_true")
-
-    p_slot_list = slot_sub.add_parser("list", add_help=False)
-    p_slot_list.add_argument("trek_id", nargs="?", default="")
-    p_slot_list.add_argument("--json", action="store_true")
 
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
@@ -4793,362 +4573,6 @@ def _handle_project(root: Path, args: argparse.Namespace) -> int:
     return 1
 
 
-def _handle_trek(root: Path, args: argparse.Namespace) -> int:
-    """`beacon trek <create|list|show|start|archive>` (ms-69 / e-1653).
-
-    Mirrors the bash dispatch in bin/beacon. Trek is a top-level
-    cross-project entity so we do **not** call ``_ensure_project`` —
-    the storage layer (~/.beacon/treks/) is project-agnostic.
-
-    BEACON_USER_EMAIL / BEACON_SESSION_ID are inherited from the parent
-    process environment for the ``create`` path (= identity gating lives
-    in commands.py).
-    """
-    if args.show_help or args.trek_cmd is None:
-        print(
-            "Usage: beacon trek <subcommand> [args]\n"
-            "\n"
-            "Subcommands:\n"
-            "  create \"<title>\" [--type temporary|persistent] "
-            "[--description \"...\"] [--goal-state \"<criterion>\"]\n"
-            "  list [--status S] [--all] [--all-actors] [--joined] [--json]\n"
-            "  show <trek-id> [--all] [--json]   (= aggregation block: tasks "
-            "/ commits / docs)\n"
-            "  start <trek-id>\n"
-            "  archive <trek-id>\n"
-            "  invite <trek-id> --actor <email> [--notify]\n"
-            "  join <trek-id>\n"
-            "  leave <trek-id>\n"
-            "  plan <trek-id> --add-scope <project[:ref]>\n"
-            "  plan <trek-id> --remove-scope <project[:ref]>\n"
-            "  plan <trek-id> --goal-state \"<criterion>\"   "
-            "(= ms-75 / e-1865, '' clears)\n"
-            "  scope-add <trek-id> --project <pid> "
-            "[--milestone <ms-id> | --operation <op-id> | --task <e-id>]   "
-            "(= canonical, ms-97 / AC23)\n"
-            "  scope-approve <trek-id> <pending-id>   "
-            "(= commit staged op, ms-97 / AC25)\n"
-            "  scope-reject  <trek-id> <pending-id>   "
-            "(= drop staged op, ms-97 / AC25)\n"
-            "  slot add   <trek-id> --project <pid> "
-            "--milestone|--task|--operation <id> [--children e-A,e-B]\n"
-            "  slot amend <trek-id> <slot-id> "
-            "[--add-child <e-id> ...] [--remove-child <e-id> ...]\n"
-            "  slot claim <trek-id> <slot-id> [--session <sid> | --unclaim]\n"
-            "  slot list  <trek-id> [--json]   "
-            "(= materialize view, ms-99 / e-2829)\n"
-            "  timeline <trek-id> [--limit N] [--json]   "
-            "(= chronological view)\n"
-            "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号)\n"
-            "  resume <trek-id>                     (= halt 信号を clear)\n"
-            "  transfer-leader <trek-id> --to <session-id>\n"
-            "\n"
-            "Env (creator identity, required for 'create'):\n"
-            "  BEACON_USER_EMAIL    creator email\n"
-            "  BEACON_SESSION_ID    creator session id (becomes initial leader)\n"
-            "  BEACON_USER_ID       creator user_id (fallback: whoami)"
-        )
-        return 0 if args.show_help else 2
-    cmd = args.trek_cmd
-    json_env = "1" if getattr(args, "json", False) else ""
-
-    if cmd == "create":
-        return _run_commands_py(
-            root, "trek_create",
-            {
-                "BEACON_TREK_TITLE": args.title or "",
-                "BEACON_TREK_TYPE": args.trek_type or "",
-                "BEACON_TREK_DESCRIPTION": args.trek_desc or "",
-                "BEACON_TREK_GOAL_STATE": getattr(args, "goal_state", "") or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd in ("list", "ls"):
-        return _run_commands_py(
-            root, "trek_list",
-            {
-                "BEACON_TREK_STATUS": args.status or "",
-                "BEACON_TREK_INCLUDE_ARCHIVED": "1" if args.include_archived else "",
-                "BEACON_TREK_ALL_ACTORS": "1" if args.all_actors else "",
-                "BEACON_TREK_JOINED_ONLY": (
-                    "1" if getattr(args, "joined_only", False) else ""
-                ),
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd in ("show", "get"):
-        return _run_commands_py(
-            root, "trek_show",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_ALL": "1" if getattr(args, "show_all", False) else "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "start":
-        return _run_commands_py(
-            root, "trek_start",
-            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
-        )
-    if cmd == "archive":
-        return _run_commands_py(
-            root, "trek_archive",
-            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
-        )
-    if cmd == "invite":
-        return _run_commands_py(
-            root, "trek_invite",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_ACTOR": args.actor or "",
-                "BEACON_TREK_NOTIFY": "1" if args.notify else "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "join":
-        return _run_commands_py(
-            root, "trek_join",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_NO_ARM": "1" if getattr(args, "no_arm", False) else "",
-                # ms-88 / e-2090 — consent gate bypass。 CLI から渡された場合のみ
-                # commands.py 側の typed-ack prompt を skip する。 環境変数で
-                # bypass する経路は意図しない (= テスト fixture など特殊用途は
-                # 別途 BEACON_TREK_CONSENT_ACK=1 を明示する手があるが、 default
-                # は flag 経由のみ通る運用)。
-                "BEACON_TREK_CONSENT_ACK": "1" if getattr(args, "consent_ack", False) else "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "leave":
-        return _run_commands_py(
-            root, "trek_leave",
-            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
-        )
-    if cmd == "plan":
-        goal_state_val = getattr(args, "goal_state", None)
-        goal_state_explicit = goal_state_val is not None
-        return _run_commands_py(
-            root, "trek_plan",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_SCOPE_ADD": args.add_scope or "",
-                "BEACON_TREK_SCOPE_REMOVE": args.remove_scope or "",
-                "BEACON_TREK_GOAL_STATE": goal_state_val or "",
-                "BEACON_TREK_GOAL_STATE_SET": "1" if goal_state_explicit else "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "timeline":
-        return _run_commands_py(
-            root, "trek_timeline",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_LIMIT": args.limit or "50",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "stop":
-        return _run_commands_py(
-            root, "trek_stop",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_REASON": args.reason or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "resume":
-        return _run_commands_py(
-            root, "trek_resume",
-            {"BEACON_TREK_ID": args.trek_id or "", "BEACON_JSON": json_env},
-        )
-    if cmd == "transfer-leader":
-        return _run_commands_py(
-            root, "trek_transfer_leader",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_TO": args.to_session_id or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "take-over":
-        return _run_commands_py(
-            root, "trek_take_over",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "kickoff":
-        # session_id override is optional — when absent, cmd_trek_kickoff
-        # reads BEACON_SESSION_ID from the inherited env (= same default
-        # as take-over / pulse-ack). Passing through "" is safe; the
-        # commands-side resolver only honors a non-empty override.
-        env = {
-            "BEACON_TREK_ID": args.trek_id or "",
-            "BEACON_TREK_KICKOFF_DM_EVENT_ID":
-                getattr(args, "kickoff_dm_event_id", "") or "",
-            "BEACON_JSON": json_env,
-        }
-        sid_override = getattr(args, "session_id_override", "") or ""
-        if sid_override:
-            env["BEACON_SESSION_ID"] = sid_override
-        return _run_commands_py(root, "trek_kickoff", env)
-    if cmd == "pulse-ack":
-        return _run_commands_py(
-            root, "trek_pulse_ack",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_PICKED_CHOICE": getattr(args, "picked_choice", "") or "",
-                "BEACON_TREK_NOTE": getattr(args, "note", "") or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "task-state":
-        return _run_commands_py(
-            root, "trek_task_state",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_TASK_ID": args.task_id or "",
-                "BEACON_TREK_STATE": args.state or "",
-                "BEACON_TREK_NOTE": args.note or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "extend-ttl":
-        # ms-95 / e-2308 — leader-side primitive for Agent-tool subagent
-        # dispatch path. See lib/commands.cmd_trek_extend_ttl docstring.
-        return _run_commands_py(
-            root, "trek_extend_ttl",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_TASK_ID": args.task_id or "",
-                "BEACON_TREK_TTL_MINUTES": getattr(args, "minutes", "") or "",
-                "BEACON_TREK_TTL_REASON": getattr(args, "reason", "") or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    if cmd == "reconcile":
-        return _run_commands_py(
-            root, "trek_reconcile",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_APPLY": "1" if getattr(args, "apply", False) else "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    # ms-97 / e-2626 (AC23) — canonical scope-add verb. Delegates to
-    # cmd_trek_plan with BEACON_TREK_SCOPE_ADD assembled from the flag-style
-    # args. Requires at least one narrowing key (= --milestone / --operation /
-    # --task) since cmd_trek_plan / parse_scope_arg rejects bare project-wide
-    # adds under AC7 strict mode.
-    if cmd == "scope-add":
-        project = getattr(args, "scope_add_project", "") or ""
-        milestone = getattr(args, "scope_add_milestone", "") or ""
-        operation = getattr(args, "scope_add_operation", "") or ""
-        task = getattr(args, "scope_add_task", "") or ""
-        if not project:
-            print("Error: --project <pid> is required", file=sys.stderr)
-            return 1
-        ref = milestone or operation or task
-        if not ref:
-            print(
-                "Error: one of --milestone | --operation | --task is required",
-                file=sys.stderr,
-            )
-            return 1
-        return _run_commands_py(
-            root, "trek_plan",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_TREK_SCOPE_ADD": f"{project}:{ref}",
-                "BEACON_JSON": json_env,
-            },
-        )
-    # ms-97 / e-2611 (AC25) — commit a staged scope op.
-    if cmd == "scope-approve":
-        return _run_commands_py(
-            root, "trek_scope_approve",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_PENDING_ID": getattr(args, "pending_id", "") or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    # ms-97 / e-2611 (AC25) — drop a staged scope op.
-    if cmd == "scope-reject":
-        return _run_commands_py(
-            root, "trek_scope_reject",
-            {
-                "BEACON_TREK_ID": args.trek_id or "",
-                "BEACON_PENDING_ID": getattr(args, "pending_id", "") or "",
-                "BEACON_JSON": json_env,
-            },
-        )
-    # ms-99 / e-2829 — slot verbs (nested subcommand). All four flow
-    # through commands.py so the same code path serves bash and pipx
-    # front-ends.
-    if cmd == "slot":
-        slot_cmd = getattr(args, "slot_cmd", None) or ""
-        if not slot_cmd:
-            print(
-                "Usage: beacon trek slot <add|amend|claim|list> [args]",
-                file=sys.stderr,
-            )
-            return 2
-        if slot_cmd == "add":
-            return _run_commands_py(
-                root, "trek_slot_add",
-                {
-                    "BEACON_TREK_ID": args.trek_id or "",
-                    "BEACON_SLOT_PROJECT": getattr(args, "slot_project", "") or "",
-                    "BEACON_SLOT_MILESTONE": getattr(args, "slot_milestone", "") or "",
-                    "BEACON_SLOT_OPERATION": getattr(args, "slot_operation", "") or "",
-                    "BEACON_SLOT_TASK": getattr(args, "slot_task", "") or "",
-                    "BEACON_SLOT_CHILDREN": getattr(args, "slot_children", "") or "",
-                    "BEACON_JSON": json_env,
-                },
-            )
-        if slot_cmd == "amend":
-            add_children = getattr(args, "slot_add_child", []) or []
-            remove_children = getattr(args, "slot_remove_child", []) or []
-            return _run_commands_py(
-                root, "trek_slot_amend",
-                {
-                    "BEACON_TREK_ID": args.trek_id or "",
-                    "BEACON_SLOT_ID": getattr(args, "slot_id", "") or "",
-                    "BEACON_SLOT_ADD_CHILDREN": ",".join(add_children),
-                    "BEACON_SLOT_REMOVE_CHILDREN": ",".join(remove_children),
-                    "BEACON_JSON": json_env,
-                },
-            )
-        if slot_cmd == "claim":
-            return _run_commands_py(
-                root, "trek_slot_claim",
-                {
-                    "BEACON_TREK_ID": args.trek_id or "",
-                    "BEACON_SLOT_ID": getattr(args, "slot_id", "") or "",
-                    "BEACON_SLOT_SESSION": getattr(args, "slot_session", "") or "",
-                    "BEACON_SLOT_UNCLAIM": "1" if getattr(args, "slot_unclaim", False) else "",
-                    "BEACON_JSON": json_env,
-                },
-            )
-        if slot_cmd == "list":
-            return _run_commands_py(
-                root, "trek_slot_list",
-                {
-                    "BEACON_TREK_ID": args.trek_id or "",
-                    "BEACON_JSON": json_env,
-                },
-            )
-        print(
-            f"Error: unknown slot subcommand {slot_cmd!r}",
-            file=sys.stderr,
-        )
-        return 2
-    return 1
-
-
 def _handle_doctor(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "doctor", {})
 
@@ -6271,97 +5695,6 @@ def _handle_sessions(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "sessions_list", env)
 
 
-def _expand_trek_recipients(root: Path, trek_id: str) -> Optional[list]:
-    """Expand ``--to-trek <trek-id>`` into the trek's joined member sessions.
-
-    Returns a list of session ids (= ``leader_session_id`` if leader is in
-    the trek, plus any session ids stored against joined members). On error
-    (= trek not found, no joined members, lookup failure) returns ``None``
-    after printing a user-facing error to stderr, matching the dispatch
-    convention used by ``_ensure_project``.
-
-    Local mode resolution: walks ``~/.beacon/treks/<trek_id>.json`` and
-    extracts the ``leader_session_id``. Member-level session ids are not
-    persisted at this layer (ms-69 schema keeps membership at user grain
-    + a single leader session); for fan-out beyond the leader we add a
-    todo and a graceful warning so the surface is honest about what it
-    can do today. Cloud mode does the equivalent via the API client.
-
-    ms-75 / e-1858: this exists as a *thin wrapper* over the legacy single
-    recipient path (= per-recipient subprocess) instead of teaching
-    ``cmd_bus_send`` itself about fan-out. Each send still passes through
-    the envelope / budget gates independently, so multi-target broadcasts
-    don't bypass any single-recipient safety check.
-    """
-    import json
-    import subprocess
-
-    # Try local store first; fall back to a beacon trek show invocation
-    # when local lookup misses (= cloud-only treks).
-    try:
-        treks_dir = os.environ.get("BEACON_TREKS_DIR") or \
-            os.path.expanduser("~/.beacon/treks")
-        local_path = os.path.join(treks_dir, f"{trek_id}.json")
-        if os.path.exists(local_path):
-            with open(local_path, "r", encoding="utf-8") as f:
-                trek_doc = json.load(f)
-        else:
-            # Cloud-mode resolution: ask `beacon trek show <id> --json` —
-            # the same dispatch path used by /beacon-trek-execute.
-            res = subprocess.run(
-                ["beacon", "trek", "show", trek_id, "--json"],
-                capture_output=True, text=True, check=False,
-            )
-            if res.returncode != 0 or not res.stdout.strip():
-                print(
-                    f"Error: --to-trek {trek_id} → trek not found "
-                    f"(local store empty, `beacon trek show` returned "
-                    f"rc={res.returncode}).",
-                    file=sys.stderr,
-                )
-                return None
-            trek_doc = json.loads(res.stdout)
-    except (OSError, json.JSONDecodeError) as e:
-        print(
-            f"Error: --to-trek {trek_id} → failed to load trek doc: {e}",
-            file=sys.stderr,
-        )
-        return None
-
-    recipients: list[str] = []
-    leader_sid = (trek_doc.get("leader_session_id") or "").strip()
-    if leader_sid:
-        recipients.append(leader_sid)
-
-    # Membership is at user grain (ms-69 SPEC 設計方針 3): a "session id
-    # per member" field doesn't live in the trek doc. The Tier-1 use case
-    # for --to-trek today is "page the trek leader + any other live
-    # sessions belonging to joined members". Live-session resolution per
-    # member is a follow-up — we surface a one-line note so the caller
-    # knows what fan-out actually happened.
-    joined_count = sum(
-        1 for m in trek_doc.get("members") or [] if m.get("joined_at")
-    )
-    if joined_count > 1:
-        print(
-            f"Note: --to-trek {trek_id} fanned out to the leader session "
-            f"({leader_sid or '(none)'}) only. Member-level session id "
-            f"resolution lands in the cloud-mode follow-up; for now, the "
-            f"other {joined_count - 1} joined member(s) need to be "
-            f"addressed individually with --to <session-id>.",
-            file=sys.stderr,
-        )
-
-    if not recipients:
-        print(
-            f"Error: --to-trek {trek_id} → no joined sessions to fan out "
-            "to (trek has no leader_session_id).",
-            file=sys.stderr,
-        )
-        return None
-    return recipients
-
-
 def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     """`beacon bus <send|listen|receive|ack|status|directory|budget>`.
 
@@ -6382,7 +5715,7 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.bus_cmd is None:
         print("Usage: beacon bus send      --channel <ch> [--payload '<json>'] "
               "[--sender <id>] [--to <recipient> ...] [--to-user <user-id>] "
-              "[--to-trek <trek-id>] [--delivery <mode>] "
+              "[--delivery <mode>] "
               "[--in-reply-to <event_id>] [--action <name> ...] "
               "[--manual] [--recipient-confirmed] [--no-envelope] "
               "[--project <id>]")
@@ -6402,9 +5735,6 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         print("--to: cross-user DM recipient session id (Tier-1 envelope "
               "path). Repeatable: multiple --to flags fan out the same "
               "send to each recipient (ms-75 / e-1858).")
-        print("--to-trek: expand to the trek's joined session(s). Equivalent "
-              "to passing --to for each trek member (= broadcast within a "
-              "Trek scope).")
         print("--action: repeat for each authorized action; comma-joined "
               "for envelope issuance (e-1290).")
         print("--no-envelope: opt-out of envelope issuance (legacy / debug).")
@@ -6424,8 +5754,7 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         actions = getattr(args, "bus_action", []) or []
         bus_action_csv = ",".join([a for a in actions if a])
 
-        # ms-75 / e-1858: collect recipients from --to (repeatable) and
-        # --to-trek (= expand to trek member session ids). The legacy
+        # ms-75 / e-1858: collect recipients from --to (repeatable). The legacy
         # bash entry point passes a single string in
         # BEACON_BUS_RECIPIENT_SESSION; we keep that contract by looping
         # one send per recipient when multiple are supplied. Single
@@ -6437,18 +5766,11 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
         else:
             bus_to_list = [r for r in bus_to_raw if r]
         bus_to_user = (getattr(args, "bus_to_user", "") or "").strip()
-        bus_to_trek = (getattr(args, "bus_to_trek", "") or "").strip()
-        if bus_to_trek:
-            extras = _expand_trek_recipients(root, bus_to_trek)
-            if extras is None:
-                # _expand_trek_recipients already printed an error.
-                return 1
-            bus_to_list.extend(extras)
         # ms-54 e-2934 / ms-160 e-6674: --to and --to-user are mutually
         # exclusive. Same rule, same exit code and wording as bin/beacon — a
         # shim that accepts a combination the other frontend rejects is the
         # drift this task exists to close.
-        if bus_to_user and (bus_to_list or bus_to_trek):
+        if bus_to_user and bus_to_list:
             print("Error: --to と --to-user は相互排他です "
                   "(どちらか片方のみ指定してください)。", file=sys.stderr)
             return 2
@@ -6488,7 +5810,7 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             base_env["BEACON_BUS_PROJECT_ID"] = project_id
 
         if not bus_to_list:
-            # Preserve legacy behaviour: no --to / --to-trek means the
+            # Preserve legacy behaviour: no --to means the
             # caller intentionally targeted a non-DM broadcast channel
             # (cmd_bus_send warns if channel == 'dm' anyway).
             return _run_commands_py(root, "bus_send", base_env)
@@ -6753,7 +6075,6 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "deploy": _handle_deploy,
     "entry": _handle_entry,
     "operation": _handle_operation,
-    "trek": _handle_trek,
     "project": _handle_project,
     "doctor": _handle_doctor,
     "view": _handle_view,

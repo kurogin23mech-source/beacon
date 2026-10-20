@@ -239,8 +239,9 @@ def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
     ``recipient_sid`` are joined members of the same active Trek; otherwise
     ``(False, "")``.
 
-    Detection material (= mirror of server-side
-    ``dm_gate.should_gate_dm_action`` shared_trek_member rule, session grain):
+    Detection material (判定は ``lib/trek.build_shared_trek_lookup_from_lists``
+    と同じ session 粒度。ms-185 e-7068 で受信側の確認ゲートからは同じ規則が
+    削除されたので、これは **予算の最適化だけ**に効く):
       * caller's user_id + session_id from the cloud identity
       * recipient's user_id resolved from the project session registry
       * caller's joined active treks; both sender session and recipient
@@ -684,11 +685,9 @@ def cmd_bus_send():
         # is an opt-in pre-approval scope (= 缶詰の作業部屋), so the budget
         # cap (= runaway-autonomy guardrail) is structurally redundant for
         # member-to-member DMs within an active Trek both sides have
-        # joined. server/dm_gate.should_gate_dm_action already short-
-        # circuits the receiver-side cross-user gate for shared_trek_member
-        # pairs (ms-70 / e-1854); this client-side check brings the budget
-        # layer into parity so a Trek doesn't deadlock on budget exhaustion
-        # while leader/executor DMs keep flowing under blanket consent.
+        # joined. (ms-185 e-7068: 受信側の確認ゲートに在った同じ規則は削除済。
+        # 残っているのは予算の層だけで、認可の境界ではない。この経路自体も
+        # e-7080 で呼び出し側と一緒に落ちる。)
         # The check is best-effort: any error path (no auth, network blip,
         # unknown recipient) falls through to the regular budget gate so we
         # never silently relax enforcement on a misconfigured send.
@@ -1521,12 +1520,11 @@ def cmd_bus_consent_check():
         recipient_user_id=recipient_email or "",
         channel=channel,
         is_reply=bool(in_reply_to),
-        # 安価に証明できない 2 軸。安全側 (= 余分に確認を求める) に倒すが、
-        # **倒したこと自体を黙らせない**: 出力に「この 2 軸は未検証」と出す
-        # (独立 AX レビュー A-4 — 出さないと、Trek / Operation 文脈で「必要」と
+        # 安価に証明できない軸。安全側 (= 余分に確認を求める) に倒すが、
+        # **倒したこと自体を黙らせない**: 出力に「この軸は未検証」と出す
+        # (独立 AX レビュー A-4 — 出さないと、Operation 文脈で「必要」と
         # 出た呼び手が理由を誤診し、無関係な所をデバッグする)。
         operation_envelope=False,
-        shared_trek=False,
     )
     explanation = dm_consent.explain_consent_reason(reason)
 
@@ -1558,7 +1556,7 @@ def cmd_bus_consent_check():
             "identity_uncertain": identity_uncertain,
             # 判定に使わなかった carve-out。答えが「必要」でも、これらが真なら
             # 実際には不要でありうる。
-            "carve_outs_not_checked": ["operation_envelope", "shared_trek"],
+            "carve_outs_not_checked": ["operation_envelope"],
             "caveats": caveats,
         }, ensure_ascii=False))
         return

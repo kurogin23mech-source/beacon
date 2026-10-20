@@ -141,11 +141,11 @@ milestone は「軌跡」なので、done / 廃止された機能は**現在地�
 | type | exact | family (束ね) |
 |---|---|---|
 | `cli:` | `` `cli:beacon task done` `` | `` `cli:beacon task *` `` (= その noun 配下すべて) |
-| `api:` | `` `api:POST /api/projects/{id}/entries/{e}/done` `` | `` `api:* /api/treks/*` `` (= method `*` + path prefix) |
+| `api:` | `` `api:POST /api/projects/{id}/entries/{e}/done` `` | `` `api:* /api/projects/*/bus/*` `` (= method `*` + path prefix) |
 | `skill:` | `` `skill:/beacon-task` `` | (原則 exact) |
 | `file:` | `` `file:channel/bus.mjs` `` | glob 可 `` `file:scripts/check-*.py` `` (= 裏方の仕組み用) |
 
-- **family を default** にして地図が全 leaf 列挙で膨らむのを防ぐ (= 例: `beacon trek` の 29 サブコマンドは `cli:beacon trek *` 1 本)
+- **family を default** にして地図が全 leaf 列挙で膨らむのを防ぐ (= 例: `beacon task` のサブコマンド群は `cli:beacon task *` 1 本)
 - 個別 exact は「価値が節をまたいで割れる時だけ」
 - 楔は `type:` プレフィクス必須。だから散文中に例として書いた素の `beacon <サブコマンド>` は照合対象外 (= 誤検出しない、例を自由に書ける)
 - 裏方の仕組みは **二重実装リスクが宿る所だけ** `file:` で楔る (= 受信ループ / hook 入口 / storage backend)。drift check 群のように保守価値の低い集合は glob-family 1 本で足りる

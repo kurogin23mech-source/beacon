@@ -48,7 +48,7 @@ def test_every_skill_is_classified():
 def test_key_skills_have_expected_scope():
     assert cl.skill_scope_of("beacon-sales-email") == "L3"
     assert cl.skill_scope_of("beacon-task") == "L3"
-    assert cl.skill_scope_of("beacon-trek-execute") == "L1"
+    assert cl.skill_scope_of("beacon-bus-armed") == "L1"
     assert cl.skill_scope_of("beacon-map") == "L2"
     assert cl.skill_scope_of("_beacon-spec-methodology") == "L1"
 
@@ -217,7 +217,7 @@ def test_skill_owner_of_representative():
     assert cl.skill_owner_of("beacon-task") == "dev"
     assert cl.skill_owner_of("beacon-deploy") == "dev"
     # shared skills have no owner.
-    assert cl.skill_owner_of("beacon-trek-execute") == ""   # L1
+    assert cl.skill_owner_of("beacon-bus-armed") == ""      # L1
     assert cl.skill_owner_of("beacon-map") == ""            # L2
 
 
