@@ -1884,19 +1884,28 @@ def _resolve_recipient_live(
         helpers = importlib.import_module(
             "beacon_cli.skills_helpers.dm_discover"
         )
-    except Exception:
+    except (Exception, SystemExit):
         # No discovery module available (e.g. beacon_cli not on the CLI
         # subprocess's sys.path) — bypass the liveness check, but still resolve
         # identity via the api client so same-user recognition (the qual gate)
         # does not depend on the dm_discover helper importing (e-3880).
+        # (ms-185 e-7069: SystemExit も捕まえる理由は下の guard のコメント参照。)
         return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
     try:
         rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
-    except Exception:
+    except (Exception, SystemExit):
         # Discovery raised (network / psutil / auth) — bypass the liveness
         # check, but still resolve identity: same-user recognition (the qual
         # gate) must not depend on local bridge discovery succeeding (e-3880).
+        #
+        # ms-185 e-7069: ``SystemExit`` を明示的に捕まえる。この best-effort 経路の
+        # 奥で ``_get_api_client`` が「ログインしていない」「cloud.json が無い」を
+        # ``sys.exit(1)`` で返す。``SystemExit`` は ``Exception`` を継承しないので
+        # 素の ``except Exception`` を**素通りし、送信そのものがプロセスごと死ぬ** —
+        # 生存確認は落ちても送信は続けてよい、という設計意図と正反対になる。
+        # cloud 未設定の利用者が ``beacon bus send`` を打つと、安全な fallback が
+        # 在るのに hard exit する形だった (CI の全件検査で発覚)。
         return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
     for row in rows:
