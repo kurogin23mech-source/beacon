@@ -295,6 +295,7 @@ VERB_LEDGER = {
     "note_list": {"cls": "Q", "secondary": [], "note": ""},
     "note_restore": {"cls": "R", "secondary": ["B"], "note": "[post-memo/ms-178] note clear が残した退避からメモを復元=台帳への再追記(R)、退避読取と重複判定は機構(B)"},
     "note_purge_probes": {"cls": "B", "secondary": [], "note": "[post-memo/ms-160] 点検機構が書いたゴミメモの除去=台帳の保守操作(B)。既定は下見で、--confirm 時のみ削除"},
+    "note_reap": {"cls": "B", "secondary": [], "note": "[post-memo/ms-178] 終了したセッションのメモの除去=台帳の保守操作(B)。note_clear(B) / note_purge_probes(B) と同族で、違いは述語だけ(生存セッションに属さないメモ)。判断を記録するわけではないので R ではない"},
 
     # --- operation ---
     "operation_approve": {"cls": "C", "secondary": ["B"], "note": "人間承認(C)/gate反映(B)"},

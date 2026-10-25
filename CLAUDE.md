@@ -74,8 +74,9 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
 | `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
-| `beacon note list` | Show session notes (cloud mode: 他セッション分も統合) / メモ一覧 |
+| `beacon note list` | Show session notes — 既定で直近 3 日 / 最大 20 件 (`--all` で全件) / メモ一覧 |
 | `beacon note clear --yes` | Clear all session notes / メモ全削除 (`--yes` 必須、退避を取ってから削除) |
+| `beacon note reap --yes` | Clear notes of ENDED sessions only (live sessions untouched) / 終了したセッションのメモを片付ける |
 | `beacon note restore` | Restore notes from backups / 退避からメモを復元 |
 
 <!-- BEACON_ENTRY_WRITING_PRINCIPLE -->

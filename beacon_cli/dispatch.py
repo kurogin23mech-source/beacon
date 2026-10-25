@@ -1293,6 +1293,17 @@ def build_parser() -> argparse.ArgumentParser:
     # (AX review, PR #782).
     p_note.add_argument("--include-other-sessions", dest="note_all",
                         action="store_true")
+    # ms-178 e-7150 (AC7): `note list` is windowed by default. --all here
+    # widens a READ, which is the established meaning of --all in this CLI
+    # (status / task list / trek list) — the opposite of the destructive
+    # scope above, which is why that one is spelled out instead.
+    p_note.add_argument("--all", dest="note_list_all", action="store_true")
+    p_note.add_argument("--since-days", dest="since_days", default="")
+    p_note.add_argument("--limit", dest="limit", default="")
+    # ms-178 e-7150: `note reap` options.
+    p_note.add_argument("--include-untagged", dest="include_untagged",
+                        action="store_true")
+    p_note.add_argument("--since-min", dest="since_min", default="")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
     # ---- tool (ms-180 e-7000: 道具台帳 — 宣言の登録と読み口) ----
@@ -4252,8 +4263,9 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
     if args.show_help:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
-            "       beacon note list [--json]\n"
+            "       beacon note list [--json] [--all] [--since-days <N>] [--limit <N>]\n"
             "       beacon note clear --yes [--include-other-sessions]\n"
+            "       beacon note reap --yes [--include-untagged] [--since-min <N>]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
@@ -4264,8 +4276,28 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
 
     sub = args.text_or_sub
     if sub == "list":
-        env = {"BEACON_JSON": "1" if args.json else ""}
+        # ms-178 e-7150 (AC7): windowed by default on BOTH frontends. A cap
+        # that exists on only one of the two is the cli-drift this repo
+        # already pays for elsewhere — and session-start calls whichever is
+        # installed, so a one-sided cap is no cap.
+        env = {
+            "BEACON_JSON": "1" if args.json else "",
+            "BEACON_NOTE_LIST_ALL": "1" if getattr(args, "note_list_all", False) else "",
+            "BEACON_NOTE_LIST_SINCE_DAYS": str(
+                getattr(args, "since_days", "") or ""),
+            "BEACON_NOTE_LIST_LIMIT": str(getattr(args, "limit", "") or ""),
+        }
         return _run_commands_py(root, "note_list", env)
+    if sub == "reap":
+        # ms-178 e-7150: the third option between clear (mine only — which a
+        # session that already ended cannot run) and clear
+        # --include-other-sessions (also takes live sessions' handoff notes).
+        return _run_commands_py(
+            root, "note_reap",
+            {"BEACON_NOTE_REAP_YES": "1" if args.assume_yes else "",
+             "BEACON_NOTE_REAP_UNTAGGED": "1" if getattr(args, "include_untagged", False) else "",
+             "BEACON_NOTE_REAP_SINCE_MIN": str(getattr(args, "since_min", "") or "")},
+        )
     if sub == "clear":
         # ms-178 e-6654: pass the confirmation through; the python side
         # refuses without it (the cloud notes are shared project-wide).
@@ -4291,8 +4323,9 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
     if not sub:
         print(
             "Usage: beacon note \"<text>\" [--context \"<label>\"] [--bus-origin]\n"
-            "       beacon note list [--json]\n"
+            "       beacon note list [--json] [--all] [--since-days <N>] [--limit <N>]\n"
             "       beacon note clear --yes [--include-other-sessions]\n"
+            "       beacon note reap --yes [--include-untagged] [--since-min <N>]\n"
             "       beacon note restore\n"
             "       beacon note purge-probes [--confirm]   (-y / --yes も可)\n"
             "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"

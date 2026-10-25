@@ -179,6 +179,7 @@ from cmd_task import (  # noqa: F401
 from cmd_note import (  # noqa: F401
     cmd_note_add, cmd_note_list, cmd_note_clear, cmd_note_restore,
     cmd_note_purge_probes,
+    cmd_note_reap,
 )
 from cmd_decision import (cmd_decision_record, cmd_decision_list,  # noqa: F401  (ms-154 e-5594/e-5595)
                           cmd_decision_derive)  # noqa: F401  (ms-166 e-5972)
@@ -7254,8 +7255,9 @@ def _help_registry():
         # fell through to the dispatcher, and `note clear --help` deleted the
         # notes. Registered here so help renders from the single source instead.
         {"command": "beacon note <text>", "flags": ["--context <label>"], "description": "Add an ephemeral session note (survives compaction; cleared at session end)"},
-        {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
+        {"command": "beacon note list", "flags": ["--json", "--all", "--since-days", "--limit"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud. WINDOWED BY DEFAULT to the last 3 days and at most 20 notes (ms-178 e-7150): /beacon-session-start reads this on every startup, and an unbounded read put the whole store into the context window before any work began (measured 2026-10-25: 180 notes / 370,047 chars = 18-37% of a 1M context). When anything is withheld the omitted count is always printed, so a window never reads as an empty store. --all turns both limits off; --since-days <N> / --limit <N> set them (0 disables that one axis)"},
         {"command": "beacon note clear --yes", "flags": ["--include-other-sessions"], "description": "Delete THIS SESSION's notes (-y is accepted as shorthand; --confirm is an accepted alias). The cloud copy is shared by every session on the project, so clearing everything used to take other sessions' handoff notes with it — and made the session-end routine unperformable while anyone else was working. --include-other-sessions still clears every session's notes and prints a per-session breakdown of whose it is about to take before doing it (deliberately NOT named --all: every other --all in this CLI widens a read). Notes with no recorded session are never assumed to be yours. Both stores are snapshotted first and NOTHING is deleted if that snapshot cannot be taken, so this needs cloud reachability in cloud mode"},
+        {"command": "beacon note reap --yes", "flags": ["--include-untagged", "--since-min"], "description": "Delete notes that no LIVE session can ever claim (ms-178 e-7150). note clear only ever matches the running session's own notes, so a session that ended without clearing leaves notes nothing can reach except --include-other-sessions, which also takes the handoff notes of sessions still working; this is the missing middle. Liveness, never age, is the criterion: an old note belonging to a live session is still that session's note. The live set is the union of this session, .beacon/session.json, alive bridge claims in this cwd and the server's live-session list; in cloud mode an unreadable server ABORTS the command rather than reclassifying unlisted live sessions as orphans. Notes with no recorded session are kept unless --include-untagged (never delete on missing information). --since-min <N> sets the server liveness window (default 5). Backed up first via the same snapshot path as note clear, recoverable with note restore"},
         {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
         {"command": "beacon note purge-probes", "flags": ["--confirm", "-y", "--yes"], "description": "Remove the junk notes an AX surface audit wrote before the read-only gate existed (text == the probe sentinel; notes merely MENTIONING it are kept). Dry-run by default — prints what would go and changes nothing; --confirm performs it (-y and --yes are accepted aliases, same set as note clear). The notes API has no delete-one, so the cloud leg is clear + re-post the survivors: a note another session writes during that window is lost. Both stores are snapshotted to .purge.bak first (a separate path from note clear's backups, so one cannot destroy the other's recovery route) and nothing is deleted if that snapshot cannot be taken"},
         # ms-178 e-6702/e-6703: the fork family was absent from this registry, so
@@ -11828,6 +11830,7 @@ if __name__ == "__main__":
         "note_clear": cmd_note_clear,
         "note_restore": cmd_note_restore,
         "note_purge_probes": cmd_note_purge_probes,
+        "note_reap": cmd_note_reap,
         "tool_add": cmd_tool_add,                   # ms-180 e-7000
         "tool_list": cmd_tool_list,                 # ms-180 e-7000
         "tool_show": cmd_tool_show,                 # ms-180 e-7000

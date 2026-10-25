@@ -211,6 +211,101 @@ def _note_key(note: dict):
     return (note.get("ts", ""), note.get("text", ""), note.get("session_id", ""))
 
 
+DEFAULT_LIST_SINCE_DAYS = 3
+DEFAULT_LIST_LIMIT = 20
+
+
+def _list_window():
+    """Resolve the read window for ``note list`` (ms-178 / e-7150 AC7).
+
+    ``note list`` had no bound of any kind and printed every note in full.
+    ``/beacon-session-start`` runs it on every startup, so the whole store
+    landed in the context window before any work began: 180 notes / 370,047
+    chars, which is 18–37% of a 1M context at 1–2 chars per token for
+    Japanese. The handoff value of notes was being outweighed by the cost of
+    reading them.
+
+    This bound is needed **independently** of the session_id fix in the same
+    task: making ``note clear`` work again stops the 24-day pile-up, but a day
+    on which several parallel sessions each write a long note reproduces the
+    same pressure. So the default is a window, not a cleanup.
+
+    Two limits rather than one, because each misses what the other catches: a
+    day limit alone lets one busy day through, and a count limit alone lets a
+    handful of very long notes through. ``--all`` turns both off for the cases
+    that genuinely want the whole store (an audit, a migration).
+    """
+    if os.environ.get("BEACON_NOTE_LIST_ALL") == "1":
+        return None, None
+    raw_days = os.environ.get("BEACON_NOTE_LIST_SINCE_DAYS", "").strip()
+    raw_limit = os.environ.get("BEACON_NOTE_LIST_LIMIT", "").strip()
+    try:
+        days = int(raw_days) if raw_days else DEFAULT_LIST_SINCE_DAYS
+    except ValueError:
+        days = DEFAULT_LIST_SINCE_DAYS
+    try:
+        limit = int(raw_limit) if raw_limit else DEFAULT_LIST_LIMIT
+    except ValueError:
+        limit = DEFAULT_LIST_LIMIT
+    # 0 / negative reads as "no bound on this axis" so a caller can cap only
+    # the one it cares about without having to restate the other.
+    return (days if days > 0 else None), (limit if limit > 0 else None)
+
+
+def _apply_list_window(notes, days, limit):
+    """Return ``(shown, omitted)`` — newest-first windowing, oldest dropped.
+
+    Notes are ordered oldest-first by the caller (that is the reading order a
+    handoff wants), so the window is taken from the END and the order is
+    preserved. An unparseable ``ts`` is kept rather than dropped: a note we
+    cannot date is not evidence that it is old.
+    """
+    if days is None and limit is None:
+        return list(notes), 0
+
+    kept = list(notes)
+    if days is not None:
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        windowed = []
+        for note in kept:
+            raw = (note.get("ts") or "").strip()
+            if not raw:
+                windowed.append(note)
+                continue
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except ValueError:
+                windowed.append(note)
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if parsed >= cutoff:
+                windowed.append(note)
+        kept = windowed
+    if limit is not None and len(kept) > limit:
+        kept = kept[-limit:]
+    return kept, len(notes) - len(kept)
+
+
+def _format_omitted_notice(omitted, days, limit):
+    """One line stating what was withheld and how to see it.
+
+    A truncation the reader cannot detect is worse than a long list: the reader
+    concludes "that is all the notes there are". So the count is always stated
+    when anything was dropped, together with the escape hatch.
+    """
+    bounds = []
+    if days is not None:
+        bounds.append("直近 %d 日" % days)
+    if limit is not None:
+        bounds.append("最大 %d 件" % limit)
+    scope = " / ".join(bounds) if bounds else "既定の範囲"
+    return ("… 他 %d 件は省略しました (%s で表示中)。"
+            "全件は `beacon note list --all`、範囲変更は "
+            "`--since-days <N>` / `--limit <N>`。" % (omitted, scope))
+
+
 def cmd_note_list():
     path = _get_notes_path()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -241,8 +336,18 @@ def cmd_note_list():
         merged.append(item)
     merged.sort(key=lambda n: n.get("ts", ""))
 
+    # AC7: bound what a reader (above all /beacon-session-start) pulls in.
+    # Applied to BOTH output modes — the JSON mode is the one session-start
+    # actually calls, so capping only the human mode would leave the defect
+    # exactly where it was measured.
+    days, limit = _list_window()
+    total_before = len(merged)
+    merged, omitted = _apply_list_window(merged, days, limit)
+
     if json_mode:
         print(json.dumps(merged, ensure_ascii=False))
+        if omitted:
+            print(_format_omitted_notice(omitted, days, limit), file=sys.stderr)
         if cloud_error:
             print(f"Warning: cloud のメモを取得できませんでした ({cloud_error})。"
                   f"下の一覧はこの作業フォルダのローカル分のみで、"
@@ -254,7 +359,13 @@ def cmd_note_list():
               f"表示はローカル分のみです — 「メモなし」= 存在しない、とは判断できません。",
               file=sys.stderr)
     if not merged:
-        if project_id and not cloud_error:
+        if total_before:
+            # The store is NOT empty — the window emptied the view. Saying
+            # "no notes" here would be a false negative of exactly the kind
+            # the omitted-count notice exists to prevent.
+            print("(表示範囲内のメモはありません — %s)"
+                  % _format_omitted_notice(omitted, days, limit))
+        elif project_id and not cloud_error:
             # Distinguish "checked both stores, genuinely empty" from the
             # local-only reading that used to be reported the same way.
             print("(メモなし — この作業フォルダも cloud も空です)")
@@ -266,6 +377,10 @@ def cmd_note_list():
     if project_id and not local and cloud:
         print(f"(この作業フォルダのメモはありません。以下 {len(cloud)} 件は"
               f"cloud にある他セッション由来のメモです)")
+    if omitted:
+        # Before the list, not after: a reader who stops at the first screen
+        # still learns that this is a window rather than the whole store.
+        print("  " + _format_omitted_notice(omitted, days, limit))
     for n in merged:
         ctx = f" [{n['context']}]" if n.get("context") else ""
         mark = " (他セッション)" if n.get("origin") == "cloud" else ""
@@ -652,6 +767,149 @@ def _is_probe_note(note: dict) -> bool:
     """
     import cli_surface
     return (note.get("text") or "").strip() == cli_surface.SURFACE_PROBE_SENTINEL
+
+
+def _collect_live_session_ids(since_minutes: int):
+    """Gather every source that can say "this session is still running".
+
+    Returns what :func:`note_reap.resolve_live_ids` needs, having already done
+    the IO. Split out from :func:`cmd_note_reap` so the decision (pure, tested)
+    and the gathering (impure, best-effort per source) stay separable.
+
+    The local sources are read first and unconditionally, because they work in
+    local mode and when the network is down. The server is consulted only in
+    cloud mode, where it is the *only* source that can see sessions on another
+    machine or in a sibling worktree — so its failure is reported, never
+    swallowed.
+    """
+    import session as _session
+
+    current_sid = (_resolve_session_id() or "").strip()
+    session_json_sid = ((_session.read_session() or {}).get("session_id") or "").strip()
+
+    bridge_sids = []
+    try:
+        for claim in _session.read_all_bridge_claims():
+            pid = claim.get("pid")
+            if pid and _session._pid_alive(pid):
+                bridge_sids.append((claim.get("session_id") or "").strip())
+    except Exception:
+        # A claim directory we cannot read is not evidence of absence, so the
+        # cloud-mode server check below still has to pass for us to proceed.
+        pass
+
+    project_id = _cloud_project_id()
+    server_sids, server_error = None, ""
+    if project_id:
+        client, err = _note_api_client()
+        if err or client is None:
+            server_error = err or "api client unavailable"
+        else:
+            try:
+                rows = client.list_sessions(
+                    project_id, live_only=True, since_minutes=since_minutes)
+                server_sids = [
+                    (r.get("session_id") or "").strip() for r in (rows or [])]
+            except Exception as exc:
+                server_error = str(exc) or exc.__class__.__name__
+
+    return {
+        "current_sid": current_sid,
+        "session_json_sid": session_json_sid,
+        "bridge_sids": bridge_sids,
+        "server_sids": server_sids,
+        "server_error": server_error,
+        "cloud_mode": bool(project_id),
+    }
+
+
+def cmd_note_reap():
+    """Delete notes no live session can ever claim (ms-178 / e-7150).
+
+    ``note clear`` can only ever match the running session's own notes, so
+    notes outlive their only authorised cleaner: a session that ended without
+    clearing leaves notes that nothing but
+    ``--include-other-sessions`` can reach, and that flag also takes the
+    handoff notes of sessions that are still working. This verb is the missing
+    third option — "take what is provably finished, keep what is provably
+    running" — so tidying up never requires risking a live session's notes.
+
+    Not time-based on purpose: an old note belonging to a live session is still
+    that session's note. The criterion is liveness of the writer, never age.
+
+    Refuses rather than guesses when liveness cannot be established (see
+    ``note_reap.resolve_live_ids``) — an incomplete live set would reclassify
+    running sessions' notes as orphans.
+    """
+    import note_reap
+
+    confirm = os.environ.get("BEACON_NOTE_REAP_YES") == "1"
+    include_untagged = os.environ.get("BEACON_NOTE_REAP_UNTAGGED") == "1"
+    try:
+        since_minutes = int(os.environ.get("BEACON_NOTE_REAP_SINCE_MIN", "") or "5")
+    except ValueError:
+        since_minutes = 5
+
+    sources = _collect_live_session_ids(since_minutes)
+    live_ids, refusal = note_reap.resolve_live_ids(**sources)
+
+    if refusal == note_reap.REFUSE_SERVER_UNREADABLE:
+        print("Aborted: 稼働中セッションの一覧を取得できないため、どのメモが"
+              "孤児かを判定できません (%s)。"
+              % (sources["server_error"] or "live session list unavailable"),
+              file=sys.stderr)
+        print("  何も削除していません。判定できないまま消すと、動いている"
+              "セッションの引き継ぎメモを孤児として巻き込みます。",
+              file=sys.stderr)
+        print("  ネットワーク / 認証を確認して再実行してください。", file=sys.stderr)
+        sys.exit(1)
+
+    path = _get_notes_path()
+    project_id = _cloud_project_id()
+    local = _read_local_notes(path)
+    cloud, cloud_error = ([], "")
+    if project_id:
+        cloud, cloud_error = _fetch_cloud_notes(project_id)
+    merged, seen = [], set()
+    for note in list(local) + list(cloud):
+        key = _note_key(note)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(note)
+
+    verdict = note_reap.classify(merged, live_ids,
+                                 include_untagged=include_untagged)
+
+    def _preview(local_go, cloud_go, local_keep, cloud_keep):
+        out = sys.stdout if confirm else sys.stderr
+        print("  稼働中と判定したセッション: %d 件" % len(live_ids), file=out)
+        print("  孤児 (どの稼働中セッションにも属さない): %d 件"
+              % len(verdict["orphans"]), file=out)
+        for sid in sorted(verdict["by_session"],
+                          key=lambda k: -verdict["by_session"][k]):
+            print("    %s: %d 件" % (_session_label({"session_id": sid}),
+                                     verdict["by_session"][sid]), file=out)
+        if verdict["kept"]:
+            print("  残す (稼働中セッションのメモ): %d 件"
+                  % len(verdict["kept"]), file=out)
+        if verdict["untagged"]:
+            # Stated either way: silently keeping them looks like "there were
+            # none", and silently taking them deletes on missing information.
+            state = "削除します" if include_untagged else "残します"
+            print("  セッション未記録のメモ: %d 件 — %s "
+                  "(--include-untagged で削除対象に含められます)"
+                  % (len(verdict["untagged"]), state), file=out)
+
+    removed = _selective_delete(
+        lambda n: note_reap.is_doomed(n, live_ids,
+                                      include_untagged=include_untagged),
+        label="終了したセッションのメモ",
+        write_backups=_clear_backup_desc, confirm=confirm,
+        rerun_hint="beacon note reap --yes",
+        on_unconfirmed=UNCONFIRMED_REFUSE, preview=_preview,
+        touches_other_sessions=False)
+    return removed
 
 
 def cmd_note_purge_probes():

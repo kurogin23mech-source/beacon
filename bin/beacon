@@ -2429,9 +2429,18 @@ EOF
                 # dumped the notes instead of explaining the command.
                 shift 2
                 note_json=""
+                note_all=""
+                note_since_days=""
+                note_limit=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) note_json="1"; shift ;;
+                        # ms-178 e-7150 (AC7): the read is windowed by default
+                        # (直近 N 日 かつ 最大 M 件) because session-start pulls
+                        # this into context on every startup. --all opts out.
+                        --all) note_all="1"; shift ;;
+                        --since-days) note_since_days="${2:-}"; shift 2 ;;
+                        --limit) note_limit="${2:-}"; shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
                         # ms-178 (AX review PR#766): reject stray positionals
                         # instead of shift-ing them away. Silently swallowing an
@@ -2440,7 +2449,35 @@ EOF
                         *)      _guard_no_positional "note list" "$1" ;;
                     esac
                 done
-                BEACON_JSON="$note_json" python3 "$COMMANDS_PY" note_list
+                BEACON_JSON="$note_json" \
+                    BEACON_NOTE_LIST_ALL="$note_all" \
+                    BEACON_NOTE_LIST_SINCE_DAYS="$note_since_days" \
+                    BEACON_NOTE_LIST_LIMIT="$note_limit" \
+                    python3 "$COMMANDS_PY" note_list
+                ;;
+            reap)
+                # ms-178 e-7150: delete notes no LIVE session can claim. The
+                # missing third option between `clear` (only my own, which a
+                # finished session can no longer run) and
+                # `clear --include-other-sessions` (also takes running
+                # sessions' handoff notes).
+                shift 2
+                note_reap_yes=""
+                note_reap_untagged=""
+                note_reap_since=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -y|--yes|--confirm) note_reap_yes="1"; shift ;;
+                        --include-untagged) note_reap_untagged="1"; shift ;;
+                        --since-min) note_reap_since="${2:-}"; shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)   _guard_no_positional "note reap" "$1" ;;
+                    esac
+                done
+                BEACON_NOTE_REAP_YES="$note_reap_yes" \
+                    BEACON_NOTE_REAP_UNTAGGED="$note_reap_untagged" \
+                    BEACON_NOTE_REAP_SINCE_MIN="$note_reap_since" \
+                    python3 "$COMMANDS_PY" note_reap
                 ;;
             restore)
                 # ms-178 e-6656: recover from the backups `note clear` left.
@@ -2500,8 +2537,9 @@ EOF
                 ;;
             "")
                 echo "Usage: beacon note \"<text>\" [--context \"<label>\"]"
-                echo "       beacon note list [--json]"
+                echo "       beacon note list [--json] [--all] [--since-days <N>] [--limit <N>]   (既定は直近 3 日 / 最大 20 件)"
                 echo "       beacon note clear -y|--yes [--include-other-sessions]   (既定は自セッション分のみ)"
+                echo "       beacon note reap -y|--yes [--include-untagged] [--since-min <N>]   (終了したセッションのメモのみ)"
                 echo "       beacon note restore"
                 echo "       beacon note purge-probes [--confirm]   (-y / --yes も可)"
                 ;;
