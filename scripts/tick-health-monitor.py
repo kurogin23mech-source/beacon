@@ -14,12 +14,18 @@ deliberately its twin:
      timestamp the server records at the end of each tick),
   2. classifies ok / stale / never / unreachable
      (``lib.tick_health.evaluate_tick_health`` / ``should_alert``),
-  3. **checks that every required source still rides the tick**
-     (``lib.tick_health.evaluate_scheduled_sources``) — a tick that keeps its
-     cadence while Operation firing or deadline reminders quietly dropped out
-     is green on the liveness axis and broken in fact (ms-185 e-7066),
-  4. on a dead tick or a missing source, resolves the alert recipient (reusing
-     ``lib.deploy_health.resolve_alert_recipient``) and sends a beacon-bus DM,
+  3. **checks that every required source still rides the tick, and still gets
+     work done on it** (``lib.tick_health.evaluate_scheduled_sources``) — a
+     tick that keeps its cadence while Operation firing or deadline reminders
+     quietly dropped out is green on the liveness axis and broken in fact
+     (ms-185 e-7066). Two shapes count: the source left the registry
+     (``missing``), and the source is still called every tick but errored on
+     every attempt (``failing`` — e-7066 follow-up, independent AX review's
+     high: the registry axis alone reports ``ok`` for a source that is wired,
+     called, and broken 100% of the time),
+  4. on a dead tick, a missing source or a wholly failing source, resolves the
+     alert recipient (reusing ``lib.deploy_health.resolve_alert_recipient``)
+     and sends a beacon-bus DM,
   5. dedups on a state file so a persistent fault alerts once, not every
      cron tick.
 
@@ -154,8 +160,18 @@ def decide_and_alert(
     # ms-185 e-7066 — 相乗りしている source の欠落も見る。``scheduled_sources``
     # を報告しない旧デプロイでは status=unknown になり alert しない (rollout 中に
     # 鳴きっぱなしの watchdog は mute され、結果として何も守らなくなる)。
+    #
+    # e-7066 follow-up (独立 AX レビューの high): 登録簿の名前だけでは「配線は
+    # 在るが毎回失敗している」が ok に見える。tick が既に publish している
+    # source ごとの内訳 (last_tick_report.scheduled_by_source) をここで渡して、
+    # その形も鳴るようにする。内訳を publish しない旧デプロイでは None のまま
+    # = 登録簿の軸だけで判定する (沈黙する、鳴きっぱなしにしない)。
+    _report = payload.get("last_tick_report") if reachable else None
     sources = th.evaluate_scheduled_sources(
-        payload.get("scheduled_sources") if reachable else None)
+        payload.get("scheduled_sources") if reachable else None,
+        fire_summary=(_report or {}).get("scheduled_by_source")
+        if isinstance(_report, dict) else None,
+    )
 
     verdict = {"reachable": reachable, "health": health,
                "sources": sources, "alerted": False}

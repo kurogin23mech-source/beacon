@@ -267,3 +267,159 @@ def test_missing_source_dedup_key_distinguishes_which_source_went():
     both = th.alert_dedup_key(True, {"status": "ok"},
                               th.evaluate_scheduled_sources([]))
     assert one != both
+
+
+# --- 5. 「配線は在るが毎回失敗している」も鳴る ---------------------------
+#
+# e-7066 follow-up (独立 AX レビューの high)。上の 1〜4 が測っていたのは
+# 「source の行が登録簿から消えた」形だけで、**登録簿に残ったまま毎回例外を
+# 投げている** 形は status=ok のまま鳴らなかった。報告される source 一覧は
+# 登録簿のキーであって成否とは独立なので、100% 失敗していても緑に見える。
+# ms-185 の起点 (e-5366: 44 日 / 約 6 万回の無音失敗、e-7078: 本番で一度も
+# 成立していなかった Operation の自律実行) と同じ失敗クラスの一段深い変種。
+
+
+def test_a_source_that_errors_every_attempt_is_not_reported_ok(harness, monkeypatch):
+    """登録簿に在り毎 tick 呼ばれるが全失敗する source を、watchdog が緑にしない。
+
+    判定器の単体ではなく **本物の tick を回して** 測る: 発火関数を「呼ばれるが
+    毎回例外」に挿げ替え、tick-health が返す payload をそのまま watchdog に
+    食わせて、鳴るところまでを 1 本で繋ぐ。単体だけだと「判定器は直ったが
+    monitor が内訳を渡していない」配線漏れを見逃す (= まさに今回の欠陥の形)。
+    """
+    def _always_raises(*_a, **_kw):
+        raise RuntimeError("deadline source is broken")
+
+    monkeypatch.setattr(
+        app_module, "SCHEDULED_SOURCES",
+        (("operation", app_module._fire_source_operations),
+         ("deadline", _always_raises)))
+
+    client = TestClient(app_module.app)
+    client.post(TICK_PATH, json={}, headers=HEADERS_OK)
+    health = client.get(HEALTH_PATH).json()
+
+    # 登録簿の軸では欠落していない (= 名前は在る)。ここが緑に見える正体。
+    assert "deadline" in health["scheduled_sources"]
+    by_source = health["last_tick_report"]["scheduled_by_source"]
+    assert by_source["deadline"]["error"] > 0, by_source
+    assert by_source["deadline"]["fired"] == 0, by_source
+
+    # 名前だけ渡す旧判定は ok を返す = これが塞いだ穴そのもの。
+    assert th.evaluate_scheduled_sources(
+        health["scheduled_sources"])["status"] == "ok"
+
+    # 内訳まで渡すと failing になり、alert が鳴る。
+    verdict = th.evaluate_scheduled_sources(
+        health["scheduled_sources"], fire_summary=by_source)
+    assert verdict["status"] == "failing"
+    assert verdict["failing"] == ["deadline"]
+    tick_ok = {"status": "ok", "seconds_since": 5.0, "last_tick_at": "x"}
+    assert th.should_alert(tick_ok, True, verdict) is True
+    msg = th.format_alert_message(True, tick_ok, "https://example.test", verdict)
+    assert "deadline" in msg
+    assert "ティックは動いて" in msg          # 「tick が止まった」と誤報しない
+    assert "全試行失敗" in msg                # 欠落ではなく全失敗だと名指しする
+
+
+def test_monitor_passes_the_breakdown_through_to_the_verdict(harness, monkeypatch):
+    """monitor が内訳を判定器に渡している (= 配線が在る)。
+
+    判定器が failing を返せるようになっても、monitor が
+    ``last_tick_report.scheduled_by_source`` を渡さなければ本番では何も変わら
+    ない。「足した」≠「全域に効く」を分けて測る。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_tick_monitor_e7066",
+        pathlib.Path(__file__).resolve().parents[1] / "scripts"
+        / "tick-health-monitor.py")
+    mon = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mon)
+
+    import datetime
+    sent = []
+    payload = {
+        "last_tick_at": datetime.datetime.now(
+            datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "uptime_seconds": 10_000,
+        "scheduled_sources": ["operation", "deadline"],
+        "last_tick_report": {
+            "scheduled_by_source": {
+                "operation": {"fired": 2, "skipped": 0, "error": 0, "total": 2},
+                "deadline": {"fired": 0, "skipped": 0, "error": 3, "total": 3},
+            },
+        },
+    }
+    verdict = mon.decide_and_alert(
+        reachable=True, payload=payload,
+        now=datetime.datetime.now(datetime.timezone.utc),
+        prod_url="https://example.test", live_sessions=[],
+        owner_user_id="u-owner", last_alerted_key="",
+        send=lambda _r, t: sent.append(t) or True)
+
+    assert verdict["sources"]["status"] == "failing", verdict["sources"]
+    assert verdict["alerted"] is True, verdict
+    assert sent and "deadline" in sent[0]
+
+
+def test_partial_failure_does_not_cry_wolf(harness):
+    """一部成功・一部失敗では鳴らない。
+
+    鳴きっぱなしの watchdog は mute され、結果として何も守らなくなる。
+    「全試行失敗」(error>0 かつ fired==0) に絞るのは意図。
+    """
+    by_source = {
+        "operation": {"fired": 3, "skipped": 0, "error": 1, "total": 4},
+        "deadline": {"fired": 1, "skipped": 0, "error": 0, "total": 1},
+    }
+    verdict = th.evaluate_scheduled_sources(
+        ["operation", "deadline"], fire_summary=by_source)
+    assert verdict["status"] == "ok", verdict
+    assert th.should_alert({"status": "ok", "seconds_since": 5.0,
+                            "last_tick_at": "x"}, True, verdict) is False
+
+
+def test_nothing_due_is_not_a_failure(harness):
+    """「回ったが 0 件」は失敗ではない (error==0 かつ fired==0)。"""
+    by_source = {
+        "operation": {"fired": 0, "skipped": 0, "error": 0, "total": 0},
+        "deadline": {"fired": 0, "skipped": 2, "error": 0, "total": 2},
+    }
+    assert th.evaluate_scheduled_sources(
+        ["operation", "deadline"], fire_summary=by_source)["status"] == "ok"
+
+
+def test_a_server_that_omits_the_breakdown_stays_silent(harness):
+    """内訳を publish しない旧デプロイでは failing を判定しない (沈黙する)。"""
+    for absent in (None, {}, "not-a-dict", {"deadline": "not-a-dict"}):
+        verdict = th.evaluate_scheduled_sources(
+            ["operation", "deadline"], fire_summary=absent)
+        assert verdict["status"] == "ok", (absent, verdict)
+        assert verdict["failing"] == []
+
+
+def test_missing_outranks_failing(harness):
+    """欠落と全失敗が同時なら、欠落を先に名指しする (直し方が違う)。"""
+    by_source = {"operation": {"fired": 0, "skipped": 0, "error": 5, "total": 5}}
+    verdict = th.evaluate_scheduled_sources(["operation"], fire_summary=by_source)
+    assert verdict["status"] == "missing"
+    assert verdict["missing"] == ["deadline"]
+    msg = th.format_alert_message(
+        True, {"status": "ok", "seconds_since": 5.0, "last_tick_at": "x"},
+        "https://example.test", verdict)
+    assert "欠けています" in msg
+
+
+def test_failing_dedup_key_is_distinct_from_missing_and_per_source(harness):
+    """dedup が欠落↔全失敗を混同しない / 2 つ目の全失敗を飲み込まない。"""
+    ok = {"status": "ok"}
+    miss = th.alert_dedup_key(True, ok, th.evaluate_scheduled_sources(["operation"]))
+    one = th.alert_dedup_key(True, ok, th.evaluate_scheduled_sources(
+        ["operation", "deadline"],
+        fire_summary={"deadline": {"fired": 0, "error": 1, "total": 1}}))
+    two = th.alert_dedup_key(True, ok, th.evaluate_scheduled_sources(
+        ["operation", "deadline"],
+        fire_summary={"deadline": {"fired": 0, "error": 1, "total": 1},
+                      "operation": {"fired": 0, "error": 1, "total": 1}}))
+    assert len({miss, one, two}) == 3, (miss, one, two)

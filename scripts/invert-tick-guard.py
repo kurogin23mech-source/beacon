@@ -28,6 +28,13 @@ import invert_harness as ih  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP = ROOT / "server" / "app.py"
+# e-7066 follow-up: 壊す先は server/app.py だけではない。「配線は在るが毎回
+# 失敗している」を捕まえるのは箱の外の watchdog 側 (判定器と、それに内訳を
+# 渡す monitor) なので、その 2 ファイルも壊して測る。守る対象が 2 ファイルに
+# またがっているのに 1 ファイルだけ壊していると、もう一方は無防備なまま
+# 「全件 OK」と報告される (= ハーネスが偽の安全を作る)。
+WATCHDOG = ROOT / "lib" / "tick_health.py"
+MONITOR = ROOT / "scripts" / "tick-health-monitor.py"
 AST_TEST = "tests/test_tick_now_iso_binding.py"
 WIRE_TEST = "tests/test_system_tick_entrypoint_e7065.py"
 SOURCE_TEST = "tests/test_scheduled_source_registry_e7066.py"
@@ -198,6 +205,49 @@ def mutate_call_deadline_outside_registry(src: str) -> str:
         + anchor, 1)
 
 
+# --- ms-185 e-7066 follow-up: 「配線は在るが毎回失敗」の検知 ----------------
+#
+# 独立 AX レビューの high。登録簿の名前だけを見る判定は、source が毎 tick
+# 呼ばれて毎回例外を投げていても ok を返す。壊す先が watchdog 側なので、
+# 下の 4 ケースは APP ではなく WATCHDOG / MONITOR に当てる。
+
+
+def mutate_verdict_ignores_the_breakdown(src: str) -> str:
+    """判定器が内訳を見るのをやめる (= 名前の所属判定だけに戻す)。"""
+    anchor = "    failing = failing_scheduled_sources(fire_summary, required)\n"
+    assert anchor in src, "anchor not found (mutate_verdict_ignores_the_breakdown)"
+    return src.replace(anchor, "    failing = []  # MUTANT\n", 1)
+
+
+def mutate_alert_ignores_failing(src: str) -> str:
+    """鳴る条件から failing を外す (= 判定はできても alert が出ない形)。"""
+    anchor = 'return bool(sources) and sources.get("status") in ("missing", "failing")'
+    assert anchor in src, "anchor not found (mutate_alert_ignores_failing)"
+    return src.replace(
+        anchor, 'return bool(sources) and sources.get("status") == "missing"  # MUTANT', 1)
+
+
+def mutate_failing_predicate_ignores_fired(src: str) -> str:
+    """全失敗の判定から「1 件も成功していない」を落とす (= 一部失敗でも鳴る)。
+
+    締めすぎる方向の変異。鳴きっぱなしの watchdog は mute され、結果として
+    何も守らなくなるので、緩める方向と同じく壊れとして扱う。"""
+    anchor = "        if errors > 0 and fired == 0:"
+    assert anchor in src, "anchor not found (mutate_failing_predicate_ignores_fired)"
+    return src.replace(anchor, "        if errors > 0:  # MUTANT", 1)
+
+
+def mutate_monitor_drops_the_breakdown(src: str) -> str:
+    """monitor が内訳を判定器に渡すのをやめる (= 判定器は直ったが本番で効かない)。
+
+    「足した」≠「全域に効く」。判定器だけ直して monitor の配線を忘れる形は
+    実際に今回の欠陥そのものだったので、独立のケースとして測る。"""
+    anchor = ("        fire_summary=(_report or {}).get(\"scheduled_by_source\")\n"
+              "        if isinstance(_report, dict) else None,\n")
+    assert anchor in src, "anchor not found (mutate_monitor_drops_the_breakdown)"
+    return src.replace(anchor, "", 1)
+
+
 CASES = [
     ("now_iso を条件分岐の中へ (ms-66 の穴)", mutate_now_iso_into_branch,
      "test_now_iso_bound_unconditionally_before_fire_due_scheduled"),
@@ -239,6 +289,19 @@ CASES = [
      SOURCE_TEST + "::test_tick_health_exposes_the_driven_sources"),
     ("登録簿の外から締切リマインドを直呼びする", mutate_call_deadline_outside_registry,
      SOURCE_TEST + "::test_scheduled_sources_are_driven_only_through_the_registry"),
+    # --- e-7066 follow-up: 「配線は在るが毎回失敗」(壊す先は watchdog 側) ---
+    ("判定器が内訳を見るのをやめる", mutate_verdict_ignores_the_breakdown,
+     SOURCE_TEST + "::test_a_source_that_errors_every_attempt_is_not_reported_ok",
+     WATCHDOG),
+    ("鳴る条件から全失敗を外す", mutate_alert_ignores_failing,
+     SOURCE_TEST + "::test_a_source_that_errors_every_attempt_is_not_reported_ok",
+     WATCHDOG),
+    ("全失敗の判定から「1 件も成功なし」を落とす (鳴きすぎ)",
+     mutate_failing_predicate_ignores_fired,
+     SOURCE_TEST + "::test_partial_failure_does_not_cry_wolf", WATCHDOG),
+    ("monitor が内訳を渡すのをやめる", mutate_monitor_drops_the_breakdown,
+     SOURCE_TEST + "::test_monitor_passes_the_breakdown_through_to_the_verdict",
+     MONITOR),
 ]
 
 
@@ -265,16 +328,21 @@ def run_one(test_name: str) -> tuple:
 
 
 def main() -> int:
-    originals = {APP: APP.read_text(encoding="utf-8")}
+    originals = {path: path.read_text(encoding="utf-8")
+                 for path in (APP, WATCHDOG, MONITOR)}
     # まず壊していない状態で全件緑を確認 (= ベースライン)
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 
     bad = 0
-    for label, mutate, test_name in CASES:
+    for case in CASES:
+        # 4 要素目は壊す先のファイル (省略時は server/app.py)。守る対象が
+        # 複数ファイルにまたがるので、ケースごとにどこを壊すかを持たせる。
+        label, mutate, test_name = case[0], case[1], case[2]
+        target_file = case[3] if len(case) > 3 else APP
         try:
-            APP.write_text(mutate(originals[APP]), encoding="utf-8")
-            ih.invalidate_bytecode_cache(APP, ROOT)
+            target_file.write_text(mutate(originals[target_file]), encoding="utf-8")
+            ih.invalidate_bytecode_cache(target_file, ROOT)
             went_red, tail = run_one(test_name)
         except AssertionError as exc:
             ih.restore(originals, ROOT)

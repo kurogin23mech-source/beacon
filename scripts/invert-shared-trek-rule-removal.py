@@ -28,6 +28,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 GATE = ROOT / "server" / "dm_gate.py"
 APP = ROOT / "server" / "app.py"
 CONSENT = ROOT / "lib" / "dm_consent.py"
+# e-7069 (独立保守性レビューの medium): 同じ「共有作業部屋の参加者か」判定が
+# 正本 (lib/trek.py) と CLI 側の独自実装 (lib/cmd_bus.py) の 2 箇所にある。
+# 突き合わせる検査を足したので、**両方の側を別々に壊して**赤くなるか測る。
+# 片側だけ壊して測ると、もう一方が無防備なまま「全件 OK」になる。
+TREK = ROOT / "lib" / "trek.py"
+CMD_BUS = ROOT / "lib" / "cmd_bus.py"
 
 GATE_TEST = "tests/test_dm_gate.py"
 AUDIT_TEST = "tests/test_audit_log_no_trek_bypass_e7068.py"
@@ -35,8 +41,9 @@ CONSENT_TEST = "tests/test_dm_consent.py"
 BACKSTOP_TEST = "tests/test_sender_consent_backstop.py"
 ALIGN_TEST = "tests/test_dm_consent_skill_alignment_e6349.py"
 GRAIN_TEST = "tests/test_dm_gate_session_grain.py"
+PARITY_TEST = "tests/test_trek_member_rule_parity_e7069.py"
 BASELINE = [GATE_TEST, AUDIT_TEST, CONSENT_TEST, BACKSTOP_TEST, ALIGN_TEST,
-            GRAIN_TEST]
+            GRAIN_TEST, PARITY_TEST]
 
 
 # --- 戻す方向 (= 規則の復活) ------------------------------------------------
@@ -180,6 +187,42 @@ def gate_drops_the_same_user_rule(src: str) -> str:
     return src.replace(anchor, "    pass  # MUTANT", 1)
 
 
+# --- 2 実装のズレ (e-7069: 正本 lib/trek.py ↔ CLI 側 lib/cmd_bus.py) --------
+#
+# 実装を 1 本に寄せず「黙ってズレない」ことだけを固定したので、ズレを作る
+# 変異で赤くなることが、その検査が本物である唯一の根拠になる。**両側**を
+# 別々に壊す: どちらを直し忘れても捕まる形でなければ意味がない。
+
+
+def cmd_bus_loosens_the_session_grain(src: str) -> str:
+    """CLI 側の phase-A 判定を user_id 一致に緩める (= 粒度のズレ)。"""
+    anchor = '        return any((m.get("session_id") or "") == session_id for m in members)'
+    assert anchor in src, "anchor not found (cmd_bus_loosens_the_session_grain)"
+    return src.replace(
+        anchor,
+        '        return any((m.get("user_id") or "") == user_id for m in members)  # MUTANT',
+        1)
+
+
+def cmd_bus_pre_a_matches_anything(src: str) -> str:
+    """CLI 側の pre-A 判定を常に真にする (= 正本より緩い側へ転ぶ)。"""
+    anchor = ('    return bool(user_id) and any(\n'
+              '        (m.get("user_id") or "") == user_id for m in members\n'
+              '    )')
+    assert anchor in src, "anchor not found (cmd_bus_pre_a_matches_anything)"
+    return src.replace(anchor, "    return True  # MUTANT", 1)
+
+
+def trek_phase_a_needs_only_the_sender(src: str) -> str:
+    """正本の phase-A 判定から受け手の在籍要求を落とす (= 正本側のズレ)。"""
+    anchor = "                if sender_in and receiver_in:\n                    return (True, trek_id)"
+    assert anchor in src, "anchor not found (trek_phase_a_needs_only_the_sender)"
+    return src.replace(
+        anchor,
+        "                if sender_in:  # MUTANT\n                    return (True, trek_id)",
+        1)
+
+
 CASES = [
     # 引数経由で戻す形は、引数を渡さない呼び方では発火しないので**振る舞いでは
     # 捕まらない**。構造の試験 (引数も理由コードも無いこと) が唯一の防御になる。
@@ -212,6 +255,15 @@ CASES = [
      AUDIT_TEST + "::test_t1_system_authority_is_untouched"),
     ("同一ユーザーの規則を一緒に消す", GATE, gate_drops_the_same_user_rule,
      GATE_TEST + "::test_gate_skip_when_sender_equals_receiver"),
+    # 2 実装のズレ (e-7069) — 正本側と CLI 側を別々に壊す
+    ("CLI 側が session 粒度を緩める", CMD_BUS, cmd_bus_loosens_the_session_grain,
+     PARITY_TEST + "::test_phase_a_rule_is_identical_in_both_implementations"),
+    ("CLI 側の pre-A が何でも一致する (正本より緩い)", CMD_BUS,
+     cmd_bus_pre_a_matches_anything,
+     PARITY_TEST + "::test_pre_a_cli_is_never_looser_than_the_canonical_rule"),
+    ("正本の phase-A が受け手の在籍を要求しない", TREK,
+     trek_phase_a_needs_only_the_sender,
+     PARITY_TEST + "::test_phase_a_rule_is_identical_in_both_implementations"),
 ]
 
 _COLLECTION_FAILURE_MARKS = ("found no collectors", "SyntaxError",
@@ -226,7 +278,8 @@ def run_one(target: str):
 
 
 def main() -> int:
-    originals = {p: p.read_text(encoding="utf-8") for p in (GATE, APP, CONSENT)}
+    originals = {p: p.read_text(encoding="utf-8")
+                 for p in (GATE, APP, CONSENT, TREK, CMD_BUS)}
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 

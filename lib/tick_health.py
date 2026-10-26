@@ -28,6 +28,32 @@ stopped is green on the liveness axis and broken in fact — so
 ``evaluate_scheduled_sources`` reads the source list the server reports and
 flags any required source that is missing. Watching only the tick (or only
 Operations) is precisely the blind spot this closes.
+
+ms-185 e-7066 follow-up (independent AX review, high): "silently stopped" has
+**two shapes**, and the first cut only caught one of them.
+
+  * the source's row left the registry → it is absent from the reported list
+    (``missing``), and
+  * the source is still in the registry and still called every tick, but every
+    call raises → it stays in the reported list forever (``failing``).
+
+The second shape was invisible here: the reported list is the registry's keys,
+which are computed independently of whether any call succeeded, so a source
+that failed 100% of the time reported ``ok``. That is the exact failure class
+this milestone exists to close (e-5366: 44 days / ~60k silent failures;
+e-7078: Operation autonomy that had never once succeeded in production), and
+a watchdog whose own prose promised to catch it is worse than no watchdog —
+a green signal gets trusted. ``evaluate_scheduled_sources`` therefore also
+reads the per-source outcome tally the tick already publishes
+(``last_tick_report.scheduled_by_source``, built by
+``summarize_scheduled_fires``) and flags a required source whose most recent
+tick produced errors and **zero** successful fires.
+
+Known limit, stated rather than papered over: the endpoint exposes only the
+*most recent* tick, so ``failing`` means "every attempt in the last tick
+failed", not "has been failing for N ticks". A lone flaky tick can therefore
+alert once (the dedup key then holds it). That bias is deliberate here —
+this module exists because a silent failure ran unnoticed for 44 days.
 """
 from __future__ import annotations
 
@@ -181,16 +207,54 @@ def summarize_scheduled_fires(report, source_names=()) -> dict:
     return summary
 
 
+def failing_scheduled_sources(fire_summary, required_sources) -> list:
+    """Required sources whose last tick produced errors and no successful fire.
+
+    ``fire_summary`` is the per-source tally the tick publishes as
+    ``last_tick_report.scheduled_by_source`` (``summarize_scheduled_fires``'s
+    output): ``{name: {"fired", "skipped", "error", "total"}}``.
+
+    A source counts as failing when ``error > 0`` **and** ``fired == 0``: every
+    attempt that happened, failed. ``error > 0`` with ``fired > 0`` is NOT
+    failing — that is one bad project among many, and alerting on it would make
+    this watchdog cry wolf (a muted watchdog guards nothing). ``error == 0``
+    with ``fired == 0`` is the ordinary "nothing was due" tick.
+
+    Pure: no IO, no clock. Returns [] when the tally is absent or unusable, so
+    an older deployment that does not publish it stays silent.
+    """
+    if not isinstance(fire_summary, dict):
+        return []
+    failing = []
+    for name in tuple(required_sources or ()):
+        bucket = fire_summary.get(name)
+        if not isinstance(bucket, dict):
+            continue
+        try:
+            errors = int(bucket.get("error") or 0)
+            fired = int(bucket.get("fired") or 0)
+        except (TypeError, ValueError):
+            continue
+        if errors > 0 and fired == 0:
+            failing.append(name)
+    return failing
+
+
 def evaluate_scheduled_sources(
     reported_sources,
     required_sources=REQUIRED_SCHEDULED_SOURCES,
+    fire_summary=None,
 ) -> dict:
-    """Classify whether every required source is still riding the tick.
+    """Classify whether every required source is still riding the tick AND
+    actually getting work done on it.
 
     ``reported_sources`` is the ``scheduled_sources`` list from
     ``/api/system/tick-health`` (the server echoes its own registry).
+    ``fire_summary`` is that response's ``last_tick_report.scheduled_by_source``
+    (optional — omit it and only the registry axis is judged).
 
-    Returns ``{"status", "reported", "missing", "detail"}`` where status is:
+    Returns ``{"status", "reported", "missing", "failing", "detail"}`` where
+    status is:
 
       * ``"unknown"`` — the server did not report a source list at all. This is
         an **older deployment**, not a fault: stay silent rather than alert on
@@ -199,25 +263,45 @@ def evaluate_scheduled_sources(
       * ``"missing"`` — the server reports its sources and at least one
         required source is absent = that job silently stopped while the tick
         itself kept looking healthy.
-      * ``"ok"`` — all required sources present.
+      * ``"failing"`` — every required source is present, but at least one of
+        them errored on every attempt of the last tick (e-7066 follow-up: the
+        registry axis alone reports ``ok`` for a source that is wired, called,
+        and broken 100% of the time).
+      * ``"ok"`` — all required sources present, none wholly failing.
+
+    ``missing`` outranks ``failing``: a source that left the registry is the
+    more fundamental breakage, and naming it first keeps the recovery advice
+    pointed at the right repair.
     """
     required = tuple(required_sources or ())
     if reported_sources is None:
         return {"status": "unknown", "reported": None, "missing": [],
+                "failing": [],
                 "detail": "server does not report scheduled_sources "
                           "(deployment predates ms-185 e-7066)"}
     if not isinstance(reported_sources, (list, tuple, set)):
         return {"status": "unknown", "reported": None, "missing": [],
+                "failing": [],
                 "detail": "scheduled_sources is not a list"}
     reported = [str(x) for x in reported_sources]
     missing = [name for name in required if name not in reported]
     if missing:
         return {
             "status": "missing", "reported": reported, "missing": missing,
+            "failing": [],
             "detail": ("required scheduled source(s) no longer driven by the "
                        "tick: " + ", ".join(missing)),
         }
-    return {"status": "ok", "reported": reported, "missing": [], "detail": ""}
+    failing = failing_scheduled_sources(fire_summary, required)
+    if failing:
+        return {
+            "status": "failing", "reported": reported, "missing": [],
+            "failing": failing,
+            "detail": ("required scheduled source(s) ran but failed every "
+                       "attempt on the last tick: " + ", ".join(failing)),
+        }
+    return {"status": "ok", "reported": reported, "missing": [],
+            "failing": [], "detail": ""}
 
 
 def should_alert(health: dict, reachable: bool, sources: Optional[dict] = None) -> bool:
@@ -234,16 +318,18 @@ def should_alert(health: dict, reachable: bool, sources: Optional[dict] = None) 
     ``evaluate_tick_health`` (given uptime), not "some later window" by magic.
 
     ms-185 e-7066 — also alert when ``sources`` (from
-    ``evaluate_scheduled_sources``) says a required source is ``missing``: a
-    tick that keeps its cadence while one of its jobs stopped is green on the
-    liveness axis and broken in fact. ``unknown`` (server predates the source
-    report) never alerts.
+    ``evaluate_scheduled_sources``) says a required source is ``missing`` or
+    ``failing``: a tick that keeps its cadence while one of its jobs stopped is
+    green on the liveness axis and broken in fact, and that holds whether the
+    job left the registry (``missing``) or stayed in it while erroring on every
+    attempt (``failing``, the e-7066 follow-up). ``unknown`` (server predates
+    the source report) never alerts.
     """
     if not reachable:
         return True
     if health.get("status") == "stale":
         return True
-    return bool(sources) and sources.get("status") == "missing"
+    return bool(sources) and sources.get("status") in ("missing", "failing")
 
 
 def alert_dedup_key(reachable: bool, health: dict,
@@ -252,9 +338,11 @@ def alert_dedup_key(reachable: bool, health: dict,
 
     Mirrors ``deploy-health-monitor``'s per-rev dedup: the key changes only
     when the *nature* of the outage changes (unreachable ↔ stale ↔ which
-    source went missing), so a steady-state fault does not re-notify each run.
-    A newly-missing *second* source changes the key, so it is not swallowed by
-    the dedup of the first.
+    source went missing ↔ which source is failing), so a steady-state fault
+    does not re-notify each run. A newly-missing *second* source changes the
+    key, so it is not swallowed by the dedup of the first; likewise a source
+    that goes from missing to failing (or back) is reported again, because the
+    repair differs.
     """
     if not reachable:
         return "unreachable"
@@ -262,6 +350,8 @@ def alert_dedup_key(reachable: bool, health: dict,
         return f"stale:{health.get('status', '')}"
     if sources and sources.get("status") == "missing":
         return "missing-sources:" + ",".join(sorted(sources.get("missing") or []))
+    if sources and sources.get("status") == "failing":
+        return "failing-sources:" + ",".join(sorted(sources.get("failing") or []))
     return f"stale:{health.get('status', '')}"
 
 
@@ -298,6 +388,21 @@ def format_alert_message(reachable: bool, health: dict, prod_url: str,
             f"{reported})。該当する自律 (operation=Operation の発火 / "
             f"deadline=締切リマインド) が無音で止まっています。"
             f"{prod_url}/api/system/tick-health を確認してください。"
+        )
+    if health.get("status") != "stale" and sources and sources.get("status") == "failing":
+        # 定期ティックも登録簿も生きているのに、その source の試行が全部失敗して
+        # いる形。登録簿の名前だけを見ていると ok に見えるのがこの alert の存在
+        # 理由 (= e-7066 の積み残し、独立 AX レビューの high)。直し方が「欠落」
+        # とは違う (driver の再配線ではなく、失敗の中身を読む) ので案内も分ける。
+        failing = ", ".join(sources.get("failing") or [])
+        return (
+            f"⚠ 本番の定期ティックは動いていますが、相乗りしている定期発火の "
+            f"source が直前のティックで全試行失敗しています (失敗: {failing})。"
+            f"該当する自律 (operation=Operation の発火 / deadline=締切リマインド) "
+            f"は呼ばれてはいるものの 1 件も成功していません。"
+            f"{prod_url}/api/system/tick-health の last_tick_report."
+            f"scheduled_by_source に source ごとの内訳があります。"
+            f"driver (beacon-tick.timer) ではなく発火側の例外を確認してください。"
         )
     secs = health.get("seconds_since")
     mins = f"{secs / 60:.0f}分" if isinstance(secs, (int, float)) else "?"
