@@ -104,15 +104,35 @@ def test_anchor_cannot_collide_with_a_real_pid(monkeypatch, churning_ppid):
         assert anchor <= 0x7FFFFFFF, (sid, anchor)
 
 
+def test_posix_session_id_anchors_a_plain_terminal(monkeypatch, churning_ppid):
+    """env が無い素の端末でも、POSIX セッション id が安定した錨になる。
+
+    `getppid` を外した当初はここが 0 になり、素の端末から `beacon` を叩く人が
+    cloud の身元を持てなくなっていた (CI で検出: CI には env が両方無い)。
+    POSIX セッションは「この端末」そのもので、端末の寿命のあいだ不変なので、
+    docstring が最初から求めていた『セッションを固定する端末の pid』に一致する。
+    """
+    monkeypatch.delenv(S.ENV_PARENT_PID, raising=False)
+    monkeypatch.delenv(S.ENV_SESSION_ID, raising=False)
+    monkeypatch.setattr(S.os, "getsid", lambda pid: 50717)
+    values = [S._resolve_parent_pid() for _ in range(3)]
+    assert values == [50717] * 3
+    # churning な getppid を見ていないこと。
+    assert 40000 not in values
+
+
 def test_unresolvable_returns_zero_not_a_guess(monkeypatch, churning_ppid):
-    """身元の手がかりが無いときは 0 (= 解決不能) を返し、推測しない。
+    """身元の手がかりが 1 つも無いときは 0 (= 解決不能) を返し、推測しない。
 
     「とりあえず非ゼロ」を返すのが e-7150 の defect だった。間違った非ゼロは
     無い方より高い: 無ければ操作が止まってそう言うが、間違っていると静かに
     別セッションを作る / 別セッションの記録に混ざる。
+
+    `getsid` が無い環境 (Windows) を模して、全ての源を落とした状態で見る。
     """
     monkeypatch.delenv(S.ENV_PARENT_PID, raising=False)
     monkeypatch.delenv(S.ENV_SESSION_ID, raising=False)
+    monkeypatch.delattr(S.os, "getsid", raising=False)
     assert S._resolve_parent_pid() == 0
 
 
@@ -121,6 +141,8 @@ def test_blank_env_values_fall_through(monkeypatch, churning_ppid):
     monkeypatch.setenv(S.ENV_PARENT_PID, "   ")
     monkeypatch.setenv(S.ENV_SESSION_ID, SID_A)
     anchor_from_sid = S._resolve_parent_pid()
+    # 2 段目 (harness の錨) で解決しているので、3 段目の getsid は見ていない。
+    assert anchor_from_sid > 0x40000000
 
     monkeypatch.setenv(S.ENV_PARENT_PID, "not-a-number")
     assert S._resolve_parent_pid() == anchor_from_sid
@@ -141,6 +163,7 @@ def test_cloud_mint_refuses_when_identity_unresolvable(
     """
     monkeypatch.delenv(S.ENV_PARENT_PID, raising=False)
     monkeypatch.delenv(S.ENV_SESSION_ID, raising=False)
+    monkeypatch.delattr(S.os, "getsid", raising=False)   # Windows 相当
     monkeypatch.chdir(fake_cloud_config.parent)
 
     def _must_not_call(*a, **k):  # pragma: no cover - 呼ばれたら失敗

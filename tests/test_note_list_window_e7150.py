@@ -30,8 +30,22 @@ import cmd_note  # noqa: E402
 
 
 def _iso(days_ago: float) -> str:
-    ts = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)
-    return ts.isoformat()
+    """`cmd_note_add` が実際に書く形式でタイムスタンプを作る。
+
+    **ここが一度この機能を無効にした** (ms-178 / e-7150、CI が 2026-10-26 に検出)。
+    最初の版は `datetime.isoformat()` を使っていて、これは UTC オフセットを
+    `+09:00` と **コロン付き**で出す。一方 `cmd_note_add` は
+    `strftime("%Y-%m-%dT%H:%M:%S%z")` で `+0900` と **コロンなし**で書く。
+    `datetime.fromisoformat` がコロンなしを受け付けるのは Python 3.11 以降なので、
+    本番の 3.9 では全ての実メモが「日付が読めない」側に落ち、日数の窓は一度も
+    効いていなかった。テストは自分が発明した形式で緑だった。
+
+    対策は形式を本番から取ること: 下は `cmd_note_add` と同じ `strftime` を使い、
+    さらに `test_fixture_format_matches_what_production_writes` が両者の一致を
+    固定する。
+    """
+    ts = datetime.datetime.now().astimezone() - datetime.timedelta(days=days_ago)
+    return ts.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def _rows(n: int, days_ago: float):
@@ -55,6 +69,53 @@ def store(tmp_path, monkeypatch):
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
             encoding="utf-8")
     return _write
+
+
+# --- 試験の土台が本番と同じ形式であること ------------------------------------
+
+def test_fixture_format_matches_what_production_writes(store, monkeypatch, capsys):
+    """この module の `_iso` と `cmd_note_add` が同じ形式を書くこと。
+
+    形式がずれると窓は「テストが作った形式」でだけ動き、本番では無効になる
+    (実際にそうなった)。`cmd_note_add` に 1 件書かせて、その `ts` が
+    `_parse_note_ts` で解析でき、かつ `_iso` と同じ綴り (オフセットの
+    コロンの有無) であることを見る。
+    """
+    monkeypatch.setenv("BEACON_NOTE_TEXT", "produced by production")
+    monkeypatch.setenv("BEACON_NOTE_CONTEXT", "")
+    monkeypatch.setattr(cmd_note, "resolve_worked_target_ids", lambda *a, **k: [])
+    monkeypatch.setattr(cmd_note, "load_project",
+                        lambda *a, **k: {"name": "t", "milestones": []})
+    cmd_note.cmd_note_add()
+    capsys.readouterr()
+
+    written = json.loads(
+        (pathlib.Path.cwd() / ".beacon" / "session_notes.jsonl")
+        .read_text(encoding="utf-8").strip().splitlines()[-1])
+    produced = written["ts"]
+
+    assert cmd_note._parse_note_ts(produced) is not None, (
+        "本番が書いた ts を窓が解析できない: %r" % produced)
+    # オフセット部分の綴りが一致していること (コロンの有無が本体)。
+    assert produced[-5:].replace(":", "") == _iso(0)[-5:].replace(":", "")
+    assert (":" in produced[-6:]) == (":" in _iso(0)[-6:]), (
+        "fixture と本番でオフセットの綴りが違う: %r vs %r" % (_iso(0), produced))
+
+
+def test_window_filters_a_note_written_by_production(store, monkeypatch, capsys):
+    """本番形式の古いメモが、実際に窓で落ちること。
+
+    純粋関数に合成データを渡す試験では見えなかった穴なので、本番の書き手が
+    作った形式でもう一度見る。
+    """
+    old = (datetime.datetime.now().astimezone()
+           - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S%z")
+    store([{"ts": old, "text": "ancient"}])
+    monkeypatch.setenv("BEACON_JSON", "1")
+    cmd_note.cmd_note_list()
+    out = capsys.readouterr()
+    assert json.loads(out.out.strip()) == []
+    assert "他 1 件" in out.err
 
 
 # --- 窓の算出 (純粋関数) -----------------------------------------------------

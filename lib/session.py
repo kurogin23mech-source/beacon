@@ -438,10 +438,18 @@ def _resolve_parent_pid() -> int:
       2. :func:`_harness_session_anchor` — folded ``CLAUDE_CODE_SESSION_ID``,
          for sessions that did NOT come through the bclaude wrapper (the
          desktop app, a bare ``claude``). Stable per session.
-      3. Nothing. Return 0 = "unresolvable", which makes the cloud path
+      3. The POSIX session id (:func:`os.getsid`) — for a caller that came
+         through neither (a human running ``beacon`` in a plain terminal, CI).
+         This is *literally* the thing the first paragraph asks for: the POSIX
+         session is the terminal, it is constant for every process in that
+         terminal, and a new terminal gets a new one. Two plain ``beacon``
+         invocations in one terminal therefore share an identity, which is the
+         correct answer — the terminal is the session. Unavailable on Windows,
+         where it falls through.
+      4. Nothing. Return 0 = "unresolvable", which makes the cloud path
          refuse to mint rather than mint a session nobody can find again.
 
-    ms-178 / e-7150 — ``os.getppid()`` used to be source 3, described as
+    ms-178 / e-7150 — ``os.getppid()`` used to be the last source, described as
     "less stable ... but at least non-zero". It is worse than that: the
     immediate parent of a CLI call is the **transient shell** the harness
     spawns per invocation, so it differs on every call (measured
@@ -459,7 +467,14 @@ def _resolve_parent_pid() -> int:
 
     A non-zero value that is wrong is more expensive than no value: with 0
     the operation stops and says so, and ``cmd_note_clear`` already refuses
-    rather than guessing. So there is no fallback below source 2.
+    rather than guessing. So the chain ends at 0 — never at a value that merely
+    happens to be non-zero.
+
+    Note the difference between source 3 and the removed ``getppid``: both are
+    pids of an ancestor, but ``getsid`` names the *terminal session* (one value
+    for its whole life) while ``getppid`` names whichever short-lived shell the
+    harness spawned for this one call. The old code reached for the nearest pid;
+    the identity it needed was the outermost one.
     """
     raw = os.environ.get(ENV_PARENT_PID, "").strip()
     if raw:
@@ -469,7 +484,18 @@ def _resolve_parent_pid() -> int:
                 return v
         except ValueError:
             pass
-    return _harness_session_anchor()
+    anchor = _harness_session_anchor()
+    if anchor:
+        return anchor
+    getsid = getattr(os, "getsid", None)
+    if getsid is not None:
+        try:
+            sid = getsid(0)
+            if sid > 0:
+                return sid
+        except OSError:
+            pass
+    return 0
 
 
 def _cloud_mint_cache_hit(

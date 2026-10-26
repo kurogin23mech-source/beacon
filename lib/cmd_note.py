@@ -278,13 +278,57 @@ def _list_window():
     return (days if days > 0 else None), (limit if limit > 0 else None)
 
 
+def _parse_note_ts(raw: str):
+    """Parse a note's ``ts`` to an aware datetime, or None if undatable.
+
+    **This has to accept what ``cmd_note_add`` writes**, which is
+    ``strftime("%Y-%m-%dT%H:%M:%S%z")`` — a UTC offset with **no colon**
+    (``2026-10-26T20:01:38+0900``). ``datetime.fromisoformat`` only learned to
+    accept that spelling in Python 3.11; on 3.9 it raises.
+
+    That discrepancy made the day window silently inert for every note Beacon
+    itself writes (ms-178 / e-7150, caught by CI 2026-10-26). ``_apply_list_window``
+    deliberately keeps a note it cannot date — "undatable" is not evidence of
+    "old" — so on 3.9 every real note landed in that branch and nothing was ever
+    filtered by age, while the tests passed because the test helper built its
+    timestamps with ``datetime.isoformat()``, which *does* emit the colon. The
+    feature worked only on data the tests invented. The lesson is in
+    ``tests/test_note_list_window_e7150.py``: the window tests now timestamp
+    their fixtures through ``cmd_note_add`` itself.
+
+    Accepts, in order of how they reach us: the colon-less offset above, a
+    trailing ``Z``, and a naive stamp (assumed UTC, matching
+    ``session._parse_iso_utc`` and ``morning._parse_iso`` — the sibling parsers
+    whose data never carries a colon-less offset, which is why they did not need
+    this and are left alone).
+    """
+    import re
+    from datetime import datetime, timezone
+
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    # ±HHMM → ±HH:MM (only at the very end, so a time like 12:00:00 is untouched)
+    s = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", s)
+    try:
+        parsed = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _apply_list_window(notes, days, limit):
     """Return ``(shown, omitted)`` — newest-first windowing, oldest dropped.
 
     Notes are ordered oldest-first by the caller (that is the reading order a
     handoff wants), so the window is taken from the END and the order is
     preserved. An unparseable ``ts`` is kept rather than dropped: a note we
-    cannot date is not evidence that it is old.
+    cannot date is not evidence that it is old. :func:`_parse_note_ts` owns
+    what "parseable" means — see its docstring for why that mattered.
     """
     if days is None and limit is None:
         return list(notes), 0
@@ -295,18 +339,8 @@ def _apply_list_window(notes, days, limit):
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         windowed = []
         for note in kept:
-            raw = (note.get("ts") or "").strip()
-            if not raw:
-                windowed.append(note)
-                continue
-            try:
-                parsed = datetime.fromisoformat(raw)
-            except ValueError:
-                windowed.append(note)
-                continue
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            if parsed >= cutoff:
+            parsed = _parse_note_ts(note.get("ts") or "")
+            if parsed is None or parsed >= cutoff:
                 windowed.append(note)
         kept = windowed
     if limit is not None and len(kept) > limit:
