@@ -213,6 +213,38 @@ def _note_key(note: dict):
 
 DEFAULT_LIST_SINCE_DAYS = 3
 DEFAULT_LIST_LIMIT = 20
+# Promoted from a bare literal that appeared twice in cmd_note_reap
+# (maintainability review, 2026-10-26): a default with no name has no canonical
+# location, so the two copies could drift from each other and the help text had
+# a third copy of the digit.
+DEFAULT_REAP_LIVENESS_WINDOW_MIN = 5
+
+
+def _int_or_notice(env_name: str, flag_name: str, default: int) -> int:
+    """Read an int from ``env_name``, saying so when the value is unusable.
+
+    AX review (2026-10-26): every numeric flag in this family used to swallow a
+    non-numeric value and substitute the default in silence — ``--limit twenty``
+    returned the ordinary 20-note window with no hint the word had been
+    discarded. That is the "type mismatch silently recast as something else"
+    failure the AX principles name directly, and it was the more galling for
+    being in the same file as ``_format_omitted_notice``, which exists precisely
+    to tell the caller that something was withheld. One helper now owns the
+    rule, so a third numeric flag cannot reintroduce the silence by writing its
+    own ``try/except ValueError: pass``.
+
+    Unset / blank is not a mistake (it means "use the default"), so only a
+    present-but-unparseable value is reported.
+    """
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print("Note: %s に数値でない値 %r が渡されたので、既定の %d を使います。"
+              % (flag_name, raw, default), file=sys.stderr)
+        return default
 
 
 def _list_window():
@@ -237,16 +269,10 @@ def _list_window():
     """
     if os.environ.get("BEACON_NOTE_LIST_ALL") == "1":
         return None, None
-    raw_days = os.environ.get("BEACON_NOTE_LIST_SINCE_DAYS", "").strip()
-    raw_limit = os.environ.get("BEACON_NOTE_LIST_LIMIT", "").strip()
-    try:
-        days = int(raw_days) if raw_days else DEFAULT_LIST_SINCE_DAYS
-    except ValueError:
-        days = DEFAULT_LIST_SINCE_DAYS
-    try:
-        limit = int(raw_limit) if raw_limit else DEFAULT_LIST_LIMIT
-    except ValueError:
-        limit = DEFAULT_LIST_LIMIT
+    days = _int_or_notice("BEACON_NOTE_LIST_SINCE_DAYS", "--since-days",
+                          DEFAULT_LIST_SINCE_DAYS)
+    limit = _int_or_notice("BEACON_NOTE_LIST_LIMIT", "--limit",
+                           DEFAULT_LIST_LIMIT)
     # 0 / negative reads as "no bound on this axis" so a caller can cap only
     # the one it cares about without having to restate the other.
     return (days if days > 0 else None), (limit if limit > 0 else None)
@@ -490,9 +516,22 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
         # a new place. Say what is left and how to reach it.
         others = len(local) + len(cloud) - total
         print("%s はありません (削除するものなし)。" % label)
-        if others:
+        if others and touches_other_sessions:
             print("  他セッション分が %d 件あります。消す必要があるなら "
                   "'beacon note clear --include-other-sessions --yes' を明示してください。" % others)
+        elif others:
+            # AX review (2026-10-26): this line used to print unconditionally,
+            # so the two callers that pass touches_other_sessions=False — the
+            # scoped `note clear` and `note reap` — recommended
+            # `--include-other-sessions`, which deletes every LIVE session's
+            # handoff notes. For `reap` that is the exact operation it exists to
+            # make unnecessary: the safe verb's own empty-result path pointed at
+            # the unsafe one. It also called the remaining notes 他セッション分
+            # when the bucket includes this session's own and untagged notes.
+            # The parameter the callers already pass now gates this, so the
+            # recommendation cannot outlive the scope that justified it.
+            print("  残り %d 件はこの口の対象外です (稼働中セッションのメモ / "
+                  "セッション未記録のメモ)。" % others)
         return -1
 
     if not confirm and on_unconfirmed == UNCONFIRMED_REFUSE:
@@ -788,15 +827,20 @@ def _collect_live_session_ids(since_minutes: int):
     session_json_sid = ((_session.read_session() or {}).get("session_id") or "").strip()
 
     bridge_sids = []
+    bridge_error = ""
     try:
         for claim in _session.read_all_bridge_claims():
             pid = claim.get("pid")
             if pid and _session._pid_alive(pid):
                 bridge_sids.append((claim.get("session_id") or "").strip())
-    except Exception:
-        # A claim directory we cannot read is not evidence of absence, so the
-        # cloud-mode server check below still has to pass for us to proceed.
-        pass
+    except Exception as exc:
+        # A claim directory we cannot read is not evidence of absence — it is
+        # the *other* live sessions in this working directory going invisible.
+        # Report it rather than swallowing it: in local mode this is the only
+        # source that can see them, so note_reap.resolve_live_ids refuses on it
+        # (an earlier version passed silently here and the module's "refuses
+        # rather than guesses" promise was false in local mode).
+        bridge_error = str(exc) or exc.__class__.__name__
 
     project_id = _cloud_project_id()
     server_sids, server_error = None, ""
@@ -817,6 +861,7 @@ def _collect_live_session_ids(since_minutes: int):
         "current_sid": current_sid,
         "session_json_sid": session_json_sid,
         "bridge_sids": bridge_sids,
+        "bridge_error": bridge_error,
         "server_sids": server_sids,
         "server_error": server_error,
         "cloud_mode": bool(project_id),
@@ -845,23 +890,40 @@ def cmd_note_reap():
 
     confirm = os.environ.get("BEACON_NOTE_REAP_YES") == "1"
     include_untagged = os.environ.get("BEACON_NOTE_REAP_UNTAGGED") == "1"
-    try:
-        since_minutes = int(os.environ.get("BEACON_NOTE_REAP_SINCE_MIN", "") or "5")
-    except ValueError:
-        since_minutes = 5
+    window_minutes = _int_or_notice(
+        "BEACON_NOTE_REAP_SINCE_MIN", "--since-min",
+        DEFAULT_REAP_LIVENESS_WINDOW_MIN)
 
-    sources = _collect_live_session_ids(since_minutes)
+    sources = _collect_live_session_ids(window_minutes)
+
+    # AX review (2026-10-26): the flag reached the handler, was parsed, and in a
+    # local-mode project was then discarded without a word — the liveness window
+    # only means anything to the server query. A caller who widened it to protect
+    # a slow session had no way to learn it had protected nothing.
+    if (os.environ.get("BEACON_NOTE_REAP_SINCE_MIN", "").strip()
+            and not sources["cloud_mode"]):
+        print("Note: --since-min はサーバに稼働中セッションを問い合わせる"
+              "ときだけ効きます。このプロジェクトはローカルなので、指定は結果を"
+              "変えていません。", file=sys.stderr)
+
     live_ids, refusal = note_reap.resolve_live_ids(**sources)
 
-    if refusal == note_reap.REFUSE_SERVER_UNREADABLE:
+    if refusal:
+        detail, recovery = {
+            note_reap.REFUSE_SERVER_UNREADABLE: (
+                sources["server_error"] or "live session list unavailable",
+                "ネットワーク / 認証を確認して再実行してください。"),
+            note_reap.REFUSE_BRIDGE_UNREADABLE: (
+                sources["bridge_error"] or "bridge claims unreadable",
+                "この作業フォルダの .beacon/bridges/ が読めるか確認して"
+                "再実行してください。"),
+        }.get(refusal, (refusal, "再実行してください。"))
         print("Aborted: 稼働中セッションの一覧を取得できないため、どのメモが"
-              "孤児かを判定できません (%s)。"
-              % (sources["server_error"] or "live session list unavailable"),
-              file=sys.stderr)
+              "孤児かを判定できません (%s)。" % detail, file=sys.stderr)
         print("  何も削除していません。判定できないまま消すと、動いている"
               "セッションの引き継ぎメモを孤児として巻き込みます。",
               file=sys.stderr)
-        print("  ネットワーク / 認証を確認して再実行してください。", file=sys.stderr)
+        print("  %s" % recovery, file=sys.stderr)
         sys.exit(1)
 
     path = _get_notes_path()

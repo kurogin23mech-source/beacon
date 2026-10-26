@@ -158,6 +158,28 @@ _need_flag_value() {
     }
 }
 
+# _need_flag_value の姉妹 (ms-178 e-7150 / AX レビュー 2026-10-26)。
+# _need_flag_value は「残り引数が 2 本以上あるか」だけを見るので、
+# `--since-min --yes` のように **次のフラグが値の位置に来た** ケースを通してしまう。
+# 通すと利用者が明示した `--yes` が値として消え、書いた通りに動かないのにそうと
+# 分からない。値を取るフラグのうち「`--` で始まる値を取ることが有り得ない」ものは
+# こちらを使う (値の型そのものの検査は Python 側が持つ = 2 つのフロントで方針を
+# 割らないため、ここでは形だけを見る)。
+# 既存 9 箇所の _need_flag_value は据え置き: `--desc -- ...` のような値を渡す
+# 呼び出しが在るかを確認できていないので、共有ヘルパの挙動は変えない。
+_need_flag_value_not_flag() {
+    # _need_flag_value_not_flag <remaining-argc "$#"> <flag "$1"> <value "$2">
+    _need_flag_value "$1" "$2"
+    case "$3" in
+        --*)
+            echo "Error: フラグ '$2' の値が '$3' になっています" \
+                 "(別のフラグを値として読み込んでいます)。'$2 <value>' の形で" \
+                 "値を渡してください。" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # ms-120 e-3907: `<entity> status <id> <state>` writes state, which reverses
 # the polarity of the read-only `beacon status`. The canonical path is a named
 # intent verb (activate / close / start / observe / done) — the verb names what
@@ -2439,8 +2461,8 @@ EOF
                         # (直近 N 日 かつ 最大 M 件) because session-start pulls
                         # this into context on every startup. --all opts out.
                         --all) note_all="1"; shift ;;
-                        --since-days) note_since_days="${2:-}"; shift 2 ;;
-                        --limit) note_limit="${2:-}"; shift 2 ;;
+                        --since-days) _need_flag_value_not_flag "$#" "$1" "${2:-}"; note_since_days="$2"; shift 2 ;;
+                        --limit) _need_flag_value_not_flag "$#" "$1" "${2:-}"; note_limit="$2"; shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
                         # ms-178 (AX review PR#766): reject stray positionals
                         # instead of shift-ing them away. Silently swallowing an
@@ -2464,19 +2486,19 @@ EOF
                 shift 2
                 note_reap_yes=""
                 note_reap_untagged=""
-                note_reap_since=""
+                note_reap_window=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         -y|--yes|--confirm) note_reap_yes="1"; shift ;;
                         --include-untagged) note_reap_untagged="1"; shift ;;
-                        --since-min) note_reap_since="${2:-}"; shift 2 ;;
+                        --since-min) _need_flag_value_not_flag "$#" "$1" "${2:-}"; note_reap_window="$2"; shift 2 ;;
                         -?*) _guard_flag "$1" ;;
                         *)   _guard_no_positional "note reap" "$1" ;;
                     esac
                 done
                 BEACON_NOTE_REAP_YES="$note_reap_yes" \
                     BEACON_NOTE_REAP_UNTAGGED="$note_reap_untagged" \
-                    BEACON_NOTE_REAP_SINCE_MIN="$note_reap_since" \
+                    BEACON_NOTE_REAP_SINCE_MIN="$note_reap_window" \
                     python3 "$COMMANDS_PY" note_reap
                 ;;
             restore)
@@ -2550,7 +2572,7 @@ EOF
                 note_bus_origin=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        --context)    note_context="${2:-}"; shift 2 ;;
+                        --context)    _need_flag_value "$#" "$1"; note_context="$2"; shift 2 ;;
                         --bus-origin) note_bus_origin="1"; shift ;;
                         -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$note_text" ]] && note_text="$1"; shift ;;

@@ -33,7 +33,10 @@ the whole point of the mechanism.
 from __future__ import annotations
 
 # Returned as the ``refusal`` reason when liveness could not be established.
+# One code per source that can fail to answer, because the recovery differs
+# (network/auth vs. a local directory we cannot read).
 REFUSE_SERVER_UNREADABLE = "server-unreadable"
+REFUSE_BRIDGE_UNREADABLE = "bridge-unreadable"
 
 
 def resolve_live_ids(
@@ -41,6 +44,7 @@ def resolve_live_ids(
     current_sid: str = "",
     session_json_sid: str = "",
     bridge_sids=(),
+    bridge_error: str = "",
     server_sids=None,
     server_error: str = "",
     cloud_mode: bool = False,
@@ -60,15 +64,34 @@ def resolve_live_ids(
       cross-worktree, so it covers the sessions the two local sources cannot
       see.
 
-    In cloud mode the server is not optional: a project whose notes live in the
-    cloud has sessions this machine cannot enumerate. ``server_error`` (or a
-    ``None`` ``server_sids``) therefore yields ``refusal`` =
-    :data:`REFUSE_SERVER_UNREADABLE` and an empty set, so the caller stops.
-    Local-mode projects have no such sessions, and the local sources are
-    complete by construction.
+    **Every source that was supposed to answer and could not makes this
+    refuse.** Which source matters depends on the mode, because the modes have
+    different "can I enumerate every live session?" conditions:
+
+    * Cloud mode — the server is not optional: a project whose notes live in
+      the cloud has sessions this machine cannot see at all (another machine,
+      a sibling worktree). ``server_error`` (or a ``None`` ``server_sids``)
+      yields :data:`REFUSE_SERVER_UNREADABLE`.
+    * Local mode — the bridge claims are not optional: they are the only place
+      *other* live sessions in this working directory are recorded.
+      ``current_sid`` and ``session_json_sid`` only ever describe one session
+      each, so a failed claim read means other live sessions are invisible, not
+      absent. That yields :data:`REFUSE_BRIDGE_UNREADABLE`.
+
+    An earlier version gated only the server. The bridge read sat in a bare
+    ``except: pass`` whose comment said "the cloud-mode server check below
+    still has to pass for us to proceed" — true in cloud mode, and *nothing*
+    gated it in local mode, where it is the only source. So the module's
+    headline promise ("refuses rather than guesses") held in one mode and
+    failed open in the other, which is worse than not promising it: a reader
+    stops checking. An independent maintainability review found this
+    (2026-10-26). The contract is now one rule for every source: a source that
+    was asked and did not answer stops the operation.
     """
     if cloud_mode and (server_error or server_sids is None):
         return set(), REFUSE_SERVER_UNREADABLE
+    if not cloud_mode and bridge_error:
+        return set(), REFUSE_BRIDGE_UNREADABLE
 
     live = set()
     for sid in (current_sid, session_json_sid):
