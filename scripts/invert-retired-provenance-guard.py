@@ -178,26 +178,87 @@ def claude_reverts_to_the_fixed_message(src: str) -> str:
     入れる。初版のテストは「代入文がソースに在るか」しか見ておらず、これを
     「Claude 側は追従不要」と誤って裏付けていた。
     """
-    old = ('            f" — {_downgrade_advice(ev.get(\'_downgrade_reason\', \'\'))}]"')
+    old = ('            f" — {_downgrade_advice(ev.get(\'_downgrade_reason\', \'\'), '
+           'str(ev.get(\'channel\') or \'\'))}]"')
     new = ('            " — channel not in bus_auto_execute_channels]"')
     assert old in src, "anchor not found (claude_reverts_to_the_fixed_message)"
     return src.replace(old, new, 1)
 
 
-def claude_swaps_retired_and_provenance_advice(src: str) -> str:
-    """Claude 側の案内文だけを逆転させる (条件は触らない)。
+def swap_the_retired_and_provenance_advice(src: str) -> str:
+    """案内文だけを逆転させる (判定条件は触らない)。
 
-    「署名が無い」に対して「古い opt-in を外せ」、引退に対して「直せません」と
-    案内する状態。分岐の形は残るので、分岐の存在を見るだけでは捕まえられない。
+    「証拠の封筒が無い」に対して「古い opt-in を外せ」、引退に対して channel ごとの
+    要求を案内する状態。分岐の形は残るので、分岐の存在をソースで見るだけでは
+    捕まえられない。
+
+    文言の所有者は ``lib/bus_delivery.downgrade_advice`` 1 つなので、壊す先も
+    そこ 1 箇所 (以前は 2 つの hook に別コピーが在り、片方ずつ壊す必要があった)。
     """
-    prov = ('        return ("channel は allowlist 済だが envelope が T1-system でない "\n'
-            '                "(= 偽装の恐れ)。opt-in し直しても直りません")')
+    prov = '        requirement = PROVENANCE_REQUIREMENTS.get(str(channel or ""))'
     ret = ('        return ("channel は allowlist 済だが、サーバが発行する channel では "\n'
            '                "なくなっています (= 古い opt-in が残った状態)。"\n'
            '                "`beacon bus auto-execute remove --channel <名前>` で外してください")')
     assert prov in src and ret in src, \
-        "anchor not found (claude_swaps_retired_and_provenance_advice)"
-    return src.replace(prov, '@@P@@', 1).replace(ret, prov, 1).replace('@@P@@', ret, 1)
+        "anchor not found (swap_the_retired_and_provenance_advice)"
+    # retired の分岐が、証拠欠落のほうの案内 (channel ごと) を返すようにする
+    return src.replace(
+        ret,
+        '        return downgrade_advice(DOWNGRADE_NON_SYSTEM_ENVELOPE, channel)', 1)
+
+
+def advice_ignores_the_channel(src: str) -> str:
+    """証拠欠落の案内が channel を見ず、trek の世界観の固定文を常に返す形。
+
+    **これが #812 レビューが high で挙げた状態そのもの**: operation-trigger にも
+    「operator には直せない」と返し、``beacon operation approve <op-id>`` という
+    実在する回復手段を隠す。
+    """
+    anchor = ('        requirement = PROVENANCE_REQUIREMENTS.get(str(channel or ""))')
+    assert anchor in src, "anchor not found (advice_ignores_the_channel)"
+    return src.replace(anchor, '        return _TREK_ADVICE\n' + anchor, 1)
+
+
+def drop_the_advice_from_the_requirement(src: str) -> str:
+    """ゲートした channel が回復手段を宣言していない状態に戻す。
+
+    述語だけが在り説明が空 = 「ゲートしているのに operator が打つ手が無い」形。
+    構造テストがこれを赤にするはずで、しなければ宣言を束ねた意味が無い。
+    """
+    anchor = '_OPERATION_ADVICE = ('
+    assert anchor in src, "anchor not found (drop_the_advice_from_the_requirement)"
+    return src.replace(anchor, '_OPERATION_ADVICE = ""\n_UNUSED_ADVICE = (', 1)
+
+
+# --- bin/beacon-bus-inbox-hook.py への壊し方 --------------------------------
+
+def claude_keeps_its_own_copy_of_the_advice(src: str) -> str:
+    """Claude 側が共有層を呼ばず、自分の固定文を持つ形に戻す。
+
+    欠陥が 2 箇所に在った原因そのもの。両 hook が同じ案内を返すことを測る
+    パリティテストが赤くなるはず。
+    """
+    anchor = '    return bd.downgrade_advice(reason, channel)'
+    assert anchor in src, "anchor not found (claude_keeps_its_own_copy_of_the_advice)"
+    return src.replace(
+        anchor,
+        '    if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:\n'
+        '        return ("channel は allowlist 済だが envelope が T1-system でない "\n'
+        '                "(= 偽装の恐れ)。opt-in し直しても直りません")\n'
+        '    return bd.downgrade_advice(reason, channel)', 1)
+
+
+# --- scripts/codex-inbox-hook.py への追加の壊し方 ---------------------------
+
+def codex_folds_all_channels_into_one_line(src: str) -> str:
+    """Codex 側が channel ごとの案内をやめ、1 つの固定文に畳む形。
+
+    理由ごとの件数で束ねる通知なので、以前はここで必ず片方が誤案内になっていた。
+    混在バッチのテストが赤くなるはず。
+    """
+    anchor = '        if bd is not None and downgraded_provenance_channels:'
+    assert anchor in src, "anchor not found (codex_folds_all_channels_into_one_line)"
+    return src.replace(anchor, '        if False:', 1)
 
 
 # --- ms-185 e-7078: ゲートの張り替えを守る反転 -------------------------------
@@ -211,10 +272,13 @@ def accept_the_retired_proof_again(src: str) -> str:
     **これが張り替え前の状態そのもの** = 本番が一度も満たせない証拠を要求し、
     試験だけが合成した形で緑になる偽の緑。
     """
-    anchor = "    OPERATION_TRIGGER_CHANNEL: has_approved_operation_envelope,"
+    anchor = ("    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n"
+              "        has_approved_operation_envelope, _OPERATION_ADVICE),")
     assert anchor in src, "anchor not found (accept_the_retired_proof_again)"
     return src.replace(
-        anchor, "    OPERATION_TRIGGER_CHANNEL: has_server_minted_envelope,", 1)
+        anchor,
+        "    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n"
+        "        has_server_minted_envelope, _OPERATION_ADVICE),", 1)
 
 
 def drop_the_scope_match(src: str) -> str:
@@ -316,9 +380,28 @@ CASES = [
     ("Claude 側を固定文言に戻す (AX の misleading)", CLAUDE,
      claude_reverts_to_the_fixed_message,
      CONSUMER_TEST + "::TestClaudeHookRendersPerReasonAdvice"),
-    ("Claude 側の案内文だけを逆転させる", CLAUDE,
-     claude_swaps_retired_and_provenance_advice,
+    # --- ms-185 / #812 レビュー: 案内が channel ごとに導かれることを守る ---
+    # 壊すのは retired の案内なので、赤くなるべきは 4 理由を描画で見るクラス
+    # (TestProvenanceAdviceIsChannelAware は証拠欠落の理由だけを見ているので、
+    #  ここを指すと「壊したのに緑」になる = 最初それで MISS を踏んだ)。
+    ("案内文だけを逆転させる (判定条件は触らない)", BD,
+     swap_the_retired_and_provenance_advice,
      CONSUMER_TEST + "::TestClaudeHookRendersPerReasonAdvice"),
+    ("証拠欠落の案内が channel を見ない (= high の状態そのもの)", BD,
+     advice_ignores_the_channel,
+     CONSUMER_TEST + "::TestProvenanceAdviceIsChannelAware::"
+     "test_operation_trigger_names_the_approval_recovery"),
+    ("ゲートした channel が回復手段を宣言しない", BD,
+     drop_the_advice_from_the_requirement,
+     CONSUMER_TEST + "::TestProvenanceAdviceIsChannelAware::"
+     "test_every_gated_channel_declares_a_recovery"),
+    ("Claude 側が共有層を呼ばず自分の固定文を持つ", CLAUDE,
+     claude_keeps_its_own_copy_of_the_advice,
+     CONSUMER_TEST + "::TestBothHooksShareOneAdviceSource"),
+    ("Codex 側が channel ごとの案内を 1 つに畳む", CODEX,
+     codex_folds_all_channels_into_one_line,
+     "tests/test_codex_inbox_autonomy_e5803.py::"
+     "test_mixed_provenance_batch_names_each_channels_own_recovery"),
 ]
 
 

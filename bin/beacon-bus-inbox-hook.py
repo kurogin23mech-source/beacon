@@ -686,45 +686,36 @@ def _format_pending_approval_block(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _downgrade_advice(reason: str) -> str:
-    """理由ごとの「何が起きて、どう直すか」の 1 行 (ms-185 e-7077 / AX レビュー)。
+def _downgrade_advice(reason: str, channel: str = "") -> str:
+    """理由 **と channel** ごとの「何が起きて、どう直すか」の 1 行。
 
-    **直した穴**: 以前はここが無く、``_format_event`` が
-    「— channel not in bus_auto_execute_channels」という**固定文**を出していた。
-    降格の理由は 3 つあり、``retired-provenance-channel`` と
-    ``non-system-envelope`` は **どちらも「channel は許可リストに在る」ときにしか
-    起きない**。つまり固定文は事実と正反対で、読んだ AI は「channel を許可リストに
-    足せ」という**真因と逆の回復ループ**に入る。
+    実体は ``lib/bus_delivery.downgrade_advice`` に 1 つだけ置いてある。この関数は
+    そこへの薄い委譲 + lib が読めない環境の fallback だけを担う。
 
-    理由ごとに operator の打つ手が違うので、文言も分ける:
+    **なぜ channel を取るか (ms-185 / #812 の独立レビュー 2 体が一致で指摘)**:
+    降格理由タグ ``non-system-envelope`` は、#812 が証拠の要求を channel ごとに
+    張り替えた後、**2 つの別の世界**を指すようになった。``operation-trigger`` は
+    「人間がその op_id を承認した封筒」を要求し、満たしていなければ
+    ``beacon operation approve <op-id>`` で**直せる**。``trek-*`` はサーバ署名を
+    要求し、operator には直せない。タグだけで分岐していた以前の実装は後者の文言
+    (「偽装の恐れ」「opt-in し直しても直りません」) を前者にも返し、**実在する
+    回復手段を隠して「直らない」と断定**していた。
 
-      * 理由タグ空 = 許可リストに無い → 許可する (`bus auto-execute add`)
-      * ``non-system-envelope`` → 許可リストには在るが署名が無い。operator には
-        直せない (サーバが発行していない = 偽装の恐れ)
-      * ``retired-provenance-channel`` → 許可リストに在るが、その channel は
-        サーバ発行ではなくなった。古い許可を外す (`bus auto-execute remove`)
-      * 未知のタグ → bus_delivery に理由が足されてこの関数が追従していない。
-        **黙って許可リスト漏れに畳まない** (畳むと誤案内になる)
+    **なぜ説明文をこの hook に持たせないか**: 同じ説明文が Codex 側の受信 hook
+    (``scripts/codex-inbox-hook.py``) にも別コピーで在り、#812 の張り替えに
+    どちらも追従していなかった。レビューは Claude 側しか見ておらず、片方だけ直す
+    形になりかけた。「何を証拠として要求したか」を宣言している
+    ``PROVENANCE_REQUIREMENTS`` と同じ場所に説明を置けば、2 度と割れない。
     """
-    if not reason:
-        return "channel not in bus_auto_execute_channels (= 人間が許可する前)"
-    # ``bd`` はこの hook では遅延 import で、**None になりうる** (lib が読めない
-    # 環境では fail-closed に倒す設計)。モジュールスコープに ``bd`` は無いので、
-    # ここで取り直す。None のときは理由タグを言い換えずそのまま出す — 知らない
-    # 定数名で分岐したふりをするより、生のタグを見せる方が誤診を招かない。
     bd = _import_bus_delivery()
     if bd is None:
+        # lib が読めない環境 (fail-closed 側に倒す設計)。知らない定数名で分岐した
+        # ふりをするより、生のタグを見せる方が誤診を招かない。
+        if not reason:
+            return "channel not in bus_auto_execute_channels (= 人間が許可する前)"
         return (f"理由タグ '{reason}' (bus_delivery を読めないため説明を "
                 "解決できません)")
-    if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
-        return ("channel は allowlist 済だが envelope が T1-system でない "
-                "(= 偽装の恐れ)。opt-in し直しても直りません")
-    if reason == getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None):
-        return ("channel は allowlist 済だが、サーバが発行する channel では "
-                "なくなっています (= 古い opt-in が残った状態)。"
-                "`beacon bus auto-execute remove --channel <名前>` で外してください")
-    return (f"理由タグ '{reason}' はこの hook が知りません "
-            "(= bus_delivery に理由が足され、hook が追従していない)")
+    return bd.downgrade_advice(reason, channel)
 
 
 def _format_event(ev: dict) -> str:
@@ -748,7 +739,7 @@ def _format_event(ev: dict) -> str:
     if downgraded_from:
         delivery_line += (
             f"  [auto-execute downgraded from '{downgraded_from}'"
-            f" — {_downgrade_advice(ev.get('_downgrade_reason', ''))}]"
+            f" — {_downgrade_advice(ev.get('_downgrade_reason', ''), str(ev.get('channel') or ''))}]"
         )
     return (
         f"{delivery_line}\n"

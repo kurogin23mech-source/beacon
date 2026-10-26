@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 # Delivery classes (mirror server-side BusEventCreate + bus.mjs).
 AUTO_EXECUTE = "auto-execute"
@@ -219,12 +220,65 @@ def has_server_minted_envelope(ev: dict) -> bool:
 # The proof differs per channel because the authorizing human differs:
 #   operation-trigger → the person who ran ``beacon operation approve`` for THIS op
 #   trek-*            → the person who activated the Trek (the server signs for them)
+class ProvenanceRequirement(NamedTuple):
+    """What a gated channel demands, **and** what the operator can do about it.
+
+    The two halves are one declaration on purpose (ms-185, #812 の独立レビュー
+    2 体が一致で指摘した欠陥の構造修正)。
+
+    **直した穴**: 以前は述語だけがこの表に在り、「降格をどう説明するか」は
+    降格理由タグ 1 つ (``non-system-envelope``) から 2 つの hook が各自の固定文
+    へ分岐していた。#812 が ``operation-trigger`` の証拠を「サーバ署名」から
+    「人間がその op_id を承認した封筒」へ張り替えた結果、同じタグが**別の世界**
+    を指すようになったのに、文言は trek の世界観のまま残った:
+
+        channel は allowlist 済だが envelope が T1-system でない
+        (= 偽装の恐れ)。opt-in し直しても直りません
+
+    ``operation-trigger`` の真因は「この op_id の承認が無い / scope 不一致」で、
+    ``beacon operation approve <op-id>`` という**回復手段が実在する**。それを
+    「直りません」と断定して隠していた。#812 自身が引用する e-7077 の教訓
+    (固定文言が真因と逆の回復ループを誘う) と同型の退行を、同じファイルの中で
+    起こしていたことになる。
+
+    述語と説明を同じ 1 宣言に束ねると、「ゲートしているのに満たせる述語が無い」
+    と「ゲートしているのに operator への回復手段が無い」が**どちらも構造的に
+    作れない**。片方だけ足した状態は
+    ``test_gated_channels_match_their_requirements`` が赤で止める。
+    """
+
+    predicate: Callable[[dict], bool]
+    advice: str
+
+
+_OPERATION_ADVICE = (
+    "channel は許可リスト済だが、この op_id を人間が承認した封筒 "
+    f"(tier={OPERATION_ENVELOPE_TIER}) が付いていない / 承認の scope が "
+    "この op_id を指していません。"
+    "`beacon operation approve <op-id>` で承認すると直ります"
+)
+
+# trek-* の証拠はサーバ署名で、発行者は Trek スケジューラだけ。operator の手で
+# 用意できる封筒ではないので、回復手段は「opt-in のやり直し」ではない。この一群は
+# Trek の bus 面の削除 (e-7080 / e-7070) と一緒に退役する。
+_TREK_ADVICE = (
+    "channel は許可リスト済だが、サーバ署名 "
+    f"(tier={T1_SYSTEM_TIER}) の封筒が付いていません。これは Trek の "
+    "スケジューラだけが発行するもので、operator が用意して直せるものでは "
+    "ありません (許可リストに入れ直しても直りません)"
+)
+
 PROVENANCE_REQUIREMENTS = {
-    OPERATION_TRIGGER_CHANNEL: has_approved_operation_envelope,
-    "trek-trigger": has_server_minted_envelope,
-    "trek-progress-check": has_server_minted_envelope,
-    "trek-task-review": has_server_minted_envelope,
-    "trek-leader-digest": has_server_minted_envelope,
+    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(
+        has_approved_operation_envelope, _OPERATION_ADVICE),
+    "trek-trigger": ProvenanceRequirement(
+        has_server_minted_envelope, _TREK_ADVICE),
+    "trek-progress-check": ProvenanceRequirement(
+        has_server_minted_envelope, _TREK_ADVICE),
+    "trek-task-review": ProvenanceRequirement(
+        has_server_minted_envelope, _TREK_ADVICE),
+    "trek-leader-digest": ProvenanceRequirement(
+        has_server_minted_envelope, _TREK_ADVICE),
 }
 
 
@@ -252,7 +306,50 @@ def has_required_provenance(ev: dict) -> bool:
     requirement = PROVENANCE_REQUIREMENTS.get(str(ev.get("channel") or ""))
     if requirement is None:
         return False
-    return requirement(ev)
+    return requirement.predicate(ev)
+
+
+def downgrade_advice(reason: str, channel: str = "") -> str:
+    """降格 1 件につき「何が起きて、どう直すか」の 1 句を返す唯一の場所。
+
+    両方の受信 hook (Claude = ``bin/beacon-bus-inbox-hook.py`` / Codex =
+    ``scripts/codex-inbox-hook.py``) がこれを呼ぶ。以前は**同じ説明文が両 hook に
+    別コピーで**在り、#812 が証拠の要求を channel ごとに張り替えた後も片方ずつ
+    直す形だった (独立レビュー 2 体が Claude 側だけを指摘し、Codex 側は
+    誰も見ていなかった)。説明は「何を証拠として要求したか」から導かれるべきもの
+    なので、要求を宣言している ``PROVENANCE_REQUIREMENTS`` と同じ場所に置く。
+
+    ``channel`` を受け取るのが要点。``non-system-envelope`` という理由タグ 1 つが
+    ``operation-trigger`` (人間の承認が要る = 回復手段が在る) と ``trek-*``
+    (サーバ署名が要る = operator には直せない) の**両方**を指すので、タグだけで
+    分岐すると必ず片方に誤った案内を出す。
+
+    提示の仕方 (1 件ずつ inline に添えるか、件数つきの塊にまとめるか) は hook
+    ごとに違うので、ここは**原因と回復手段の 1 句だけ**を返し、前後の飾りは
+    呼び出し側に委ねる。
+    """
+    if not reason:
+        # 文言は従来のまま。既存の読み手 (人間 / AI) と
+        # ``test_allowlist_miss_output_keeps_the_original_wording`` が
+        # この literal を見ている。
+        return "channel not in bus_auto_execute_channels (= 人間が許可する前)"
+    if reason == DOWNGRADE_RETIRED_CHANNEL:
+        return ("channel は allowlist 済だが、サーバが発行する channel では "
+                "なくなっています (= 古い opt-in が残った状態)。"
+                "`beacon bus auto-execute remove --channel <名前>` で外してください")
+    if reason == DOWNGRADE_NON_SYSTEM_ENVELOPE:
+        requirement = PROVENANCE_REQUIREMENTS.get(str(channel or ""))
+        if requirement is None:
+            # ゲートした channel が要求を宣言していない、あるいは呼び出し側が
+            # channel を渡さなかった。**回復手段を推測で名乗らない** — 知らない
+            # のに「直せます」「直りません」と言う方が、言わないより害が大きい
+            # (e-7077 の教訓そのもの)。
+            return (f"channel は許可リスト済だが、要求された証拠の封筒が付いて "
+                    f"いません (channel='{channel or '?'}' の要求が "
+                    "PROVENANCE_REQUIREMENTS に無いため、回復手段を提示できません)")
+        return requirement.advice
+    return (f"理由タグ '{reason}' はこの受信 hook が知りません "
+            "(= bus_delivery に理由が足され、hook が追従していない)")
 
 
 def read_auto_execute_channels(root: "str | Path") -> list[str]:
@@ -385,6 +482,8 @@ __all__ = [
     "DOWNGRADE_NON_SYSTEM_ENVELOPE",
     "OPERATION_ENVELOPE_TIER",
     "PROVENANCE_REQUIREMENTS",
+    "ProvenanceRequirement",
+    "downgrade_advice",
     "has_server_minted_envelope",
     "sanitize_id",
     "has_approved_operation_envelope",

@@ -73,6 +73,25 @@ def _op_trigger_event(*, envelope=None) -> dict:
     return e
 
 
+def _trek_trigger_event(*, envelope=None) -> dict:
+    """``trek-trigger`` の 1 件。要求される証拠はサーバ署名 (T1-system)。
+
+    operation-trigger と**同じ理由タグ**で降格するが、回復手段は違う
+    (operator には直せない)。混在時に片方が誤案内にならないかを測るのに使う。
+    """
+    e = {
+        "event_id": "1787000020000-TREKtrig",
+        "channel": "trek-trigger",
+        "delivery": "auto-execute",
+        "sender_session_id": "other-sid",
+        "created_at": "2026-08-29T07:05:00.000000Z",
+        "payload": {"recipient_session_id": CODEX_SID, "trek_id": "trek-1"},
+    }
+    if envelope is not None:
+        e["envelope"] = envelope
+    return e
+
+
 def test_opted_in_operation_trigger_emits_imperative(tmp_path):
     cwd = _setup(tmp_path, auto_execute_channels=["operation-trigger"])
     _seed(cwd, _op_trigger_event(envelope=_OP_ENVELOPE))
@@ -94,17 +113,43 @@ def test_non_opted_in_auto_execute_is_downgraded_with_allowlist_reason(tmp_path)
     assert "T1-system" not in ctx  # e-5803 review AX-1: not a provenance failure
 
 
-def test_opted_in_but_no_system_envelope_downgraded_with_provenance_reason(tmp_path):
-    # In the allowlist, but the envelope is not T1-system → provenance downgrade.
-    # e-5803 review (AX-1): the notice must say envelope/provenance, NOT tell the
-    # AI to opt-in the channel (it already is opted in).
+def test_opted_in_but_no_approved_envelope_names_the_operation_recovery(tmp_path):
+    """許可リスト済 + 承認の封筒が無い → 降格し、**その channel の**直し方を出す。
+
+    ms-185 / #812 の独立レビュー 2 体が一致で指摘した欠陥の回帰テスト。
+
+    この試験は以前 ``assert "T1-system" in ctx`` を置いていた。#812 が
+    ``operation-trigger`` の証拠を「サーバ署名 (T1-system)」から「人間がその
+    op_id を承認した封筒 (T2)」へ張り替えた後は、**本番に存在しない語彙**を
+    期待する偽の緑になっていた。しかも実装の文言も trek の世界観のままで、
+    ``beacon operation approve <op-id>`` という**実在する回復手段を隠して
+    「直りません」と断定**していた。
+
+    なので測るべきは「T1-system と書いてあるか」ではなく:
+      1. 回復手段 (``beacon operation approve``) を名指しているか
+      2. operator には直せないという趣旨の trek 側の文言を出していないか
+      3. 許可リスト漏れ (= 別の理由) と混同していないか
+    """
     cwd = _setup(tmp_path, auto_execute_channels=["operation-trigger"])
     _seed(cwd, _op_trigger_event(envelope=None))
     ctx = _run(cwd)
     assert "AUTONOMOUS ACTION" not in ctx
     assert "安全側降格" in ctx
-    assert "T1-system" in ctx  # provenance-specific wording
+    assert "beacon operation approve" in ctx, (
+        "operation-trigger の降格で、実在する回復手段 "
+        "`beacon operation approve <op-id>` を案内していません。"
+    )
+    assert "T1-system" not in ctx, (
+        "operation-trigger が要求するのはサーバ署名 (T1-system) ではなく "
+        "人間が承認した封筒です。T1-system を持ち出すのは #812 以前の語彙。"
+    )
+    assert "直りません" not in ctx, (
+        "回復手段が実在するのに「直りません」と断定しています "
+        "(= 真因と逆の案内、e-7077 と同型の退行)。"
+    )
     assert "opt-in 前" not in ctx
+    # channel を名指していること (= どの channel の話か読み手が分かる)
+    assert "channel=operation-trigger" in ctx
 
 
 def test_unprocessed_stop_surfaces_a_degraded_warning(tmp_path):
@@ -141,3 +186,39 @@ def test_plain_dm_has_no_imperative_or_downgrade(tmp_path):
     assert "hello" in ctx
     assert "AUTONOMOUS ACTION" not in ctx
     assert "安全側降格" not in ctx
+
+
+def test_mixed_provenance_batch_names_each_channels_own_recovery(tmp_path):
+    """同じ理由で降格した 2 つの channel に、**それぞれの**直し方を出す。
+
+    ms-185 / #812 レビュー。Codex 側の通知は理由ごとの **件数** で束ねる形なので、
+    以前は「署名欠落 N 件」に対して trek の世界観の固定文を 1 つ出すだけだった。
+    operation-trigger と trek-trigger が同じ受信に混ざると、**片方は必ず誤案内**
+    になる (operation 側には回復手段が在るのに「直りません」と言う)。
+
+    この状況は以前の実装では表現そのものが不可能だった = 回帰テストが置けない形
+    だったので、channel を集めて 1 行ずつ案内する形に変えた。
+    """
+    cwd = _setup(tmp_path,
+                 auto_execute_channels=["operation-trigger", "trek-trigger"])
+    _seed(cwd, _op_trigger_event(envelope=None))          # 承認の封筒が無い
+    _seed(cwd, _trek_trigger_event(envelope=None))        # サーバ署名が無い
+    ctx = _run(cwd)
+
+    assert "安全側降格" in ctx
+    # 2 件とも降格している
+    assert "2 件" in ctx, "2 件の降格を 1 つの塊で数えていません。"
+    # それぞれの channel が名指しされ、その channel の回復手段が出ている
+    assert "channel=operation-trigger" in ctx
+    assert "channel=trek-trigger" in ctx
+    assert "beacon operation approve" in ctx, (
+        "operation-trigger 側の回復手段が出ていません = 片方が誤案内。"
+    )
+    assert "T1-system" in ctx, (
+        "trek-trigger 側がサーバ署名を要求している説明が出ていません。"
+    )
+    # 案内は 2 行に分かれている (= 1 つの固定文に畳んでいない)
+    advice_lines = [ln for ln in ctx.splitlines() if ln.strip().startswith("- channel=")]
+    assert len(advice_lines) == 2, (
+        f"channel ごとの案内行が 2 行ありません: {advice_lines}"
+    )

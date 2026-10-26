@@ -229,3 +229,95 @@ class TestReasonTagsAreAllDistinct:
             "理由タグが衝突しています: " + repr(tags)
             + " — 消費側が理由を区別できず、誤った直し方を案内します。"
         )
+
+
+# ---------------------------------------------------------------------------
+# ms-185 / #812 レビュー: 案内は **channel ごと** に導かれる
+# ---------------------------------------------------------------------------
+
+class TestProvenanceAdviceIsChannelAware:
+    """``non-system-envelope`` 1 つのタグが 2 つの別世界を指すことを測る。
+
+    #812 が ``operation-trigger`` の証拠を「サーバ署名 (T1-system)」から
+    「人間がその op_id を承認した封筒 (T2)」へ張り替えた。それ以降、同じ理由タグが
+    **回復手段が在る世界** (operation-trigger) と **operator には直せない世界**
+    (trek-*) の両方を指す。タグだけで分岐していた以前の実装は後者の文言を前者にも
+    返し、``beacon operation approve <op-id>`` という実在する回復手段を隠して
+    「直りません」と断定していた (独立レビュー 2 体が一致で high)。
+
+    ここは**返ってくる文字列そのもの**を見る。「分岐が在るか」をソースで見ると、
+    分岐の形を残したまま中身を入れ替える変異を捕まえられない。
+    """
+
+    def test_operation_trigger_names_the_approval_recovery(self):
+        out = bd.downgrade_advice(PROVENANCE, bd.OPERATION_TRIGGER_CHANNEL)
+        assert "beacon operation approve" in out, (
+            "operation-trigger の降格で、実在する回復手段を名指していません。"
+        )
+        assert "T1-system" not in out, (
+            "operation-trigger はサーバ署名を要求しません (#812 以前の語彙)。"
+        )
+        assert "直りません" not in out, (
+            "回復手段が実在するのに「直らない」と断定しています。"
+        )
+
+    def test_trek_channel_says_the_operator_cannot_fix_it(self):
+        out = bd.downgrade_advice(PROVENANCE, "trek-trigger")
+        assert "T1-system" in out, "trek-* が要求するサーバ署名を説明していません。"
+        assert "直りません" in out, (
+            "trek-* の証拠は Trek スケジューラだけが発行するので、operator には "
+            "直せない旨を伝える必要があります。"
+        )
+        assert "operation approve" not in out, (
+            "trek-* に operation の回復手段を案内しています = 誤案内。"
+        )
+
+    def test_the_two_families_get_different_advice(self):
+        assert (bd.downgrade_advice(PROVENANCE, bd.OPERATION_TRIGGER_CHANNEL)
+                != bd.downgrade_advice(PROVENANCE, "trek-trigger")), (
+            "同じ理由タグでも channel で要求が違うのに、同じ案内を返しています。"
+        )
+
+    def test_every_gated_channel_declares_a_recovery(self):
+        """ゲートした channel は、述語と**回復手段の説明**の両方を必ず持つ。
+
+        片方だけ在る状態 (= 以前そのものだった形) を構造的に作れなくする。
+        """
+        for channel, requirement in bd.PROVENANCE_REQUIREMENTS.items():
+            assert callable(requirement.predicate), (
+                f"{channel} の述語が呼び出せません")
+            assert requirement.advice and requirement.advice.strip(), (
+                f"{channel} は証拠を要求しているのに、operator への回復手段を "
+                "宣言していません")
+            assert bd.downgrade_advice(PROVENANCE, channel) == requirement.advice
+
+    def test_undeclared_channel_does_not_claim_a_recovery(self):
+        """要求を宣言していない channel に、回復手段を推測で名乗らない。
+
+        知らないのに「直せます」「直りません」と言う方が、言わないより害が大きい
+        (e-7077 の教訓そのもの)。
+        """
+        out = bd.downgrade_advice(PROVENANCE, "nobody-declares-me")
+        assert "operation approve" not in out
+        assert "auto-execute remove" not in out
+        assert "nobody-declares-me" in out, "どの channel の話か示していません。"
+
+
+class TestBothHooksShareOneAdviceSource:
+    """2 つの受信 hook が **同じ (理由, channel) に同じ案内** を返す。
+
+    欠陥が 2 箇所に在ったのは、同じ説明文が Claude 側と Codex 側へ別コピーで
+    置かれていたから。レビューは Claude 側しか見ておらず、Codex 側は誰も見て
+    いなかった。説明の所有者を ``lib/bus_delivery.downgrade_advice`` 1 つに
+    畳んだので、このテストは**どちらかに固定文を書き戻す変異**で赤くなる。
+    """
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("reason", [ALLOWLIST_MISS, PROVENANCE, RETIRED, UNKNOWN])
+    def test_claude_hook_delegates_instead_of_keeping_a_copy(
+            self, claude, reason, channel):
+        assert claude._downgrade_advice(reason, channel) == \
+            bd.downgrade_advice(reason, channel), (
+            "Claude 側の受信 hook が独自の説明文を持っています "
+            "(= 共有層と割れる形に戻っている)。"
+        )

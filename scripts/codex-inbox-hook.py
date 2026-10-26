@@ -350,6 +350,11 @@ def main() -> int:
     downgraded_retired = 0
     downgraded_other = 0
     downgraded_other_reasons: set = set()
+    # ms-185 / #812 レビュー: 署名欠落の降格は **channel ごとに回復手段が違う**
+    # (operation-trigger = 人間の承認で直せる / trek-* = operator には直せない)。
+    # 件数だけ数えていた以前の形では、どちらの案内を出すか決められず、trek の
+    # 世界観の固定文を全件に出していた。だから channel を集める。
+    downgraded_provenance_channels: set = set()
     gate_unavailable_autoexec = 0
     if bd is not None:
         allowlist = bd.read_auto_execute_channels(cwd)
@@ -362,6 +367,9 @@ def main() -> int:
                 # ここで inline に分岐していた頃は、配線の逆転をテストで捕まえ
                 # られなかった (ms-185 e-7077 / 保守性レビュー)。
                 downgrade_reasons.append(reason)
+                if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
+                    downgraded_provenance_channels.add(
+                        str(ev.get("channel") or ""))
             elif (delivery == bd.AUTO_EXECUTE
                     and str(ev.get("channel") or "")
                     == bd.OPERATION_TRIGGER_CHANNEL):
@@ -427,12 +435,23 @@ def main() -> int:
             "出ています。自動実行はしないでください。\n"
         )
     if downgraded_provenance:
+        # channel ごとに回復手段が違うので、1 行ずつ **その channel の** 案内を
+        # 出す。文言は lib/bus_delivery.downgrade_advice が唯一の所有者で、
+        # Claude 側の受信 hook も同じものを呼ぶ (= 2 度と割れない)。
+        if bd is not None and downgraded_provenance_channels:
+            advice_lines = "".join(
+                f"\n    - channel={ch or '?'}: "
+                f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"
+                for ch in sorted(downgraded_provenance_channels)
+            )
+        else:
+            advice_lines = ("\n    - 要求された証拠の封筒が付いていません "
+                            "(channel を特定できないため回復手段を提示できません)")
         parts.append(
             f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
-            f"{downgraded_provenance} 件 — channel は allowlist 済だが、届いた "
-            "envelope が T1-system でない (= project editor による偽装の恐れ) ため。"
-            "channel を opt-in し直しても直りません。上の一覧に通常イベントとして "
-            "出ています。自動実行はしないでください。\n"
+            f"{downgraded_provenance} 件 — channel は allowlist 済だが、"
+            f"要求された証拠の封筒が付いていないため。{advice_lines}\n"
+            "  上の一覧に通常イベントとして出ています。自動実行はしないでください。\n"
         )
     if downgraded_retired:
         parts.append(
