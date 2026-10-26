@@ -163,7 +163,13 @@ def test_help_only_still_allows_read_only_verb(project):
     r = subprocess.run(
         [sys.executable, str(COMMANDS_PY), "note_list"],
         cwd=str(cwd), capture_output=True, text=True,
-        env={**os.environ, "BEACON_HELP_ONLY": "1"},
+        # ms-178 e-7150: `note list` は既定で直近 N 日に絞る。この試験の主題は
+        # HELP_ONLY のもとで読み取り専用 verb が描画されることで、土台のメモが
+        # いつ書かれたかは無関係 (窓に落とされると「描画された」ことを本文で
+        # 確かめられなくなる)。窓そのものは
+        # tests/test_note_list_window_e7150.py が見ている。
+        env={**os.environ, "BEACON_HELP_ONLY": "1",
+             "BEACON_NOTE_LIST_ALL": "1"},
     )
     assert r.returncode == 0, r.stdout + r.stderr
     assert "handoff" in r.stdout, r.stdout + r.stderr

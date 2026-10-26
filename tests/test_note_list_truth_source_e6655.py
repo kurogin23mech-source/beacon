@@ -43,6 +43,24 @@ PARENT = {"ts": "2026-09-29T09:00:00+0900", "text": "parent handoff",
           "session_id": "sv-parent"}
 
 
+@pytest.fixture(autouse=True)
+def _read_the_whole_store(monkeypatch):
+    """この module では `note list` の既定の窓を外す (ms-178 / e-7150)。
+
+    `note list` は既定で直近 N 日・最大 M 件に絞る。この module の主題は
+    「local と cloud のどちらを真値として読むか」で、固定した 2026-09-29 の
+    タイムスタンプはその主題と無関係な土台にすぎない。窓に落とされるとマージ
+    自体を検査できなくなるので、ここでは全件を読む。
+
+    **窓を弱めているのではない**: 窓そのものは
+    `tests/test_note_list_window_e7150.py` が、既定が有界であること・省略件数を
+    必ず申告すること・本番が書く形式で実際に落ちることまで見ている。共有の
+    `fake_cloud_config` fixture を書き換えると、窓を意識していない他 module まで
+    黙って opt-out させてしまうので、宣言はこの module に閉じる。
+    """
+    monkeypatch.setenv("BEACON_NOTE_LIST_ALL", "1")
+
+
 @pytest.fixture
 def local_only(tmp_path, monkeypatch):
     """A local-mode project: project.json but NO cloud.json."""

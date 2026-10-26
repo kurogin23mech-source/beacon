@@ -112,6 +112,35 @@ class _BridgeClient:
         return resp.json()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_bus_budget(tmp_path, monkeypatch):
+    """Give this module its own auto-reply budget file.
+
+    `cmd_bus_send` consults the budget to decide whether a send is an armed
+    autonomous one, and resolves the file from the project root. This module
+    never sets a project root, so under `-n 4` it inherited whatever the
+    previous test in the same worker had resolved — reaching
+    `tests/test_bus_budget.py::test_consume_refuses_when_exhausted`'s tmp copy,
+    which is deliberately `{total: 2, used: 2}`. All four scenarios then died
+    with `auto-reply budget exhausted (2/2 used)` before the server was ever
+    called: a failure about a neighbour's fixture, in a module whose subject is
+    cross-user consent.
+
+    Serial runs were green because nothing armed a budget in between, so this
+    looked like "passes alone, fails in CI" — the shape that teaches people to
+    re-run instead of to look.
+
+    The remedy is the one this repo settled on in ms-166 / e-6621: isolation
+    belongs to the module, detection belongs suite-wide. A blanket autouse
+    override of `BEACON_BUS_BUDGET_PATH` was tried once and reverted because it
+    hijacked the path the 14 tests whose SUBJECT is the budget had correctly
+    chosen (see tests/test_bus_budget_isolation_e6621.py). So this sets it here,
+    where the budget is incidental.
+    """
+    monkeypatch.setenv("BEACON_BUS_BUDGET_PATH",
+                       str(tmp_path / "bus-budget.json"))
+
+
 @pytest.fixture
 def send(monkeypatch):
     """Return a helper that runs the real cmd_bus_send against the real server."""

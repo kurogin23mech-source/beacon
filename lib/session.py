@@ -32,6 +32,7 @@ side-effect-free at import — all IO is inside ``update_last_active`` /
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -392,15 +393,88 @@ def _write_machine_cache(machine_id: str, fingerprint: str) -> None:
     os.replace(tmp, p)
 
 
+def _harness_session_anchor() -> int:
+    """Derive a stable positive int from the harness' own session id.
+
+    ``CLAUDE_CODE_SESSION_ID`` is a UUID that Claude Code keeps constant for
+    the whole session and exports to every Bash call and hook. The server's
+    tuple lookup wants an int, so fold the UUID into one. The value is
+    arbitrary but **reproducible**: same session → same anchor → same
+    ``{machine_id}_{anchor}`` lookup key → same session_id.
+
+    Returns 0 when the env var is absent or unusable, meaning "no anchor
+    here" (the caller then reports the identity as unresolvable rather than
+    inventing one).
+    """
+    raw = _env_session_id()
+    if not raw:
+        return 0
+    digest = hashlib.sha256(raw.encode("utf-8")).digest()
+    # 31 bits keeps it inside every signed-32-bit column / JSON int the
+    # server and its two backends accept, and well clear of real pids.
+    folded = int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+    # Real pids are small; offsetting keeps anchors from ever colliding with
+    # a pid-derived tuple for the same machine (a collision would hand two
+    # different sessions the same session_id).
+    return folded | 0x40000000
+
+
 def _resolve_parent_pid() -> int:
-    """Return the terminal pid that anchors this session (ms-62 / e-1510).
+    """Return the stable anchor that identifies this session (ms-62 / e-1510).
 
-    Preferred source: ``BEACON_PARENT_PID`` env set by ``bin/bclaude`` (=
-    the wrapper that started Claude Code). Mac and Windows bootstrap
-    paths both export it so every subprocess inherits the same value.
+    The server resolves ``(project_id, machine_id, parent_pid)`` to a
+    session_id via the lookup key ``{machine_id}_{parent_pid}``
+    (``server/firestore_client.py``). So this value is not merely a hint:
+    **it is the session's identity**, and it must be the same on every call
+    a session makes for its whole life. Anything that varies per call mints
+    a brand-new session per call.
 
-    Fallback: ``os.getppid()`` (= immediate parent). Less stable for
-    server-side tuple lookup but at least non-zero.
+    Sources, in order:
+
+      1. ``BEACON_PARENT_PID`` — exported by ``bin/bclaude`` as the pid of
+         the terminal that started Claude Code. Stable by construction;
+         Mac and Windows bootstrap paths both set it, and every subprocess
+         and hook inherits it.
+      2. :func:`_harness_session_anchor` — folded ``CLAUDE_CODE_SESSION_ID``,
+         for sessions that did NOT come through the bclaude wrapper (the
+         desktop app, a bare ``claude``). Stable per session.
+      3. The POSIX session id (:func:`os.getsid`) — for a caller that came
+         through neither (a human running ``beacon`` in a plain terminal, CI).
+         This is *literally* the thing the first paragraph asks for: the POSIX
+         session is the terminal, it is constant for every process in that
+         terminal, and a new terminal gets a new one. Two plain ``beacon``
+         invocations in one terminal therefore share an identity, which is the
+         correct answer — the terminal is the session. Unavailable on Windows,
+         where it falls through.
+      4. Nothing. Return 0 = "unresolvable", which makes the cloud path
+         refuse to mint rather than mint a session nobody can find again.
+
+    ms-178 / e-7150 — ``os.getppid()`` used to be the last source, described as
+    "less stable ... but at least non-zero". It is worse than that: the
+    immediate parent of a CLI call is the **transient shell** the harness
+    spawns per invocation, so it differs on every call (measured
+    2026-10-25: 35125 → 36292 between two Bash calls in one session). With
+    the server keying on it, each ``beacon`` call presented a new tuple and
+    the server dutifully minted a new session. Measured consequence: five
+    notes written by one session carried five different session_ids, each
+    sid's embedded timestamp equal to that note's own write time. Because
+    ``beacon note clear`` looks for "notes whose session_id == mine", the
+    session could no longer find anything it had written; the only
+    remaining route was ``--include-other-sessions``, which also takes
+    every other session's handoff notes. Notes therefore accumulated
+    unclearable from 2026-10-01 (180 notes / 370,047 chars / 16 distinct
+    ids, 97% of them orphaned).
+
+    A non-zero value that is wrong is more expensive than no value: with 0
+    the operation stops and says so, and ``cmd_note_clear`` already refuses
+    rather than guessing. So the chain ends at 0 — never at a value that merely
+    happens to be non-zero.
+
+    Note the difference between source 3 and the removed ``getppid``: both are
+    pids of an ancestor, but ``getsid`` names the *terminal session* (one value
+    for its whole life) while ``getppid`` names whichever short-lived shell the
+    harness spawned for this one call. The old code reached for the nearest pid;
+    the identity it needed was the outermost one.
     """
     raw = os.environ.get(ENV_PARENT_PID, "").strip()
     if raw:
@@ -410,7 +484,18 @@ def _resolve_parent_pid() -> int:
                 return v
         except ValueError:
             pass
-    return os.getppid()
+    anchor = _harness_session_anchor()
+    if anchor:
+        return anchor
+    getsid = getattr(os, "getsid", None)
+    if getsid is not None:
+        try:
+            sid = getsid(0)
+            if sid > 0:
+                return sid
+        except OSError:
+            pass
+    return 0
 
 
 def _cloud_mint_cache_hit(

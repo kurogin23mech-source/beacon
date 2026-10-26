@@ -543,8 +543,9 @@ Ephemeral memos that survive context compaction within a session — cleared at 
 | Command | Description |
 |---------|-------------|
 | `beacon note "text" [--context "label"]` | Add a session note / セッションメモ追加 |
-| `beacon note list [--json]` | Show session notes; cloud mode merges other sessions' notes (origin=local\|both\|cloud) / メモ一覧 (cloud mode は他セッション分も統合) |
+| `beacon note list [--json] [--all] [--since-days <N>] [--limit <N>]` | Show session notes; cloud mode merges other sessions' notes (origin=local\|both\|cloud). Windowed to the last 3 days and 20 notes by default, with the omitted count always printed — session-start reads this every startup and an unbounded read filled the context window before any work began. `--all` lifts both limits / メモ一覧 (既定は直近 3 日 かつ 最大 20 件、省略時は件数を明示。`--all` で全件) |
 | `beacon note clear --yes [--include-other-sessions]` | Clear THIS session's notes / 自セッション分を削除 (`--yes` 必須、両ストアを退避してから削除。`--include-other-sessions` で全セッション分、誰の分を消すか提示してから) |
+| `beacon note reap --yes [--include-untagged] [--since-min <N>]` | Delete notes of ENDED sessions only — the gap between `clear` (yours alone, which a finished session can no longer run) and `clear --include-other-sessions` (also takes live sessions' handoff notes). Liveness, not age, is the criterion; aborts rather than guessing when the live-session list is unreadable / 終了したセッションのメモだけを削除 (生存セッション分は残す、生存一覧が取れなければ中止) |
 | `beacon note restore` | Restore notes from the backups `note clear` left / 退避からメモを復元 |
 | `beacon note purge-probes [--confirm]` | Remove the junk notes an AX surface audit left behind (dry-run unless `--confirm`) / 点検機構が書いたゴミメモを除去（`--confirm` 無しは下見） |
 
