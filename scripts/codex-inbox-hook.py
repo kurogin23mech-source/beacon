@@ -218,6 +218,35 @@ def _hook_output(context: str, hook_event_name: str = "UserPromptSubmit") -> dic
     }
 
 
+def render_provenance_advice_lines(channels, *, bd) -> str:
+    """証拠欠落で降格した channel 群を、1 行ずつ「その channel の直し方」に畳む。
+
+    **なぜ純粋関数に切り出したか (ms-185 / #812 独立 AX レビュー, medium)**:
+    文言の所有者を ``lib/bus_delivery.downgrade_advice`` 1 つに畳んだはずなのに、
+    それを機械で守っていたのは Claude 側だけだった (``TestBothHooksShareOneAdviceSource``
+    が Claude の ``_downgrade_advice`` を共有層と等値比較している)。Codex 側は
+    ``main()`` の中に inline で在り、テストは出力の部分一致しか見ていなかったので、
+    **今日の文言を凍結したコピーを埋め込んでも緑のまま**だった — 独立 judge が実測で
+    示した。つまり「2 箇所に別コピーが在った」という直したはずの欠陥が、テスト層に
+    そのまま残っていた。
+
+    純粋関数にすると、Codex 側が返す文字列を channel × 理由で共有層と**厳密に**
+    突き合わせられる (部分一致でなく等値)。
+
+    ``bd`` が None (= lib が読めない環境) のとき、および channel を特定できなかった
+    ときは、**回復手段を推測で名乗らない**。知らないのに「直せます」と言う方が、
+    言わないより害が大きい (e-7077 の教訓)。
+    """
+    if bd is None or not channels:
+        return ("\n    - 要求された証拠の封筒が付いていません "
+                "(channel を特定できないため回復手段を提示できません)")
+    return "".join(
+        f"\n    - channel={ch or '?'}: "
+        f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"
+        for ch in sorted(channels)
+    )
+
+
 def tally_downgrade_reasons(reasons, *, bd) -> dict:
     """降格理由のリストを、理由ごとの件数に畳む (ms-185 e-7077 / 保守性レビュー)。
 
@@ -437,16 +466,11 @@ def main() -> int:
     if downgraded_provenance:
         # channel ごとに回復手段が違うので、1 行ずつ **その channel の** 案内を
         # 出す。文言は lib/bus_delivery.downgrade_advice が唯一の所有者で、
-        # Claude 側の受信 hook も同じものを呼ぶ (= 2 度と割れない)。
-        if bd is not None and downgraded_provenance_channels:
-            advice_lines = "".join(
-                f"\n    - channel={ch or '?'}: "
-                f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"
-                for ch in sorted(downgraded_provenance_channels)
-            )
-        else:
-            advice_lines = ("\n    - 要求された証拠の封筒が付いていません "
-                            "(channel を特定できないため回復手段を提示できません)")
+        # Claude 側の受信 hook も同じものを呼ぶ (= 2 度と割れない)。整形は
+        # render_provenance_advice_lines (純粋関数) が持つ — inline に書くと
+        # 共有層との等値をテストで守れない (docstring 参照)。
+        advice_lines = render_provenance_advice_lines(
+            downgraded_provenance_channels, bd=bd)
         parts.append(
             f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_provenance} 件 — channel は allowlist 済だが、"

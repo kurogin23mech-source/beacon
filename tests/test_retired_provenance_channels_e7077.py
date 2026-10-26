@@ -235,3 +235,96 @@ class TestReasonTagIsConsumable:
         assert bd.DOWNGRADE_RETIRED_CHANNEL
         assert bd.DOWNGRADE_RETIRED_CHANNEL != bd.DOWNGRADE_NON_SYSTEM_ENVELOPE
         assert bd.DOWNGRADE_RETIRED_CHANNEL != ""
+
+
+# ---------------------------------------------------------------------------
+# ms-185 / #812 独立レビュー (AX, high): 宣言ではなく **満たせること** を測る
+# ---------------------------------------------------------------------------
+
+# ゲートした channel ごとの「本物の発行者が作る形」。
+#
+# **なぜ test 側に置くか**: これは「この channel の証拠は現実に用意できる」という
+# 主張の見本で、production の判断には要らない。だが集合と一致していることを下の
+# test が強制するので、**新しい gated channel を足した人はここに見本を書くまで
+# テストが赤**になる (= 見本を書けない = 誰も満たせない証拠を要求している、と
+# その場で分かる)。
+#
+# **直した穴 (独立 AX レビュー / high)**: 以前は「述語が宣言されているか」
+# (`test_gated_channels_match_their_requirements`) と「回復手段の文字列が空でないか」
+# (`test_every_gated_channel_declares_a_recovery`) しか測っていなかった。judge は
+# 隔離コピーで 2 つの変異を実証した:
+#   1. ``trek-trigger`` の述語を ``has_approved_operation_envelope`` に差し替える
+#      → 本物のサーバ署名イベントが永久に降格されるのに **全テスト緑**
+#   2. ``predicate=lambda ev: False`` + ``advice="x"`` の channel を足す
+#      → **永久に満たせない門** なのに全テスト緑
+# どちらも ms-185 e-7078 が消したはずの「誰も満たせない判定」の再生産。照合した
+# ところ、降格されずに通る (= kept) 経路を測るテストが在ったのは 5 channel 中
+# **3 つだけ** で、``trek-trigger`` と ``trek-task-review`` は素通りだった。
+SATISFYING_ENVELOPES = {
+    "operation-trigger": _OP,      # 人間が beacon operation approve で承認した T2
+    "trek-trigger": _T1,           # Trek スケジューラが発行したサーバ署名
+    "trek-progress-check": _T1,
+    "trek-task-review": _T1,
+    "trek-leader-digest": _T1,
+}
+
+
+class TestGatedChannelsAreActuallySatisfiable:
+    """「門が在る」だけでなく「その門は通れる」ことを channel ごとに測る。"""
+
+    def test_every_gated_channel_has_a_satisfying_sample(self):
+        """見本の集合がゲート集合と一致する (= 新しい channel は見本必須)。
+
+        これが強制力の本体。ここが緑でないと以下の 2 本は「見本を書かなかった
+        channel」を黙って飛ばせてしまい、当初の穴に戻る。
+        """
+        assert set(SATISFYING_ENVELOPES) == set(bd.SYSTEM_PROVENANCE_CHANNELS), (
+            "ゲートした channel と『満たせる封筒の見本』がズレています。"
+            "見本を書けない channel は、誰も満たせない証拠を要求しています。"
+        )
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    def test_the_declared_predicate_accepts_its_own_minters_shape(self, channel):
+        """宣言した述語が、その channel の発行者が実際に作る形を受け入れる。
+
+        述語の差し替え (judge の変異 1) と、永久に偽を返す述語 (変異 2) の両方が
+        ここで赤くなる。
+        """
+        requirement = bd.PROVENANCE_REQUIREMENTS[channel]
+        ev = _evt(channel, envelope=SATISFYING_ENVELOPES[channel])
+        assert requirement.predicate(ev) is True, (
+            f"{channel} の述語が、本物の発行者が作る封筒を拒否しています "
+            "(= 誰も満たせない門)。"
+        )
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    def test_a_properly_proven_event_is_kept_with_default_args(self, channel):
+        """既定引数で classify_auto_execute を通し、降格されないことを測る。
+
+        **既定引数で**叩くのが肝。``provenance_channels`` / ``retired_channels`` を
+        呼び出し側から渡すテストは、production の既定集合がズレても緑のままになる。
+        """
+        ev = _evt(channel, envelope=SATISFYING_ENVELOPES[channel])
+        assert bd.classify_auto_execute(ev, allowlist=[channel]) == (
+            bd.AUTO_EXECUTE, "", ""), (
+            f"{channel} が正しい証拠を持っているのに降格されました "
+            "(= 本番で自律実行が一度も成立しない状態)。"
+        )
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    def test_the_advice_points_at_something_actionable_or_says_it_cannot(
+            self, channel):
+        """回復手段の文字列が「空でない」より強いことを要求する。
+
+        judge の変異 2 は ``advice="x"`` (1 文字) で通った。回復手段を名乗るなら
+        実在するコマンドを名指し、名乗れないなら「operator には直せない」と
+        はっきり言う — そのどちらかであることを測る。
+        """
+        advice = bd.PROVENANCE_REQUIREMENTS[channel].advice
+        names_a_command = "beacon " in advice
+        says_it_cannot_be_fixed = "直せるものではありません" in advice \
+            or "直りません" in advice
+        assert names_a_command or says_it_cannot_be_fixed, (
+            f"{channel} の回復手段が、実在するコマンドの名指しでも "
+            "「operator には直せない」の明言でもありません: {advice!r}"
+        )

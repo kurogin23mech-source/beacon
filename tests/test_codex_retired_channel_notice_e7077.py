@@ -304,20 +304,71 @@ class TestProvenanceAdviceIsChannelAware:
 
 
 class TestBothHooksShareOneAdviceSource:
-    """2 つの受信 hook が **同じ (理由, channel) に同じ案内** を返す。
+    """2 つの受信 hook が、案内文を **共有層から取っている** ことを測る。
 
     欠陥が 2 箇所に在ったのは、同じ説明文が Claude 側と Codex 側へ別コピーで
-    置かれていたから。レビューは Claude 側しか見ておらず、Codex 側は誰も見て
-    いなかった。説明の所有者を ``lib/bus_delivery.downgrade_advice`` 1 つに
-    畳んだので、このテストは**どちらかに固定文を書き戻す変異**で赤くなる。
+    置かれていたから。説明の所有者を ``lib/bus_delivery.downgrade_advice`` 1 つに
+    畳んだので、ここは「どちらかに固定文を書き戻す変異」で赤くならなければならない。
+
+    **測り方を 1 度やり直している (= 偽の安全を踏んだ記録)**。最初はこう書いていた::
+
+        assert claude._downgrade_advice(reason, ch) == bd.downgrade_advice(reason, ch)
+
+    これは「**今日の文言と一致するか**」しか見ていない。片方の hook に *今日の文言と
+    byte 一致する* 凍結コピーを埋め込む変異を当てたところ、**全件緑のまま**だった
+    (= 独自コピーを持っているのに検知できない)。等値比較は、コピーが古くなった後で
+    しか赤くならない — つまり drift が起きてからしか気付けず、守りたい性質
+    (「割れない形になっている」) を測れていない。
+
+    いまは **真値源を試験中だけ差し替えて、出力が追随するか** を見る。凍結コピーを
+    持つ実装は差し替えに追随できないので、byte 一致でも必ず赤くなる。
     """
 
+    SENTINEL = "SENTINEL-ADVICE-7ca91f (試験中だけ差し替えた値)"
+
     @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
-    @pytest.mark.parametrize("reason", [ALLOWLIST_MISS, PROVENANCE, RETIRED, UNKNOWN])
-    def test_claude_hook_delegates_instead_of_keeping_a_copy(
-            self, claude, reason, channel):
-        assert claude._downgrade_advice(reason, channel) == \
-            bd.downgrade_advice(reason, channel), (
-            "Claude 側の受信 hook が独自の説明文を持っています "
-            "(= 共有層と割れる形に戻っている)。"
+    def test_claude_hook_follows_the_shared_source(self, claude, channel,
+                                                   monkeypatch):
+        """真値源を差し替えると Claude 側の出力も変わる (= 委譲している)。"""
+        patched = dict(bd.PROVENANCE_REQUIREMENTS)
+        patched[channel] = patched[channel]._replace(advice=self.SENTINEL)
+        monkeypatch.setattr(bd, "PROVENANCE_REQUIREMENTS", patched)
+        assert claude._downgrade_advice(PROVENANCE, channel) == self.SENTINEL, (
+            "真値源を差し替えても Claude 側の案内が変わりません "
+            "(= 独自コピーを持っている)。"
         )
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    def test_codex_hook_follows_the_shared_source(self, codex, channel,
+                                                  monkeypatch):
+        """真値源を差し替えると Codex 側の出力も変わる (= 委譲している)。
+
+        **直した穴 (独立 AX レビュー, medium)**: この検査は Claude 側にしか無かった。
+        Codex 側は出力の部分一致 (``"beacon operation approve" in ctx``) だけだったので、
+        judge が実測したとおり凍結コピーを埋め込んでも全テスト緑だった。
+        """
+        patched = dict(bd.PROVENANCE_REQUIREMENTS)
+        patched[channel] = patched[channel]._replace(advice=self.SENTINEL)
+        monkeypatch.setattr(bd, "PROVENANCE_REQUIREMENTS", patched)
+        rendered = codex.render_provenance_advice_lines([channel], bd=bd)
+        assert rendered == f"\n    - channel={channel}: {self.SENTINEL}", (
+            "真値源を差し替えても Codex 側の案内が変わりません "
+            "(= 独自コピーを持っているか、整形が割れている)。"
+        )
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("reason", [ALLOWLIST_MISS, RETIRED, UNKNOWN])
+    def test_claude_hook_does_not_keep_its_own_copy_of_the_other_reasons(
+            self, claude, reason, channel):
+        """証拠欠落以外の 3 理由も共有層と一致する (こちらは真値源が定数)。"""
+        assert claude._downgrade_advice(reason, channel) == \
+            bd.downgrade_advice(reason, channel)
+
+    def test_codex_hook_does_not_guess_a_recovery_without_the_shared_layer(
+            self, codex):
+        """lib が読めない / channel 不明のとき、回復手段を推測で名乗らない。"""
+        for channels, kw in (([], {"bd": bd}), (["operation-trigger"], {"bd": None})):
+            out = codex.render_provenance_advice_lines(channels, **kw)
+            assert "beacon operation approve" not in out
+            assert "auto-execute remove" not in out
+            assert "回復手段を提示できません" in out

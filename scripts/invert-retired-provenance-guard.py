@@ -248,7 +248,64 @@ def claude_keeps_its_own_copy_of_the_advice(src: str) -> str:
         '    return bd.downgrade_advice(reason, channel)', 1)
 
 
+def make_a_gated_channel_unsatisfiable(src: str) -> str:
+    """永久に満たせない門を足す (= e-7078 が消した状態の再生産)。
+
+    **独立 AX レビュー (high) が隔離コピーで実証した変異**。以前は「述語が宣言されて
+    いるか」と「advice が空でないか」しか測っていなかったので、
+    ``predicate=lambda ev: False`` + ``advice="x"`` の channel を足しても全件緑だった。
+    """
+    tail = ('    "trek-leader-digest": ProvenanceRequirement(\n'
+            '        has_server_minted_envelope, _TREK_ADVICE),\n}')
+    head = ('SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",')
+    assert tail in src and head in src, \
+        "anchor not found (make_a_gated_channel_unsatisfiable)"
+    return src.replace(
+        tail,
+        '    "trek-leader-digest": ProvenanceRequirement(\n'
+        '        has_server_minted_envelope, _TREK_ADVICE),\n'
+        '    "nobody-can-satisfy-me": ProvenanceRequirement(lambda ev: False, "x"),\n}',
+        1).replace(
+        head,
+        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n'
+        '    "nobody-can-satisfy-me",\n    "operation-trigger",', 1)
+
+
+def point_a_channel_at_the_wrong_predicate(src: str) -> str:
+    """trek-trigger の述語を operation 用に差し替える (分岐の形は残る)。
+
+    **独立 AX レビュー (high) が実証した変異**。本物のサーバ署名イベントが永久に
+    降格されるのに、kept 経路を測るテストが trek-trigger に無かったため全件緑だった
+    (照合したら 5 channel 中 3 つにしか kept テストが無かった)。
+    """
+    anchor = ('    "trek-trigger": ProvenanceRequirement(\n'
+              '        has_server_minted_envelope, _TREK_ADVICE),')
+    assert anchor in src, "anchor not found (point_a_channel_at_the_wrong_predicate)"
+    return src.replace(
+        anchor,
+        '    "trek-trigger": ProvenanceRequirement(\n'
+        '        has_approved_operation_envelope, _TREK_ADVICE),', 1)
+
+
 # --- scripts/codex-inbox-hook.py への追加の壊し方 ---------------------------
+
+def codex_freezes_a_byte_identical_copy(src: str) -> str:
+    """Codex 側に **今日の文言と byte 一致する** 凍結コピーを埋め込む。
+
+    等値比較 (``codex の出力 == bd.downgrade_advice(...)``) では **捕まらない** 変異。
+    私は最初その等値比較を書いて偽の安全を作り、この変異で緑を踏んだ。真値源を試験中
+    だけ差し替えて出力が追随するかを見る形に直したので、いまは赤くなる。
+    """
+    anchor = '        f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"'
+    assert anchor in src, "anchor not found (codex_freezes_a_byte_identical_copy)"
+    return src.replace(
+        anchor,
+        '        f"{_FROZEN_ADVICE.get(ch) or bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"',
+        1).replace(
+        'def render_provenance_advice_lines(channels, *, bd) -> str:',
+        '_FROZEN_ADVICE = {"operation-trigger": "frozen copy"}\n\n\n'
+        'def render_provenance_advice_lines(channels, *, bd) -> str:', 1)
+
 
 def codex_folds_all_channels_into_one_line(src: str) -> str:
     """Codex 側が channel ごとの案内をやめ、1 つの固定文に畳む形。
@@ -256,9 +313,9 @@ def codex_folds_all_channels_into_one_line(src: str) -> str:
     理由ごとの件数で束ねる通知なので、以前はここで必ず片方が誤案内になっていた。
     混在バッチのテストが赤くなるはず。
     """
-    anchor = '        if bd is not None and downgraded_provenance_channels:'
+    anchor = '    if bd is None or not channels:'
     assert anchor in src, "anchor not found (codex_folds_all_channels_into_one_line)"
-    return src.replace(anchor, '        if False:', 1)
+    return src.replace(anchor, '    if True:', 1)
 
 
 # --- ms-185 e-7078: ゲートの張り替えを守る反転 -------------------------------
@@ -402,6 +459,18 @@ CASES = [
      codex_folds_all_channels_into_one_line,
      "tests/test_codex_inbox_autonomy_e5803.py::"
      "test_mixed_provenance_batch_names_each_channels_own_recovery"),
+    # --- #812 独立レビュー (AX high / medium) で塞いだ性質を守る反転 ---
+    ("満たせない門を足す (宣言だけ測っていた偽の緑)", BD,
+     make_a_gated_channel_unsatisfiable,
+     GUARD_TEST + "::TestGatedChannelsAreActuallySatisfiable"),
+    ("channel の述語を別物に差し替える (本物の封筒が拒否される)", BD,
+     point_a_channel_at_the_wrong_predicate,
+     GUARD_TEST + "::TestGatedChannelsAreActuallySatisfiable::"
+     "test_a_properly_proven_event_is_kept_with_default_args"),
+    ("Codex に byte 一致の凍結コピーを埋める (等値比較では捕まらない)", CODEX,
+     codex_freezes_a_byte_identical_copy,
+     CONSUMER_TEST + "::TestBothHooksShareOneAdviceSource::"
+     "test_codex_hook_follows_the_shared_source"),
 ]
 
 
