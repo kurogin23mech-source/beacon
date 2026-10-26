@@ -69,6 +69,18 @@ os.environ.setdefault("BEACON_TEST_MODE", "1")
 # 再初期化せず、XPC にも触らないので発火点自体が消える。grpc はこの env を
 # import 時に読むので、どのテストモジュールより先に置く必要がある。
 # setdefault なので、調査のため有効化したい場合は外から上書きできる。
+#
+# 実測 (= この設定が本当に発火点を消すことの裏取り): grpc チャネルを張った状態で
+# fork+exec を 30 回まわすと、env 未設定では C コアの atfork ハンドラ登録ログが
+# 29 回出るが、この設定を入れると 0 回になる。Python 層の
+# cygrpc.is_fork_support_enabled() は macOS では元から False を返し C コア層の
+# 状態を映さないので、ハンドラが走るかどうかの判定には使えない。
+#
+# 「どのテストモジュールより先」という順序は、下の _GRPC_IMPORTED_BEFORE_GUARD が
+# 事実として捕まえる (tests/test_fork_safety_guards.py が False を固定する)。
+# コメントの約束だけに頼ると、先に grpc を import する plugin や conftest の
+# 並び替えが入ったとき、黙って設定が後追いになる。
+_GRPC_IMPORTED_BEFORE_GUARD = "grpc" in sys.modules
 os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 
 
@@ -116,16 +128,22 @@ def _ban_real_firestore_client(request, monkeypatch):
         return
     try:
         from google.cloud import firestore  # type: ignore[import-not-found]
-    except Exception:
+    except ImportError:
         # google-cloud-firestore 未インストール環境 (= 実接続が起き得ない) では
-        # 守るものが無いので何もしない。
+        # 守るものが無いので何もしない。ImportError 以外 (= 版ずれや壊れた
+        # 部分インストールで import 自体が失敗する) はここで握り潰さず素通し
+        # する: 「守るものが無い」と「守ろうとして失敗した」を同じ沈黙にすると、
+        # ガードが設置されないままテストが緑になる (= このガードが塞ごうとして
+        # いる silent no-op をガード自身がやる)。
         return
 
     def _refuse(*args, **kwargs):
         raise AssertionError(
             "本物の firestore.Client() がテスト内で生成されました。"
-            "テストは server/firestore_client を stub で差し替えてください "
-            "(実接続が主題のテストは @pytest.mark.allow_real_firestore を付与)。")
+            "traceback の直近の呼び出し元が生成箇所です。そこを stub / fixture "
+            "経由に変えてください (よくある経路は server/firestore_client の "
+            "get_db())。実接続が主題のテストは "
+            "@pytest.mark.allow_real_firestore を付与してください。")
 
     monkeypatch.setattr(firestore, "Client", _refuse, raising=False)
 
