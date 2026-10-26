@@ -229,3 +229,146 @@ class TestReasonTagsAreAllDistinct:
             "理由タグが衝突しています: " + repr(tags)
             + " — 消費側が理由を区別できず、誤った直し方を案内します。"
         )
+
+
+# ---------------------------------------------------------------------------
+# ms-185 / #812 レビュー: 案内は **channel ごと** に導かれる
+# ---------------------------------------------------------------------------
+
+class TestProvenanceAdviceIsChannelAware:
+    """``non-system-envelope`` 1 つのタグが 2 つの別世界を指すことを測る。
+
+    #812 が ``operation-trigger`` の証拠を「サーバ署名 (T1-system)」から
+    「人間がその op_id を承認した封筒 (T2)」へ張り替えた。それ以降、同じ理由タグが
+    **回復手段が在る世界** (operation-trigger) と **operator には直せない世界**
+    (trek-*) の両方を指す。タグだけで分岐していた以前の実装は後者の文言を前者にも
+    返し、``beacon operation approve <op-id>`` という実在する回復手段を隠して
+    「直りません」と断定していた (独立レビュー 2 体が一致で high)。
+
+    ここは**返ってくる文字列そのもの**を見る。「分岐が在るか」をソースで見ると、
+    分岐の形を残したまま中身を入れ替える変異を捕まえられない。
+    """
+
+    def test_operation_trigger_names_the_approval_recovery(self):
+        out = bd.downgrade_advice(PROVENANCE, bd.OPERATION_TRIGGER_CHANNEL)
+        assert "beacon operation approve" in out, (
+            "operation-trigger の降格で、実在する回復手段を名指していません。"
+        )
+        assert "T1-system" not in out, (
+            "operation-trigger はサーバ署名を要求しません (#812 以前の語彙)。"
+        )
+        assert "直りません" not in out, (
+            "回復手段が実在するのに「直らない」と断定しています。"
+        )
+
+    def test_trek_channel_says_the_operator_cannot_fix_it(self):
+        out = bd.downgrade_advice(PROVENANCE, "trek-trigger")
+        assert "T1-system" in out, "trek-* が要求するサーバ署名を説明していません。"
+        assert "直りません" in out, (
+            "trek-* の証拠は Trek スケジューラだけが発行するので、operator には "
+            "直せない旨を伝える必要があります。"
+        )
+        assert "operation approve" not in out, (
+            "trek-* に operation の回復手段を案内しています = 誤案内。"
+        )
+
+    def test_the_two_families_get_different_advice(self):
+        assert (bd.downgrade_advice(PROVENANCE, bd.OPERATION_TRIGGER_CHANNEL)
+                != bd.downgrade_advice(PROVENANCE, "trek-trigger")), (
+            "同じ理由タグでも channel で要求が違うのに、同じ案内を返しています。"
+        )
+
+    def test_every_gated_channel_declares_a_recovery(self):
+        """ゲートした channel は、述語と**回復手段の説明**の両方を必ず持つ。
+
+        片方だけ在る状態 (= 以前そのものだった形) を構造的に作れなくする。
+        """
+        for channel, requirement in bd.PROVENANCE_REQUIREMENTS.items():
+            assert callable(requirement.predicate), (
+                f"{channel} の述語が呼び出せません")
+            assert requirement.advice and requirement.advice.strip(), (
+                f"{channel} は証拠を要求しているのに、operator への回復手段を "
+                "宣言していません")
+            assert bd.downgrade_advice(PROVENANCE, channel) == requirement.advice
+
+    def test_undeclared_channel_does_not_claim_a_recovery(self):
+        """要求を宣言していない channel に、回復手段を推測で名乗らない。
+
+        知らないのに「直せます」「直りません」と言う方が、言わないより害が大きい
+        (e-7077 の教訓そのもの)。
+        """
+        out = bd.downgrade_advice(PROVENANCE, "nobody-declares-me")
+        assert "operation approve" not in out
+        assert "auto-execute remove" not in out
+        assert "nobody-declares-me" in out, "どの channel の話か示していません。"
+
+
+class TestBothHooksShareOneAdviceSource:
+    """2 つの受信 hook が、案内文を **共有層から取っている** ことを測る。
+
+    欠陥が 2 箇所に在ったのは、同じ説明文が Claude 側と Codex 側へ別コピーで
+    置かれていたから。説明の所有者を ``lib/bus_delivery.downgrade_advice`` 1 つに
+    畳んだので、ここは「どちらかに固定文を書き戻す変異」で赤くならなければならない。
+
+    **測り方を 1 度やり直している (= 偽の安全を踏んだ記録)**。最初はこう書いていた::
+
+        assert claude._downgrade_advice(reason, ch) == bd.downgrade_advice(reason, ch)
+
+    これは「**今日の文言と一致するか**」しか見ていない。片方の hook に *今日の文言と
+    byte 一致する* 凍結コピーを埋め込む変異を当てたところ、**全件緑のまま**だった
+    (= 独自コピーを持っているのに検知できない)。等値比較は、コピーが古くなった後で
+    しか赤くならない — つまり drift が起きてからしか気付けず、守りたい性質
+    (「割れない形になっている」) を測れていない。
+
+    いまは **真値源を試験中だけ差し替えて、出力が追随するか** を見る。凍結コピーを
+    持つ実装は差し替えに追随できないので、byte 一致でも必ず赤くなる。
+    """
+
+    SENTINEL = "SENTINEL-ADVICE-7ca91f (試験中だけ差し替えた値)"
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    def test_claude_hook_follows_the_shared_source(self, claude, channel,
+                                                   monkeypatch):
+        """真値源を差し替えると Claude 側の出力も変わる (= 委譲している)。"""
+        patched = dict(bd.PROVENANCE_REQUIREMENTS)
+        patched[channel] = patched[channel]._replace(advice=self.SENTINEL)
+        monkeypatch.setattr(bd, "PROVENANCE_REQUIREMENTS", patched)
+        assert claude._downgrade_advice(PROVENANCE, channel) == self.SENTINEL, (
+            "真値源を差し替えても Claude 側の案内が変わりません "
+            "(= 独自コピーを持っている)。"
+        )
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    def test_codex_hook_follows_the_shared_source(self, codex, channel,
+                                                  monkeypatch):
+        """真値源を差し替えると Codex 側の出力も変わる (= 委譲している)。
+
+        **直した穴 (独立 AX レビュー, medium)**: この検査は Claude 側にしか無かった。
+        Codex 側は出力の部分一致 (``"beacon operation approve" in ctx``) だけだったので、
+        judge が実測したとおり凍結コピーを埋め込んでも全テスト緑だった。
+        """
+        patched = dict(bd.PROVENANCE_REQUIREMENTS)
+        patched[channel] = patched[channel]._replace(advice=self.SENTINEL)
+        monkeypatch.setattr(bd, "PROVENANCE_REQUIREMENTS", patched)
+        rendered = codex.render_provenance_advice_lines([channel], bd=bd)
+        assert rendered == f"\n    - channel={channel}: {self.SENTINEL}", (
+            "真値源を差し替えても Codex 側の案内が変わりません "
+            "(= 独自コピーを持っているか、整形が割れている)。"
+        )
+
+    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("reason", [ALLOWLIST_MISS, RETIRED, UNKNOWN])
+    def test_claude_hook_does_not_keep_its_own_copy_of_the_other_reasons(
+            self, claude, reason, channel):
+        """証拠欠落以外の 3 理由も共有層と一致する (こちらは真値源が定数)。"""
+        assert claude._downgrade_advice(reason, channel) == \
+            bd.downgrade_advice(reason, channel)
+
+    def test_codex_hook_does_not_guess_a_recovery_without_the_shared_layer(
+            self, codex):
+        """lib が読めない / channel 不明のとき、回復手段を推測で名乗らない。"""
+        for channels, kw in (([], {"bd": bd}), (["operation-trigger"], {"bd": None})):
+            out = codex.render_provenance_advice_lines(channels, **kw)
+            assert "beacon operation approve" not in out
+            assert "auto-execute remove" not in out
+            assert "回復手段を提示できません" in out

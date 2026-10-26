@@ -54,17 +54,20 @@ def _isolated_env() -> dict:
 
 # --- lib/bus_delivery.py への壊し方 -----------------------------------------
 
-def drop_from_provenance_only(src: str) -> str:
-    """trek-trigger を provenance から消すだけ (= 引退先に足し忘れる)。
+def drop_from_both_sets(src: str) -> str:
+    """trek-trigger をどちらの集合からも落とす (= 族の名前を取りこぼす)。
 
     **これが本番の事故そのもの。** 畳む作業で起きる最も自然な間違いで、古い opt-in が
     残っているプロジェクトで署名なし自動実行が通る。
+
+    ms-185 e-7078 時点では trek-* はまだ現役 (SYSTEM) 側に居るので、落とす先はそこ。
+    Trek の bus 面を外す e-7080 / e-7070 で引退済みへ移ったら、当てる場所もそちらへ
+    移る (どちらの集合から落ちても「族の名前がどちらにも居ない」状態は同じで、被覆の
+    テストが赤くなる)。
     """
     anchor = '    "trek-trigger",\n    "trek-progress-check",'
-    assert anchor in src, "anchor not found (drop_from_provenance_only)"
+    assert anchor in src, "anchor not found (drop_from_both_sets)"
     return src.replace(anchor, '    "trek-progress-check",', 1)
-
-
 def retire_without_removing(src: str) -> str:
     """現役と引退済みの両方に入れる (= 判定の順序に依存する曖昧な状態)。"""
     anchor = "RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset()"
@@ -89,7 +92,7 @@ def move_retired_check_after_provenance(src: str) -> str:
                "        return (PROPOSE_TO_AI, AUTO_EXECUTE, "
                "DOWNGRADE_RETIRED_CHANNEL)\n")
     prov = ("    if channel in provenance_channels and not "
-            "has_system_provenance(event):\n"
+            "has_required_provenance(event):\n"
             "        return (PROPOSE_TO_AI, AUTO_EXECUTE, "
             "DOWNGRADE_NON_SYSTEM_ENVELOPE)\n")
     assert retired + prov in src, "anchor not found (move_retired_check_after_provenance)"
@@ -111,9 +114,9 @@ def break_custom_channel_optin(src: str) -> str:
     これ。固定テストが守っているので赤くなる。
     """
     anchor = ("    if channel in provenance_channels and not "
-              "has_system_provenance(event):")
+              "has_required_provenance(event):")
     assert anchor in src, "anchor not found (break_custom_channel_optin)"
-    return src.replace(anchor, "    if not has_system_provenance(event):", 1)
+    return src.replace(anchor, "    if not has_required_provenance(event):", 1)
 
 
 # --- scripts/codex-inbox-hook.py への壊し方 ---------------------------------
@@ -175,33 +178,237 @@ def claude_reverts_to_the_fixed_message(src: str) -> str:
     入れる。初版のテストは「代入文がソースに在るか」しか見ておらず、これを
     「Claude 側は追従不要」と誤って裏付けていた。
     """
-    old = ('            f" — {_downgrade_advice(ev.get(\'_downgrade_reason\', \'\'))}]"')
+    old = ('            f" — {_downgrade_advice(ev.get(\'_downgrade_reason\', \'\'), '
+           'str(ev.get(\'channel\') or \'\'))}]"')
     new = ('            " — channel not in bus_auto_execute_channels]"')
     assert old in src, "anchor not found (claude_reverts_to_the_fixed_message)"
     return src.replace(old, new, 1)
 
 
-def claude_swaps_retired_and_provenance_advice(src: str) -> str:
-    """Claude 側の案内文だけを逆転させる (条件は触らない)。
+def swap_the_retired_and_provenance_advice(src: str) -> str:
+    """案内文だけを逆転させる (判定条件は触らない)。
 
-    「署名が無い」に対して「古い opt-in を外せ」、引退に対して「直せません」と
-    案内する状態。分岐の形は残るので、分岐の存在を見るだけでは捕まえられない。
+    「証拠の封筒が無い」に対して「古い opt-in を外せ」、引退に対して channel ごとの
+    要求を案内する状態。分岐の形は残るので、分岐の存在をソースで見るだけでは
+    捕まえられない。
+
+    文言の所有者は ``lib/bus_delivery.downgrade_advice`` 1 つなので、壊す先も
+    そこ 1 箇所 (以前は 2 つの hook に別コピーが在り、片方ずつ壊す必要があった)。
     """
-    prov = ('        return ("channel は allowlist 済だが envelope が T1-system でない "\n'
-            '                "(= 偽装の恐れ)。opt-in し直しても直りません")')
+    prov = '        requirement = PROVENANCE_REQUIREMENTS.get(str(channel or ""))'
     ret = ('        return ("channel は allowlist 済だが、サーバが発行する channel では "\n'
            '                "なくなっています (= 古い opt-in が残った状態)。"\n'
            '                "`beacon bus auto-execute remove --channel <名前>` で外してください")')
     assert prov in src and ret in src, \
-        "anchor not found (claude_swaps_retired_and_provenance_advice)"
-    return src.replace(prov, '@@P@@', 1).replace(ret, prov, 1).replace('@@P@@', ret, 1)
+        "anchor not found (swap_the_retired_and_provenance_advice)"
+    # retired の分岐が、証拠欠落のほうの案内 (channel ごと) を返すようにする
+    return src.replace(
+        ret,
+        '        return downgrade_advice(DOWNGRADE_NON_SYSTEM_ENVELOPE, channel)', 1)
+
+
+def advice_ignores_the_channel(src: str) -> str:
+    """証拠欠落の案内が channel を見ず、trek の世界観の固定文を常に返す形。
+
+    **これが #812 レビューが high で挙げた状態そのもの**: operation-trigger にも
+    「operator には直せない」と返し、``beacon operation approve <op-id>`` という
+    実在する回復手段を隠す。
+    """
+    anchor = ('        requirement = PROVENANCE_REQUIREMENTS.get(str(channel or ""))')
+    assert anchor in src, "anchor not found (advice_ignores_the_channel)"
+    return src.replace(anchor, '        return _TREK_ADVICE\n' + anchor, 1)
+
+
+def drop_the_advice_from_the_requirement(src: str) -> str:
+    """ゲートした channel が回復手段を宣言していない状態に戻す。
+
+    述語だけが在り説明が空 = 「ゲートしているのに operator が打つ手が無い」形。
+    構造テストがこれを赤にするはずで、しなければ宣言を束ねた意味が無い。
+    """
+    anchor = '_OPERATION_ADVICE = ('
+    assert anchor in src, "anchor not found (drop_the_advice_from_the_requirement)"
+    return src.replace(anchor, '_OPERATION_ADVICE = ""\n_UNUSED_ADVICE = (', 1)
+
+
+# --- bin/beacon-bus-inbox-hook.py への壊し方 --------------------------------
+
+def claude_keeps_its_own_copy_of_the_advice(src: str) -> str:
+    """Claude 側が共有層を呼ばず、自分の固定文を持つ形に戻す。
+
+    欠陥が 2 箇所に在った原因そのもの。両 hook が同じ案内を返すことを測る
+    パリティテストが赤くなるはず。
+    """
+    anchor = '    return bd.downgrade_advice(reason, channel)'
+    assert anchor in src, "anchor not found (claude_keeps_its_own_copy_of_the_advice)"
+    return src.replace(
+        anchor,
+        '    if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:\n'
+        '        return ("channel は allowlist 済だが envelope が T1-system でない "\n'
+        '                "(= 偽装の恐れ)。opt-in し直しても直りません")\n'
+        '    return bd.downgrade_advice(reason, channel)', 1)
+
+
+def make_a_gated_channel_unsatisfiable(src: str) -> str:
+    """永久に満たせない門を足す (= e-7078 が消した状態の再生産)。
+
+    **独立 AX レビュー (high) が隔離コピーで実証した変異**。以前は「述語が宣言されて
+    いるか」と「advice が空でないか」しか測っていなかったので、
+    ``predicate=lambda ev: False`` + ``advice="x"`` の channel を足しても全件緑だった。
+    """
+    tail = ('    "trek-leader-digest": ProvenanceRequirement(\n'
+            '        has_server_minted_envelope, _TREK_ADVICE),\n}')
+    head = ('SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",')
+    assert tail in src and head in src, \
+        "anchor not found (make_a_gated_channel_unsatisfiable)"
+    return src.replace(
+        tail,
+        '    "trek-leader-digest": ProvenanceRequirement(\n'
+        '        has_server_minted_envelope, _TREK_ADVICE),\n'
+        '    "nobody-can-satisfy-me": ProvenanceRequirement(lambda ev: False, "x"),\n}',
+        1).replace(
+        head,
+        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n'
+        '    "nobody-can-satisfy-me",\n    "operation-trigger",', 1)
+
+
+def point_a_channel_at_the_wrong_predicate(src: str) -> str:
+    """trek-trigger の述語を operation 用に差し替える (分岐の形は残る)。
+
+    **独立 AX レビュー (high) が実証した変異**。本物のサーバ署名イベントが永久に
+    降格されるのに、kept 経路を測るテストが trek-trigger に無かったため全件緑だった
+    (照合したら 5 channel 中 3 つにしか kept テストが無かった)。
+    """
+    anchor = ('    "trek-trigger": ProvenanceRequirement(\n'
+              '        has_server_minted_envelope, _TREK_ADVICE),')
+    assert anchor in src, "anchor not found (point_a_channel_at_the_wrong_predicate)"
+    return src.replace(
+        anchor,
+        '    "trek-trigger": ProvenanceRequirement(\n'
+        '        has_approved_operation_envelope, _TREK_ADVICE),', 1)
+
+
+# --- scripts/codex-inbox-hook.py への追加の壊し方 ---------------------------
+
+def codex_freezes_a_byte_identical_copy(src: str) -> str:
+    """Codex 側に **今日の文言と byte 一致する** 凍結コピーを埋め込む。
+
+    等値比較 (``codex の出力 == bd.downgrade_advice(...)``) では **捕まらない** 変異。
+    私は最初その等値比較を書いて偽の安全を作り、この変異で緑を踏んだ。真値源を試験中
+    だけ差し替えて出力が追随するかを見る形に直したので、いまは赤くなる。
+    """
+    anchor = '        f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"'
+    assert anchor in src, "anchor not found (codex_freezes_a_byte_identical_copy)"
+    return src.replace(
+        anchor,
+        '        f"{_FROZEN_ADVICE.get(ch) or bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"',
+        1).replace(
+        'def render_provenance_advice_lines(channels, *, bd) -> str:',
+        '_FROZEN_ADVICE = {"operation-trigger": "frozen copy"}\n\n\n'
+        'def render_provenance_advice_lines(channels, *, bd) -> str:', 1)
+
+
+def codex_folds_all_channels_into_one_line(src: str) -> str:
+    """Codex 側が channel ごとの案内をやめ、1 つの固定文に畳む形。
+
+    理由ごとの件数で束ねる通知なので、以前はここで必ず片方が誤案内になっていた。
+    混在バッチのテストが赤くなるはず。
+    """
+    anchor = '    if bd is None or not channels:'
+    assert anchor in src, "anchor not found (codex_folds_all_channels_into_one_line)"
+    return src.replace(anchor, '    if True:', 1)
+
+
+# --- ms-185 e-7078: ゲートの張り替えを守る反転 -------------------------------
+#
+# 張り替えで新しく主張した性質は 4 つ。どれも「壊したら赤くなる」ことを測る。
+# 偽の緑を 1 度生んだ箇所なので、ここを無ガードで置くのは特に危ない。
+
+def accept_the_retired_proof_again(src: str) -> str:
+    """operation-trigger が T1-system 署名を再び受け付けるようにする。
+
+    **これが張り替え前の状態そのもの** = 本番が一度も満たせない証拠を要求し、
+    試験だけが合成した形で緑になる偽の緑。
+    """
+    anchor = ("    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n"
+              "        has_approved_operation_envelope, _OPERATION_ADVICE),")
+    assert anchor in src, "anchor not found (accept_the_retired_proof_again)"
+    return src.replace(
+        anchor,
+        "    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n"
+        "        has_server_minted_envelope, _OPERATION_ADVICE),", 1)
+
+
+def drop_the_scope_match(src: str) -> str:
+    """承認が「いま発火する op_id」を名指しているかを見なくする。
+
+    op-1 への承認で op-9 の自律実行が通る状態。承認自体は本物なので、
+    封筒の有無を見るだけの検査では捕まえられない。
+    """
+    anchor = ("    return bool(scope) and bool(op_id) and scope == op_id")
+    assert anchor in src, "anchor not found (drop_the_scope_match)"
+    return src.replace(anchor, "    return True", 1)
+
+
+def treat_absence_as_a_match(src: str) -> str:
+    """scope も op_id も無いときに一致と見なす (= 不在を合致に畳む)。
+
+    ms-184 が期間フィルタで踏んだのと同じ型。空 == 空 で通ると、scope の無い
+    封筒が op_id の無いトリガーを承認してしまう。
+    """
+    anchor = ("    return bool(scope) and bool(op_id) and scope == op_id")
+    assert anchor in src, "anchor not found (treat_absence_as_a_match)"
+    return src.replace(anchor, "    return scope == op_id", 1)
+
+
+def fail_open_on_undeclared_channel(src: str) -> str:
+    """要求を宣言していない channel に何も求めない (= 開いた門を閉じて見せる)。
+
+    **実装中に私が実際に書いた形。** 反転ハーネスがこれを捕まえ、順序の反転と
+    opt-in の反転という既存 2 件の歯が同時に抜けていたことが分かった。
+    """
+    anchor = "    if requirement is None:\n        return False"
+    assert anchor in src, "anchor not found (fail_open_on_undeclared_channel)"
+    return src.replace(
+        anchor, "    if requirement is None:\n        return True", 1)
+
+
+def let_the_set_and_map_drift(src: str) -> str:
+    """gated 集合に、要求を宣言していない channel を足す。
+
+    集合と要求表がズレた状態。fail-closed なので実害は「黙って降格し続ける」で、
+    まさに e-7078 が消した「誰も満たせない判定」の再生産。
+    """
+    anchor = 'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",'
+    assert anchor in src, "anchor not found (let_the_set_and_map_drift)"
+    return src.replace(
+        anchor,
+        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "nobody-declares-me",'
+        '\n    "operation-trigger",', 1)
 
 
 CASES = [
     # (ラベル, 対象ファイル, 壊し方, 赤くなるべきテスト)
-    ("provenance から消すだけ (= 本番の事故そのもの)", BD, drop_from_provenance_only,
+    # --- ms-185 e-7078: 張り替えたゲートを守る ---
+    ("operation-trigger が引退した証拠を再び受け付ける (= 偽の緑に戻す)", BD,
+     accept_the_retired_proof_again,
+     PINNED_TEST + "::TestClassifyAutoExecute::"
+     "test_retired_server_minted_shape_no_longer_passes"),
+    ("承認が発火する op_id を名指しているかを見ない", BD, drop_the_scope_match,
+     PINNED_TEST + "::TestClassifyAutoExecute::"
+     "test_approval_for_a_different_operation_is_rejected"),
+    ("不在を合致に畳む (scope も op_id も空で通す)", BD, treat_absence_as_a_match,
+     PINNED_TEST + "::TestHasApprovedOperationEnvelope::"
+     "test_empty_scope_and_empty_op_id_do_not_match"),
+    ("要求未宣言の channel に何も求めない (= 開いた門を閉じて見せる)", BD,
+     fail_open_on_undeclared_channel,
+     PINNED_TEST + "::TestHasRequiredProvenance::"
+     "test_undeclared_channel_fails_closed"),
+    ("gated 集合と要求表をズラす", BD, let_the_set_and_map_drift,
+     PINNED_TEST + "::TestHasRequiredProvenance::"
+     "test_gated_channels_match_their_requirements"),
+    ("どちらの集合からも落とす (= 本番の事故そのもの)", BD, drop_from_both_sets,
      GUARD_TEST + "::TestClassificationCoverage::"
-     "test_every_known_server_minted_channel_is_classified"),
+     "test_every_known_gated_channel_is_classified"),
     ("現役と引退済みの両方に入れる", BD, retire_without_removing,
      GUARD_TEST + "::TestClassificationCoverage::test_the_two_sets_do_not_overlap"),
     ("引退の判定そのものを外す", BD, remove_the_retired_check,
@@ -230,9 +437,40 @@ CASES = [
     ("Claude 側を固定文言に戻す (AX の misleading)", CLAUDE,
      claude_reverts_to_the_fixed_message,
      CONSUMER_TEST + "::TestClaudeHookRendersPerReasonAdvice"),
-    ("Claude 側の案内文だけを逆転させる", CLAUDE,
-     claude_swaps_retired_and_provenance_advice,
+    # --- ms-185 / #812 レビュー: 案内が channel ごとに導かれることを守る ---
+    # 壊すのは retired の案内なので、赤くなるべきは 4 理由を描画で見るクラス
+    # (TestProvenanceAdviceIsChannelAware は証拠欠落の理由だけを見ているので、
+    #  ここを指すと「壊したのに緑」になる = 最初それで MISS を踏んだ)。
+    ("案内文だけを逆転させる (判定条件は触らない)", BD,
+     swap_the_retired_and_provenance_advice,
      CONSUMER_TEST + "::TestClaudeHookRendersPerReasonAdvice"),
+    ("証拠欠落の案内が channel を見ない (= high の状態そのもの)", BD,
+     advice_ignores_the_channel,
+     CONSUMER_TEST + "::TestProvenanceAdviceIsChannelAware::"
+     "test_operation_trigger_names_the_approval_recovery"),
+    ("ゲートした channel が回復手段を宣言しない", BD,
+     drop_the_advice_from_the_requirement,
+     CONSUMER_TEST + "::TestProvenanceAdviceIsChannelAware::"
+     "test_every_gated_channel_declares_a_recovery"),
+    ("Claude 側が共有層を呼ばず自分の固定文を持つ", CLAUDE,
+     claude_keeps_its_own_copy_of_the_advice,
+     CONSUMER_TEST + "::TestBothHooksShareOneAdviceSource"),
+    ("Codex 側が channel ごとの案内を 1 つに畳む", CODEX,
+     codex_folds_all_channels_into_one_line,
+     "tests/test_codex_inbox_autonomy_e5803.py::"
+     "test_mixed_provenance_batch_names_each_channels_own_recovery"),
+    # --- #812 独立レビュー (AX high / medium) で塞いだ性質を守る反転 ---
+    ("満たせない門を足す (宣言だけ測っていた偽の緑)", BD,
+     make_a_gated_channel_unsatisfiable,
+     GUARD_TEST + "::TestGatedChannelsAreActuallySatisfiable"),
+    ("channel の述語を別物に差し替える (本物の封筒が拒否される)", BD,
+     point_a_channel_at_the_wrong_predicate,
+     GUARD_TEST + "::TestGatedChannelsAreActuallySatisfiable::"
+     "test_a_properly_proven_event_is_kept_with_default_args"),
+    ("Codex に byte 一致の凍結コピーを埋める (等値比較では捕まらない)", CODEX,
+     codex_freezes_a_byte_identical_copy,
+     CONSUMER_TEST + "::TestBothHooksShareOneAdviceSource::"
+     "test_codex_hook_follows_the_shared_source"),
 ]
 
 
