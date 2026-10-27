@@ -1,6 +1,6 @@
 ---
 name: beacon-session-merge-back
-description: /beacon-session-fork で立てた子 worktree を片付ける Skill。active な fork を picker で選び、対応 branch が main に取り込まれているかを git で確認、merge 済なら git worktree remove + git branch -d で物理削除する。未 merge は警告して中止。fork → 並列実装 → cleanup の往復を 2 Skill で完結させるペア Skill。
+description: /beacon-session-fork で立てた子 worktree を片付ける Skill。active な fork を picker で選び、対応 branch が main に取り込まれているかを git で確認、merge 済なら beacon session fork cleanup (= メモを退避してから消す口) で削除する。未 merge は警告して中止。fork → 並列実装 → cleanup の往復を 2 Skill で完結させるペア Skill。
 version: 0.1.0
 triggers:
   - /beacon-session-merge-back
@@ -16,7 +16,7 @@ triggers:
 
 > `/beacon-session-fork` で立てた子 worktree を片付ける Skill。`/beacon-session-fork` とペアで、fork → 並列実装 → cleanup の往復を **2 Skill で完結** させる。
 >
-> 親 worktree から叩く想定。active な fork を picker で選び、対応する子 branch が main に取り込まれているかを git で確認、取り込み済なら `git worktree remove` + `git branch -d` で物理削除する。**未 merge の子は強制削除しない** — 未マージ branch の作業を黙って失うことを構造的に防ぐ。
+> 親 worktree から叩く想定。active な fork を picker で選び、対応する子 branch が main に取り込まれているかを git で確認、取り込み済なら `beacon session fork cleanup` (= 引き継ぎメモを退避してから worktree と branch を消す口) で削除する。**未 merge の子は強制削除しない** — 未マージ branch の作業を黙って失うことを構造的に防ぐ。
 
 ## 文章の書き方 (Beacon 全体の哲学)
 
@@ -173,10 +173,20 @@ branch の削除可否は `branch_removed` で別に返る。`removed: true` + `
 中身を確認してください:
   - PR がまだの場合: `gh pr create --base main --head <branch>`
   - PR が open なら merge を待つ
-  - もう要らないなら手動で消す: `git worktree remove --force <wt-path> && git branch -D <branch>`
+  - もう要らない (= この branch の作業を捨てる) と人間が判断した場合だけ:
+      `beacon session fork cleanup <wt-path> --force`
+    その後、残った branch は `git branch -D <branch>` で消す (worktree が無い branch の削除は
+    メモに触らないので git 直叩きでよい)。
 
 本 Skill は未 merge の作業を黙って失う経路を持ちません。明示判断後、再度 /beacon-session-merge-back を実行してください。
 ```
+
+**ここでも git の強制削除コマンドを直接書かない (ms-178 e-7183)**。かつてこの Step は
+「もう要らないなら手動で git の強制削除」と案内しており、Step 4 のゲート (メモの退避 →
+退避が取れなければ削除しない) の **外を通る道を手順書が示している** 状態だった
+(目的達成レビューの独立 judge の指摘: 「a prose route around the tool gate, outside the
+code」)。`--force` が何を上書きでき、何を上書きできないか (= 退避の失敗) は **Step 4 の説明が
+唯一の正** で、ここには写さない。
 
 中止して終了。
 

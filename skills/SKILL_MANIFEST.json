@@ -588,7 +588,7 @@
       "current_location": "skills/beacon-session-merge-back.md",
       "frontmatter": {
         "name": "beacon-session-merge-back",
-        "description": "/beacon-session-fork で立てた子 worktree を片付ける Skill。active な fork を picker で選び、対応 branch が main に取り込まれているかを git で確認、merge 済なら git worktree remove + git branch -d で物理削除する。未 merge は警告して中止。fork → 並列実装 → cleanup の往復を 2 Skill で完結させるペア Skill。",
+        "description": "/beacon-session-fork で立てた子 worktree を片付ける Skill。active な fork を picker で選び、対応 branch が main に取り込まれているかを git で確認、merge 済なら beacon session fork cleanup (= メモを退避してから消す口) で削除する。未 merge は警告して中止。fork → 並列実装 → cleanup の往復を 2 Skill で完結させるペア Skill。",
         "version": "0.1.0",
         "triggers": ""
       },
