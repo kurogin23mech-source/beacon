@@ -105,13 +105,13 @@ def test_the_unsafe_verb_is_still_recommended_where_it_applies(project, capsys):
     _seed(project, [{"ts": "2026-10-25T00:00:00+00:00", "text": "other",
                      "session_id": "sv-OTHER"}])
     import os
-    # 自セッション分を対象にする既定のまま、自分のメモだけ 0 件の状態を作る。
-    # touches_other_sessions=True の呼び出し (= 旧来の全件 clear) を直接叩く。
+    # 全セッション分を対象にする呼び出し (= 旧来の全件 clear) を直接叩く。
+    # ms-178 e-7174 で scope は 1 引数に畳まれた: scope_sentence を渡さない
+    # (= None) ことが「全セッション横断」の意味になる。
     removed = cmd_note._selective_delete(
         lambda n: False, label="テスト", write_backups=lambda *a: "b",
         confirm=True, rerun_hint="h",
-        on_unconfirmed=cmd_note.UNCONFIRMED_REFUSE,
-        touches_other_sessions=True)
+        on_unconfirmed=cmd_note.UNCONFIRMED_REFUSE)
     del removed, os
     combined = "".join(capsys.readouterr())
     assert UNSAFE_VERB in combined, combined
