@@ -136,7 +136,7 @@ priority 順 (highest > high > middle > low > なし) + depends_on 解決済を�
 
 ## Step 3: 計画系 DM の自律発信 (= 必要なら)
 
-Trek scope 内、 cross-session で合意が必要な計画的判断 (= partial helper の signature / fixture 順 等) は user 確認なしで `beacon dm send` を発射してよい (= ms-70 blanket exception、 dm_gate.py で `shared_trek_member` 判定済)。
+Trek scope 内、 cross-session で合意が必要な計画的判断 (= partial helper の signature / fixture 順 等) は `beacon dm send` で相談してよい。**ただし受信側の確認は省略されない (ms-185 e-7068)**: 以前は「同じ Trek の参加者同士なら server が確認ゲートを素通りする」例外があったが、その判定は削除された。相手が別のユーザーで action を伴う DM なら、相手側の人間の承認を待つことになる。
 
 ```bash
 cd "$PROJECT_DIR" && beacon dm send --channel session-dm \
