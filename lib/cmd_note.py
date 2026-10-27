@@ -494,9 +494,53 @@ UNCONFIRMED_REFUSE = "refuse"      # destructive verb: state the stake, exit non
 UNCONFIRMED_PREVIEW = "preview"    # opt-in cleanup: dry run, exit 0
 
 
+def _net_doomed(local, local_go, cloud_go, cloud_error):
+    """How many notes actually DISAPPEAR — and whether that number is knowable.
+
+    Returns ``(count, known)``. ``known`` is False when the cloud store could
+    not be read, because then the count is a floor, not the answer.
+
+    ``total`` (= ``len(local_go) + len(cloud_go)``) is not it: ``note add``
+    writes each note to both stores, so the common ones are counted twice.
+    (``_push_note_to_cloud`` is deliberately best-effort and silent, so a note
+    whose push failed is local-only — the overlap is the intent, not an
+    invariant. The arithmetic below is right either way.)
+
+    Two wrong answers were tried on the way here, both of which understated the
+    stake — the exact failure this gate exists to prevent:
+
+    * ``len(local_go)``, which reported one store. Measured against the real
+      store on 2026-10-27: printed 49 while 175 notes were about to go.
+    * ``len(set_of_local_keys | set_of_cloud_keys)``, which collapses DUPLICATE
+      ROWS INSIDE one store. ``_note_key`` is (ts, text, session_id), so two
+      identical rows in the local file — one ``note add`` run twice in the same
+      second, a resend — are one key but two deletions. An independent AX
+      review found this (2026-10-27) by putting the same row in twice: the gate
+      said 1, the run removed 2.
+
+    So: count local rows as rows, and add only the cloud rows whose key is NOT
+    already in local. That de-duplicates ACROSS stores (which double counts)
+    without de-duplicating WITHIN one (which loses rows). It is the same
+    arithmetic the all-sessions branch below already used
+    for its ``他セッション分`` figure; this is now the one place that owns it.
+    """
+    if cloud_error:
+        # An unreadable store is not an empty one. `_fetch_cloud_notes` returns
+        # [] on failure, so every count derived from `cloud_go` silently reads
+        # as zero — and that file's own docstring says confusing "unreadable"
+        # with "empty" is the defect it exists to stop. Report the local floor
+        # and say it is a floor (AX review, 2026-10-27: the first version of
+        # this function printed a flat "0 件" for an unreachable cloud).
+        return len(local_go), False
+    local_keys = {_note_key(n) for n in local}
+    only_in_cloud = sum(1 for n in cloud_go
+                        if _note_key(n) not in local_keys)
+    return len(local_go) + only_in_cloud, True
+
+
 def _selective_delete(should_delete, *, label, write_backups, confirm,
                       rerun_hint, on_unconfirmed, preview=None,
-                      touches_other_sessions=True, scope_sentence=""):
+                      scope_sentence=None):
     """Delete the notes ``should_delete(note)`` picks; keep the rest.
 
     One mechanism, two policies. ``note clear`` (this session's notes) and
@@ -515,21 +559,26 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
     stderr, exit non-zero) and "preview" for the opt-in cleanup (dry run on
     stdout, exit 0). Returns the number removed, or -1 when nothing was done.
 
-    ``scope_sentence`` is what the refusal says the cloud leg is about, in the
-    caller's own words. Required when ``touches_other_sessions`` is False: that
-    branch is shared by two verbs with DIFFERENT subjects (`note clear` takes
-    this session's notes, `note reap` takes ended sessions'), and a single
-    hardcoded sentence was false for one of them (ms-178 / e-7174). The count
-    is derived from the data, never from the caller.
+    ``scope_sentence`` says what the delete is about, in the caller's own
+    words, and by being present at all it says the delete is SCOPED (it spares
+    some notes). ``None`` means the opposite: this takes every session's notes,
+    so the refusal carries the shared-store warning instead.
+
+    One parameter rather than two (maintainability review, 2026-10-27). The
+    first version had ``touches_other_sessions=False`` AND ``scope_sentence``,
+    coupled by a runtime ``ValueError`` — so ``(False, "")`` was constructible
+    in the signature and a third caller would learn the rule by hitting the
+    exception. Folding them makes the invalid state unrepresentable, which is
+    what the rule was trying to buy.
+
+    The scoped branch is shared by verbs with DIFFERENT subjects (`note clear`
+    takes this session's notes, `note reap` takes ended sessions'), and one
+    hardcoded sentence was false for one of them (ms-178 / e-7174) — hence the
+    caller supplies it. The COUNT is always derived from the data, never from
+    the caller.
     """
     if on_unconfirmed not in (UNCONFIRMED_REFUSE, UNCONFIRMED_PREVIEW):
         raise ValueError("unknown on_unconfirmed policy: %r" % (on_unconfirmed,))
-    if not touches_other_sessions and not scope_sentence:
-        # Refuse rather than fall back to a default sentence: a default is how
-        # the wrong-scope message got shared by two verbs in the first place.
-        raise ValueError(
-            "scope_sentence is required when touches_other_sessions=False "
-            "(the refusal must say whose notes this verb takes)")
     path = _get_notes_path()
     project_id = _cloud_project_id()
 
@@ -555,13 +604,10 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
         cloud_keep = [n for n in cloud if not should_delete(n)]
 
     total = len(local_go) + len(cloud_go)
-    # How many notes actually DISAPPEAR, which is not `total`: the two stores
-    # overlap (every note `note add` writes lands in both), so `total` double
-    # counts the common ones. The confirmation gate must state the net, because
-    # that is the number the operator is consenting to lose (ms-178 / e-7174).
-    _doomed_keys = {_note_key(n) for n in local_go} | {
-        _note_key(n) for n in cloud_go}
-    net_total = len(_doomed_keys)
+    # Presence of the caller's sentence IS the scope flag (see the docstring).
+    touches_other_sessions = scope_sentence is None
+    net_total, net_total_known = _net_doomed(local, local_go, cloud_go,
+                                             cloud_error)
 
     if total == 0 and on_unconfirmed == UNCONFIRMED_REFUSE:
         # Nothing of ours to clear. Exit 0 so the session-end routine
@@ -575,7 +621,7 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
                   "'beacon note clear --include-other-sessions --yes' を明示してください。" % others)
         elif others:
             # AX review (2026-10-26): this line used to print unconditionally,
-            # so the two callers that pass touches_other_sessions=False — the
+            # so the two callers that pass a scope_sentence — the
             # scoped `note clear` and `note reap` — recommended
             # `--include-other-sessions`, which deletes every LIVE session's
             # handoff notes. For `reap` that is the exact operation it exists to
@@ -592,14 +638,21 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
         # A confirmation gate that hides the stake is not a gate (ms-178, AX
         # review of PR#766). Size it on stderr and exit non-zero: this is a
         # refusal, not a successful preview.
-        # The net, not len(local_go) (ms-178 / e-7174). Running `note reap`
+        # The net (see _net_doomed), not one store's total: running `note reap`
         # against the real store on 2026-10-27 printed "49" while 175 notes
-        # were about to go: the local file held 49 of the orphans and the
-        # shared cloud store held 175, and the gate reported only the store it
-        # happened to read first. A gate that understates the stake 3.5x is the
-        # thing the comment above says it exists not to be.
-        print("Refusing to clear %d session note(s) without confirmation (%s)."
-              % (net_total, label), file=sys.stderr)
+        # were about to go. A gate that understates the stake 3.5x is the thing
+        # the comment above says it exists not to be.
+        #
+        # When the cloud is unreadable the number is a FLOOR, and saying so is
+        # the whole point — "at least N" lets the operator wait, a bare N tells
+        # them they have the answer.
+        if net_total_known:
+            print("Refusing to clear %d session note(s) without confirmation (%s)."
+                  % (net_total, label), file=sys.stderr)
+        else:
+            print("Refusing to clear at least %d session note(s) without "
+                  "confirmation (%s) — cloud を読めないので総数は不明です。"
+                  % (net_total, label), file=sys.stderr)
         print("  local: %s の %d 件 (moved to %s.bak, recoverable)"
               % (path, len(local_go), path), file=sys.stderr)
         if project_id and touches_other_sessions:
@@ -630,8 +683,15 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
             # message that is true for the caller it was written for and false
             # for the one that later shared it. So the caller names its own
             # scope, and the count comes from the data either way.
-            print("  cloud: %s — %d 件。退避は %s。"
-                  % (scope_sentence, len(cloud_go), _cloud_backup_path()),
+            # Same rule as the sibling branch above: an unreadable store
+            # reports 件数不明, never a flat 0. `_fetch_cloud_notes` returns []
+            # on failure, so `len(cloud_go)` is 0 for "could not look" and 0 for
+            # "looked, found none" — the first version of this line printed
+            # 「0 件」 for an unreachable cloud (AX review, 2026-10-27).
+            cloud_count = ("件数不明 — cloud を確認できません" if cloud_error
+                           else "%d 件" % len(cloud_go))
+            print("  cloud: %s — %s。退避は %s。"
+                  % (scope_sentence, cloud_count, _cloud_backup_path()),
                   file=sys.stderr)
         if preview:
             preview(local_go, cloud_go, local_keep, cloud_keep)
@@ -777,7 +837,7 @@ def cmd_note_clear():
             {"session_id": session_id}),
         write_backups=_clear_backup_desc, confirm=confirm,
         rerun_hint="beacon note clear --yes",
-        on_unconfirmed=UNCONFIRMED_REFUSE, touches_other_sessions=False,
+        on_unconfirmed=UNCONFIRMED_REFUSE,
         scope_sentence="対象はこのセッションが書いたメモだけです "
                        "(他セッションの引き継ぎメモは消えません)")
 
@@ -1041,7 +1101,6 @@ def cmd_note_reap():
         write_backups=_clear_backup_desc, confirm=confirm,
         rerun_hint="beacon note reap --yes",
         on_unconfirmed=UNCONFIRMED_REFUSE, preview=_preview,
-        touches_other_sessions=False,
         scope_sentence="対象は終了したセッションが書いたメモだけです "
                        "(稼働中セッションの引き継ぎメモは消えません)")
     return removed
