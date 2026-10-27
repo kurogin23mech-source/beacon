@@ -496,7 +496,7 @@ UNCONFIRMED_PREVIEW = "preview"    # opt-in cleanup: dry run, exit 0
 
 def _selective_delete(should_delete, *, label, write_backups, confirm,
                       rerun_hint, on_unconfirmed, preview=None,
-                      touches_other_sessions=True):
+                      touches_other_sessions=True, scope_sentence=""):
     """Delete the notes ``should_delete(note)`` picks; keep the rest.
 
     One mechanism, two policies. ``note clear`` (this session's notes) and
@@ -514,9 +514,22 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
     ``on_unconfirmed`` is "refuse" for the destructive verb (state the stake on
     stderr, exit non-zero) and "preview" for the opt-in cleanup (dry run on
     stdout, exit 0). Returns the number removed, or -1 when nothing was done.
+
+    ``scope_sentence`` is what the refusal says the cloud leg is about, in the
+    caller's own words. Required when ``touches_other_sessions`` is False: that
+    branch is shared by two verbs with DIFFERENT subjects (`note clear` takes
+    this session's notes, `note reap` takes ended sessions'), and a single
+    hardcoded sentence was false for one of them (ms-178 / e-7174). The count
+    is derived from the data, never from the caller.
     """
     if on_unconfirmed not in (UNCONFIRMED_REFUSE, UNCONFIRMED_PREVIEW):
         raise ValueError("unknown on_unconfirmed policy: %r" % (on_unconfirmed,))
+    if not touches_other_sessions and not scope_sentence:
+        # Refuse rather than fall back to a default sentence: a default is how
+        # the wrong-scope message got shared by two verbs in the first place.
+        raise ValueError(
+            "scope_sentence is required when touches_other_sessions=False "
+            "(the refusal must say whose notes this verb takes)")
     path = _get_notes_path()
     project_id = _cloud_project_id()
 
@@ -542,6 +555,13 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
         cloud_keep = [n for n in cloud if not should_delete(n)]
 
     total = len(local_go) + len(cloud_go)
+    # How many notes actually DISAPPEAR, which is not `total`: the two stores
+    # overlap (every note `note add` writes lands in both), so `total` double
+    # counts the common ones. The confirmation gate must state the net, because
+    # that is the number the operator is consenting to lose (ms-178 / e-7174).
+    _doomed_keys = {_note_key(n) for n in local_go} | {
+        _note_key(n) for n in cloud_go}
+    net_total = len(_doomed_keys)
 
     if total == 0 and on_unconfirmed == UNCONFIRMED_REFUSE:
         # Nothing of ours to clear. Exit 0 so the session-end routine
@@ -572,10 +592,16 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
         # A confirmation gate that hides the stake is not a gate (ms-178, AX
         # review of PR#766). Size it on stderr and exit non-zero: this is a
         # refusal, not a successful preview.
+        # The net, not len(local_go) (ms-178 / e-7174). Running `note reap`
+        # against the real store on 2026-10-27 printed "49" while 175 notes
+        # were about to go: the local file held 49 of the orphans and the
+        # shared cloud store held 175, and the gate reported only the store it
+        # happened to read first. A gate that understates the stake 3.5x is the
+        # thing the comment above says it exists not to be.
         print("Refusing to clear %d session note(s) without confirmation (%s)."
-              % (len(local_go), label), file=sys.stderr)
-        print("  local: %s (moved to %s.bak, recoverable)" % (path, path),
-              file=sys.stderr)
+              % (net_total, label), file=sys.stderr)
+        print("  local: %s の %d 件 (moved to %s.bak, recoverable)"
+              % (path, len(local_go), path), file=sys.stderr)
         if project_id and touches_other_sessions:
             if cloud_error:
                 others = "件数不明 — cloud を確認できません"
@@ -590,14 +616,23 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
                   "Snapshotted to %s first; restore with 'beacon note restore'."
                   % (others, _cloud_backup_path()), file=sys.stderr)
         elif project_id:
-            # The scoped delete touches only this session's notes, so the
+            # The scoped delete does not touch LIVE sessions' notes, so the
             # shared-store warning would be false here. Saying it anyway made
             # the refusal explain itself with a reason that does not apply —
             # and would push a careful agent into stopping a safe operation
             # (AX review, PR #782).
-            print("  cloud: 対象はこのセッションが書いたメモだけです "
-                  "(他セッションの引き継ぎメモは消えません)。退避は %s。"
-                  % _cloud_backup_path(), file=sys.stderr)
+            #
+            # But "whose notes, then" differs per caller, and one sentence for
+            # both was wrong for one of them (ms-178 / e-7174): `note reap`
+            # printed 「対象はこのセッションが書いたメモだけです」 while its
+            # subject is precisely OTHER, ended sessions' notes. Same shape as
+            # the AX-2 defect this file already carries a note about — a
+            # message that is true for the caller it was written for and false
+            # for the one that later shared it. So the caller names its own
+            # scope, and the count comes from the data either way.
+            print("  cloud: %s — %d 件。退避は %s。"
+                  % (scope_sentence, len(cloud_go), _cloud_backup_path()),
+                  file=sys.stderr)
         if preview:
             preview(local_go, cloud_go, local_keep, cloud_keep)
         print("Re-run as '%s' to proceed." % rerun_hint, file=sys.stderr)
@@ -742,7 +777,9 @@ def cmd_note_clear():
             {"session_id": session_id}),
         write_backups=_clear_backup_desc, confirm=confirm,
         rerun_hint="beacon note clear --yes",
-        on_unconfirmed=UNCONFIRMED_REFUSE, touches_other_sessions=False)
+        on_unconfirmed=UNCONFIRMED_REFUSE, touches_other_sessions=False,
+        scope_sentence="対象はこのセッションが書いたメモだけです "
+                       "(他セッションの引き継ぎメモは消えません)")
 
 
 def cmd_note_restore():
@@ -1004,7 +1041,9 @@ def cmd_note_reap():
         write_backups=_clear_backup_desc, confirm=confirm,
         rerun_hint="beacon note reap --yes",
         on_unconfirmed=UNCONFIRMED_REFUSE, preview=_preview,
-        touches_other_sessions=False)
+        touches_other_sessions=False,
+        scope_sentence="対象は終了したセッションが書いたメモだけです "
+                       "(稼働中セッションの引き継ぎメモは消えません)")
     return removed
 
 
