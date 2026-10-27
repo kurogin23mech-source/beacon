@@ -50,6 +50,39 @@ os.environ.setdefault("BEACON_SESSION_KIND", "human")
 # deliberately clears it can. Propagates to `beacon` CLI subprocess children.
 os.environ.setdefault("BEACON_TEST_MODE", "1")
 
+# macOS + grpcio: fork() ハンドラを切る。
+#
+# 症状: xdist worker が grpc のチャネル (= google-cloud-firestore 経由) を
+# 抱えた状態で subprocess (`bin/beacon` 等) を起こすと、CPython の subprocess は
+# close_fds 既定のため posix_spawn ではなく fork() + exec() を踏む。fork() 直後・
+# exec() 到達前の子プロセスで grpc の pthread_atfork child ハンドラが発火し、
+# イベントエンジンのスレッドプールを作り直して中断中の DNS 解決を再開する。その
+# 解決経路が os_log / XPC を呼ぶため、macOS は "multi-threaded process forked" を
+# 検出して子を SIGTRAP で殺す。子は exec に到達しないので、
+#   - 親は returncode -5 と空の stdout を受け取る (= 理由不明の FAILED)
+#   - macOS が "Python が予期しない理由で終了しました" のクラッシュレポートを書く
+# が同時に起きる。exec が間に合えば何も起きないため完全なレースで間欠発生する
+# (実測: 2026-10-26 の `pytest -n 4` 2本並走で 8 分間に 25 件)。
+#
+# grpc の fork support は「fork して exec しない」(= 子で grpc を続ける) 用途の
+# ための機能で、fork+exec しかしない subprocess には不要。切れば子は grpc を
+# 再初期化せず、XPC にも触らないので発火点自体が消える。grpc はこの env を
+# import 時に読むので、どのテストモジュールより先に置く必要がある。
+# setdefault なので、調査のため有効化したい場合は外から上書きできる。
+#
+# 実測 (= この設定が本当に発火点を消すことの裏取り): grpc チャネルを張った状態で
+# fork+exec を 30 回まわすと、env 未設定では C コアの atfork ハンドラ登録ログが
+# 29 回出るが、この設定を入れると 0 回になる。Python 層の
+# cygrpc.is_fork_support_enabled() は macOS では元から False を返し C コア層の
+# 状態を映さないので、ハンドラが走るかどうかの判定には使えない。
+#
+# 「どのテストモジュールより先」という順序は、下の _GRPC_IMPORTED_BEFORE_GUARD が
+# 事実として捕まえる (tests/test_fork_safety_guards.py が False を固定する)。
+# コメントの約束だけに頼ると、先に grpc を import する plugin や conftest の
+# 並び替えが入ったとき、黙って設定が後追いになる。
+_GRPC_IMPORTED_BEFORE_GUARD = "grpc" in sys.modules
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
+
 
 def pytest_configure(config):
     """Register the suite's own markers so they are not silently mistyped.
@@ -64,6 +97,60 @@ def pytest_configure(config):
         "markers",
         "allow_repo_beacon_write: this test's subject is the repository's own "
         ".beacon/ directory, so the leak guard is waived for it")
+    config.addinivalue_line(
+        "markers",
+        "allow_real_firestore: this test deliberately talks to a real "
+        "Firestore instance, so the no-real-client guard is waived for it")
+
+
+@pytest.fixture(autouse=True)
+def _ban_real_firestore_client(request, monkeypatch):
+    """本物の ``firestore.Client()`` をテスト中に生成できないようにする。
+
+    ``server/firestore_client.py`` は 100 以上のテストモジュールから import され、
+    その ``get_db()`` は ADC (``~/.config/gcloud/application_default_credentials.json``)
+    があれば **実 Firestore へ接続してしまう**。各テストはインメモリ stub を
+    sys.modules に差し込んで回避しているが、それは「差し込み忘れたら実接続」
+    という向き (= お願いベース) の防ぎ方で、二つの実害に素通りする:
+
+    1. ``projects-dev`` / ``users-dev`` 等の実コレクションをテストが触る
+       (BEACON_TEST_MODE / cloud_write_guard は beacon 側の書き込み経路を守るが、
+       firestore_client を直に叩く経路はその外側にある)
+    2. 生きた grpc チャネルが worker に残り、その後の subprocess で fork() 時に
+       macOS の fork 安全性違反でクラッシュする (上の GRPC_ENABLE_FORK_SUPPORT の
+       コメント参照)
+
+    そこで既定を反転させ、生成そのものを例外にする。実接続が主題のテストは
+    ``@pytest.mark.allow_real_firestore`` で明示的に opt-in する (marker は
+    pytest_configure で登録済みなので、--strict-markers 下で綴り間違いはエラー)。
+    """
+    if request.node.get_closest_marker("allow_real_firestore"):
+        return
+    try:
+        from google.cloud import firestore  # type: ignore[import-not-found]
+    except ImportError:
+        # google-cloud-firestore 未インストール環境 (= 実接続が起き得ない) では
+        # 守るものが無いので何もしない。ImportError 以外 (= 版ずれや壊れた
+        # 部分インストールで import 自体が失敗する) はここで握り潰さず素通し
+        # する: 「守るものが無い」と「守ろうとして失敗した」を同じ沈黙にすると、
+        # ガードが設置されないままテストが緑になる (= このガードが塞ごうとして
+        # いる silent no-op をガード自身がやる)。
+        return
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError(
+            "本物の firestore.Client() がテスト内で生成されました。"
+            "traceback の直近の呼び出し元が生成箇所です。そこを stub / fixture "
+            "経由に変えてください (よくある経路は server/firestore_client の "
+            "get_db())。実接続が主題のテストは "
+            "@pytest.mark.allow_real_firestore を付与してください。")
+
+    # Client と AsyncClient の両方を塞ぐ。いまのリポに AsyncClient の呼び出しは
+    # 無いが、片方だけ塞ぐと「非同期版に書き換えたらガードが外れる」経路が残る
+    # (= 塞いだつもりの穴が別の名前で開く)。raising=False なので、将来 grpc 側で
+    # どちらかが無くなっても壊れない。
+    for _name in ("Client", "AsyncClient"):
+        monkeypatch.setattr(firestore, _name, _refuse, raising=False)
 
 
 @pytest.fixture(autouse=True)
