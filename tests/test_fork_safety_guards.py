@@ -81,3 +81,17 @@ def test_opt_in_marker_lifts_the_firestore_guard():
     # marker が効いていれば差し替えは起きていない = 本物のクラスがそのまま見える。
     # ここで実際に Client() を呼ぶと実接続になるので、差し替えの不在だけを測る。
     assert getattr(firestore.Client, "__name__", "") != "_refuse"
+
+
+def test_real_firestore_async_client_is_also_refused():
+    """(2-c) 非同期版 (AsyncClient) も同じく拒否されること。
+
+    片方だけ塞ぐと「非同期版に書き換えたらガードが外れる」経路が残り、塞いだ
+    つもりの穴が別の名前で開く。いまのリポに AsyncClient の呼び出しは無いが、
+    ガードの対象であることをここで固定する。
+    """
+    firestore = pytest.importorskip("google.cloud.firestore")
+    if not hasattr(firestore, "AsyncClient"):
+        pytest.skip("この版の google-cloud-firestore に AsyncClient が無い")
+    with pytest.raises(AssertionError):
+        firestore.AsyncClient()

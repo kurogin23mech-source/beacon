@@ -145,7 +145,12 @@ def _ban_real_firestore_client(request, monkeypatch):
             "get_db())。実接続が主題のテストは "
             "@pytest.mark.allow_real_firestore を付与してください。")
 
-    monkeypatch.setattr(firestore, "Client", _refuse, raising=False)
+    # Client と AsyncClient の両方を塞ぐ。いまのリポに AsyncClient の呼び出しは
+    # 無いが、片方だけ塞ぐと「非同期版に書き換えたらガードが外れる」経路が残る
+    # (= 塞いだつもりの穴が別の名前で開く)。raising=False なので、将来 grpc 側で
+    # どちらかが無くなっても壊れない。
+    for _name in ("Client", "AsyncClient"):
+        monkeypatch.setattr(firestore, _name, _refuse, raising=False)
 
 
 @pytest.fixture(autouse=True)
