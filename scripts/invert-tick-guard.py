@@ -305,26 +305,15 @@ CASES = [
 ]
 
 
-# pytest が「テストを集められなかった」ときの印。変異が構文を壊すと**どの**
-# テストも赤くなるので、赤いこと自体はガードが効いた証拠にならない。これを
-# 成功として数えると、壊し方が下手なだけのケースが「守られている」に化ける
-# (= 偽の安全をハーネスが作る)。実際この 3 ケースで一度踏んだ: literal 化の
-# 置換が末尾のカンマをコメントに飲ませて SyntaxError を作り、2 件が OK に
-# 見えていた。
-_COLLECTION_FAILURE_MARKS = ("found no collectors", "SyntaxError",
-                             "errors in", "error in")
-
-
+# 赤いこと自体はガードが効いた証拠にならない。変異が構文を壊すと**どの**
+# テストも赤くなる。実際この 3 ケースで一度踏んだ: literal 化の置換が末尾の
+# カンマをコメントに飲ませて SyntaxError を作り、2 件が OK に見えていた。
+# 赤の理由の判定は ``invert_harness.classify_pytest_result`` が 1 箇所で持つ。
 def run_one(test_name: str) -> tuple:
     """(ガードが捕まえたか, 出力の末尾)。収集エラーは「捕まえた」に数えない。"""
     target = test_name if "::" in test_name and test_name.startswith("tests/") \
         else f"{AST_TEST}::{test_name}"
-    went_red, tail, r = ih.run_pytest(target, ROOT)
-    combined = r.stdout + r.stderr
-    if any(mark in combined for mark in _COLLECTION_FAILURE_MARKS):
-        return (False, "INVALID (テストを収集できていない — 変異が構文を壊した"
-                       f"か、対象名が違う): {tail}")
-    return (went_red, tail)
+    return ih.run_and_classify(target, ROOT)
 
 
 def main() -> int:
@@ -371,4 +360,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, ROOT))

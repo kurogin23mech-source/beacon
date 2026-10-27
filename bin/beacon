@@ -308,6 +308,8 @@ if [ -n "$_beacon_wants_help" ]; then
     # as "the operator asked for help" and let the python chokepoint refuse any
     # non-read-only verb. The class is then closed for every command, including
     # ones added later: a missing registry entry can degrade help, never data.
+    # The inversion harness scripts/invert-note-backup-ordering.py anchors on
+    # the exact `export` line below (M1). Read it before changing this line.
     export BEACON_HELP_ONLY=1
 fi
 
@@ -2468,6 +2470,8 @@ EOF
                         # instead of shift-ing them away. Silently swallowing an
                         # unexpected token is the same defect class as the old
                         # `${3:+1}` — a malformed call looks like a correct one.
+                        # scripts/invert-note-backup-ordering.py anchors on the
+                        # exact `*)` line below (M14).
                         *)      _guard_no_positional "note list" "$1" ;;
                     esac
                 done

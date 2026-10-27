@@ -183,6 +183,8 @@ def _fetch_cloud_notes(project_id: str):
     client, error = _note_api_client()
     if error:
         return [], error
+    # 反転ハーネス scripts/invert-note-backup-ordering.py が下の except 行の
+    # 文面を anchor にしている (M2b)。言い回しを変えるときは先にそちらを読む。
     try:
         notes = client.list_notes(project_id)
         return (notes if isinstance(notes, list) else []), ""
@@ -462,6 +464,8 @@ def _clear_backup_desc(local, cloud, project_id) -> str:
     with open(path + ".bak", "w", encoding="utf-8") as f:
         for n in local:
             f.write(json.dumps(n, ensure_ascii=False) + "\n")
+    # 反転ハーネス scripts/invert-note-backup-ordering.py が次の 2 行を
+    # anchor にしている (cloud の退避を飛ばす変異)。
     if project_id:
         cb = _cloud_backup_path()
         os.makedirs(os.path.dirname(cb) or ".", exist_ok=True)
@@ -595,6 +599,8 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
             # the stake, an unreadable cloud is reported as "count unknown" —
             # refusing to describe the operation would hide the stake instead
             # of stating it (ms-178 e-6656).
+            # 反転ハーネス scripts/invert-note-backup-ordering.py が
+            # 次の print 2 行を anchor にしている。文面を変えたらそちらも。
             print("Aborted: cloud のメモを取得できず退避が取れません "
                   "(%s)。" % cloud_error, file=sys.stderr)
             print("  何も削除していません (退避の取れない削除は行いません)。",
@@ -719,6 +725,9 @@ def _selective_delete(should_delete, *, label, write_backups, confirm,
         print("  実行する: %s" % rerun_hint)
         return -1
 
+    # 「退避なし ⇒ 削除なし」の脚。反転ハーネス
+    # scripts/invert-note-backup-ordering.py がこの try/except 6 行をそのまま
+    # anchor にしている (M3b / 素の例外)。字句を変えるときは先にそちらを読む。
     try:
         backup_desc = write_backups(local, cloud, project_id)
     except OSError as exc:

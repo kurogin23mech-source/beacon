@@ -37,7 +37,9 @@ e-7185 で測る対象を 4 つ足した。いずれも **挙動は正しいが�
 同一秒内の復元で stale な `.pyc` が偽の結果を出す実例を 2026-10-27 に踏んだ。
 サイズが変わらない変異を書いてしまったら SKIP として失敗させ、書き直させる。
 
-使い方: python3 scripts/invert-note-backup-ordering.py
+使い方: python3 scripts/invert-note-backup-ordering.py   (引数なし。--help で本文)
+入口の裁き (未知の引数は非 0 で拒否 / 同じ repo で 2 本同時に走らせない排他ロック)
+は ``invert_harness.guarded_main`` が持つ。
 終了コード: 全ケースで期待どおり赤くなれば 0、1 件でも「壊したのに緑」か
 SKIP (= 当てる場所が無い) なら 1。SKIP は緑と同じ害なので失敗として数える。
 """
@@ -247,28 +249,10 @@ CASES = [
      BIN, swallow_a_stray_positional_as_json, FLAG_TEST),
 ]
 
-# 「赤くなった」が「ガードが効いた」とは限らない。変異が構文を壊したり対象を
-# 収集できなかったりしても赤くなるので、**赤の理由**まで見ないと偽の OK を出す。
-#
-# ここは出力の自由文を substring で探さない。以前の書き方 (`"error in" in 出力`)
-# は、テスト側の docstring に「a syntax error in the ledger」という文があるだけで
-# INVALID と誤判定した (2026-10-27 実測)。緩い一致はこのリポジトリが 3 回踏んだ
-# 形なので、pytest の **終了コード** という構造を見る:
-#   0 = 全部緑 (= MISS)、1 = テストが落ちた (= 本来狙っていた赤)、
-#   2 interrupted / 3 internal error / 4 usage error / 5 no tests collected。
-# 加えて、収集時 error も終了コード 1 に落ちるので **要約行** (= 機械が出す
-# 1 行) に error が数えられていないことだけを見る。本文は見ない。
-_PYTEST_TESTS_FAILED = 1
-_PYTEST_INVALID_RCS = (2, 3, 4, 5)
-
-
+# 「赤くなった」が「ガードが効いた」とは限らない。赤の理由の判定は
+# ``invert_harness.classify_pytest_result`` が 1 箇所で持つ (穴 3)。ここに写さない。
 def run_one(target: str):
-    went_red, tail, r = ih.run_pytest(target, ROOT)
-    if r.returncode in _PYTEST_INVALID_RCS:
-        return (False, f"INVALID (pytest rc={r.returncode} — 収集/起動の失敗): {tail}")
-    if r.returncode == _PYTEST_TESTS_FAILED and "error" in tail.lower():
-        return (False, f"INVALID (要約行が error を数えている): {tail}")
-    return (went_red, tail)
+    return ih.run_and_classify(target, ROOT)
 
 
 def main() -> int:
@@ -312,4 +296,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, ROOT))

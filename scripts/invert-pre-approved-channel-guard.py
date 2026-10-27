@@ -167,18 +167,10 @@ CASES = [
      GUARD_TEST + "::test_retired_reason_string_is_still_explainable"),
 ]
 
-# pytest が「テストを集められなかった」ときの印。変異が構文を壊すとどのテストも
-# 赤くなるので、赤いこと自体はガードが効いた証拠にならない。
-_COLLECTION_FAILURE_MARKS = ("found no collectors", "SyntaxError",
-                             "errors in", "error in")
-
-
+# 赤いこと自体はガードが効いた証拠にならない (変異が構文を壊しても赤くなる)。
+# 赤の理由の判定は ``invert_harness.classify_pytest_result`` が 1 箇所で持つ。
 def run_one(target: str):
-    went_red, tail, r = ih.run_pytest(target, ROOT)
-    combined = r.stdout + r.stderr
-    if any(mark in combined for mark in _COLLECTION_FAILURE_MARKS):
-        return (False, f"INVALID (テストを収集できていない): {tail}")
-    return (went_red, tail)
+    return ih.run_and_classify(target, ROOT)
 
 
 def main() -> int:
@@ -216,4 +208,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, ROOT))
