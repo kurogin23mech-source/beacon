@@ -196,6 +196,56 @@ def test_genuinely_empty_both_stores_is_stated_as_such(fake_cloud_config, monkey
 
 # --- the dedup key itself ---------------------------------------------------
 
+# --- the read failure is MANUFACTURED one layer down (ms-178 e-7185) --------
+#
+# Every test above stubs `_fetch_cloud_notes` itself, so the mapping INSIDE it —
+# "the client raised" -> a non-empty error string — was never measured. The
+# objective-attainment review's independent judge made that function swallow the
+# exception and return `error=""`, and five note test files stayed green
+# (2026-10-27). The docstring of `_fetch_cloud_notes` calls exactly that
+# conflation "the whole defect", so the stub layer was hiding the one line the
+# module exists to get right. These two drive the real function and stub the
+# API client instead.
+
+class _RaisingClient:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def list_notes(self, project_id):
+        raise self._exc
+
+
+def test_a_raising_client_becomes_a_non_empty_error(fake_cloud_config, monkeypatch):
+    """`_fetch_cloud_notes` itself must turn an exception into an error string.
+
+    Returning `([], "")` here would make an unreachable cloud indistinguishable
+    from an empty one for EVERY caller — the list, the clear gate's sizing, and
+    the reap refusal all branch on this one value.
+    """
+    monkeypatch.setattr(cmd_note, "_note_api_client",
+                        lambda: (_RaisingClient(RuntimeError("boom")), ""))
+    notes, error = cmd_note._fetch_cloud_notes("proj-1")
+    assert notes == []
+    assert error, "an exception was swallowed into an empty error string"
+    assert "RuntimeError" in error and "boom" in error, error
+
+
+def test_a_genuinely_empty_cloud_keeps_the_error_empty(fake_cloud_config, monkeypatch):
+    """The other side of the same distinction: "read it, found nothing" must NOT
+    report an error, or callers would refuse to operate on a healthy project.
+
+    Pinning both directions is what makes the pair a discrimination test rather
+    than a one-way assertion that a constant would satisfy.
+    """
+    class _EmptyClient:
+        def list_notes(self, project_id):
+            return []
+
+    monkeypatch.setattr(cmd_note, "_note_api_client",
+                        lambda: (_EmptyClient(), ""))
+    assert cmd_note._fetch_cloud_notes("proj-1") == ([], "")
+
+
 def test_note_key_joins_on_ts_text_session():
     """Pin the join key: the cloud copy carries no stable id of its own (the
     Firestore document id is not stored in the document), so ts+text+session_id

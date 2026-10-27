@@ -195,6 +195,103 @@ def test_unclassified_verb_is_treated_as_unsafe():
     assert classify("definitely_not_a_real_verb_e6654") is None
 
 
+# A verb that is NOT in the help registry and NOT read-only, so asking for its
+# help takes the fall-through and lands on the chokepoint. Pinned rather than
+# derived because deriving it means running `help_render` for all 255 non-Q
+# verbs; the preconditions are asserted below, so registering it later fails
+# loudly instead of quietly turning the next test into a no-op.
+FALL_THROUGH_VERB = ("deploy", "delete")
+FALL_THROUGH_KEY = "deploy_delete"
+
+
+def test_the_fall_through_verb_still_has_no_help_entry():
+    """Test-the-test: the verb the next one relies on must still fall through.
+
+    If someone registers `deploy delete`'s help, its --help stops reaching the
+    chokepoint and the test below would pass while measuring nothing. Twenty
+    non-Q verbs took the fall-through on 2026-10-27, so a replacement exists;
+    the failure message says how to find one.
+    """
+    from verb_ledger import classify
+
+    assert (classify(FALL_THROUGH_KEY) or {}).get("cls") != "Q", FALL_THROUGH_KEY
+    r = subprocess.run(
+        [sys.executable, str(COMMANDS_PY), "help_render"],
+        cwd=str(ROOT), capture_output=True, text=True,
+        env={**os.environ, "BEACON_HELP_QUERY": " ".join(FALL_THROUGH_VERB)},
+    )
+    assert r.returncode == 3, (
+        f"`beacon {' '.join(FALL_THROUGH_VERB)}` now HAS a help entry (exit "
+        f"{r.returncode}), so it no longer exercises the fall-through. Pick "
+        "another non-Q verb whose help_render exits 3 and update "
+        "FALL_THROUGH_VERB."
+    )
+
+
+@pytest.mark.skipif(BASH is None, reason="bash required")
+def test_bin_beacon_sets_help_only_on_the_fall_through(project):
+    """bin/beacon must EXPORT BEACON_HELP_ONLY when help falls through.
+
+    The chokepoint is what makes the fall-through safe, but something has to arm
+    it. Every test above either drives a registered command (`note`, which no
+    longer falls through at all) or sets the env var itself — so the one line in
+    bin/beacon that arms the gate for real was unmeasured: the independent judge
+    deleted the `export` and all five files that mention the gate stayed green
+    (ms-178 e-7185 / M1). Asking for help on an unregistered destructive verb
+    must produce the refusal, which is only reachable if the export happened.
+    """
+    cwd, _ = project
+    r = _run(cwd, *FALL_THROUGH_VERB, "--help")
+    assert "NOT executed" in r.stdout, (
+        "the help fall-through did not arm BEACON_HELP_ONLY — an unregistered "
+        "destructive verb would have RUN under --help: "
+        + r.stdout + r.stderr
+    )
+    assert r.returncode == 0, "a help request must still exit 0: " + r.stderr
+
+
+# --- layer 2: the gate itself is fail-closed, not just classify() ----------
+
+def test_the_gate_refuses_an_unclassified_verb(monkeypatch):
+    """Drive `verb_is_read_only`, not `classify`.
+
+    The test above pins that `classify` answers None for an unknown verb, but
+    nothing carried that None THROUGH the gate — the judge made
+    `verb_is_read_only` return True for an unclassified verb and the suite
+    stayed green (ms-178 e-7185 / M8). "Unclassified is refused" is the claim,
+    so the claim is what gets measured.
+    """
+    import readonly_gate
+
+    assert readonly_gate.verb_is_read_only("definitely_not_a_real_verb_e7185") is False
+    # And the allow side still works, or fail-closed would mean fail-always.
+    assert readonly_gate.verb_is_read_only("note_list") is True
+
+
+def test_the_gate_refuses_when_the_ledger_cannot_be_imported(monkeypatch):
+    """An unavailable ledger must not open the gate.
+
+    `verb_is_read_only` imports `verb_ledger` lazily inside the try, so an
+    import failure is a live possibility (a broken ledger module, a
+    truncated install). Answering True there would wave EVERY verb through at
+    exactly the moment the classification is unknowable.
+    """
+    import builtins
+
+    import readonly_gate
+
+    real_import = builtins.__import__
+
+    def _no_ledger(name, *a, **k):
+        if name == "verb_ledger":
+            raise ImportError("ledger unavailable")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_ledger)
+    # Even the read-only verb is refused: without the ledger we cannot know.
+    assert readonly_gate.verb_is_read_only("note_list") is False
+
+
 # --- both CLI frontends agree (ms-178 e-6654) ------------------------------
 
 def _dispatch_note(cwd, *argv):

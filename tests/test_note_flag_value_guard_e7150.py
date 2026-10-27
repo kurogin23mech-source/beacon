@@ -93,6 +93,41 @@ def test_following_flag_is_not_swallowed_as_a_value(project):
     assert "別のフラグを値として読み込んでいます" in combined, combined
 
 
+# --- 余分な位置引数を飲まないこと (ms-178 / e-7185) --------------------------
+#
+# `note list` の catch-all は以前 **どの第 3 token も `--json` として飲んで**
+# いた (`${3:+1}`)、その結果 `note list --help` がメモ本文を吐いた。今は
+# `_guard_no_positional` で止めるが、目的達成レビューの独立 judge が「再び
+# 飲む」変異を入れたところ `bin/beacon note list` を駆動する全テストが緑のまま
+# 通った (2026-10-27 / M14)。挙動として在るだけで、固定されていなかった。
+
+@pytest.mark.skipif(not BEACON.exists(), reason="bin/beacon がない")
+@pytest.mark.parametrize("extra_args", [
+    ["note", "list", "oops"],            # 素の余分な語
+    ["note", "list", "--json", "oops"],  # 正しいフラグの後ろに続く語
+])
+def test_stray_positional_is_rejected_not_swallowed(project, extra_args):
+    """余分な語は名指しで拒否する。黙って飲むと誤った呼び出しが成功に見える。"""
+    r = _run(project, extra_args)
+    combined = r.stdout + r.stderr
+    assert r.returncode != 0, "余分な位置引数を飲んで成功した: " + combined
+    assert "oops" in combined, combined
+    assert "unexpected argument" in combined, combined
+
+
+@pytest.mark.skipif(not BEACON.exists(), reason="bin/beacon がない")
+def test_a_stray_positional_does_not_dump_the_notes(project):
+    """旧実装の実害そのもの: 余分な語が `--json` 扱いされ、メモ本文が出た。
+
+    拒否されること (上) と、**本文が漏れないこと** は別の性質。前者が壊れても
+    後者が守られる形 (例: 拒否はするが拒否前に一覧を出す) があり得るので、
+    両方を見る。土台のメモ本文 "x" が出力に現れないことで測る。
+    """
+    r = _run(project, ["note", "list", "oops"])
+    assert '"text": "x"' not in r.stdout, "拒否する前にメモを吐いた: " + r.stdout
+    assert "x" not in r.stdout.replace("unexpected argument", ""), r.stdout
+
+
 @pytest.mark.skipif(not BEACON.exists(), reason="bin/beacon がない")
 def test_guarded_flags_still_accept_a_real_value(project):
     """ガードを足したことで正常系を壊していない。"""
