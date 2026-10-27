@@ -266,15 +266,10 @@ CASES = [
      PARITY_TEST + "::test_phase_a_rule_is_identical_in_both_implementations"),
 ]
 
-_COLLECTION_FAILURE_MARKS = ("found no collectors", "SyntaxError",
-                             "errors in", "error in")
-
-
+# 赤いこと自体はガードが効いた証拠にならない (変異が構文を壊しても赤くなる)。
+# 赤の理由の判定は ``invert_harness.classify_pytest_result`` が 1 箇所で持つ。
 def run_one(target: str):
-    went_red, tail, r = ih.run_pytest(target, ROOT)
-    if any(m in (r.stdout + r.stderr) for m in _COLLECTION_FAILURE_MARKS):
-        return (False, f"INVALID (テストを収集できていない): {tail}")
-    return (went_red, tail)
+    return ih.run_and_classify(target, ROOT)
 
 
 def main() -> int:
@@ -313,4 +308,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, ROOT))

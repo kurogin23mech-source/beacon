@@ -79,6 +79,10 @@ def verb_is_read_only(verb_key: str) -> bool:
 
     Any failure to classify — unknown verb, ledger import error — answers False.
     The gate must not be weakened by the ledger being unavailable.
+
+    The inversion harness scripts/invert-note-backup-ordering.py anchors on the
+    exact text of the ``except Exception:`` / ``return bool(entry) ...`` lines
+    below (M8). Read it before rewording them.
     """
     try:
         from verb_ledger import classify

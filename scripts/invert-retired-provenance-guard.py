@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import pathlib
-import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -35,10 +34,6 @@ CONSUMER_TEST = "tests/test_codex_retired_channel_notice_e7077.py"
 # ``scripts/invert_harness.py`` が持つ (なぜその形かの経緯もそこに在る)。
 # e-7066 以前はこのファイルと invert-tick-guard.py に別々の実装が並んでおり、
 # 片方 (tick 側) だけが穴を持ったままだった — 写すのではなく 1 箇所にした理由。
-def _isolated_env() -> dict:
-    return ih.isolated_env()
-
-
 def _invalidate_bytecode_cache(path: pathlib.Path) -> None:
     ih.invalidate_bytecode_cache(path, ROOT)
 
@@ -469,28 +464,19 @@ CASES = [
 ]
 
 
+BASELINE = [GUARD_TEST, PINNED_TEST, CONSUMER_TEST]
+
+
+# 赤いこと自体はガードが効いた証拠にならない (変異が構文を壊しても赤くなる)。
+# 赤の理由の判定は ``invert_harness.classify_pytest_result`` が 1 箇所で持つ。
 def run(target: str) -> tuple:
-    r = subprocess.run(
-        [sys.executable, "-B", "-m", "pytest", target, "-q", "--no-header",
-         "-p", "no:cacheprovider"],
-        cwd=ROOT, capture_output=True, text=True, env=_isolated_env())
-    tail = (r.stdout + r.stderr).strip().split("\n")[-1]
-    return (r.returncode != 0, tail)
+    return ih.run_and_classify(target, ROOT)
 
 
 def main() -> int:
     originals = {p: p.read_text(encoding="utf-8") for p in (BD, CODEX, CLAUDE)}
-
-    base = subprocess.run(
-        [sys.executable, "-B", "-m", "pytest", GUARD_TEST, PINNED_TEST,
-         CONSUMER_TEST,
-         "-q", "--no-header", "-p", "no:cacheprovider"],
-        cwd=ROOT, capture_output=True, text=True, env=_isolated_env())
-    if base.returncode != 0:
-        print("BASELINE RED — 壊す前からガードが落ちている。先にそれを直すこと。")
-        print((base.stdout + base.stderr)[-2000:])
+    if not ih.check_baseline(BASELINE, ROOT):
         return 1
-    print("baseline: " + base.stdout.strip().splitlines()[-1] + "\n")
 
     bad = 0
     for label, path, mutate, target in CASES:
@@ -519,19 +505,8 @@ def main() -> int:
     # 変異と復元を繰り返すので、復元漏れ / バイトコードキャッシュの残留が起きうる。
     # 黙って汚して終わると、次に走る人が「ソースは正しいのにテストが落ちる」
     # (または通る) 状態を引き継ぐ = ハーネス自身が偽の安全を作る。
-    after = subprocess.run(
-        [sys.executable, "-B", "-m", "pytest", GUARD_TEST, PINNED_TEST,
-         CONSUMER_TEST, "-q", "--no-header", "-p", "no:cacheprovider"],
-        cwd=ROOT, capture_output=True, text=True, env=_isolated_env())
-    if after.returncode != 0:
-        print()
-        print("NG: ハーネス実行後にベースラインが緑に戻りません。復元漏れか、")
-        print("    バイトコードキャッシュの残留です。環境を汚したまま終わるのは")
-        print("    偽の安全そのものなので失敗として扱います。")
-        print((after.stdout + after.stderr)[-1500:])
+    if not ih.check_not_polluted(BASELINE, ROOT):
         return 1
-    print("after: " + after.stdout.strip().splitlines()[-1]
-          + "  (= 環境を汚していない)")
     print()
     print("OK: %d 件すべて、守る対象を壊すと赤くなった。" % len(CASES))
     return 0
@@ -543,4 +518,4 @@ def _final_cleanup(originals: dict) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, ROOT))

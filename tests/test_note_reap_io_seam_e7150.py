@@ -17,6 +17,10 @@
 このモジュールは **継ぎ目を端から端まで**動かす。各テストは、レビュアーが通してしまった
 変異で落ちることを狙って書いてある (下の `test_cloud_mode_is_detected_from_the_project`
 が、まさにその `cloud_mode` 固定を捕まえる担当)。
+
+変異で実際に赤くなるかは `scripts/invert-note-backup-ordering.py` が実測する
+(「退避なし ⇒ 削除なし」が reap の配線でも効くこと含む)。`lib/cmd_note.py` を
+その場で書き換えるので pytest からは**呼ばない** (並列 worker を壊す)。
 """
 
 from __future__ import annotations
@@ -138,6 +142,36 @@ def test_cloud_mode_abort_is_reached_end_to_end(project, monkeypatch):
     assert len(_read(project)) == 2, "中止したのにメモが消えている"
     assert not (project / "session_notes.jsonl.bak").exists(), \
         "中止したのに退避を取っている (退避が取れたら消す設計なので危険)"
+
+
+def test_unwritable_backup_aborts_the_reap_end_to_end(project, monkeypatch):
+    """退避を書く係が OSError を上げたら、**刈り取りも**止まって何も消さない。
+
+    「退避なし ⇒ 削除なし」は `_selective_delete` の 1 機構に置いてあり、
+    `note clear` と `note reap` が同じ機構を別の述語で使う。片方の verb でしか
+    測っていないと、機構を通っているつもりの側が実は迂回していても気付けない
+    ので、到達することをこちらの継ぎ目でも見る (ms-178 e-7182)。
+
+    退避の 2 本の脚 (local の `.jsonl.bak` / cloud の `.cloud.bak`) をどちらが
+    落ちても止まる、という対は `tests/test_note_clear_backup_e6656.py` 側で
+    固めてある。ここで見るのは「reap の配線がその中止に到達する」こと。
+    """
+    _go_cloud(project)
+    client = _FakeClient(live_sids=["sv-ME"], notes=[ORPHAN, MINE])
+    monkeypatch.setattr(cmd_note, "_note_api_client", lambda: (client, ""))
+
+    def _boom(local, cloud, project_id):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(cmd_note, "_clear_backup_desc", _boom)
+    monkeypatch.setenv("BEACON_NOTE_REAP_YES", "1")
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_note.cmd_note_reap()
+    assert exc.value.code == 1
+    assert len(_read(project)) == 2, "退避が取れていないのに local を消している"
+    assert {n["text"] for n in client.notes} == {"orphan", "mine"}, \
+        "退避が取れていないのに cloud を消している"
 
 
 def test_server_live_ids_reach_the_decision(project, monkeypatch):
