@@ -165,10 +165,25 @@ branch の削除可否は `branch_removed` で別に返る。`removed: true` + `
 中身を確認してください:
   - PR がまだの場合: `gh pr create --base main --head <branch>`
   - PR が open なら merge を待つ
-  - もう要らないなら手動で消す: `git worktree remove --force <wt-path> && git branch -D <branch>`
+  - もう要らない (= この branch の作業を捨てる) と人間が判断した場合だけ:
+      `beacon session fork cleanup <wt-path> --force`
+    その後、残った branch は `git branch -D <branch>` で消す (worktree が無い branch の削除は
+    メモに触らないので git 直叩きでよい)。
 
 本 Skill は未 merge の作業を黙って失う経路を持ちません。明示判断後、再度 /beacon-session-merge-back を実行してください。
 ```
+
+**ここでも素の `git worktree remove --force` は案内しない (ms-178 e-7183)**。かつてこの Step は
+「もう要らないなら手動で `git worktree remove --force`」と書いていた。それは Step 4 で説明した
+ゲート (メモの退避 → 退避が取れなければ削除しない) の **外を通る道を手順書が案内している**
+状態で、コードでゲートを閉じても prose が迂回路を示していれば未昇格の引き継ぎメモは
+worktree ごと消える (目的達成レビューの独立 judge の指摘: 「a prose route around the tool
+gate, outside the code」)。
+
+`beacon session fork cleanup --force` なら、未取り込みという拒否理由だけを人間の判断で
+上書きし、**メモの退避は必ず走る** (退避が取れなければ `--force` でも通らない)。「捨てる」
+判断の後でも、消えるのは branch の作業であって、引き継ぎメモの控えは
+`.beacon/fork-notes-backup/` に残る。
 
 中止して終了。
 
