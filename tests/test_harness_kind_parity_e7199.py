@@ -5,12 +5,19 @@
 
 * 名乗り側: ``channel/bus-harness-kind.mjs`` の ``TERM_PROGRAM_KINDS``
   (TERM_PROGRAM → 正典名)
-* 受け付け側: ``viewer/jump.go`` の ``terminalDrivers`` (正典名の別名集合)
+* 受け付け側: ``viewer/jump.go`` の ``terminalDrivers`` (driver ごとの
+  kinds = 正典名と旧別名 / rawNames = 生の形で来る小文字の TERM_PROGRAM)
 
 JS は Go を import できず、Go は JS を読まない。どちらの言語の試験も自分の表だけを
 見て緑になるので、片方にだけ iTerm2 が在る状態 (= 宣言は対応済み、実機では一度も
 成立しない) が 1 か月以上気付かれなかった。ここが両方の表を **構造的に** 読んで
 突き合わせる唯一の歯止め。
+
+突き合わせは **driver 単位** で行う (PR#820 独立保守性レビュー): JS の 1 行
+``TERM_PROGRAM → 正典名`` は、Go の **同じ 1 つの driver** の rawNames
+(= lower(TERM_PROGRAM)) と kinds (= 正典名) に対応していなければならない。全 driver を
+平らにした集合で「含まれるか」だけ見ると、正典名を別の driver (= 別の端末アプリ) に
+置き間違えても緑のまま通る。
 
 **substring 一致で済ませない**: コメントや help 文に ``iterm2`` が出てくるだけで
 素通りするので、表のブロックを波括弧で切り出してからリテラルを拾う。表が見つから
@@ -33,9 +40,9 @@ GO_SOURCE = REPO / "viewer" / "jump.go"
 BUS_MJS = REPO / "channel" / "bus.mjs"
 
 
-def _brace_block(source: str, head_pattern: str, what: str) -> str:
+def _brace_block(source: str, head_pattern: str, what: str, start: int = 0) -> str:
     """``head_pattern`` の直後に始まる ``{ ... }`` を波括弧の対応で切り出す。"""
-    head = re.search(head_pattern, source)
+    head = re.compile(head_pattern).search(source, start)
     if head is None:
         raise AssertionError(
             f"{what} が見つかりません。改名したならこのガードも直してください "
@@ -50,6 +57,22 @@ def _brace_block(source: str, head_pattern: str, what: str) -> str:
             if depth == 0:
                 return source[i + 1:j]
     raise AssertionError(f"{what} の波括弧が閉じていません")
+
+
+def _top_level_blocks(body: str) -> list:
+    """``{...}, {...}`` と並ぶ要素を、深さ 1 の波括弧対応で 1 つずつ切り出す。"""
+    out, depth, start = [], 0, None
+    for j, ch in enumerate(body):
+        if ch == "{":
+            if depth == 0:
+                start = j
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                out.append(body[start + 1:j])
+                start = None
+    return out
 
 
 def js_term_program_kinds() -> dict:
@@ -71,18 +94,36 @@ def js_raw_prefix() -> str:
     return m.group(1)
 
 
-def go_driver_kinds() -> set:
-    """``var terminalDrivers = []terminalDriver{ ... kinds: []string{...} ... }`` を読む。"""
+def _go_string_list(block: str, field: str) -> list:
+    m = re.search(r"\b%s:\s*\[\]string\s*\{([^}]*)\}" % re.escape(field), block)
+    if m is None:
+        return []
+    return re.findall(r'"([^"]*)"', m.group(1))
+
+
+def go_drivers() -> list:
+    """``var terminalDrivers = []terminalDriver{ {...}, {...} }`` を driver ごとに読む。
+
+    返り値は ``[{"appName", "kinds", "rawNames"}]``。driver が 1 つも取れない /
+    appName が無い driver があるのは表の形が変わった証拠なので例外にする。
+    """
     src = GO_SOURCE.read_text(encoding="utf-8")
     body = _brace_block(
         src, r"var\s+terminalDrivers\s*=\s*\[\]terminalDriver\s*\{",
         "Go の受け付け表 terminalDrivers")
-    kinds: set = set()
-    for m in re.finditer(r"kinds:\s*\[\]string\s*\{([^}]*)\}", body):
-        kinds.update(re.findall(r'"([^"]*)"', m.group(1)))
-    if not kinds:
-        raise AssertionError("Go の受け付け表から kinds を 1 つも読めませんでした")
-    return kinds
+    drivers = []
+    for blk in _top_level_blocks(body):
+        name = re.search(r'\bappName:\s*"([^"]*)"', blk)
+        if name is None:
+            raise AssertionError(f"appName の無い driver がある: {blk.strip()[:80]}")
+        drivers.append({
+            "appName": name.group(1),
+            "kinds": _go_string_list(blk, "kinds"),
+            "rawNames": _go_string_list(blk, "rawNames"),
+        })
+    if not drivers:
+        raise AssertionError("Go の受け付け表から driver を 1 つも読めませんでした")
+    return drivers
 
 
 def go_raw_prefix() -> str:
@@ -92,16 +133,42 @@ def go_raw_prefix() -> str:
     return m.group(1)
 
 
+def _drivers_with(drivers: list, field: str, value: str) -> list:
+    return [d["appName"] for d in drivers if value in d[field]]
+
+
 # --- 構造 (静的) の突き合わせ --------------------------------------------------
 
-def test_js_canonical_kinds_are_all_accepted_by_go():
-    """名乗り側が送りうる正典名は、受け付け側の別名集合に全部含まれる。"""
+def test_each_js_row_lands_in_exactly_one_go_driver():
+    """JS の 1 行 (TERM_PROGRAM → 正典名) は、Go の同じ 1 つの driver の rawNames と
+    kinds に対応する。平らな集合の「含まれるか」ではなく driver 単位で見る。"""
     js = js_term_program_kinds()
-    go = go_driver_kinds()
-    missing = {k: v for k, v in js.items() if v not in go}
-    assert not missing, (
-        "名乗り側 (bus-harness-kind.mjs) が送る値を viewer/jump.go が受け付けません: "
-        f"{missing}。両方の表を同じ変更で直してください。")
+    drivers = go_drivers()
+    problems = []
+    for term_program, kind in js.items():
+        by_kind = _drivers_with(drivers, "kinds", kind)
+        by_raw = _drivers_with(drivers, "rawNames", term_program.lower())
+        if len(by_kind) != 1:
+            problems.append(f"{term_program!r} の正典名 {kind!r} が kinds に {by_kind} ({len(by_kind)} driver)")
+        if len(by_raw) != 1:
+            problems.append(f"{term_program!r} の生の名前 {term_program.lower()!r} が rawNames に {by_raw} ({len(by_raw)} driver)")
+        if len(by_kind) == 1 and len(by_raw) == 1 and by_kind != by_raw:
+            problems.append(f"{term_program!r}: 正典名は {by_kind[0]}、生の名前は {by_raw[0]} と別の driver に着く")
+    assert not problems, (
+        "名乗り側 (bus-harness-kind.mjs) と受け付け側 (viewer/jump.go) の対応が崩れています:\n  "
+        + "\n  ".join(problems) + "\n両方の表を同じ変更で直してください。")
+
+
+def test_go_kinds_and_raw_names_are_unique_across_drivers():
+    """同じ別名 / 生の名前が 2 つの driver に居ると、先に並んだ方が黙って勝つ。"""
+    drivers = go_drivers()
+    for field in ("kinds", "rawNames"):
+        seen = {}
+        for d in drivers:
+            for v in d[field]:
+                seen.setdefault(v, []).append(d["appName"])
+        dups = {v: apps for v, apps in seen.items() if len(apps) > 1}
+        assert not dups, f"{field} が複数 driver で重複: {dups}"
 
 
 def test_js_table_names_the_two_terminals_we_run():
@@ -137,10 +204,10 @@ def test_bus_mjs_delegates_and_has_no_inline_term_program_branch():
 
 @pytest.mark.skipif(shutil.which("node") is None,
                     reason="node が無い環境では名乗り側を実走できない (静的突合は上で走る)")
-def test_node_output_for_each_known_terminal_lands_in_go_table():
-    """表の読み取りではなく、関数を実際に走らせた出力が Go の表に入ることを見る。"""
+def test_node_output_for_each_known_terminal_lands_in_its_go_driver():
+    """表の読み取りではなく、関数を実際に走らせた出力が Go の正しい driver に入ることを見る。"""
     js = js_term_program_kinds()
-    go = go_driver_kinds()
+    drivers = go_drivers()
     probes = list(js.keys()) + ["WezTerm", ""]
     script = (
         f"import {{ harnessKindFromEnv }} from {json.dumps(str(JS_MODULE))}\n"
@@ -154,9 +221,12 @@ def test_node_output_for_each_known_terminal_lands_in_go_table():
     assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
     out = json.loads(proc.stdout)
     for term_program in js:
-        assert out[term_program] in go, (
-            f"TERM_PROGRAM={term_program!r} の名乗り {out[term_program]!r} を Go が受け付けない")
-    # 知らない端末は接頭辞付きの生の形で、Go が剥がした残りは表に無い (= 未対応に落ちる)。
+        by_kind = _drivers_with(drivers, "kinds", out[term_program])
+        by_raw = _drivers_with(drivers, "rawNames", term_program.lower())
+        assert by_kind == by_raw and len(by_kind) == 1, (
+            f"TERM_PROGRAM={term_program!r} の名乗り {out[term_program]!r} は driver {by_kind}、"
+            f"生の名前は driver {by_raw} — 同じ 1 つの driver に着いていない")
+    # 知らない端末は接頭辞付きの生の形で、Go が剥がした残りは rawNames に無い (= 未対応に落ちる)。
     assert out["WezTerm"] == js_raw_prefix() + "WezTerm"
-    assert out["WezTerm"][len(js_raw_prefix()):].lower() not in go
-    assert out[""] == "terminal" and "terminal" in go
+    assert not _drivers_with(drivers, "rawNames", "wezterm")
+    assert out[""] == "terminal" and _drivers_with(drivers, "kinds", "terminal")

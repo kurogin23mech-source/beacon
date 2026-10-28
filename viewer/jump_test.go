@@ -49,7 +49,7 @@ func TestTerminalAppName(t *testing.T) {
 		{"apple-terminal", "Terminal.app"}, // サーバの harness.kind 表記
 		{" Apple_Terminal ", "Terminal.app"},
 		{"iterm2", "iTerm2"},
-		{"ITERM.APP", "iTerm2"}, // 大文字でも引ける
+		{"ITERM.APP", "iTerm2"},   // 大文字でも引ける
 		{"kitty", "Terminal.app"}, // 未対応は既定表示名 (メッセージ用のみ)
 	}
 	for _, c := range cases {
@@ -122,23 +122,52 @@ func TestJumpableHarness(t *testing.T) {
 			t.Errorf("jumpableHarness(%q) = true, want false", h)
 		}
 	}
+	// 生の形は rawNames との完全一致でだけ受ける。kinds の汎用別名 ("" / "terminal") や
+	// 短縮形 ("iterm")、正典名 ("iterm2") に生の形から落ちてはならない — 未知の端末が
+	// 偶然その名で名乗ると既知端末に化ける (PR#820 独立 AX レビュー)。
+	for _, h := range []string{"terminal:", "terminal:terminal", "terminal:Terminal", "terminal:iterm", "terminal:iterm2", "terminal:apple-terminal"} {
+		if jumpableHarness(h) {
+			t.Errorf("jumpableHarness(%q) = true, want false (生の形は rawNames 完全一致のみ)", h)
+		}
+	}
+	// 逆に、正典名の面 (kinds) には rawNames の値だけを頼りに当てない — rawNames の
+	// 値は kinds にも載せてあるので今は同じ結果だが、照合面が分かれていることを
+	// driverForHarness の raw フラグ経由で確かめる (下の TestSplitHarnessKind)。
 }
 
-// 生の形の正規化: 接頭辞 `terminal:` を剥がし、小文字化・空白除去する。剥がした
-// 結果が表のどの別名になるか (= どの端末アプリを狙うか) まで確かめる。
-func TestNormalizeHarnessKind(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"terminal:iTerm.app", "iterm.app"},
-		{"terminal:Apple_Terminal", "apple_terminal"},
-		{" Terminal:ITERM2 ", "iterm2"},
-		{"iterm2", "iterm2"},
-		{"terminal", "terminal"}, // 接頭辞ではない素の値は触らない
-		{"terminal:kitty", "kitty"},
-		{"", ""},
+// 生の形の分解: 接頭辞 `terminal:` の有無で照合面 (rawNames / kinds) を切り替え、
+// 鍵は小文字化・空白除去する。分解した結果がどの端末アプリを狙うかまで確かめる。
+func TestSplitHarnessKind(t *testing.T) {
+	cases := []struct {
+		in   string
+		raw  bool
+		want string
+	}{
+		{"terminal:iTerm.app", true, "iterm.app"},
+		{"terminal:Apple_Terminal", true, "apple_terminal"},
+		{" Terminal:ITERM2 ", true, "iterm2"},
+		{"terminal:", true, ""},
+		{"iterm2", false, "iterm2"},
+		{"terminal", false, "terminal"}, // 接頭辞ではない素の値は触らない
+		{"terminal:kitty", true, "kitty"},
+		{"", false, ""},
 	}
 	for _, c := range cases {
-		if got := normalizeHarnessKind(c.in); got != c.want {
-			t.Errorf("normalizeHarnessKind(%q) = %q, want %q", c.in, got, c.want)
+		raw, got := splitHarnessKind(c.in)
+		if raw != c.raw || got != c.want {
+			t.Errorf("splitHarnessKind(%q) = (%v, %q), want (%v, %q)", c.in, raw, got, c.raw, c.want)
+		}
+	}
+	// 全 driver の rawNames は小文字で、その driver の kinds にも載っている
+	// (生の形でも正典名でも同じ driver に着く)。
+	for _, d := range terminalDrivers {
+		for _, rn := range d.rawNames {
+			if rn != strings.ToLower(rn) || rn == "" {
+				t.Errorf("%s の rawName %q は小文字・非空でなければならない", d.appName, rn)
+			}
+			if driverForHarness(rawTerminalPrefix+rn) != driverForHarness(rn) {
+				t.Errorf("%s: 生の形 %q と素の %q が別の driver に着く", d.appName, rawTerminalPrefix+rn, rn)
+			}
 		}
 	}
 	// 生の iTerm.app は iTerm2 を狙う (Terminal.app に誤って落ちない)。
