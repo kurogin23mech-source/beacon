@@ -121,6 +121,8 @@ type SessionOverview struct {
 	// Harness は端末の種類。どの端末アプリを前面化するかの分岐に使う。名乗っている
 	// セッションだけが持つ (サーバが解決)。受け付ける値は jump.go の terminalDrivers が
 	// 唯一の正典 (apple-terminal / terminal / apple_terminal / iterm2 / iterm / iterm.app)。
+	// 名乗り側が生の形 (terminal:iTerm.app) で送ってきた値も、jump.go が接頭辞を
+	// 剥がして同じ表で引く (e-7199)。
 	// 空は不明 = Terminal.app 既定扱い。ここに無い値は前面化に未対応 (Jumpable=false)。
 	Harness string `json:"harness,omitempty"`
 	// Jumpable は「端末へ飛ぶ」の **最終 1 値** (= 環境・マシン・プロセス・端末種別を

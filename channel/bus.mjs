@@ -49,6 +49,7 @@ import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
 import { readStateMarker, STATE_TERMINATED } from './bus-state-marker.mjs'
 import { readContextUsageForSession } from './bus-context-usage.mjs'
+import { harnessKindFromEnv } from './bus-harness-kind.mjs'
 import { isPidAlive, detectOtherAliveBridges } from './bridge_detect.mjs'
 import {
   buildAutonomousActionContent,
@@ -796,13 +797,12 @@ function detectAgentKind() {
 function detectHarnessKind() {
   // What's wrapping the AI runtime? Terminal sessions are the most common
   // (Claude Code default). IDE extensions and the desktop app set their
-  // own env signals.
-  if (process.env.VSCODE_PID || process.env.VSCODE_IPC_HOOK) return 'vscode-ext'
-  if (process.env.JETBRAINS_IDE) return 'jetbrains-ext'
-  if (process.env.TAURI_PLATFORM) return 'desktop-app'
-  if (process.env.TERM_PROGRAM === 'Apple_Terminal') return 'apple-terminal'
-  if (process.env.TERM_PROGRAM) return `terminal:${process.env.TERM_PROGRAM}`
-  return 'terminal'
+  // own env signals. The vocabulary lives in bus-harness-kind.mjs (e-7199):
+  // the viewer's jump-to-terminal picks its AppleScript by this value, so the
+  // names must stay inside viewer/jump.go's terminalDrivers table — locked by
+  // tests/test_harness_kind_parity_e7199.py. Do not re-inline a TERM_PROGRAM
+  // branch here (that is exactly how iTerm2 silently fell out of the table).
+  return harnessKindFromEnv(process.env)
 }
 
 function collectLayer0Identity() {

@@ -109,11 +109,45 @@ func TestJumpableHarness(t *testing.T) {
 	if !jumpableHarness(" ITerm2 ") {
 		t.Error("大文字/空白付きの別名が jumpable と判定されない")
 	}
-	// テーブルに無い端末は未対応 (fallback へ)。
-	for _, h := range []string{"kitty", "vscode", "tmux", "wezterm"} {
+	// 名乗り側の生の形 (直す前の bridge が送る `terminal:<TERM_PROGRAM>`) も、
+	// 接頭辞を剥がして表に当てる (e-7199: iTerm2 がこの形で来て一度も飛べなかった)。
+	for _, h := range []string{"terminal:iTerm.app", "terminal:Apple_Terminal", " Terminal:ITERM.APP "} {
+		if !jumpableHarness(h) {
+			t.Errorf("jumpableHarness(%q) = false, want true (生の形は接頭辞を剥がして表引き)", h)
+		}
+	}
+	// テーブルに無い端末は未対応 (fallback へ)。生の形でも同じ。
+	for _, h := range []string{"kitty", "vscode", "tmux", "wezterm", "terminal:kitty", "terminal:WezTerm"} {
 		if jumpableHarness(h) {
 			t.Errorf("jumpableHarness(%q) = true, want false", h)
 		}
+	}
+}
+
+// 生の形の正規化: 接頭辞 `terminal:` を剥がし、小文字化・空白除去する。剥がした
+// 結果が表のどの別名になるか (= どの端末アプリを狙うか) まで確かめる。
+func TestNormalizeHarnessKind(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"terminal:iTerm.app", "iterm.app"},
+		{"terminal:Apple_Terminal", "apple_terminal"},
+		{" Terminal:ITERM2 ", "iterm2"},
+		{"iterm2", "iterm2"},
+		{"terminal", "terminal"}, // 接頭辞ではない素の値は触らない
+		{"terminal:kitty", "kitty"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := normalizeHarnessKind(c.in); got != c.want {
+			t.Errorf("normalizeHarnessKind(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// 生の iTerm.app は iTerm2 を狙う (Terminal.app に誤って落ちない)。
+	if got := terminalAppName("terminal:iTerm.app"); got != "iTerm2" {
+		t.Errorf("terminalAppName(terminal:iTerm.app) = %q, want iTerm2", got)
+	}
+	b, err := jumpScriptBuilder("terminal:iTerm.app")
+	if err != nil || !strings.Contains(b("ttys000"), `application "iTerm2"`) {
+		t.Errorf("terminal:iTerm.app が iTerm2 を狙っていない (err=%v)", err)
 	}
 }
 

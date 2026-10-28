@@ -139,9 +139,14 @@ type terminalDriver struct {
 	appName string
 }
 
-// terminalDrivers は対応端末の一覧 (= 唯一の正典)。空文字 "" は種類不明で、macOS の
-// 既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
+// terminalDrivers は対応端末の一覧 (= 受け付け側の唯一の正典)。空文字 "" は種類不明で、
+// macOS の既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
 // 前面化に未対応で、画面では fallback (パスのコピー) に回す。
+//
+// 名乗り側 (channel/bus-harness-kind.mjs の TERM_PROGRAM_KINDS) が送る正典名は、
+// 必ずこの kinds に含まれていなければならない。別名を変える / 端末を足すときは
+// 両方を同じ変更で直す — tests/test_harness_kind_parity_e7199.py が片方だけの
+// 変更を赤にする (e-7199: 片方にだけ iTerm2 が在って実機で一度も飛べなかった)。
 var terminalDrivers = []terminalDriver{
 	{
 		kinds:   []string{"", "apple-terminal", "terminal", "apple_terminal"},
@@ -155,9 +160,27 @@ var terminalDrivers = []terminalDriver{
 	},
 }
 
+// rawTerminalPrefix は、名乗り側 (channel/bus-harness-kind.mjs) が正規化表に無い
+// 端末を送るときの接頭辞 (`terminal:<TERM_PROGRAM>`)。JS 側の RAW_TERMINAL_PREFIX と
+// 同じ値 — tests/test_harness_kind_parity_e7199.py が突き合わせる。
+const rawTerminalPrefix = "terminal:"
+
+// normalizeHarnessKind は名乗られた端末の種類を表引き用に整える (純関数)。
+//
+// 小文字化・前後空白の除去に加え、生の形 (`terminal:iTerm.app`) の接頭辞を剥がす。
+// e-7199: 直す前の bridge は iTerm2 を `terminal:iTerm.app` と名乗っていた (今も
+// 再起動するまで名乗り続ける)。接頭辞を剥がせば `iterm.app` として表に当たるので、
+// 古い bridge のセッションにも飛べる。知らない端末 (`terminal:kitty`) は剥がしても
+// 表に無いので、従来どおり未対応に落ちる。
+func normalizeHarnessKind(harness string) string {
+	k := strings.ToLower(strings.TrimSpace(harness))
+	k = strings.TrimPrefix(k, rawTerminalPrefix)
+	return strings.TrimSpace(k)
+}
+
 // driverForHarness は harness に対応する driver を返す (無ければ nil)。
 func driverForHarness(harness string) *terminalDriver {
-	k := strings.ToLower(strings.TrimSpace(harness))
+	k := normalizeHarnessKind(harness)
 	for i := range terminalDrivers {
 		for _, want := range terminalDrivers[i].kinds {
 			if k == want {
