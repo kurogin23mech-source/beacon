@@ -69,7 +69,7 @@ stdout に JSON が返る:
 優先順位:
 1. **iTerm2** が前面 (frontmost) なら iTerm2
 2. **Terminal.app** が前面なら Terminal.app
-3. どちらも前面でなければ Terminal.app をデフォルト
+3. どちらも前面でなければ **iTerm2** をデフォルト (Terminal.app は Claude Code 出力でヒープ破壊を起こして落ちるため 2026-10-27 に既定から外した)
 
 Bash ツールで実行:
 ```bash
