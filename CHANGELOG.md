@@ -2,6 +2,268 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.65.0] - 2026-10-28
+
+- Merge pull request #819 from kurogin23mech-source/ms-178-fork-e2d3c6
+- fix(ms-178): merge-back 手順書の --force 説明を Step 4 一本に寄せ、迂回案内の再発をテストで止める (PR#819 独立レビュー 4 件)
+- fix(ms-178): fork 片付けの手順書が、メモ保全ゲートを迂回する道を案内しているのを直す (e-7183)
+- Merge pull request #818 from kurogin23mech-source/ms-178-fork-e2d3c6
+- fix(ms-178): 反転ハーネスの入口・排他・赤の判定を共有部品 1 箇所に寄せる (PR#818 独立レビュー 4 件)
+- fix(ms-178): 挙動は正しいがガードが固定されていない 4 箇所を固定する (e-7185)
+- fix(ms-178): 「退避なし⇒削除なし」を local の脚でもテストで固定する (e-7182)
+- Merge pull request #816 from kurogin23mech-source/fix/grpc-fork-crash
+- fix(ms-181): 非同期版 (AsyncClient) も同じガードの対象にする (PR#816 自己レビュー)
+- Merge pull request #817 from kurogin23mech-source/ms-178-e7174-reap-disclosure
+- fix(ms-178): 独立レビュー 2 体の指摘 7 件 — 全件採用 (PR#817)
+- fix(ms-178): 削除前の確認が消す量と対象を正しく述べるようにする (e-7174)
+- Merge pull request #815 from kurogin23mech-source/ms-185-fork-6bf051
+- Merge remote-tracking branch 'origin/main' into ms-185-fork-6bf051
+- fix(ms-181): 独立レビュー 2 体の指摘 6 件 — 4 件採用 / 2 件却下 (PR#816)
+- fix(ms-185): 見張り役が「配線は在るが毎回失敗」を見逃していたのを直す — 独立レビュー 2 体の採否 (PR#815)
+- fix(ms-181): テストの間欠的な「理由不明 FAILED」と Python クラッシュを fork 安全性で閉じる
+- Merge pull request #814 from kurogin23mech-source/ms-178-session-note-a-help-note-clear-footgun
+- test(ms-178): ms110 が隣のテストの budget を拾って落ちていたのを閉じる
+- docs(ms-185): 北極星と過去の記録の扱いを決め、消えた装置を指す記述を外す (e-7072 / e-7073 / e-7081)
+- fix(ms-185): 同じ作業空間の参加者なら人間の確認を省く規則を、判定ごと削除する (e-7068)
+- fix(ms-185): 名前が trek- で始まるだけで人間の確認を省ける経路を塞ぐ (e-7067)
+- fix(ms-185): 定期発火に相乗りしている 2 つの自律を、片方だけ止まっても気付ける形にする (e-7066)
+- fix(ms-178): 日数の窓が本番の全メモに効いていなかった — CI が検出 (e-7150)
+- fix(ms-178): 独立レビュー 2 体の指摘 9 件 — 8 件採用 / 1 件却下 (PR#814)
+- fix(ms-178): セッションのメモを自分で片付けられるようにする (e-7150)
+- Merge pull request #812 from kurogin23mech-source/ms-185-e7078-provenance-repoint
+- fix(ms-185): 独立レビュー 2 体の指摘 — 宣言だけ測っていたガードを「満たせるか」まで測る (PR#812)
+- fix(ms-185): 降格の案内が「直らない」と嘘をつくのを直す — 独立レビュー 2 体の high (PR#812)
+- fix(ms-185): Operation の自律実行が本番で一度も成立していなかったのを直す (e-7078)
+- Merge pull request #810 from kurogin23mech-source/ms-184-e7055-shipping-evidence
+- fix(ms-184): 独立レビュー 2 体の指摘 8 件 — 全件採用 (PR#810)
+- Merge pull request #809 from kurogin23mech-source/ms-185-e7077-retired-provenance
+- Merge pull request #806 from kurogin23mech-source/ms-185-fork-df6784
+- feat(ms-184): デプロイした日が「何もなかった」と返らないようにする (e-7055)
+- fix(ms-185): 独立レビュー 2 体の指摘を採用 — 私のテストが振る舞いを測っておらず、Claude 側は真因と逆の案内を出していた (#809)
+- fix(ms-185): 引退した channel の古い opt-in が署名なしの自動実行を通さないようにする (e-7077)
+- Merge pull request #803 from kurogin23mech-source/ms-184-fork-43b876
+- Merge pull request #808 from kurogin23mech-source/ms-180-pin-skill-dispatcher
+- fix(ms-180): 自分で足したガード 2 つが、捕まえるべき PR でまさに走っていなかった
+- fix(ms-180): PR #808 の独立レビュー 4 件 — 過大主張の訂正・CI で走らない試験・未列挙の dispatcher・--json に届かない拒否
+- fix(ms-180): Skill 自身を pin し、ラッパーへの 1 行の宣言でゲートが無効化される穴を塞ぐ
+- Merge pull request #807 from kurogin23mech-source/ms-180-skill-ledger-lookup
+- fix(ms-180): 独立レビューが見つけたゲートのバイパスを塞ぎ、前コミットの誤った主張を訂正する
+- fix(ms-180): Skill を台帳が自分の名前で引けるようにする (目的達成レビューの唯一の反例)
+- fix(ms-184): CI の test を落としていたのは自分のテストの環境変数漏れ (PR#803)
+- fix(ms-185): 独立レビュー 2 体の指摘を採用 — 型名が「Trek 専用」と誤誘導し、私が docstring を 3 箇所壊していた (#806)
+- Merge pull request #805 from kurogin23mech-source/ms-180-fork-c44674
+- fix(ms-180): 独立 AX + 保守性レビュー 2 周目の指摘 — 4 件採用・1 件を部分採用
+- fix(ms-180): CI の間欠的な赤の真因 — 反転テストが検査対象の bin/beacon をその場で書き換えていた
+- feat(ms-185): 本番の自律発火を Trek の中から出して、Trek を畳んでも止まらないようにする (e-7065)
+- fix(ms-180): 引数を省いた呼び出しが usage ではなく中断になる級を、走る計器で閉じる
+- test: 間欠的な init 失敗の発生位置を CI に喋らせる (一時的な調査用、ms-180)
+- test: 準備コマンドの失敗が診断不能になる形を直す (ms-180 の CI 赤の切り分け)
+- fix(ms-180): 採否の中立監査が捕まえた過大主張を訂正し、AC1 を狭めている事実を開示
+- fix(ms-180): 独立 AX + 保守性レビュー (PR #805) の指摘 7 件すべてを採用
+- fix(ms-184): 再レビューの指摘のうち自分の不備 3 件 — 取り違えを捕まえる試験を足す (PR#803)
+- fix(ms-180): 独立思想レビュー (PR #802) の指摘 5 件を採用・2 件を却下
+- Merge pull request #804 from kurogin23mech-source/ms-173-e7045-attention-filter
+- Merge remote-tracking branch 'origin/main' into ms-173-e7045-attention-filter
+- Merge origin/main into ms-184 — beacon tool と beacon recap を同じ登録簿に同居させる
+- fix(ms-173): 要対応の判定で、サーバの宣言が粗いプロセス生存に負ける穴を塞ぐ (#804 独立レビュー high 2 件)
+- Merge pull request #802 from kurogin23mech-source/ms-180-fork-c44674
+- fix(ms-173): 「要対応のみ」が「生きている全部」に退化していたのを直す (独立レビュー AC2)
+- fix(ms-184): CI を落とした自分のテストを直す — 実ストア到達と日付爆弾 (PR#803)
+- fix(ms-184): 独立レビュー 2 体の指摘 11 件 — 10 件採用 1 件は範囲外 (PR#803)
+- fix(ms-180): 独立 maintainability レビュー (PR #802) の指摘 5 件すべてを採用
+- fix(ms-184): 横断側が「判定できなかった」を落としていた — 自己レビューの指摘 (e-7017)
+- fix(ms-180): 独立 AX レビュー (PR #802) の指摘 5 件すべてを採用
+- feat(ms-184): 横断の期間クエリをサーバ側にも置く — SPEC 方針 3 (e-7017)
+- docs(ms-180): e-5308 との層の境界を record_evidence に明記 (e-7004 受入条件2)
+- feat(ms-184): 「昨日って何やったっけ」の動線と、赤くなることを確かめた試験 (e-7018)
+- fix(ms-180): 受入条件を実装と突き合わせて読み直し、満たしていない 4 件を閉じる
+- fix(ms-180): /review の 3 コピー目 (Codex plugin) を同期する
+- docs(ms-180): beacon tool を help 登録簿と README に載せる
+- fix(ms-180): 未判断の道具を「使った」ことが見えていなかった (受入条件2)
+- feat(ms-184): 期間内に進捗した対象を証跡から導く — 導出を 1 箇所に置く (e-7015 / e-7016 / e-7017 / e-7020)
+- feat(ms-180): 必須と命じた道具が無い穴を塞ぎ、機械で検査する (e-7005)
+- feat(ms-180): 作用の判定を推測から台帳照会へ、ゲートが緩まないことを反転で実証 (e-7003)
+- feat(ms-180): 使ったら記録が残るのを台帳駆動にし、証跡の書き口を職種横断にする (e-7001/e-7004/e-7014)
+- feat(ms-180): 道具台帳の CLI と一方向クラウドミラーを通す (e-7000/e-7002/e-7006)
+- feat(ms-180): 道具を宣言として持つ台帳の面を作る (e-7000)
+- Merge pull request #801 from kurogin23mech-source/ms-166-e6997-close-flagship-gaps
+- fix(ms-166): 独立レビュー 2 体が同時に挙げた high — 積んだのに書かれない経路 (e-6997)
+- fix(ms-166): 旗艦の穴を構造で閉じる — 判断記録の抜け道 3 つ (e-6997)
+- Merge pull request #800 from kurogin23mech-source/ms-166-e6937-readonly-mirror
+- fix(ms-166): 独立レビュー(AX+保守性)の指摘 5 件 — ミラーを書く口を 1 つにする (e-6937)
+- fix(ms-166): 読み取りを名乗る入口が保存ファイルを触らないようにする (e-6937)
+- Merge pull request #799 from kurogin23mech-source/ms-166-e6918-review-done-target
+- fix(ms-166): 独立レビュー(保守性)の指摘 5 件 — 文法のコピーと台帳の鍵を 1 つに揃える (e-6918)
+- fix(ms-166): 独立 AX レビューの high 2 / misleading 2 / medium 2 (e-6918)
+- fix(ms-166): レビュー実施を PR のない作業にも記録できるようにする (e-6918)
+- Merge pull request #798 from kurogin23mech-source/ms-166-e6971-pr-identity-repo
+- fix(ms-166): 退行ガードを禁止リストから許可リストに反転 — 独立保守性レビュー medium (e-5980)
+- fix(ms-166): 自分の試験 3 件がローカルだけ緑だった — CI が非 hermetic を捕まえた (e-5980)
+- fix(ms-166): 発火条件が 3 箇所に割れていた — 独立保守性レビュー high / medium (e-5980)
+- fix(ms-166): 新しい動詞が成功を名乗りながら実態と違っていた — 独立 AX レビュー high 3 / medium 1 (e-5980)
+- fix(ms-166): 定期ティックに Operation を乗せる経路が存在しなかった (e-5980)
+- fix(ms-166): 旧式トリガーの許容が「移行の名残」でなく日常的な穴だった — AX 2 周目 (e-6971)
+- fix(ms-166): 不変条件を docstring の主張からコードの保証にする — 独立保守性レビューの high 2 件 (e-6971)
+- fix(ms-166): 関門を外す主経路がリポジトリを見ていなかった — 独立レビューの high 1 件 (e-6971)
+- fix(ms-166): PR の識別が番号だけでリポジトリを持っていなかったのを直す (e-6971 / e-6972)
+- Merge pull request #797 from kurogin23mech-source/ms-166-e6899-fork-review-visibility
+- docs(ms-166): 前のコミットメッセージが「足した」と書いた 1 文を実際に足す (e-6899)
+- fix(ms-166): 独立レビューの high 3 件 — 直した不具合を自分で再発させる形を作っていた (e-6899)
+- feat(ms-166): fork で実施したレビューが親からも実施済みとして見えるようにする (e-6899)
+- Merge pull request #796 from kurogin23mech-source/ms-166-e6898-ac-adjudication
+- fix(ms-166): 独立レビューの high 2 件 — 機構が無いより悪い状態を 2 箇所作っていた (e-6898)
+- Merge pull request #795 from kurogin23mech-source/ms-166-e6890-server-import-bootstrap
+- feat(ms-166): done にするとき受入条件の各節を機械で突き合わせる (e-6898)
+- fix(ms-166): 走査対象の変数名が中身とズレていたのを直す (e-6890)
+- fix(ms-166): 除外を 1 行足すだけで検査から黙って落ちるのを止める (e-6890)
+- Merge pull request #794 from kurogin23mech-source/ms-166-e6911-priority-next-action
+- fix(ms-166): server 配下の全モジュールが app.py 抜きでも読み込めるようにする (e-6890)
+- fix(ms-166): 独立レビュー 2 体が同じ high を指した — 自分の memory が警告している型を踏んでいた (e-6911)
+- feat(ms-166): セッション開始時の「次の一手」が優先度で選ばれるようにする (e-6911)
+- Merge pull request #793 from kurogin23mech-source/ms-166-e6941-cancelled-terminal
+- fix(ms-166): 独立レビューが high 2 件 — 自分の主張を裏切っていた 2 箇所を直す (e-6903 / e-6941)
+- feat(ms-166): 同じ PR を指す記録が二重に作られるのを保存前に止める (e-6903)
+- fix(ms-166): 突合が「人が判断済み」と「判断が必要」を混ぜていたのを分ける (e-6941)
+- Merge pull request #792 from kurogin23mech-source/ms-166-e6919-drop-legacy-state
+- fix(ms-166): 直した直後に古い主張を 3 箇所残していたのを畳む — 独立 2 体が同じ所を指した (e-6919)
+- fix(ms-166): 誰も読まない旧式ファイルを根から消す — 書くのをやめ、見つけたら削除する (e-6919)
+- Merge pull request #791 from kurogin23mech-source/ms-166-e6932-worktree-census
+- fix(ms-166): 宣言を守るはずのガード自身が黙って古くなる穴を塞ぐ — 狭すぎと緩すぎを両方踏んだ (e-6932)
+- feat(ms-166): 「何箇所あるか」の宣言を機械で数える — 書いた初回実行で宣言が誤っていた (e-6932)
+- Merge pull request #789 from kurogin23mech-source/ms-166-e6917-context-dedup
+- fix(ms-166): docstring が約束して実装が守っていなかった 4 件を直す — サンドボックスの穴は実測で漏れていた (e-6917)
+- Merge origin/main into ms-166-e6917-context-dedup — #790 (汚染ガードの連れファイル判定) を取り込み、CI を意味のある測定にする
+- Merge pull request #790 from kurogin23mech-source/ms-166-e6925-sqlite-sidecar
+- fix(ms-166): 独立レビューが見つけた私の退行を直す — 免除の性質を緩く引きすぎて無関係なファイルを吸い込んでいた (e-6925)
+- fix(ms-166): 本流が「テストの汚染」で突然赤くなるのを止める — 書き込み途中の一時ファイルを漏れと誤報していた (e-6925)
+- Merge origin/main into ms-166-e6917-context-dedup — #788 (終端理由の関門) 取り込み後に追従
+- Merge pull request #788 from kurogin23mech-source/ms-166-fork-3c173f
+- fix(ms-166): 独立レビューが見つけた私の退行を直す — Windows 安全ガードを壊していた削除と、古いままの主張 3 件 (e-6917)
+- fix(ms-166): 作業フォルダを移ると節目通知が二度鳴るのを止める — 1 セッションの重複防止記録が cwd ごとに分裂していた (e-6917)
+- fix(ms-166): 回帰試験が作業フォルダに依存して CI で落ち、1 件は偽の pass だったのを直す (e-6912)
+- fix(ms-166): 独立レビューが見つけた私の退行を直す — 契約取消を壊した削除の撤回と、自分が書いたガードの偽の安全 (e-6912)
+- fix(ms-166): 終わらせるときの理由を、利用者が読む面にも届かせる + 台帳の主張を機械で測る (e-6912)
+- fix(ms-166): 独立レビュー 7 件を採否 — 自分が足した silent no-op と、自分が書いた偽の被覆主張を直す (e-6893/e-6894, AX 4 件 + 保守性 3 件)
+- fix(ms-166): 結果を運ばない終端呼び出しに理由を書かせる + 「Web 画面の完了ボタン」という私の過大主張を撤回 (e-6894 の AC2)
+- fix(ms-166): 「押印層に寄せたから迂回は無い」は嘘だった — 迂回を機械で数え上げ、台帳に受理する (e-6894, e-6893 の AC2/AC3)
+- feat(ms-166): 終わらせるときの理由を、6 箇所の手書きの一覧から「押印する側の性質」にする (e-6893)
+- Merge pull request #787 from kurogin23mech-source/ms-166-e6871-pr-sync-blind
+- fix(ms-166): 「全 work-item class で同一の規則」は嘘だった — 主張を実測に合わせ、案内文の嘘を直す (e-6600, 独立レビュー 6 件)
+- feat(ms-166): 活動を終わらせるときに理由と結果を残す — 職種で分岐しない 1 つの規則にする (e-6600)
+- fix(ms-166): 「唯一の持ち主」を名乗った直後に 3 つ目のコピーが残っていた (e-6728, 独立レビュー 2 件)
+- fix(ms-166): lib を読む前に lib への道を通す — サーバが起動経路によって import 不能になる穴 (e-6728)
+- feat(ms-166): 漏れの全作成者を数える計器を足す — 掃討の順序の第 1 歩 (e-6833)
+- fix(ms-166): 冪等 no-op の開示を 1 つの形に寄せ、4 つ目の名前を自作できなくする (e-6728)
+- refactor(ms-166): fork の片付けの判定を純関数に出し、真偽表で試せるようにする (e-6793)
+- fix(ms-166): 動詞パスの抽出を 1 箇所に寄せ、3 階層目が潰れるのを止める (e-6792)
+- fix(ms-166): 印が間違った commit に押される / 詰まった相手が健全の顔で並ぶ (e-6873, e-6778)
+- fix(ms-166): #787 独立レビュー採否 — 兄弟分岐の取り残しと、種別カタログ階層での同欠陥の再発を塞ぐ (e-6871, e-6854)
+- fix(ms-166): テストから本番に書ける扉 53 件を廊下で閉じる — 全部守るに倒す (e-6854)
+- fix(ms-166): 突合の報告が騒ぎすぎる / 人の判断を上書きする 2 件を実データで見つけて直す (e-6871)
+- fix(ms-166): 突合が「見ていないもの」を整合と報告するのを止め、PR の識別を 1 箇所に寄せる (e-6871)
+- Merge pull request #786 from kurogin23mech-source/ms-166-e6816-parallel-flake
+- fix(ms-166): #786 独立レビュー採否 — 前提を散文で守るのをやめ、写しを 1 箇所に寄せる (e-6816)
+- ci(ms-166): テストを並列実行に切り替える — worker 数は実測した値に固定する (e-6816)
+- fix(ms-166): 37 日間「他人のサーバー」で緑だったテストを、自分で立てたか確かめる形にする (e-6816)
+- fix(ms-166): 両フロントの拒否文の比較を、プログラム自身の出力に限る (e-6816)
+- fix(ms-166): 漏れ検出の誤報を構造で止める — 免除の軸を「名前」から「残ったか」へ (e-6816)
+- Merge pull request #785 from kurogin23mech-source/ms-166-e6637-test-pollution
+- fix(ms-166): #785 AX レビュー採否 — 単一真実源を作っても中身が照合されていなければ同じ drift が再発する (e-6819, e-6852)
+- fix(ms-166): #785 保守性レビュー M-6 を適用 — 隔離方法の案内を 1 箇所から作る (e-6819)
+- fix(ms-166): #785 保守性レビュー採否 — 既存の単一真実源を無視して再実装していた件ほか (e-6852, e-6820)
+- fix(ms-166): 漏れ検出の全面ゲート化を戻す — 母集団が未知のまま反転させたのが早計だった (e-6833)
+- fix(ms-166): テストが本番のクラウドを読まないようにする — 廊下の GET 脚で問う (e-6819)
+- fix(ms-166): プロジェクトの保存先を指す流儀を 1 つに畳み、テストの漏れ検出を全面ゲートにする (e-6820, e-6833)
+- fix(ms-166): 判断記録の対象を、本文の文字列より明示した作業項目から決める (e-6852)
+- fix(ms-166): #785 独立レビュー採否 — ラチェットが形の違う扉を見ていなかった穴ほか 8 件 (e-6637)
+- fix(ms-166): テスト実行が本番の判断記録を汚すのを止める — 絞り所に既存ガードを配線 (e-6637)
+- Merge pull request #784 from kurogin23mech-source/fix-help-registry-680
+- test(ms-133): #784 役目を終えた留めテストを消す — 同じ知識の 4 つ目の写しを見落としていた (e-6611)
+- fix(ms-133): #784 独立レビュー採否 — 同じ実装なのに名前で能力が違う非対称を解き、第3の写しを揃える (AX-1/AX-2, 保守性 M-1/M-2)
+- fix(ms-133): help が宣伝していた旗の嘘 3 件を直し、1 件は旗を配線する側で直す (#680 由来, e-6611)
+- Merge pull request #779 from kurogin23mech-source/ms-173-fork-266134
+- Merge pull request #783 from kurogin23mech-source/ms-166-e6757-silent-decision
+- fix(ms-166): #783 独立レビュー採否 — ガードの覆域がファイル名の慣習に依っていた穴と、2 面の食い違いを塞ぐ (e-6757, e-6756, e-6633)
+- fix(ms-166): 存在しない種別名で判断記録を引いたとき、黙って 0 件を返さない (e-6633)
+- fix(ms-166): 判断記録の捕獲台帳が、実際に使われている種別を知らない穴を塞ぐ (e-6756)
+- fix(ms-166): 判断記録の書き込みが失敗したことを無言にしない (e-6757)
+- fix(ms-173): 止まった「作業中」を待機中と同じ見た目に沈めない — unknown の 2 経緯を由来で割る (独立レビュー AX-4)
+- Merge pull request #777 from kurogin23mech-source/ms-160-e6688
+- Merge origin/main into ms-160-e6688 — ガード 2 本を並べて残す
+- fix(ms-160): 直った漏れが既知の漏れ一覧に残って main を赤くしていたのを直す (e-6674)
+- Merge pull request #778 from kurogin23mech-source/ms-160-e6674-dm
+- Merge pull request #782 from kurogin23mech-source/ms-160-e6714
+- Merge pull request #781 from kurogin23mech-source/ms-160-e6674-parity
+- fix(ms-173): #779 独立レビュー採否反映 — 順序依存をコメントから機械検査へ、三値を公開面から外し、散文ロックを構造チェックに畳む (AX-1〜3 + 保守性 M-1)
+- fix(ms-160): Codex プラグイン側の Skill コピーも同期する (e-6714)
+- fix(ms-173): 到達不能の判定を「人が打鍵したか」から「受信経路が実際に取ったか」に付け替える (e-6799)
+- Merge remote-tracking branch 'origin/main' into ms-160-e6674-parity
+- Merge remote-tracking branch 'origin/main' into ms-160-e6674-dm
+- Merge remote-tracking branch 'origin/main' into ms-160-e6688
+- Merge remote-tracking branch 'origin/main' into ms-160-e6714
+- fix(ms-160): Skill の正本コピーを同期し忘れていたのを直す (e-6714)
+- Merge pull request #780 from kurogin23mech-source/ms-166-e6621-ci-timeout
+- Merge pull request #775 from kurogin23mech-source/ms-166-e6603
+- fix(ms-166): #780 既知の漏れ 2 種類を記録された負債にして、新しい種類だけをゲートする (e-6621, e-6833)
+- fix(ms-160): #782 独立レビュー採否反映 — 既定経路の覆域と、破壊的な旗の名前 (e-6714)
+- feat(ms-160): メモの片付けを自セッション分に絞る (e-6714)
+- fix(ms-166): #780 独立レビュー採否 — ガードが CI の条件で無効だった穴を塞ぎ、見つけた漏れ 2 件を直す (e-6621, AX-1〜4 + 保守性 M-1〜3)
+- Merge remote-tracking branch 'origin/main' into ms-160-e6674-parity
+- docs(ms-160): 却下した指摘の根拠に期限を書き添える (e-6674, #781 AX-3)
+- Merge pull request #776 from kurogin23mech-source/ms-160-fork-8a6e3a
+- fix(ms-160): #781 独立レビュー採否反映 — 緩い一致で見逃す穴を 3 つ塞ぐ (e-6674)
+- feat(ms-160): 旗 → env の写像が両フロントで揃っているかを機械で見る (e-6674)
+- fix(ms-166): テスト実行が次の実行を汚すのを止め、CI の時間切れを解除する (e-6621, e-6811)
+- Merge remote-tracking branch 'origin/main' into ms-160-e6688
+- fix(ms-160): #777 親レビュー指摘 — ALLOW に stale 検出を足す (e-6688)
+- fix(ms-160): 走らせられなかった点検も両方の判定を明示する (e-6715)
+- fix(ms-173): #779 独立レビュー採否反映 — 残った誤記を消し、閾値の登録漏れを構造で防ぎ、脆いテストを振る舞いに寄せる (AX-1/AX-2 + 保守性 M-1〜M-5)
+- fix(ms-160): #778 独立レビュー採否反映 — canonical な dm send を塞ぎ忘れていた (e-6674)
+- Merge branch 'main' into ms-166-e6603 — #772 と #775 が同じ場所に足した対象指定の口を合成
+- Merge origin/main into ms-160-fork-8a6e3a (#770 取り込みによる衝突の解消)
+- fix(ms-173): 指標が「受信しないこと」を報酬にするのをやめる — 消化の証拠が無いなら不明と言う (e-6777)
+- fix(ms-173): 止まった「作業中」を訂正する — running だけ経年で疑い、待ち状態は隠さない (e-6774)
+- fix(ms-173): 待機内容を状態と対で動かし、作業中の行に残る古い待ち理由を消す (e-6775)
+- fix(ms-173): 健全性の「注目されているか」軸を実効化する — スロットルの時計を他人の活動から自分の送信に付け替える (e-6776)
+- fix(ms-160): Windows から別ユーザー宛 DM が送れないのを直す (e-6674)
+- Merge pull request #772 from kurogin23mech-source/ms-166-fork-d112f1
+- Merge pull request #771 from kurogin23mech-source/ms-133-fork-4dba12
+- Merge pull request #774 from kurogin23mech-source/ms-173-fork-266134
+- Merge pull request #773 from kurogin23mech-source/ms-133-e6686-libpaths
+- Merge pull request #770 from kurogin23mech-source/ms-178-e6702
+- fix(ms-160): #777 独立レビュー採否反映 — ガード自身が同じ欠陥を見逃していた (e-6688)
+- fix(ms-166): #770 独立レビュー採否 — 未コミットの作業が --force で黙って消える穴を塞ぎ、stray 引数の黙殺を直す (AX-1/AX-2/AX-4, 保守性 M-2)
+- fix(ms-160): 中止された書き込みを「完了」と表示しないようにする (e-6688)
+- fix(ms-173): 残留した「確認待ち」宣言を一度だけ洗う修復道具を足す (e-6582 完了 / e-6717 を判断で閉じる)
+- fix(ms-166): #775 独立レビュー採否反映 — 明示指定の対象を検証し、既定値の宣伝を実態に合わせ、派生規則の複製を畳む (e-5986, ax A-1/A-2 + 保守性 M-1〜M-3)
+- fix(ms-166): #770 親レビュー指摘 3 件 — 控えの在り処を拒否時に告げ、消えた worktree を消していないと言わない (e-6780, e-6781, e-6782)
+- test(ms-160): 読み取り専用ゲートが両フロントに効くことを試験で固定する (e-6715)
+- fix(ms-160): #776 独立レビュー採否反映 — 片方のフロントが同じ事故を起こしていた (e-6715)
+- test(ms-166): 押し下げ後も「最新側の窓」が検証できるように偽 DB を仕様表評価にする (e-5986)
+- fix(ms-160): 点検機構が残したゴミメモを片付ける手段を用意する (e-6715)
+- fix(ms-160): 点検のための実行が本物の記録を作らないようにする (e-6715)
+- fix(ms-173): #774 独立レビュー採否反映 — 取り違えを型で止め、誤った記述と二重実装を正す (AX-1〜3 + 保守性 M-1〜3)
+- docs(release): update README/CHANGELOG for v0.64.0
+- chore(release): bump formula to 0.64.0
+- perf(ms-166): 判断記録の一覧を件数が増えても重くならない形にする — 絞り込みを DB 側へ寄せる (e-5986)
+- fix(ms-166): Skill の正本 (shared/) を同期し忘れていたのを直す (e-6603)
+- fix(ms-166): #775 独立レビュー採否反映 — 0 件のときこそ開示し、機械向け出力に落とさず、条件の二重評価を畳む (e-6603, ax A-1〜A-4 + 保守性 M-1〜M-3)
+- test(ms-166): 帰属の既定値を pin していたテストを「導出」を固定する形に書き換える (e-6603)
+- fix(ms-133): #773 独立レビュー採否反映 — 受信 hook が壊れた lib で Codex に traceback を抜く穴を塞ぎ、docstring の主張を実態に合わせる (e-6686, AX + 保守性 合意指摘)
+- fix(ms-133): lib 配置の中身検証は入れないと決め、残っていた規則の写し 2 件を共有定義に寄せる (e-6686)
+- test(ms-173): 新規テストの sys.path 自前 insert を conftest に寄せる (e-6729)
+- fix(ms-166): 判断記録に「誰の判断か・どの対象か」を機械で入れ、通信ログを既定の一覧から外す (e-6603)
+- fix(ms-173): 生存報告の裏付けが無い WS 単独の主張を live にしない (e-6729)
+- fix(ms-166): #772 独立レビュー採否反映 — 冪等 reject の開示を全経路で消費させ、到達不能だった表示を実際に届かせる (e-6602, ax A-1/A-3 + 保守性 M-1)
+- fix(ms-173): 死んだセッションが「生きている」と言い続けるのを bridge 側で止める (e-6583)
+- fix(ms-133): #771 独立レビュー採否反映 — 散文を実装と誤認する false-pass を塞ぎ、注入テストから書き込みを除去 (e-6611, AX A-1/A-2 + 保守性 M-1/M-2/M-3)
+- test(ms-178): #770 CI だけで落ちた非 hermetic テストを直す
+- feat(ms-133): help が宣伝する旗を実パーサと突き合わせ、嘘を機械で止める (e-6611)
+- fix(ms-166): 完遂の記録が同じ結論で二度残らないようにする (e-6602)
+- fix(ms-173): 放置セッションの橙が消えない残留汚染を自己治癒する (e-6582)
+- fix(ms-178): #770 独立レビュー反映 — force が退避ゲートを素通りする穴ほか high 4 件を塞ぐ
+- fix(ms-178): fork の片付けでメモを失わないようにし、作業中の fork を消せないようにする (e-6702, e-6703)
+
 ## [v0.64.0] - 2026-10-01
 
 - Merge pull request #769 from kurogin23mech-source/ms-160-fork-8bbd7c
