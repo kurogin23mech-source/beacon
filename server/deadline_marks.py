@@ -21,6 +21,17 @@ whole-doc 実装をそのまま使う。
 from __future__ import annotations
 
 
+def mark_key(target_id: str, item: dict) -> tuple:
+    """印を宛てる鍵 ``(target_id, item_id)`` の **唯一の決め方** (ms-185 e-7066)。
+
+    印を付ける側 (発火時に「この項目に知らせた」と控える) と、刻む側 (保存層が
+    行を読み直して印を書く) が**別のファイルに居る**。両者の鍵の作り方がずれると、
+    常に不一致になって印が 1 つも刻まれず、同じ締切で毎分知らせ続ける。ずれても
+    どちらのファイルも単体では正しく見えるので、決め方をここ 1 つに置く。
+    """
+    return (target_id or "", (item or {}).get("id", ""))
+
+
 def iter_mark_pairs(doc: dict):
     """``((target_id, item_id), item)`` を、締切を持ちうる全項目について列挙する。
 
@@ -30,7 +41,7 @@ def iter_mark_pairs(doc: dict):
     import occupation  # noqa: PLC0415
     for cand in occupation.iter_deadline_candidates(doc):
         item = cand.get("item") or {}
-        yield (cand.get("target_id", ""), item.get("id", "")), item
+        yield mark_key(cand.get("target_id", ""), item), item
 
 
 def stamp_whole_doc(doc: dict, marks: list, now_iso: str) -> int:

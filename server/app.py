@@ -4871,7 +4871,7 @@ def _deadline_reminder_candidates(project: dict):
         yield cand
 
 
-def _load_deadline_scope(pid: str) -> dict | None:
+def _load_deadline_scope(pid: str, report: list) -> dict | None:
     """締切判定に使う project doc を、保存層の専用の口から取る (ms-185 e-7066)。
 
     ``db.get_project_deadline_scope`` は**全 backend が持つ** (詳細は
@@ -4879,21 +4879,28 @@ def _load_deadline_scope(pid: str) -> dict | None:
     分岐があると、1 プロセスに 1 つしか無い可変 module である store_router が
     別経路で読み込み直されたとき、呼び出し側が意図しない実装が選ばれる。
 
-    読めたものが**行分割された文書なのに Target が付いてこない**場合は error で
+    読めたものが**行分割された文書なのに Target が付いてこない**場合は異常として
     鳴らす。以前この経路は静かに 0 件を返しており、「定期発火は緑 / 締切は永久に
     発火しない」が本番で続いた (= 事故でしか気付けない形)。判定を「どの backend か」
     ではなく「返ってきた中身」で行うので、将来 backend が増えても効く。
+
+    **鳴らし先は ``report``** (サーバログではない)。report は tick の応答
+    (``scheduled_fires``) と ``/api/system/tick-health`` の ``scheduled_by_source``
+    の原材料で、箱の外の見張りが読む唯一の面。ログにだけ書くと、その面からは
+    「0 件 = 何も期日が来ていない」と「0 件 = 見えていない」が**今までどおり
+    区別できない** = 直したつもりで同じ穴が残る。ログにも出すのは人の調査用。
     """
     project = db.get_project_deadline_scope(pid)
     if project is not None \
             and operations.get_schema_version(project) != operations.SCHEMA_V1_LEGACY \
             and "milestones" not in project:
-        _server_logger.error(
-            "deadline reminder read came back schema-blind for project %s "
-            "(schema_version=%s): the document is row-split but its Target "
-            "collections are missing, so no deadline can be seen and no reminder "
-            "can fire. ms-185 e-7066.",
-            pid, project.get("schema_version"))
+        msg = (f"schema-blind read (schema_version="
+               f"{project.get('schema_version')}): the document is row-split but "
+               f"its Target collections are missing, so no deadline can be seen "
+               f"and no reminder can fire")
+        report.append({"project_id": pid, "error": msg})
+        _server_logger.error("deadline reminder %s for project %s. ms-185 e-7066.",
+                             msg, pid)
     return project
 
 
@@ -4909,13 +4916,16 @@ def _fire_due_deadlines(pid: str, now_iso: str, report: list) -> None:
     idle-wake で起こす)。claim 者セッションが無い項目は DM 先が無いので skip。
 
     ``report`` に per-fire を積む。**読み書きはこの source 自身が持つ**
-    (ms-185 e-7066): 読み手と書き手は ``_deadline_store_pair`` が**組で**返す
-    (narrow read + narrow write、または whole-doc read + whole-doc save)。
+    (ms-185 e-7066): 読みは ``db.get_project_deadline_scope``、書きは
+    ``db.save_deadline_reminder_marks``。この 2 つは**必ず対**で、どちらも全保存層が
+    同じ名前で持つ (= 呼び出し側に「在れば使う」の分岐が無い)。対であることは
+    tests/test_tick_deadline_split_schema_e7066.py の
+    ``test_every_backend_exposes_the_deadline_pair`` が機械的に固定している。
     以前は呼び出し側が読んだ 1 つの project dict を Operation 発火と共用して
     いたが、Operation は projects 行 (meta) に載っており締切は分割された
     Target 行に載っているので、**同じ読み手を共有できる前提自体が誤り**だった。
     共有をやめたのがこの穴の構造的な閉じ方。"""
-    project = _load_deadline_scope(pid)
+    project = _load_deadline_scope(pid, report)
     if not project:
         return
     today = now_iso[:10]
@@ -4995,7 +5005,13 @@ def _persist_deadline_reminder_marks(pid: str, marks: list, now_iso: str,
                        f"deadline mark persist: {type(exc).__name__}: {exc}"})
         return
     if applied != len(marks):
-        report.append({"project_id": pid, "warning":
+        # ``error`` で積む。"warning" のような別名で積むと、見張り
+        # (lib/tick_health.summarize_scheduled_fires) は ``error`` と ``fired``
+        # しか見ないので「何も起きなかった (skipped)」に丸められ、**誰にも届かない**。
+        # 刻めなければ同じ締切で毎分知らせ続けるので、これは異常として数えてよい。
+        # 一部だけ失敗しても ``fired`` が立っていれば見張りは鳴らさない契約
+        # (error>0 かつ fired==0 のときだけ失敗扱い) なので、狼少年にもならない。
+        report.append({"project_id": pid, "error":
                        f"deadline dedup marks: wanted {len(marks)}, "
                        f"stamped {applied} (reminders may repeat)"})
 
@@ -5076,7 +5092,9 @@ def _fire_due_scheduled(now_iso: str) -> list:
 
     Source registry: ``SCHEDULED_SOURCES`` (above) lists every source this tick
     drives, each a ``(name, fire)`` pair with the entity-free contract
-    ``fire(pid, project, now_iso, report) -> changed``. Today there are **two**:
+    ``fire(pid, now_iso, report) -> None`` — the source reads and writes its own
+    project state (ms-185 e-7066: a single shared reader is what made the
+    deadline source blind on a row-split schema). Today there are **two**:
     Operations (dev/sales persistent target) and deadline reminders (ms-139
     e-4953). Account 定期連絡 and short-lived communication watch tasks plug in
     the same way later — the tick stays unaware of what it is firing, and the

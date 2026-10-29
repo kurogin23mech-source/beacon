@@ -1312,6 +1312,7 @@ def save_deadline_reminder_marks(project_id: str, marks: list,
     子行が消える。だから書き戻しは「触れた行だけ」のこちらを通す。
     """
     import deadline as _dl  # noqa: PLC0415
+    import deadline_marks  # noqa: PLC0415
     meta = _get("projects", project_id)
     if meta is None:
         return 0
@@ -1327,15 +1328,16 @@ def save_deadline_reminder_marks(project_id: str, marks: list,
     stamped = 0
     for coll in spec:                       # Target 行 (milestone の target_date 等)
         for tid, trow in _query_rows(coll, project_id):
-            if _dl.stamp_marks([((tid, trow.get("id", tid)), trow)],
+            if _dl.stamp_marks([(deadline_marks.mark_key(tid, trow), trow)],
                                marks, now_iso):
                 _put(coll, project_id, trow, sk=tid)
                 stamped += 1
     paths = _deadline_json_paths()
     for table in _server_child_tables(spec):   # 子行 (task の deadline 等)
         for sk, row in _query_rows_with_path(table, project_id, paths):
-            if _dl.stamp_marks([((sk.split("#")[0], row.get("id", "")), row)],
-                               marks, now_iso):
+            if _dl.stamp_marks(
+                    [(deadline_marks.mark_key(sk.split("#")[0], row), row)],
+                    marks, now_iso):
                 _put(table, project_id, row, sk=sk)
                 stamped += 1
     return stamped

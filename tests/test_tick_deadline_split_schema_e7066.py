@@ -369,3 +369,162 @@ def test_stamp_marks_matches_on_the_deadline_value_not_just_the_key():
     marks[0]["deadline"] = "2030-01-01"
     n = deadline_mod.stamp_marks([(("ms-1", "e-9"), item)], marks, "now")
     assert n == 1 and item[deadline_mod.REMINDED_FOR_KEY] == "2030-01-01"
+
+
+# --- 保存層 × スキーマ の全組み合わせ ---------------------------------------
+#
+# 独立レビューがここで本物のバグを見つけた: mysql_client の whole-doc 分岐が
+# import を欠いて NameError で即死していた。既存の試験は MySQL を必ず
+# schema_version=3 で呼んでいたので、同じ関数のもう半分を一度も通っていなかった。
+# 「3 つの保存層 × {1 文書, 行分割}」を machine で一覧して回す。
+
+def _whole_doc_project() -> dict:
+    return {
+        "project_id": PID, "name": "whole",
+        "milestones": [{
+            "id": "ms-1", "title": "期日を過ぎたターゲット", "status": "in_progress",
+            "target_date": PAST, "occupation": {"session_id": CLAIMER},
+            "entries": [{"id": "e-2", "type": "task", "status": "todo",
+                         "description": "締切あり", "deadline": PAST}],
+        }],
+    }
+
+
+def _load_backend_module(name: str):
+    """backend module を **ファイルから直接**読む。
+
+    ``importlib.import_module`` を使わないのは、別のテストファイルが
+    ``sys.modules["firestore_client"] = <別の module>`` と差し替えたまま残すため
+    (tests/test_trek_scheduler_api.py:35)。名前で引くと別物が返り、こちらが
+    差し替えたつもりの関数が使われずに本物の接続へ行ってしまう。ファイルから
+    読めば、他のテストが何をしていてもこの試験の対象は 1 つに定まる。
+    """
+    import importlib.util
+    import pathlib as _pl
+    path = _pl.Path(__file__).resolve().parents[1] / "server" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_isolated_{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("backend", ["mysql", "firestore", "dynamodb"])
+def test_whole_doc_backends_stamp_marks_without_crashing(backend, monkeypatch,
+                                                         split_store):
+    """1 文書で持つ経路でも印が刻める (= import 漏れ等で即死しない)。
+
+    MySQL は schema_version を持たない project を渡して **whole-doc 分岐**に入れる
+    (行分割の分岐は別の試験が見ている)。Firestore / DynamoDB は常にこの経路。
+    """
+    doc = _whole_doc_project()
+    marks = [{"target_id": "ms-1", "item_id": "ms-1", "deadline": PAST},
+             {"target_id": "ms-1", "item_id": "e-2", "deadline": PAST}]
+
+    if backend == "mysql":
+        # schema_version 無し = whole-doc 分岐
+        split_store["store"][("beacon_projects", PID, "")] = json.dumps(doc)
+        saved = {}
+        monkeypatch.setattr(mc, "_put",
+                            lambda e, pk, data, sk="": saved.update({e: data}))
+        n = mc.save_deadline_reminder_marks(PID, marks, "2026-10-29T00:00:00Z")
+        assert "projects" in saved, "印を刻んだのに保存していない"
+        written = saved["projects"]
+    else:
+        mod = _load_backend_module(f"{backend}_client")
+        saved = {}
+        monkeypatch.setattr(mod, "get_project", lambda pid: doc, raising=False)
+        monkeypatch.setattr(mod, "save_project",
+                            lambda pid, d: saved.update({"doc": d}), raising=False)
+        n = mod.save_deadline_reminder_marks(PID, marks, "2026-10-29T00:00:00Z")
+        assert saved, "印を刻んだのに保存していない"
+        written = saved["doc"]
+
+    assert n == 2, f"{backend}: 2 件刻めるはずが {n} 件"
+    ms = written["milestones"][0]
+    assert ms[deadline_mod.REMINDED_FOR_KEY] == PAST
+    assert ms["entries"][0][deadline_mod.REMINDED_FOR_KEY] == PAST
+
+
+@pytest.mark.parametrize("backend", ["mysql", "firestore", "dynamodb"])
+def test_whole_doc_backends_expose_the_read_side_too(backend, monkeypatch,
+                                                     split_store):
+    """読み側の口も全保存層で呼べる (= 書き側だけ在る半実装を作らせない)。"""
+    if backend == "mysql":
+        assert mc.get_project_deadline_scope(PID) is not None
+    else:
+        mod = _load_backend_module(f"{backend}_client")
+        monkeypatch.setattr(mod, "get_project",
+                            lambda pid: _whole_doc_project(), raising=False)
+        assert mod.get_project_deadline_scope(PID)["milestones"]
+
+
+# --- 鍵の決め方が 1 箇所であること -------------------------------------------
+
+def test_mark_key_is_defined_once_and_used_by_both_sides():
+    """印を宛てる鍵の作り方は 1 つ。付ける側と刻む側でずれると印が永久に付かない。"""
+    import ast
+    import pathlib as _pl
+    import deadline_marks
+    assert deadline_marks.mark_key("ms-1", {"id": "e-2"}) == ("ms-1", "e-2")
+    # id が無い時の落とし所も 1 つ (両側で別々に決めない)
+    assert deadline_marks.mark_key("ms-1", {}) == ("ms-1", "")
+
+    # 刻む側 (mysql の行ループ) が自前で鍵を組み立てていないこと
+    src = (_pl.Path(__file__).resolve().parents[1]
+           / "server" / "mysql_client.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "save_deadline_reminder_marks")
+    tuples = [n for n in ast.walk(fn)
+              if isinstance(n, ast.Tuple) and len(n.elts) == 2
+              and any(isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute)
+                      and e.func.attr == "get" for e in n.elts)]
+    assert not tuples, (
+        "鍵を手で組み立てている箇所がある。deadline_marks.mark_key を使うこと "
+        "(付ける側と刻む側でずれると印が 1 つも刻まれず、毎分再送になる)。")
+
+
+# --- 盲目/刻み漏れが「外から読める面」に出ること -----------------------------
+
+def test_blind_read_is_reported_to_the_tick_report_not_only_the_log(
+        monkeypatch, split_store):
+    """分割された文書を盲目に読んだら、tick の応答に異常として載る。
+
+    ログにだけ書いても、箱の外の見張りが読む面
+    (scheduled_fires / tick-health の scheduled_by_source) からは
+    「0 件 = 何も期日が来ていない」と区別が付かない = 直したことにならない。
+    """
+    import tick_health
+    _sent, report = _fire(monkeypatch, split_store, blind=True)
+    assert any(e.get("error") for e in report), (
+        f"盲目読みが tick の応答に出ていない (report={report})")
+    for e in report:
+        e.setdefault("source", "deadline")
+    summary = tick_health.summarize_scheduled_fires(report, ("deadline",))
+    assert summary["deadline"]["error"] >= 1, summary
+    assert tick_health.failing_scheduled_sources(summary, ("deadline",)) \
+        == ["deadline"], "見張りが異常として拾えていない"
+
+
+def test_unstamped_marks_are_reported_as_error_so_the_watchdog_sees_them(
+        monkeypatch, split_store):
+    """印を刻めなかったら見張りが読む面に異常として出る (= 毎分の再送に気付ける)。
+
+    "warning" のような別名で積むと summarize_scheduled_fires は skipped に
+    丸めるので、誰にも届かない。
+    """
+    import tick_health
+    db = app_module.db
+    monkeypatch.setattr(db, "append_bus_event",
+                        lambda pid, data: "ev", raising=False)
+    monkeypatch.setattr(db, "get_project_deadline_scope",
+                        mc.get_project_deadline_scope, raising=False)
+    monkeypatch.setattr(db, "save_deadline_reminder_marks",
+                        lambda *a, **k: 0, raising=False)   # 1 件も刻めなかった
+    report = []
+    app_module._fire_due_deadlines(PID, "2026-10-29T00:00:00.000000Z", report)
+    for e in report:
+        e.setdefault("source", "deadline")
+    summary = tick_health.summarize_scheduled_fires(report, ("deadline",))
+    assert summary["deadline"]["error"] >= 1, (
+        f"刻み漏れが見張りの集計に出ていない (report={report}, summary={summary})")
