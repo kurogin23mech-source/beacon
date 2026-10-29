@@ -49,7 +49,7 @@ func TestTerminalAppName(t *testing.T) {
 		{"apple-terminal", "Terminal.app"}, // サーバの harness.kind 表記
 		{" Apple_Terminal ", "Terminal.app"},
 		{"iterm2", "iTerm2"},
-		{"ITERM.APP", "iTerm2"}, // 大文字でも引ける
+		{"ITERM.APP", "iTerm2"},   // 大文字でも引ける
 		{"kitty", "Terminal.app"}, // 未対応は既定表示名 (メッセージ用のみ)
 	}
 	for _, c := range cases {
@@ -109,11 +109,74 @@ func TestJumpableHarness(t *testing.T) {
 	if !jumpableHarness(" ITerm2 ") {
 		t.Error("大文字/空白付きの別名が jumpable と判定されない")
 	}
-	// テーブルに無い端末は未対応 (fallback へ)。
-	for _, h := range []string{"kitty", "vscode", "tmux", "wezterm"} {
+	// 名乗り側の生の形 (直す前の bridge が送る `terminal:<TERM_PROGRAM>`) も、
+	// 接頭辞を剥がして表に当てる (e-7199: iTerm2 がこの形で来て一度も飛べなかった)。
+	for _, h := range []string{"terminal:iTerm.app", "terminal:Apple_Terminal", " Terminal:ITERM.APP "} {
+		if !jumpableHarness(h) {
+			t.Errorf("jumpableHarness(%q) = false, want true (生の形は接頭辞を剥がして表引き)", h)
+		}
+	}
+	// テーブルに無い端末は未対応 (fallback へ)。生の形でも同じ。
+	for _, h := range []string{"kitty", "vscode", "tmux", "wezterm", "terminal:kitty", "terminal:WezTerm"} {
 		if jumpableHarness(h) {
 			t.Errorf("jumpableHarness(%q) = true, want false", h)
 		}
+	}
+	// 生の形は rawNames との完全一致でだけ受ける。kinds の汎用別名 ("" / "terminal") や
+	// 短縮形 ("iterm")、正典名 ("iterm2") に生の形から落ちてはならない — 未知の端末が
+	// 偶然その名で名乗ると既知端末に化ける (PR#820 独立 AX レビュー)。
+	for _, h := range []string{"terminal:", "terminal:terminal", "terminal:Terminal", "terminal:iterm", "terminal:iterm2", "terminal:apple-terminal"} {
+		if jumpableHarness(h) {
+			t.Errorf("jumpableHarness(%q) = true, want false (生の形は rawNames 完全一致のみ)", h)
+		}
+	}
+	// 逆に、正典名の面 (kinds) には rawNames の値だけを頼りに当てない — rawNames の
+	// 値は kinds にも載せてあるので今は同じ結果だが、照合面が分かれていることを
+	// driverForHarness の raw フラグ経由で確かめる (下の TestSplitHarnessKind)。
+}
+
+// 生の形の分解: 接頭辞 `terminal:` の有無で照合面 (rawNames / kinds) を切り替え、
+// 鍵は小文字化・空白除去する。分解した結果がどの端末アプリを狙うかまで確かめる。
+func TestSplitHarnessKind(t *testing.T) {
+	cases := []struct {
+		in   string
+		raw  bool
+		want string
+	}{
+		{"terminal:iTerm.app", true, "iterm.app"},
+		{"terminal:Apple_Terminal", true, "apple_terminal"},
+		{" Terminal:ITERM2 ", true, "iterm2"},
+		{"terminal:", true, ""},
+		{"iterm2", false, "iterm2"},
+		{"terminal", false, "terminal"}, // 接頭辞ではない素の値は触らない
+		{"terminal:kitty", true, "kitty"},
+		{"", false, ""},
+	}
+	for _, c := range cases {
+		raw, got := splitHarnessKind(c.in)
+		if raw != c.raw || got != c.want {
+			t.Errorf("splitHarnessKind(%q) = (%v, %q), want (%v, %q)", c.in, raw, got, c.raw, c.want)
+		}
+	}
+	// 全 driver の rawNames は小文字で、その driver の kinds にも載っている
+	// (生の形でも正典名でも同じ driver に着く)。
+	for _, d := range terminalDrivers {
+		for _, rn := range d.rawNames {
+			if rn != strings.ToLower(rn) || rn == "" {
+				t.Errorf("%s の rawName %q は小文字・非空でなければならない", d.appName, rn)
+			}
+			if driverForHarness(rawTerminalPrefix+rn) != driverForHarness(rn) {
+				t.Errorf("%s: 生の形 %q と素の %q が別の driver に着く", d.appName, rawTerminalPrefix+rn, rn)
+			}
+		}
+	}
+	// 生の iTerm.app は iTerm2 を狙う (Terminal.app に誤って落ちない)。
+	if got := terminalAppName("terminal:iTerm.app"); got != "iTerm2" {
+		t.Errorf("terminalAppName(terminal:iTerm.app) = %q, want iTerm2", got)
+	}
+	b, err := jumpScriptBuilder("terminal:iTerm.app")
+	if err != nil || !strings.Contains(b("ttys000"), `application "iTerm2"`) {
+		t.Errorf("terminal:iTerm.app が iTerm2 を狙っていない (err=%v)", err)
 	}
 }
 

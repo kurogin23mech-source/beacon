@@ -131,35 +131,81 @@ end tell`, dev)
 // を加えるだけで、飛べる判定・スクリプト選択・表示名・画面のボタン (Jumpable 経由) が
 // 揃って対応する。判定を JS 側に複製しない (= Go が唯一の正典、page.html は Jumpable を読むだけ)。
 type terminalDriver struct {
-	// kinds はサーバの harness.kind として来うる別名 (すべて小文字)。
+	// kinds はサーバの harness.kind として来うる別名 (すべて小文字)。正典名
+	// (名乗り側 channel/bus-harness-kind.mjs の TERM_PROGRAM_KINDS の値) と旧別名。
 	kinds []string
+	// rawNames は、名乗り側が正規化表を持たなかった頃 (または直す前の bridge) が
+	// `terminal:<TERM_PROGRAM>` の生の形で送ってくる TERM_PROGRAM の値 (小文字)。
+	// 生の形は **この rawNames との完全一致でだけ** 受ける — kinds の汎用別名
+	// ("" / "terminal") や短縮形 ("iterm") には落とさない。未知の端末が偶然
+	// `terminal:Terminal` と名乗ったとき、既知端末に化けて前面化を試み、的外れな
+	// 回復ヒントを出す経路を閉じるため (PR#820 独立 AX レビュー)。
+	rawNames []string
 	// script は tty を持つタブを前面化する AppleScript を組む純関数。
 	script func(tty string) string
 	// appName は見つからない時のメッセージに出す表示名。
 	appName string
 }
 
-// terminalDrivers は対応端末の一覧 (= 唯一の正典)。空文字 "" は種類不明で、macOS の
-// 既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
+// terminalDrivers は対応端末の一覧 (= 受け付け側の唯一の正典)。空文字 "" は種類不明で、
+// macOS の既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
 // 前面化に未対応で、画面では fallback (パスのコピー) に回す。
+//
+// 名乗り側 (channel/bus-harness-kind.mjs の TERM_PROGRAM_KINDS) の各行
+// `TERM_PROGRAM → 正典名` は、**同じ 1 つの driver** の rawNames (= 小文字の
+// TERM_PROGRAM) と kinds (= 正典名) に対応していなければならない。別名を変える /
+// 端末を足すときは両方を同じ変更で直す — tests/test_harness_kind_parity_e7199.py が
+// 片方だけの変更や、別の driver への置き間違いを赤にする (e-7199: 片方にだけ iTerm2
+// が在って実機で一度も飛べなかった)。
 var terminalDrivers = []terminalDriver{
 	{
-		kinds:   []string{"", "apple-terminal", "terminal", "apple_terminal"},
-		script:  appleTerminalJumpScript,
-		appName: "Terminal.app",
+		kinds:    []string{"", "apple-terminal", "terminal", "apple_terminal"},
+		rawNames: []string{"apple_terminal"},
+		script:   appleTerminalJumpScript,
+		appName:  "Terminal.app",
 	},
 	{
-		kinds:   []string{"iterm2", "iterm", "iterm.app"},
-		script:  iTerm2JumpScript,
-		appName: "iTerm2",
+		kinds:    []string{"iterm2", "iterm", "iterm.app"},
+		rawNames: []string{"iterm.app"},
+		script:   iTerm2JumpScript,
+		appName:  "iTerm2",
 	},
 }
 
-// driverForHarness は harness に対応する driver を返す (無ければ nil)。
-func driverForHarness(harness string) *terminalDriver {
+// rawTerminalPrefix は、名乗り側 (channel/bus-harness-kind.mjs) が正規化表に無い
+// 端末を送るときの接頭辞 (`terminal:<TERM_PROGRAM>`)。JS 側の RAW_TERMINAL_PREFIX と
+// 同じ値 — tests/test_harness_kind_parity_e7199.py が突き合わせる。
+const rawTerminalPrefix = "terminal:"
+
+// splitHarnessKind は名乗られた端末の種類を「生の形か」と「表引きの鍵」に分ける
+// (純関数)。小文字化・前後空白の除去をした上で、生の形 (`terminal:iTerm.app`) なら
+// raw=true と接頭辞を剥がした残り (`iterm.app`) を、そうでなければ raw=false と
+// 値そのものを返す。
+//
+// e-7199: 直す前の bridge は iTerm2 を `terminal:iTerm.app` と名乗っていた (今も
+// 再起動するまで名乗り続ける)。生の形を rawNames に当てれば古い bridge のセッション
+// にも飛べる。知らない端末 (`terminal:kitty`) は rawNames に無いので未対応に落ちる。
+func splitHarnessKind(harness string) (raw bool, key string) {
 	k := strings.ToLower(strings.TrimSpace(harness))
+	if strings.HasPrefix(k, rawTerminalPrefix) {
+		return true, strings.TrimSpace(strings.TrimPrefix(k, rawTerminalPrefix))
+	}
+	return false, k
+}
+
+// driverForHarness は harness に対応する driver を返す (無ければ nil)。
+//
+// 生の形は rawNames との完全一致でだけ受け、kinds の別名には当てない (逆も同じ)。
+// 2 つの照合面を混ぜると、未知の端末の生の名乗りが汎用別名 ("" / "terminal") に
+// 吸着して既知端末に化ける (PR#820 独立 AX レビューが実測した破れ)。
+func driverForHarness(harness string) *terminalDriver {
+	raw, k := splitHarnessKind(harness)
 	for i := range terminalDrivers {
-		for _, want := range terminalDrivers[i].kinds {
+		names := terminalDrivers[i].kinds
+		if raw {
+			names = terminalDrivers[i].rawNames
+		}
+		for _, want := range names {
 			if k == want {
 				return &terminalDrivers[i]
 			}
