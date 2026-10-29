@@ -72,19 +72,28 @@ stdout に JSON が返る:
 
 `uname` が `Darwin` の場合のみ自動起動を試す。それ以外 (Linux / Win) は Step 3 のテキスト案内に直行する。
 
-### Step 2a: 起動先ターミナル候補の検出
+### Step 2a: 起動先ターミナルの決定
 
-優先順位:
-1. **iTerm2** が前面 (frontmost) なら iTerm2
-2. **Terminal.app** が前面なら Terminal.app
-3. どちらも前面でなければ Terminal.app をデフォルト
+優先順位 (= **落ちる端末を自分から選ばない**):
 
-Bash ツールで実行:
+1. **iTerm2** が導入済みなら iTerm2。前面にあるかどうかに依らず優先する。
+2. iTerm2 が無ければ **Terminal.app** (macOS に必ず在るフォールバック)。この場合は
+   下記の既知の問題を 1 行添えて user に伝える。
+
+Terminal.app は Claude Code の出力でヒープ破壊を起こして落ちるため、2026-10-27 に
+既定から外した。**前面にあるからという理由で Terminal.app を選んではならない** —
+開いた瞬間から落ちる端末で作業を始めることになる。以前は「前面なら Terminal.app」
+という分岐が残っており、危険だと書きながらその経路が生きていた (PR#821 独立 AX
+レビュー)。iTerm2 が無い環境では Terminal.app しか無いので、フォールバックは残す。
+
+導入確認は Bash ツールで実行し、**stdout が空かどうかで判定する**:
 ```bash
-osascript -e 'tell application "System Events" to name of first application process whose frontmost is true' 2>/dev/null
+osascript -e 'id of app "iTerm"' 2>/dev/null
 ```
 
-返ってきたプロセス名で分岐。
+bundle id (`com.googlecode.iterm2`) が返れば導入済み。未導入なら stdout は空で終了
+コードが 1 になる (2026-10-29 実測)。終了コードをパイプの先で読むと潰れるので、
+判定は stdout の中身で行う。
 
 ### Step 2b: osascript で新ターミナルを開いて bclaude を起動
 
@@ -100,7 +109,7 @@ end tell
 EOF
 ```
 
-**Terminal.app** の場合:
+**Terminal.app** の場合 (= iTerm2 が未導入のフォールバックのときだけ):
 ```bash
 osascript <<'EOF'
 tell application "Terminal"
