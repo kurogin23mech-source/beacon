@@ -611,8 +611,9 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
 | `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
-| `beacon note list` | Show session notes (cloud mode: 他セッション分も統合) / メモ一覧 |
-| `beacon note clear --yes [--include-other-sessions]` | Clear this session's notes / 自セッション分を削除 (`--yes` 必須、退避を取ってから削除) |
+| `beacon note list` | Show session notes — 既定で直近 @@NOTE_SINCE_DAYS@@ 日 / 最大 @@NOTE_LIMIT@@ 件 (`--all` で全件)、cloud mode では他セッション分も統合 / メモ一覧 |
+| `beacon note clear --yes [--include-other-sessions]` | Clear THIS session's notes / 自セッション分を削除 (`--yes` 必須、退避を取ってから削除。`--include-other-sessions` で全セッション分) |
+| `beacon note reap --yes` | Clear notes of ENDED sessions only (live sessions untouched) / 終了したセッションのメモだけ片付ける |
 | `beacon note restore` | Restore notes from backups / 退避からメモを復元 |
 
 <!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
@@ -629,33 +630,63 @@ When writing task / spec / doc entries (`description` / `motivation` / `acceptan
 Full principle and examples: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`).
 原則の全文と実例: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`)。
 <!-- /BEACON_ENTRY_WRITING_PRINCIPLE -->
-"""
+""".replace("@@NOTE_SINCE_DAYS@@", str(DEFAULT_LIST_SINCE_DAYS)) \
+   .replace("@@NOTE_LIMIT@@", str(DEFAULT_LIST_LIMIT))
+# メモ一覧の窓の 2 つの数字は cmd_note の定数から埋める (手打ちしない)。help の
+# 同じ行が先に同じ理由で interpolate に直されている: 定数を 10/50 に変えた変更が
+# あったとき、repo 中の手打ちコピーは「3 日 / 20 件」と言い続け、どの試験も文句を
+# 言わなかった。ここは AI が毎セッション読む CLAUDE.md に出る文なので、古い数字が
+# 残ると実害が大きい。
+#
+# 埋め方は **% 書式ではなく衝突しないトークンの置換**。一度 % 書式で書いたが、
+# 60 行超の散文全体に % を適用する形になり、本文に百分率や printf の例を 1 つ
+# 書き足すだけで **import の時点で CLI 全体が落ちる** 状態だった (独立レビュー 2 体が
+# 実測、PR#822)。help の同じ行は呼ばれたときだけ評価されるので被害が 1 行に閉じるが、
+# こちらはモジュール読み込み時なので爆発半径が全コマンドに広がる。置換なら本文に
+# % や波括弧を書いても安全で、安全性の制約がこの 2 行に閉じる。埋め残した
+# トークンは tests/test_claude_md_template_parity_e7208.py が捕まえる。
+
+
+def render_claude_md_section(content):
+    """CLAUDE.md の本文に beacon セクションを当てた結果を返す (純関数)。
+
+    **「どう当てるか」をここ 1 つに置く** のが目的。以前はこの規則が書き込み関数
+    (`_append_claude_md`) の中にしか無く、ファイルを書かずに結果を見る手段が無かった
+    ので、雛形 (`CLAUDE_MD_BEACON_SECTION`) とリポジトリの CLAUDE.md が食い違っても
+    誰も気付けなかった。実際に踏んだ形 (e-7208): メモの片付け (`beacon note reap`) の
+    案内を CLAUDE.md に直接足して雛形を直し忘れ、`beacon skill install` を走らせると
+    その行が消えて古い案内に戻った。
+
+    純関数にしてあるので、試験は「このリポジトリの CLAUDE.md に当てても何も変わらない」
+    (= install が巻き戻さない) を書き込み無しで確かめられる。試験と書き込みが同じ関数を
+    通るため、確かめた規則と実際に走る規則がずれない。
+    """
+    marker = "## Beacon Project Management"
+    if marker not in content:
+        # 節がまだ無い本文 (新規 / 他プロジェクト) は末尾に足す。
+        return content + CLAUDE_MD_BEACON_SECTION
+    idx = content.index(marker)
+    prefix = content[:idx].rstrip('\n') + '\n\n'
+    new_section = CLAUDE_MD_BEACON_SECTION.lstrip('\n')
+    after = content[idx + len(marker):]
+    next_h2 = after.find('\n## ')
+    if next_h2 == -1:
+        return prefix + new_section
+    return prefix + new_section + after[next_h2:]
 
 
 def _append_claude_md():
     claude_md = "CLAUDE.md"
-    marker = "## Beacon Project Management"
     if os.path.exists(claude_md):
         with open(claude_md, "r", encoding="utf-8") as f:
             content = f.read()
-        if marker in content:
-            # Replace existing section with latest content
-            idx = content.index(marker)
-            prefix = content[:idx].rstrip('\n') + '\n\n'
-            new_section = CLAUDE_MD_BEACON_SECTION.lstrip('\n')
-            after = content[idx + len(marker):]
-            next_h2 = after.find('\n## ')
-            if next_h2 == -1:
-                new_content = prefix + new_section
-            else:
-                new_content = prefix + new_section + after[next_h2:]
-            if new_content != content:
-                with open(claude_md, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                print(f"Updated {claude_md} with beacon rules")
-            return
-    with open(claude_md, "a", encoding="utf-8") as f:
-        f.write(CLAUDE_MD_BEACON_SECTION)
+    else:
+        content = ""
+    new_content = render_claude_md_section(content)
+    if new_content == content:
+        return
+    with open(claude_md, "w", encoding="utf-8") as f:
+        f.write(new_content)
     print(f"Updated {claude_md} with beacon rules")
 
 
