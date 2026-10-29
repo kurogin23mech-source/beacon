@@ -79,37 +79,71 @@ python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id applicatio
 - **両方 0 (exit 0)** → drift 無し。「全貌マップは source と一致しています (書き漏れ0 / 幽霊0)」と 1 行返して終了。
 - **どちらか > 0** → R2 へ。
 
-### R2. drift を curate する (AI 判断)
+### R2. drift を curate する (AI 判断) — **書くのは成果ログ、地図は触らない**
 
-現在の地図本文を取得:
+> ⚠ **地図を直接書き換えてはならない。** 全貌マップは成果ログ (deliverable-changelog)
+> からの導出物で、文書の冒頭にもそう書いてある。`beacon doc update application-map`
+> で書き戻しても次の記帳で上書きされるので、**消える編集をして「直した」と報告する**
+> ことになる (e-7213: 実際にこの手順のまま進めて踏みかけた)。地図を変えるには
+> **成果ログ側を操作する**。記帳すると地図は自動で作り直される。
+
+現在の地図本文と、章 / 節の名前を確認する (どの節に足すかを決めるため):
 ```bash
 beacon doc show application-map
 ```
 
-機械照合が挙げた各項目を、**足す / 消す** で解消する:
+機械照合が挙げた各項目を、**成果ログへの記帳**で解消する:
 
 - **書き漏れ (missing)** = source に実在するが地図に無い surface。
-  - その surface がどの価値エリア (章) / 価値 (節) に属するかを AI が判断し、価値 1 行 + 楔を足す。
-  - 単発でなく noun / prefix 単位でまとめて増えたなら **family 楔** に寄せる (下記の楔文法参照)。
+  - その surface がどの価値エリア (章 = `--area`) / 価値 (節 = `--category`) に属するかを
+    AI が判断し、**価値 1 行 (`--summary`) + 楔 (`--tag`)** として記帳する:
+    ```bash
+    beacon deliverable add \
+      --area 'A. 見失わない — 現在地と進捗の可視化' \
+      --category 'A1. 状態を一望する' \
+      --title '<短い名前>' \
+      --summary '<何ができるかを 1 行、ユーザーの言葉で>' \
+      --tag 'cli:beacon view' --tag 'cli:beacon attention'
+    ```
+  - `--area` / `--category` は **既存の見出しと綴りを完全に一致させる** (1 文字違うと
+    新しい節として別に生えて地図が二重になる)。新しい価値なら新しい節を立ててよい。
+  - `--source-target` は **生んだ target の id**。1 つの MS が生んだ surface ならその id を
+    渡す。複数 MS 由来をまとめて棚卸しするとき (reconcile の多くはこれ) は既定の `root` が
+    正しい — 作業を駆動している MS を渡すと「その MS が生んだ」と誤って記録される。
+    記帳後の `(source: ...)` の echo を読んで、意図と合っているかを必ず確かめる。
+  - 楔 (`--tag`) は `cli:` / `api:` / `skill:` / `file:` の 4 種。機械照合はこの楔を見るので、
+    **楔の無い記帳は地図の索引に出ない** (完遂だけの記録として末尾に溜まる)。
+  - 関連する surface は 1 件の記帳に **まとめる** (`--tag` を並べる)。1 surface 1 記帳に
+    すると地図が leaf 列挙で膨らむ。noun / prefix でまとめて増えたなら family 楔
+    (`cli:beacon task *` 等、下記の楔文法参照) 1 本に寄せる。
 - **幽霊 (phantom)** = 地図にあるが source に無い surface。
-  - 実装が消えた (= 廃止) なら、その行を地図から**消す**。
-  - 綴り / メソッド名の誤り (例: `GET` を `WEBSOCKET` に) なら**直す**。
-  - source 側にあるはずなのに列挙されない場合は enumeration 漏れを疑い、`scripts/check-map-drift.py` の対象 (dispatch dict / route decorator / skills dir) を確認。
+  - 実装が消えた (= 廃止) なら、その surface を載せている成果ログのエントリを
+    **取り下げる**。置き換えなら後継を指す:
+    ```bash
+    beacon deliverable list --json          # 該当 dlv-NNN を特定する
+    beacon deliverable retire dlv-NNN --reason '<なぜ廃止したか>'
+    beacon deliverable supersede dlv-NNN --by dlv-MMM --reason '<何に置き換わったか>'
+    ```
+  - 綴り / メソッド名の誤り (例: `GET` を `WEBSOCKET` に) なら、そのエントリを
+    取り下げて正しい楔で記帳し直す (楔はエントリの `--tag` が持つため)。
+  - source 側にあるはずなのに列挙されない場合は enumeration 漏れを疑い、
+    `scripts/check-map-drift.py` の対象 (dispatch dict / route decorator / skills dir) を確認。
 
-### R3. 更新して drift ゼロを確認
+### R3. drift ゼロを確認
 
-curate した本文で更新 (stdin 経由):
-```bash
-printf '%s' "<curate 済み本文>" | beacon doc update application-map --content -
-# もしくは一時ファイルに書いてから: cat /tmp/map.md | beacon doc update application-map --content -
-```
-
-再照合して **書き漏れ0 / 幽霊0 (exit 0)** を確認:
+記帳すると地図は自動で作り直されるので、**地図への書き込み操作は無い**。再照合して
+**書き漏れ0 / 幽霊0 / 節の二重化0 (exit 0)** を確認する:
 ```bash
 python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id application-map
 ```
 
-ゼロになるまで R2〜R3 を繰り返す。ゼロになったら結果をユーザーに 1 行報告して終了。
+照合は 3 つを見る。楔の書き漏れと幽霊に加えて、**同じ節が綴り違いで二重に生えていないか**
+(節の二重化) も報告する。綴り違いで節が割れても楔の集合は変わらないので、以前はこの破れだけ
+検出できず「drift ゼロ」で通っていた (PR#823 独立 AX レビューが実測)。
+
+ゼロにならなければ R2 に戻る (節の二重化が出たら `--category` / `--area` の綴りを既存見出しに
+揃えて記帳し直し、古い方のエントリは取り下げる)。ゼロになったら、**何を何件記帳したか**を
+ユーザーに 1 行報告して終了。
 
 ---
 
@@ -150,9 +184,10 @@ milestone は「軌跡」なので、done / 廃止された機能は**現在地�
 - 楔は `type:` プレフィクス必須。だから散文中に例として書いた素の `beacon <サブコマンド>` は照合対象外 (= 誤検出しない、例を自由に書ける)
 - 裏方の仕組みは **二重実装リスクが宿る所だけ** `file:` で楔る (= 受信ループ / hook 入口 / storage backend)。drift check 群のように保守価値の低い集合は glob-family 1 本で足りる
 
-### G4. reconcile でゼロにする (= 生成の検算)
+### G4. 下書きで網羅を検算する (= 記帳する前の確認)
 
-初版本文を一時ファイルに書き、照合:
+G2 / G3 で組んだ章立てを一時ファイルに下書きして照合する (この下書きは**提出物では
+なく検算用**。地図そのものは次の G5 の記帳から導出される):
 ```bash
 python3 "$(beacon _install-root)/scripts/check-map-drift.py" /tmp/application-map-draft.md
 ```
@@ -161,19 +196,25 @@ python3 "$(beacon _install-root)/scripts/check-map-drift.py" /tmp/application-ma
 
 - **`SKIP:` が出た場合 (e-5320)** → beacon 本体以外のプロジェクトでは機械照合が使えない (真値源が beacon の surface 固定)。この検算はスキップし、AI が目視で網羅性を担保して次へ進む。ユーザーに「機械の検算は使えないため AI 判断で網羅した」と 1 行添える。
 
-### G5. CORE doc として登録
+### G5. 成果ログに記帳して地図を生やす
 
-drift ゼロを確認した本文を、固定 id `application-map`・scope core で登録:
+> ⚠ **地図を直接作ってはならない** (`beacon doc add --id application-map` を打たない)。
+> 地図は成果ログからの導出物なので、直接作った文書は次の記帳で上書きされる (e-7213)。
+
+下書きの各行を、節ごとに `beacon deliverable add` で記帳する (引数の意味と注意は R2 と同じ。
+`--area` = 章 / `--category` = 節 / `--summary` = 価値 1 行 / `--tag` = 楔):
 ```bash
-cat /tmp/application-map-draft.md | beacon doc add "アプリケーション全貌マップ" --scope core --id application-map --content -
+beacon deliverable add --area '<章>' --category '<節>' \
+  --title '<短い名前>' --summary '<何ができるか 1 行>' \
+  --tag '<楔>' --tag '<楔>'
 ```
 
-登録後、live doc を再照合してゼロを確認:
+記帳し終えたら、導出された live doc を再照合してゼロを確認:
 ```bash
 python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id application-map
 ```
 
-ユーザーに「初版を N surface で生成、drift ゼロ」と報告して終了。
+ユーザーに「初版を N surface / M 件の記帳で生成、drift ゼロ」と報告して終了。
 
 ---
 
