@@ -4871,44 +4871,28 @@ def _deadline_reminder_candidates(project: dict):
         yield cand
 
 
-def _deadline_store_pair():
-    """締切リマインドが使う (読み手, 書き手) の組を返す (ms-185 e-7066)。
+def _load_deadline_scope(pid: str) -> dict | None:
+    """締切判定に使う project doc を、保存層の専用の口から取る (ms-185 e-7066)。
 
-    **必ず組で選ぶ**。narrow read (``get_project_deadline_scope``) は締切に関係ない
-    子行を読まない部分 hydrate なので、その dict を whole-doc save すると読まな
-    かった行が消える。逆に whole-doc read に narrow write を当てても噛み合わない。
-    片方ずつ ``getattr`` で拾うと、backend に片方だけ在る版で危険な組み合わせが
-    成立してしまうので、ここで**両方揃っているときだけ** narrow を採る。
+    ``db.get_project_deadline_scope`` は**全 backend が持つ** (詳細は
+    ``server/deadline_marks.py``)。だからここに「在るなら使う」の分岐は無い —
+    分岐があると、1 プロセスに 1 つしか無い可変 module である store_router が
+    別経路で読み込み直されたとき、呼び出し側が意図しない実装が選ばれる。
 
-    揃っていなければ whole-doc の組 (= 従来どおり) に倒す。これは v1 project では
-    正しいが、行分割スキーマ (MySQL v3 / Firestore v2) では ``milestones`` が
-    落ちた doc を読むので締切が 1 件も見えない。**その場合は黙って 0 件にせず
-    error を吐く**: 以前この経路は静かに 0 件を返しており、「tick は緑 / 締切は
-    永久に発火しない」が本番で続いた (= 事故でしか気付けない形)。
+    読めたものが**行分割された文書なのに Target が付いてこない**場合は error で
+    鳴らす。以前この経路は静かに 0 件を返しており、「定期発火は緑 / 締切は永久に
+    発火しない」が本番で続いた (= 事故でしか気付けない形)。判定を「どの backend か」
+    ではなく「返ってきた中身」で行うので、将来 backend が増えても効く。
     """
-    read = getattr(db, "get_project_deadline_scope", None)
-    write = getattr(db, "save_deadline_reminder_marks", None)
-    if read is not None and write is not None:
-        return read, write
-    if (read is None) != (write is None):
+    project = db.get_project_deadline_scope(pid)
+    if project is not None \
+            and operations.get_schema_version(project) != operations.SCHEMA_V1_LEGACY \
+            and "milestones" not in project:
         _server_logger.error(
-            "deadline store pair is half-wired (read=%s write=%s); falling back "
-            "to the whole-document pair. ms-185 e-7066.",
-            read is not None, write is not None)
-    return db.get_project, None
-
-
-def _load_deadline_scope(pid: str, read) -> dict | None:
-    """``read`` で project doc を取り、whole-doc 読みが分割スキーマに当たっていたら
-    error で鳴らす (= 黙って 0 件にしない)。"""
-    project = read(pid)
-    if project is not None and read is db.get_project and \
-            operations.get_schema_version(project) != operations.SCHEMA_V1_LEGACY:
-        _server_logger.error(
-            "deadline reminder read is schema-blind for project %s "
-            "(schema_version=%s): this backend has no get_project_deadline_scope, "
-            "so split-out Target rows (milestones / entries) are invisible and no "
-            "reminder can fire. ms-185 e-7066.",
+            "deadline reminder read came back schema-blind for project %s "
+            "(schema_version=%s): the document is row-split but its Target "
+            "collections are missing, so no deadline can be seen and no reminder "
+            "can fire. ms-185 e-7066.",
             pid, project.get("schema_version"))
     return project
 
@@ -4931,8 +4915,7 @@ def _fire_due_deadlines(pid: str, now_iso: str, report: list) -> None:
     いたが、Operation は projects 行 (meta) に載っており締切は分割された
     Target 行に載っているので、**同じ読み手を共有できる前提自体が誤り**だった。
     共有をやめたのがこの穴の構造的な閉じ方。"""
-    read, write = _deadline_store_pair()
-    project = _load_deadline_scope(pid, read)
+    project = _load_deadline_scope(pid)
     if not project:
         return
     today = now_iso[:10]
@@ -4991,44 +4974,29 @@ def _fire_due_deadlines(pid: str, now_iso: str, report: list) -> None:
         report.append({"project_id": pid, "kind": kind, "label": label,
                        "deadline": dl, "fired": True, "recipient": recipient})
     if stamped:
-        _persist_deadline_reminder_marks(pid, stamped, now_iso, report,
-                                         project, write)
+        _persist_deadline_reminder_marks(pid, stamped, now_iso, report)
 
 
 def _persist_deadline_reminder_marks(pid: str, marks: list, now_iso: str,
-                                     report: list, project: dict,
-                                     write) -> None:
+                                     report: list) -> None:
     """発火済みの印を永続化する (ms-185 e-7066)。
 
-    ``write`` が在れば「触れた行だけ」を書く narrow writer
-    (= 部分 hydrate した doc を whole-doc save して読まなかった行を消す事故を
-    構造的に避ける)。無ければ ``project`` は whole-doc なので、従来どおり
-    その場で印を刻んで ``save_project`` する。
+    読み手 (``get_project_deadline_scope``) と**対になる**書き手を使う。読んだ内容は
+    保存層によっては部分的 (MySQL v3 は締切に関係ない子行を読まない) なので、
+    その dict をこちらで丸ごと保存すると読まなかった行が消える。どこまで読んだかを
+    知っているのは保存層だけなので、書き戻しも保存層に任せる。
 
     印が落ちると同じ締切で毎分 DM が飛ぶ (= 二重配信) ので、刻めなかった件数は
     report に残して可視化する。"""
-    wanted = {(m["target_id"], m["item_id"]): m["deadline"] for m in marks}
     try:
-        if write is not None:
-            applied = write(pid, marks, now_iso)
-        else:
-            applied = 0
-            for cand in occupation.iter_deadline_candidates(project):
-                key = (cand["target_id"], (cand["item"] or {}).get("id", ""))
-                if wanted.get(key) != deadline.deadline_of(cand["item"]):
-                    continue
-                deadline.mark_reminded(cand["item"])
-                cand["item"]["deadline_reminded_at"] = now_iso
-                applied += 1
-            if applied:
-                db.save_project(pid, project)
+        applied = db.save_deadline_reminder_marks(pid, marks, now_iso)
     except Exception as exc:  # pragma: no cover - defensive
         report.append({"project_id": pid, "error":
                        f"deadline mark persist: {type(exc).__name__}: {exc}"})
         return
-    if applied != len(wanted):
+    if applied != len(marks):
         report.append({"project_id": pid, "warning":
-                       f"deadline dedup marks: wanted {len(wanted)}, "
+                       f"deadline dedup marks: wanted {len(marks)}, "
                        f"stamped {applied} (reminders may repeat)"})
 
 

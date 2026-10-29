@@ -95,12 +95,24 @@ def harness():
     def _save(pid, project):
         state["saved"] += 1
 
+    def _save_marks(pid, marks, now_iso):
+        import deadline_marks
+        n = deadline_marks.stamp_whole_doc(state["project"], marks, now_iso)
+        if n:
+            state["saved"] += 1
+        return n
+
     stubs = {
         "list_treks": lambda actor_id=None, **kw: [],
         "list_tick_candidate_project_ids": lambda *a, **kw: [PID],
         "list_all_projects": lambda *a, **kw: [{"project_id": PID}],
         "get_project": lambda pid, *a, **kw: state["project"],
         "save_project": _save,
+        # ms-185 e-7066: 締切リマインドは専用の口を通る。ここを差し替えないと
+        # 本物の保存層を読みに行く (= 別テストが store_router を別 backend で
+        # 読み込み直していると、その実装が選ばれて落ちる)。
+        "get_project_deadline_scope": lambda pid, *a, **kw: state["project"],
+        "save_deadline_reminder_marks": _save_marks,
         "list_sessions": lambda *a, **kw: [],
         "append_bus_event": _append,
         # Operation は事前承認済み envelope が無いと発火しない (再利用する設計)。

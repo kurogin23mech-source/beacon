@@ -30,6 +30,10 @@ if _BACKEND == "dynamodb":
         # Projects
         get_project,
         save_project,
+        # 締切リマインドの 2 つの口 (ms-185 e-7066)。全 backend が同じ名前で
+        # 持つので、呼び出し側に「在るか無いか」の分岐が無い。
+        get_project_deadline_scope,
+        save_deadline_reminder_marks,
         list_projects,
         list_all_projects,
         delete_project,
@@ -134,6 +138,10 @@ elif _BACKEND == "mysql":
         # same pure-string helper, so the router exposes it under the same
         # private name to keep call sites symmetrical.
         _extract_frontmatter_field,
+        # 締切リマインドの 2 つの口 (ms-185 e-7066)。全 backend が同じ名前で
+        # 持つので、呼び出し側に「在るか無いか」の分岐が無い。
+        get_project_deadline_scope,
+        save_deadline_reminder_marks,
         # v3 schema constant (ms-96 e-2379、iruca3 提案 entry-level split)。
         # operations.py が dispatch 側で backend + schema 見て v3 経路に振るために参照。
         SCHEMA_V3_ENTRY,
@@ -150,12 +158,6 @@ elif _BACKEND == "mysql":
         # v3 未対応。 operations.py の dispatch が backend + schema を見て
         # ここを呼ぶかどうか決める。 誤経路呼び出し時は AttributeError で顕在化)。
         get_project_v3,
-        # ms-185 e-7066: 締切リマインドが使う「Target 行は全部 / 子行は締切を
-        # 持つものだけ」の narrow read。v1 読み取りの get_project は v3 で
-        # milestones を落とすので、定期発火はこちらを通る。firestore /
-        # dynamodb branch には無く、app.py 側が getattr で有無を見る。
-        get_project_deadline_scope,
-        save_deadline_reminder_marks,
         save_project_v3,
         apply_project_op_v3,
         replace_project_v3,
@@ -278,6 +280,10 @@ elif _BACKEND == "firestore":
         # Projects
         get_project,
         save_project,
+        # 締切リマインドの 2 つの口 (ms-185 e-7066)。全 backend が同じ名前で
+        # 持つので、呼び出し側に「在るか無いか」の分岐が無い。
+        get_project_deadline_scope,
+        save_deadline_reminder_marks,
         list_projects,
         list_all_projects,
         delete_project,

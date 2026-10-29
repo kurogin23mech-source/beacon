@@ -51,6 +51,30 @@ def save_project(project_id: str, data: dict) -> None:
     get_db().collection(COLLECTION).document(project_id).set(data)
 
 
+# --- 締切リマインドの 2 つの口 (ms-185 e-7066) ------------------------------
+# 全 backend が同じ名前で持つ。詳しい経緯は server/deadline_marks.py を参照。
+# Firestore は project を 1 文書で持つので、絞り込む余地が無く丸ごと扱う。
+#
+# 既知の限界: v2 (milestones を子コレクションに分けたレイアウト) の project では
+# ``get_project`` が milestones を返さないので、締切が見えない。呼び出し側
+# (server/app.py) が「分割された文書なのに Target が付いてこない」ことを検知して
+# error を出すので、黙って 0 件にはならない。v2 を本番で使うなら、ここを
+# ``operations.load_project_consistent`` 相当に差し替える。
+
+def get_project_deadline_scope(project_id: str) -> dict | None:
+    """締切判定に使う project doc を返す (この backend では丸ごと)。"""
+    return get_project(project_id)
+
+
+def save_deadline_reminder_marks(project_id: str, marks: list,
+                                 now_iso: str) -> int:
+    """二重配信を防ぐ印を刻んで保存する。刻めた件数を返す。"""
+    import deadline_marks  # noqa: PLC0415
+    return deadline_marks.save_marks_whole_doc(
+        get_project(project_id), marks, now_iso,
+        lambda doc: save_project(project_id, doc))
+
+
 def list_projects(user_id: str | None = None, include_archived: bool = False) -> list[dict]:
     """List projects. If user_id is given, only return projects owned by or shared with that user.
 

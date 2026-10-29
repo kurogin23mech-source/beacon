@@ -48,18 +48,6 @@ ALLOWED_ASYMMETRIES = {
     "get_project_meta": "mysql 固有 最適化 (whole-doc meta の軽量取得)。他 backend は get_project で代替",
     "list_tick_candidate_project_ids": "mysql 固有 最適化。app.py が getattr guard で optional 扱い、無ければ全 project scan に fallback",
     "find_bus_event_by_client_id": "mysql 固有 client-id 冪等 helper。app.py が getattr guard で optional 扱い",
-    # ms-185 e-7066: 締切リマインドの (読み手, 書き手) の組。v3 の行分割は mysql
-    # 固有のレイアウトなので実装も mysql にしか無い。app.py の
-    # _deadline_store_pair が **両方揃っているときだけ** 採り、無ければ whole-doc
-    # の組に倒す。ただしこの fallback は v1 でしか正しくない (Firestore v2 は
-    # milestones が subcollection なので締切が見えない) ため、**黙って 0 件に
-    # せず error を吐く**。Firestore v2 を本番で使うなら同等の組を足すこと。
-    "get_project_deadline_scope":
-        "mysql v3 固有の narrow read。app.py _deadline_store_pair が組で getattr、"
-        "無ければ whole-doc read に fallback (v2 では盲目なので error ログを出す)",
-    "save_deadline_reminder_marks":
-        "mysql v3 固有の narrow write (触れた行だけ)。上の read と必ず対で選ばれる。"
-        "無ければ whole-doc read-modify-write に fallback",
 }
 
 

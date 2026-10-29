@@ -33,13 +33,19 @@ def _fire(monkeypatch, project, report=None):
     この足場は **v1 (whole-doc) の store** を模す。行分割された store での
     振る舞いは tests/test_tick_deadline_split_schema_e7066.py が測る。
     """
+    import deadline_marks
     saved = []
-    monkeypatch.setattr(app.db, "get_project",
+
+    def _save_marks(pid, marks, now_iso):
+        n = deadline_marks.stamp_whole_doc(project, marks, now_iso)
+        if n:
+            saved.append(pid)
+        return n
+
+    monkeypatch.setattr(app.db, "get_project_deadline_scope",
                         lambda pid, *a, **k: project, raising=False)
-    monkeypatch.setattr(app.db, "save_project",
-                        lambda pid, data: saved.append(pid), raising=False)
-    for name in ("get_project_deadline_scope", "save_deadline_reminder_marks"):
-        monkeypatch.delattr(app.db, name, raising=False)
+    monkeypatch.setattr(app.db, "save_deadline_reminder_marks",
+                        _save_marks, raising=False)
     app._fire_due_deadlines("p1", NOW, [] if report is None else report)
     return len(saved)
 

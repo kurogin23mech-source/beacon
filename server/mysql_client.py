@@ -1248,7 +1248,13 @@ def _deadline_json_paths() -> tuple:
     ``occupation.iter_work_items`` は ``target[arm]`` を 1 段しか歩かない
     (入れ子の子 —— task の下の commit —— は work item として yield されない)。
     つまり絞り込みの深さと列挙の深さが一致しているので、``$**`` にしても拾える
-    ものは増えない (増えるのは走査費用だけ)。"""
+    ものは増えない (増えるのは走査費用だけ)。
+
+    感度 (安さの前提): ``JSON_CONTAINS_PATH`` は**キーの存在**で一致する。今は
+    締切を持たない work item にキー自体が無いので、Beacon 本番では 4,502 行の
+    子行のうち 0 行しか読まない。もし起票側が ``deadline: ""`` を既定で書くように
+    なると全行が一致し、**正しさは保たれたまま安さだけが静かに失われる**。その時は
+    値が空でないことまで条件に含める (= ここを直す)。"""
     import deadline as _dl  # noqa: PLC0415
     return tuple(f"$.{k}" for k in _dl.DEADLINE_KEYS)
 
@@ -1309,22 +1315,10 @@ def save_deadline_reminder_marks(project_id: str, marks: list,
     meta = _get("projects", project_id)
     if meta is None:
         return 0
-    wanted = {(m.get("target_id", ""), m.get("item_id", "")): m.get("deadline", "")
-              for m in (marks or [])}
-
-    def _stamp(item: dict, key: tuple) -> bool:
-        if wanted.get(key) != _dl.deadline_of(item):
-            return False
-        _dl.mark_reminded(item)
-        item["deadline_reminded_at"] = now_iso
-        return True
 
     if meta.get("schema_version") != SCHEMA_V3_ENTRY:
         # v1: project 文書が丸ごと 1 行なので、その 1 行を読み書きする。
-        import occupation  # noqa: PLC0415
-        n = sum(1 for c in occupation.iter_deadline_candidates(meta)
-                if _stamp(c["item"], (c["target_id"],
-                                      (c["item"] or {}).get("id", ""))))
+        n = deadline_marks.stamp_whole_doc(meta, marks, now_iso)
         if n:
             _put("projects", project_id, {**meta, "project_id": project_id})
         return n
@@ -1333,13 +1327,15 @@ def save_deadline_reminder_marks(project_id: str, marks: list,
     stamped = 0
     for coll in spec:                       # Target 行 (milestone の target_date 等)
         for tid, trow in _query_rows(coll, project_id):
-            if _stamp(trow, (tid, trow.get("id", tid))):
+            if _dl.stamp_marks([((tid, trow.get("id", tid)), trow)],
+                               marks, now_iso):
                 _put(coll, project_id, trow, sk=tid)
                 stamped += 1
     paths = _deadline_json_paths()
     for table in _server_child_tables(spec):   # 子行 (task の deadline 等)
         for sk, row in _query_rows_with_path(table, project_id, paths):
-            if _stamp(row, (sk.split("#")[0], row.get("id", ""))):
+            if _dl.stamp_marks([((sk.split("#")[0], row.get("id", "")), row)],
+                               marks, now_iso):
                 _put(table, project_id, row, sk=sk)
                 stamped += 1
     return stamped

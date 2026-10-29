@@ -19,9 +19,12 @@
   3. narrow read が本当に narrow (締切を持たない子行を読んでいない)。
      = 丸ごと hydrate に戻したら赤。毎分 13.7 MB を読む形は 2026-08-20 の本番
      停止 (e-5367) と同じ読み方なので、安いことも固定する。
-  4. 読み手と書き手は**組でしか選ばれない**。片方だけだと部分 hydrate した doc を
-     whole-doc save して、読まなかった行を消す。
-  5. 分割スキーマを v1 読み取りで読んでしまった時、黙って 0 件にせず error を出す。
+  4. 読み書きの口が**全 backend に揃っている**こと、そして呼び出し側が「在れば使う」
+     で経路を選ばないこと。最初は MySQL にだけ置いて getattr で分岐していたが、
+     store_router は 1 プロセスに 1 つの可変 module なので、別のテストが backend を
+     切り替えて読み込み直すと意図しない実装が選ばれる (実際に踏んだ)。
+  5. 分割された文書なのに Target が付いてこない読み方をした時、黙って 0 件にせず
+     error を出す。
 """
 
 from __future__ import annotations
@@ -172,26 +175,26 @@ def split_store(monkeypatch):
     return {"store": store, "reads": reads}
 
 
-def _fire(monkeypatch, split_store, *, pair=True):
-    """app の締切 source を 1 回走らせ、送られた DM と report を返す。"""
+def _fire(monkeypatch, split_store, *, blind=False):
+    """app の締切 source を 1 回走らせ、送られた DM と report を返す。
+
+    ``blind=True`` は「分割された文書を v1 読み取りで読む」= 本番で起きていた形。
+    """
     sent, report = [], []
     db = app_module.db
     monkeypatch.setattr(db, "append_bus_event",
                         lambda pid, data: sent.append(data) or "ev", raising=False)
-    if pair:
+    if blind:
+        monkeypatch.setattr(db, "get_project_deadline_scope",
+                            lambda pid, *a, **k: mc._get("projects", pid),
+                            raising=False)
+        monkeypatch.setattr(db, "save_deadline_reminder_marks",
+                            lambda *a, **k: 0, raising=False)
+    else:
         monkeypatch.setattr(db, "get_project_deadline_scope",
                             mc.get_project_deadline_scope, raising=False)
         monkeypatch.setattr(db, "save_deadline_reminder_marks",
                             mc.save_deadline_reminder_marks, raising=False)
-    else:
-        for name in ("get_project_deadline_scope", "save_deadline_reminder_marks"):
-            monkeypatch.delattr(db, name, raising=False)
-        # 分割スキーマを v1 読み取りで読む = 本番で起きていた形
-        monkeypatch.setattr(db, "get_project",
-                            lambda pid, *a, **k: mc._get("projects", pid),
-                            raising=False)
-        monkeypatch.setattr(db, "save_project",
-                            lambda pid, p: None, raising=False)
     app_module._fire_due_deadlines(PID, "2026-10-29T00:00:00.000000Z", report)
     return sent, report
 
@@ -249,23 +252,56 @@ def test_read_skips_child_rows_without_a_deadline(monkeypatch, split_store):
         f"丸ごと hydrate に戻っていないか確認すること。")
 
 
-# --- 4. 読み手と書き手は組 -------------------------------------------------
+# --- 4. 口が全 backend に揃っていること ---------------------------------
 
-def test_store_pair_is_all_or_nothing(monkeypatch):
-    """narrow read だけ在る backend では、narrow の組を採らない。
+def test_every_backend_exposes_the_deadline_pair():
+    """締切リマインドの 2 つの口は、どの保存層にも同じ名前で在る。
 
-    部分 hydrate した doc を whole-doc save すると、読まなかった行が消える。
-    片方ずつ ``getattr`` で拾う実装に戻すとここが赤くなる。
+    最初は MySQL にだけ置いて、呼び出し側が「在れば使う」で経路を切り替えていた。
+    store_router は 1 プロセスに 1 つしか無い可変 module なので、別のテストが
+    backend を切り替えて読み込み直すと**呼び出し側が意図しない実装が選ばれる**
+    (実際それで、保存層を差し替えたはずの試験が本物の MySQL を見に行って落ちた)。
+    揃っていれば分岐そのものが要らない。1 つでも欠けたらここが赤くなる。
     """
-    db = app_module.db
-    monkeypatch.setattr(db, "get_project_deadline_scope",
-                        lambda pid: {"milestones": []}, raising=False)
-    monkeypatch.delattr(db, "save_deadline_reminder_marks", raising=False)
-    read, write = app_module._deadline_store_pair()
-    assert write is None, "書き手が無いのに narrow write を採っている"
-    assert read is db.get_project, (
-        "書き手が無いのに narrow read を採っている (部分 hydrate を whole-doc "
-        "save する危険な組み合わせ)")
+    import ast
+    import pathlib as _pl
+    router = _pl.Path(__file__).resolve().parents[1] / "server" / "store_router.py"
+    tree = ast.parse(router.read_text(encoding="utf-8"))
+    per_backend = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and \
+                node.module.endswith("_client"):
+            per_backend.setdefault(node.module, set()).update(
+                a.name for a in node.names)
+    assert per_backend, "store_router から backend の import を読み取れなかった"
+    for name in ("get_project_deadline_scope", "save_deadline_reminder_marks"):
+        missing = sorted(b for b, names in per_backend.items() if name not in names)
+        assert not missing, (
+            f"{name} が {missing} に無い。呼び出し側 (server/app.py) は分岐せずに "
+            f"db.{name} を呼ぶので、欠けている backend では AttributeError になる。")
+
+
+def test_app_calls_the_pair_without_feature_detection():
+    """app は「在れば使う」をしない (= getattr で経路を選ばない)。
+
+    分岐を戻すと、backend を切り替えて読み込み直した後に意図しない実装が選ばれる
+    形に逆戻りする。
+    """
+    import ast
+    import pathlib as _pl
+    src = (_pl.Path(__file__).resolve().parents[1] / "server" / "app.py").read_text(
+        encoding="utf-8")
+    tree = ast.parse(src)
+    for fname in ("_load_deadline_scope", "_persist_deadline_reminder_marks"):
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == fname)
+        bad = [n for n in ast.walk(fn)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "getattr"]
+        assert not bad, (
+            f"{fname} が getattr で保存層の口を探している。全 backend が口を持つので "
+            f"分岐は不要 — 分岐があると別 backend で読み込み直された時に意図しない "
+            f"実装が選ばれる。")
 
 
 # --- 5. 読めないときは鳴る -------------------------------------------------
@@ -277,7 +313,7 @@ def test_schema_blind_read_is_logged_not_silent(monkeypatch, split_store, caplog
     外から区別できず、事故になるまで誰も気付けない。
     """
     with caplog.at_level("ERROR"):
-        sent, _ = _fire(monkeypatch, split_store, pair=False)
+        sent, _ = _fire(monkeypatch, split_store, blind=True)
     assert sent == [], "v1 読み取りでは締切が見えない (この試験の前提)"
     assert any("schema-blind" in r.getMessage() for r in caplog.records), (
         f"分割スキーマを盲目に読んだのに error が出ていない "
@@ -294,3 +330,42 @@ def test_sql_deadline_paths_are_derived_from_the_deadline_engine():
     """
     assert mc._deadline_json_paths() == tuple(
         f"$.{k}" for k in deadline_mod.DEADLINE_KEYS)
+
+
+# --- 読んだ後に期日が動いた場合 --------------------------------------------
+
+def test_mark_is_not_stamped_when_the_deadline_moved_after_the_read(
+        monkeypatch, split_store):
+    """知らせた後・印を刻む前に期日が動いたら、その項目には刻まない。
+
+    刻んでしまうと「**新しい期日で知らせ済み**」という嘘の印が残り、その期日が
+    過ぎても二度と知らせない (= 通知が 1 回まるごと消える)。印は「どの期日値に
+    ついて知らせたか」であって「この項目に触った」ではない。
+
+    反転ハーネスで見つかった穴: 値の一致確認を外しても他の試験は全部緑だった。
+    """
+    marks = [{"target_id": "ms-1", "item_id": "ms-1", "deadline": PAST}]
+    # 読んだ後に期日が動いた状態を作る
+    moved = json.loads(split_store["store"][("beacon_milestones", PID, "ms-1")])
+    moved["target_date"] = "2001-02-03"
+    split_store["store"][("beacon_milestones", PID, "ms-1")] = json.dumps(moved)
+
+    stamped = mc.save_deadline_reminder_marks(PID, marks, "2026-10-29T00:00:00Z")
+
+    row = json.loads(split_store["store"][("beacon_milestones", PID, "ms-1")])
+    assert stamped == 0, "期日が動いた項目に刻んでしまっている"
+    assert deadline_mod.REMINDED_FOR_KEY not in row, (
+        f"新しい期日 2001-02-03 を『知らせ済み』にしてしまった (row={row})。"
+        f"この印が残ると、その期日が過ぎても二度と知らせない。")
+
+
+def test_stamp_marks_matches_on_the_deadline_value_not_just_the_key():
+    """規則そのもの (L2) を直に測る — 鍵が一致しても値が違えば刻まない。"""
+    item = {"id": "e-9", "deadline": "2030-01-01"}
+    marks = [{"target_id": "ms-1", "item_id": "e-9", "deadline": "2020-01-01"}]
+    n = deadline_mod.stamp_marks([(("ms-1", "e-9"), item)], marks, "now")
+    assert n == 0 and deadline_mod.REMINDED_FOR_KEY not in item
+    # 値が一致していれば刻む (= 上の 0 が「常に 0」でないことの裏取り)
+    marks[0]["deadline"] = "2030-01-01"
+    n = deadline_mod.stamp_marks([(("ms-1", "e-9"), item)], marks, "now")
+    assert n == 1 and item[deadline_mod.REMINDED_FOR_KEY] == "2030-01-01"
