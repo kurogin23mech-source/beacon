@@ -52,9 +52,10 @@ def _server_firing_set(project) -> set:
     the shipped ``app._deadline_reminder_candidates`` gated by the L2 temporal
     rule, exactly as ``_fire_due_deadlines`` gates it."""
     return {
-        (item.get("id"), kind, deadline.deadline_of(item), recipient)
-        for item, kind, _label, recipient in app._deadline_reminder_candidates(project)
-        if _fires(item)
+        (c["item"].get("id"), c["kind"], deadline.deadline_of(c["item"]),
+         c["recipient"])
+        for c in app._deadline_reminder_candidates(project)
+        if _fires(c["item"])
     }
 
 

@@ -141,10 +141,20 @@ def _old_sessionstart_rows(project):
 def test_server_firing_set_parity():
     project = _mixed_project()
 
+    def _unpack(cand):
+        """旧オラクルは 4-tuple、新経路は ms-185 e-7066 以降 record dict を yield する
+        (dedup 印を id で指すため)。比較する 4 項目は同じなので、ここで形だけ揃える
+        — オラクル (旧実装の逐語コピー) には手を入れない。"""
+        if isinstance(cand, dict):
+            return cand["item"], cand["kind"], cand["recipient"]
+        item, kind, _label, recipient = cand
+        return item, kind, recipient
+
     def firing_set(candidates):
+        rows = (_unpack(c) for c in candidates)
         return {
             (item.get("id"), kind, deadline.deadline_of(item), recipient)
-            for item, kind, _label, recipient in candidates
+            for item, kind, recipient in rows
             if _fires(item)
         }
 

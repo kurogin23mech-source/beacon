@@ -24,6 +24,26 @@ def _sink(monkeypatch):
     return events
 
 
+def _fire(monkeypatch, project, report=None):
+    """``_fire_due_deadlines`` を 1 回走らせ、印を保存した回数を返す
+    (ms-185 e-7066 で契約が ``(pid, now_iso, report)`` に変わり、source が自分で
+    読み書きするようになった。以前の戻り値 ``changed`` —— 「呼び出し側が保存
+    すべきか」 —— に対応する観測は「保存が走ったか」なのでそれを数える)。
+
+    この足場は **v1 (whole-doc) の store** を模す。行分割された store での
+    振る舞いは tests/test_tick_deadline_split_schema_e7066.py が測る。
+    """
+    saved = []
+    monkeypatch.setattr(app.db, "get_project",
+                        lambda pid, *a, **k: project, raising=False)
+    monkeypatch.setattr(app.db, "save_project",
+                        lambda pid, data: saved.append(pid), raising=False)
+    for name in ("get_project_deadline_scope", "save_deadline_reminder_marks"):
+        monkeypatch.delattr(app.db, name, raising=False)
+    app._fire_due_deadlines("p1", NOW, [] if report is None else report)
+    return len(saved)
+
+
 def _project_with_claimed_ms(**task):
     return {
         "id": "p1",
@@ -41,8 +61,8 @@ def test_overdue_task_dms_claimer_once(monkeypatch):
     events = _sink(monkeypatch)
     project = _project_with_claimed_ms(deadline="2026-08-06")
     report = []
-    changed = app._fire_due_deadlines("p1", project, NOW, report)
-    assert changed is True
+    changed = _fire(monkeypatch, project, report)
+    assert changed == 1
     assert len(events) == 1
     ev = events[0]
     assert ev["channel"] == "dm"
@@ -56,7 +76,7 @@ def test_overdue_task_dms_claimer_once(monkeypatch):
 
     # 2 回目の tick では再送しない。
     report2 = []
-    assert app._fire_due_deadlines("p1", project, NOW, report2) is False
+    assert _fire(monkeypatch, project, report2) == 0
     assert len(events) == 1
 
 
@@ -70,8 +90,8 @@ def test_overdue_milestone_target_date_dms_claimer(monkeypatch):
             "occupation": {"session_id": "sv-owner"}, "entries": [],
         }],
     }
-    changed = app._fire_due_deadlines("p1", project, NOW, [])
-    assert changed is True
+    changed = _fire(monkeypatch, project)
+    assert changed == 1
     assert events[0]["payload"]["work_kind"] == "milestone"
     assert events[0]["payload"]["recipient_session_id"] == "sv-owner"
 
@@ -86,7 +106,7 @@ def test_overdue_activity_dms_opportunity_claimer(monkeypatch):
                             "deadline": "2026-08-07", "status": "todo"}],
         }],
     }
-    assert app._fire_due_deadlines("p1", project, NOW, []) is True
+    assert _fire(monkeypatch, project) == 1
     assert events[0]["payload"]["work_kind"] == "activity"
     assert events[0]["payload"]["recipient_session_id"] == "sv-sales"
 
@@ -101,8 +121,8 @@ def test_unclaimed_item_is_skipped_not_dmd(monkeypatch):
         }],
     }
     report = []
-    changed = app._fire_due_deadlines("p1", project, NOW, report)
-    assert changed is False
+    changed = _fire(monkeypatch, project, report)
+    assert changed == 0
     assert events == []
     assert report and report[0]["skipped"] == "no claimer session"
 
@@ -122,7 +142,7 @@ def test_done_and_future_not_reminded(monkeypatch):
             ],
         }],
     }
-    assert app._fire_due_deadlines("p1", project, NOW, []) is False
+    assert _fire(monkeypatch, project) == 0
     assert events == []
 
 
@@ -131,7 +151,7 @@ def test_due_today_message_does_not_claim_overdue(monkeypatch):
     # います」と断言しない(受信 AI の判断入力を汚さない)。
     events = _sink(monkeypatch)
     project = _project_with_claimed_ms(deadline="2026-08-09")  # == NOW の日付
-    assert app._fire_due_deadlines("p1", project, NOW, []) is True
+    assert _fire(monkeypatch, project) == 1
     msg = events[0]["payload"]["message"]
     assert "本日" in msg
     assert "過ぎています" not in msg
@@ -141,9 +161,9 @@ def test_due_today_message_does_not_claim_overdue(monkeypatch):
 def test_refire_after_deadline_extended_then_lapsed(monkeypatch):
     events = _sink(monkeypatch)
     project = _project_with_claimed_ms(deadline="2026-08-06")
-    app._fire_due_deadlines("p1", project, NOW, [])
+    _fire(monkeypatch, project)
     assert len(events) == 1
     # 締切を延ばしたが今日より前 → 再び overdue、値が変わったので再通知。
     project["milestones"][0]["entries"][0]["deadline"] = "2026-08-07"
-    assert app._fire_due_deadlines("p1", project, NOW, []) is True
+    assert _fire(monkeypatch, project) == 1
     assert len(events) == 2
