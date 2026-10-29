@@ -12,8 +12,8 @@
 **禁止文と実行指示を構造で区別する。** 直し方を説明するには、禁止する側でもコマンド名を
 書かざるを得ない (「``beacon doc update application-map`` を打つな」)。素朴な全文の
 substring 一致にすると、その警告文自身で赤くなるか、さもなければ緩めた結果として本物の
-指示を見逃す。そこで **実行可能なブロック (```bash フェンス) の中だけ**を見る: 散文での
-言及は許し、フェンス内に現れたら落とす。
+指示を見逃す。そこで **実行可能な断片の中だけ**を見る: 引用ブロックに置かれた言及は許し、
+フェンス付きブロック (言語タグを問わない) と引用ブロック外のコードスパンに現れたら落とす。
 """
 from __future__ import annotations
 
@@ -32,13 +32,19 @@ SKILL_TREES = [
     REPO / "plugins" / "beacon" / "skills",
 ]
 
-BASH_BLOCK_RE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
+# 実行可能として扱うブロックは **フェンス言語を問わない**。```bash だけに縛っていたら、
+# ```sh に変えるだけで同じ禁止コマンドが素通りした (PR#823 独立レビュー 2 体が実測)。
+# 言語タグ無しの ``` も対象に含める。
+FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_+.-]*\n(.*?)```", re.DOTALL)
+# フェンスを使わず 1 行のコードスパンで案内する抜け道も見る (同レビュー)。
+INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
 # 地図を直接書く操作 (= 導出物を上書きする操作)。
+# 引数の順を入れ替えた形も拾うため、動詞と doc-id の隣接ではなく **同じ行** で見る。
 FORBIDDEN_IN_BASH = [
-    (re.compile(r"doc\s+update\s+application-map"),
+    (re.compile(r"doc\s+update\b[^\n]*\bapplication-map\b"),
      "beacon doc update application-map (導出物を直接上書き)"),
-    (re.compile(r"doc\s+add\b[^\n]*--id\s+application-map"),
+    (re.compile(r"doc\s+add\b[^\n]*\bapplication-map\b"),
      "beacon doc add --id application-map (導出物を直接作成)"),
 ]
 
@@ -55,8 +61,35 @@ def _skill_files() -> list:
     return out
 
 
+def _normalize_command_text(s: str) -> str:
+    """同じ操作の別の書き方を同じ形に潰す (行は保つ)。
+
+    ``beacon doc update "application-map"`` / 行折り返し / python から
+    ``subprocess.run(['beacon','doc','update','application-map'])`` で呼ぶ形は、
+    シェル的には等価な操作なのに素の正規表現では別物に見える (PR#823 独立レビュー
+    2 体が実測した抜け道)。引用符・カンマ・角括弧・行継続を落として同一視する。
+    改行は **残す** — 無関係な 2 行が 1 行に繋がって誤検知するのを避けるため。
+    """
+    s = s.replace("\\\n", " ")                  # 行継続は 1 行に畳む
+    s = re.sub(r"[\"'`,\[\]()]", " ", s)         # 引用符 / 区切り記号を落とす
+    return re.sub(r"[^\S\n]+", " ", s)           # 改行以外の空白を 1 つに
+
+
 def _bash_blocks(text: str) -> list:
-    return BASH_BLOCK_RE.findall(text)
+    """実行可能として扱う断片 (フェンス付きブロック + インラインのコードスパン)。
+
+    **引用ブロック (``>`` 行) は除く。** 禁止を説明するにはコマンド名を書かざるを
+    得ないので、この Skill 群では「禁止と理由は引用ブロックに置く」という置き場の
+    約束で区別する。引用ブロックの外にあるコードスパンは *案内* と見なして検査する
+    (フェンスを使わず 1 行で書く抜け道を塞ぐ、PR#823 独立 AX レビュー)。散文で
+    触れたいなら引用ブロックに置く、が守るべき作法。
+    """
+    out = [_normalize_command_text(b) for b in FENCED_BLOCK_RE.findall(text)]
+    masked = FENCED_BLOCK_RE.sub("\n", text)      # フェンス内を二重に見ない
+    prose = "\n".join(ln for ln in masked.splitlines()
+                      if not ln.lstrip().startswith(">"))
+    out += [_normalize_command_text(c) for c in INLINE_CODE_RE.findall(prose)]
+    return out
 
 
 def test_no_skill_instructs_writing_the_derived_map():
@@ -104,7 +137,7 @@ def _mode_sections(text: str) -> dict:
     return sections
 
 
-@pytest.mark.parametrize("path", MAP_SKILLS, ids=lambda p: str(p.name))
+@pytest.mark.parametrize("path", MAP_SKILLS, ids=lambda p: str(p.relative_to(REPO)))
 def test_map_skill_instructs_the_deliverable_route(path):
     """禁止しただけで終わらず、**代わりに何をするか**が実行ブロックに在ること。
 
@@ -121,10 +154,12 @@ def test_map_skill_instructs_the_deliverable_route(path):
     for mode, body in sections.items():
         blocks = "\n".join(_bash_blocks(body))
         assert "beacon deliverable add" in blocks, (
-            f"Step {mode} に、書き漏れを足す道 (beacon deliverable add) が実行ブロックとして無い")
+            f"{path.relative_to(REPO)}: Step {mode} に、書き漏れを足す道 "
+            "(beacon deliverable add) が実行ブロックとして無い")
     r_blocks = "\n".join(_bash_blocks(sections["R"]))
     assert "beacon deliverable retire" in r_blocks, (
-        "Step R に、幽霊を消す道 (beacon deliverable retire) が実行ブロックとして無い")
+        f"{path.relative_to(REPO)}: Step R に、幽霊を消す道 "
+        "(beacon deliverable retire) が実行ブロックとして無い")
 
 
 def _blockquotes(text: str) -> list:
@@ -141,7 +176,7 @@ def _blockquotes(text: str) -> list:
     return out
 
 
-@pytest.mark.parametrize("path", MAP_SKILLS, ids=lambda p: str(p.name))
+@pytest.mark.parametrize("path", MAP_SKILLS, ids=lambda p: str(p.relative_to(REPO)))
 def test_map_skill_states_the_derived_contract(path):
     """「地図は導出物だから直接書くな」という理由が、**各モードの警告として**在ること。
 
@@ -159,6 +194,52 @@ def test_map_skill_states_the_derived_contract(path):
                   if "導出物" in q and "上書き" in q
                   and ("直接" in q or "手編集" in q)]
         assert warned, (
-            f"Step {mode} に『地図を直接書くな / 導出物なので上書きされる』という警告が "
+            f"{path.relative_to(REPO)}: Step {mode} に『地図を直接書くな / 導出物なので"
+            "上書きされる』という警告が "
             "引用ブロックとして在りません。禁止と理由は同じ場所に並べてください "
             "(理由が無いと、次に触る AI が手近な直接書き込みに戻します)。")
+
+
+# --- 機械照合が「節の二重化」を見ること (PR#823 独立 AX レビュー high) -------------
+#
+# 地図の節見出しは成果ログの --area / --category (自由入力) から起きるので、空白 1 つや
+# 全角半角の違いで «同じ節» が 2 つ生える。楔の集合は変わらないため、書き漏れ / 幽霊の
+# 照合はそれを 0 件のまま通していた — Skill が「綴りを完全一致させろ」と警告している
+# まさにその破れを、Skill が唯一の確認手段として案内する照合が検出できない状態だった。
+
+def _drift_module():
+    import importlib.util
+    path = REPO / "scripts" / "check-map-drift.py"
+    spec = importlib.util.spec_from_file_location("check_map_drift", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_same_spelling_heading_reemission_is_not_a_split():
+    """同じ綴りの再掲は正常 (大節見出しは節が変わるたびに再掲される描画)。"""
+    mod = _drift_module()
+    text = "## B. 透明にする\n### B1. x\n## B. 透明にする\n### B3. y\n"
+    assert mod.split_sections(text) == []
+
+
+@pytest.mark.parametrize("twin", [
+    "### A1. 状態を一望する\n- a\n### A1.状態を一望する\n- b\n",      # 半角スペースの有無
+    "### A1. 状態を一望する\n### Ａ1. 状態を一望する\n",              # 全角/半角
+    "## A. 見失わない\n## A.  見失わない\n",                          # 空白の数
+])
+def test_spelling_twin_headings_are_reported(twin):
+    """綴り違いの双子は報告されること (= 二重に生えた節を検出する)。"""
+    mod = _drift_module()
+    found = mod.split_sections(twin)
+    assert len(found) == 1, f"双子を検出していない: {found}"
+    assert len(found[0]["spellings"]) == 2
+
+
+def test_clean_requires_no_split_sections():
+    """exit 0 の判定に節の二重化が入っていること (書き漏れ / 幽霊だけで緑にしない)。"""
+    mod = _drift_module()
+    base = {"counts": {"missing": 0, "phantom": 0, "split_sections": 0}}
+    assert mod._clean(base) is True
+    split = {"counts": {"missing": 0, "phantom": 0, "split_sections": 1}}
+    assert mod._clean(split) is False
