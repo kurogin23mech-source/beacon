@@ -832,6 +832,10 @@ function collectLayer0Identity() {
   }
 }
 
+// e-7235: refresh-every-heartbeat
+// ^ 上の 1 行は機械が読む印 (tests/test_heartbeat_carries_where_e7235.py)。
+//   説明文は自由に書き換えてよいが、この印は毎 heartbeat 刻み直す実装である限り消さない。
+//
 // Layer 1 (Where) = cwd + git の branch / 先頭コミット。**cold-start だけでなく
 // 毎 heartbeat 刻み直す** (ms-159 e-7235)。ここが古いと、サーバがこの branch から
 // 導出する「どの対象か」と、head_subject から導出する「何をしているか」が一緒に

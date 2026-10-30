@@ -112,13 +112,29 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
   // 宣言を第 1 優先に見るので、新鮮にしても影響するのは導出の fallback だけ。
   // 送らない場合は従来どおりサーバの merge で前の値が保たれる (後方互換)。
   if (where && typeof where === 'object') {
+    // cwd は **top-level** なのでサーバの浅いマージで安全に更新できる
+    // (指定した key だけ書き、ほかは触らない)。空なら送らない。
     if (where.cwd) body.cwd = where.cwd
-    // 空の git は送らない。送ると、サーバの merge で**実在した値を空で上書きして
-    // 「不明」に落とす** (捏造しないのと同じ理由で、無いものは送らない)。
-    // `{}` も `{branch:'',...}` も truthy なので、中身が 1 つでも在るかを見る。
+    // git は **入れ子のマップ**なので事情が違う。サーバの upsert はどの保存層でも
+    // 浅いマージ (MySQL は `{**existing, **data}`、Firestore は `set(merge=True)`、
+    // DynamoDB も同等) で、**入れ子のマップは丸ごと置換される**。だから送った map に
+    // 無い項目は、以前の正しい値ごと消える。この罠は repo 側も認識しており、
+    // `actor.email` には項目単位で書く専用の口 (`stamp_session_actor_email`) が
+    // 全保存層に在る。
+    //
+    // よって git は **3 項目すべて揃っているときだけ送る** (独立 AX レビュー指摘)。
+    // 揃わないのは、たとえば HEAD が branch を指していないとき
+    // (`git symbolic-ref` が空を返す = rebase 中 / コミット指定で開いた worktree)。
+    // その状態で送ると、数秒前まで分かっていた branch が**無言で空になる**。
+    // 消すより前の値を残す方を選ぶ: 揃わないときは git を送らず、cwd だけ更新する。
+    // 前の値は古くなるが、detached は一時的な状態で、消えるより古い方が害が小さい。
+    //
+    // 残っている筋の通った直し方は、`actor.email` と同じ**項目単位の書き込み**を
+    // git にも用意すること (そうすれば detached の間は branch だけ据え置けて、
+    // 他の項目は新鮮に保てる)。それは保存層 3 つとサーバの配線を触るので別件。
     const g = where.git
     if (g && typeof g === 'object'
-        && (g.branch || g.head_short || g.head_subject)) {
+        && g.branch && g.head_short && g.head_subject) {
       body.git = g
     }
   }

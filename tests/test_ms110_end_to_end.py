@@ -200,8 +200,16 @@ def send(monkeypatch):
     #
     # 返す行の形は、同じ fixture がサーバ側に出している `_SESSIONS` と同じ
     # (`session_id` + `actor.email`) にして、生存確認とサーバの見解を食い違わせない。
-    import beacon_cli.skills_helpers.dm_discover as dm_discover
-    monkeypatch.setattr(dm_discover, "discover_and_aggregate",
+    # 解決は被検側と同じ ``importlib.import_module`` で行う。素の import 文は、
+    # **別のテストが `sys.modules` に最下層だけを直代入している**と
+    # `ImportError: cannot import name 'skills_helpers' from 'beacon_cli'` で落ちる
+    # (親パッケージの属性が登録されないため)。単体では通るのに、その別ファイルと
+    # 同じワーカーに当たったときだけ落ちる形で実際に踏んだ (独立保守性レビューが再現)。
+    # 同じコミットで足した tests/test_send_auth_bypass_e7234.py はこの作法を採って
+    # いたのに、ここだけ弱い側になっていた。
+    import importlib
+    helpers = importlib.import_module("beacon_cli.skills_helpers.dm_discover")
+    monkeypatch.setattr(helpers, "discover_and_aggregate",
                         lambda **kw: copy.deepcopy(_SESSIONS))
 
     def _do(*, to, sender="sv-alice", sender_uid="uid-alice", confirmed=False):

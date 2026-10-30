@@ -106,25 +106,26 @@ def test_where_collection_output_shape():
         f"件名に hash が混ざっている: {got['subject']!r}")
 
 
-def test_layer1_refresh_is_documented_where_it_is_collected():
-    """収集の節が「毎 heartbeat 刻み直す」と明言していること。
+def test_layer1_refresh_is_marked_where_it_is_collected():
+    """収集の場所に「毎 heartbeat 刻み直す」印が在ること。
 
     機構を変えたのに説明が古いままだと、次に触る人が「ここは 1 回だけのはず」と
-    読んで配線を外す。
+    読んで配線を外す。だから収集している場所に印を要求する。
 
-    **肯定で固定する**。最初はこれを否定 (= 旧文言が残っていたら赤) で書いたが、
-    「その文言はもう通用しない」と説明するための引用まで弾いてしまい、正しい変更を
-    妨げる偽陽性になった。禁じたい文字列を数えるのではなく、**在るべき記述が在るか**
-    を見る方が、言い回しの自由を奪わずに意図を守れる。
+    **自然文ではなく安定した印を見る**。ここは 2 度書き直した:
+    1 度目は「旧文言が残っていたら赤」の否定で書き、「その文言はもう通用しない」と
+    説明するための引用まで弾く偽陽性になった。2 度目は肯定に変えたが、
+    「毎 heartbeat」という**日本語の字面**への依存が残り、独立レビューが
+    意味を変えずに言い回しだけ変えた変異で赤にできることを実証した
+    (= 正しい変更を妨げる偽陽性が形を変えて残っていた)。
+    3 度目の今回は grep 可能な印 1 つだけを見る。説明文は自由に書き換えられる。
     """
     src = BUS.read_text(encoding="utf-8")
     i = src.index("function collectLayer1Where()")
-    # 関数の直前にある説明の節 (= 直前の空行 2 つより後ろ) を見る。
-    doc = src[max(0, src.rfind("\n\n", 0, i)):i]
-    assert "毎 heartbeat" in doc or "毎回刻み直す" in doc, (
-        "Layer 1 を毎 heartbeat 刻み直すことが、収集している場所の説明に書かれて"
-        f"いない。次に触る人が 1 回刻みに戻す。読んだ節:\n{doc[-600:]}")
-    # 旧前提そのもの (cold-start の 1 回だけ、という**主張**) が残っていないこと。
-    # 引用は許すので、主張の形 ("Stamped ONCE") だけを見る。
-    assert "Stamped ONCE on cold-start as part of the first heartbeat" not in src, (
-        "Layer 1 を毎回刻むようにしたのに、1 回だけと断言する記述が残っている")
+    # 関数の直前 800 文字に印が在るか (説明の節に置く想定)。
+    doc = src[max(0, i - 800):i]
+    assert "e-7235: refresh-every-heartbeat" in doc, (
+        "収集している場所に『毎 heartbeat 刻み直す』印が無い。"
+        "次に触る人が 1 回刻みに戻す。印は `// e-7235: refresh-every-heartbeat`")
+
+
