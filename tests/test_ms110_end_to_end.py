@@ -185,9 +185,32 @@ def send(monkeypatch):
     bridge = _BridgeClient(TestClient(app_module.app))
     _client = lambda: (bridge, {"project_id": PROJECT_ID})
     monkeypatch.setattr(cmd_bus, "_get_api_client", _client)
-    # live-check lazily does `from commands import _get_api_client` (dm_discover)
     monkeypatch.setattr(commands, "_get_api_client", _client)
     monkeypatch.setattr(commands_shared, "_get_api_client", _client)
+
+    # 生存確認は、送信側が実際に呼ぶ 1 つの継ぎ目で止める (e-7234)。
+    #
+    # 以前はこれが無く、上の `_get_api_client` 3 箇所の差し替えだけに頼っていた。
+    # それは送信側から 3 段下の依存で、間に dm_discover の内部経路が挟まる。実際に
+    # CI で実物の `_get_api_client` に到達し、未ログイン時の `sys.exit(1)` が
+    # `except Exception` を 2 層貫通してテストごと落ちた (2026-10-30 / PR#825)。
+    # しかも認証を持つ手元では通ってしまい、その間 **本番クラウドへ実際に
+    # 問い合わせていた** (= 手元で緑・CI で赤の非対称、かつ外部への副作用)。
+    # 呼ぶ継ぎ目そのものを止めれば、依存の解決のされ方に関係なく hermetic になる。
+    #
+    # 返す行の形は、同じ fixture がサーバ側に出している `_SESSIONS` と同じ
+    # (`session_id` + `actor.email`) にして、生存確認とサーバの見解を食い違わせない。
+    # 解決は被検側と同じ ``importlib.import_module`` で行う。素の import 文は、
+    # **別のテストが `sys.modules` に最下層だけを直代入している**と
+    # `ImportError: cannot import name 'skills_helpers' from 'beacon_cli'` で落ちる
+    # (親パッケージの属性が登録されないため)。単体では通るのに、その別ファイルと
+    # 同じワーカーに当たったときだけ落ちる形で実際に踏んだ (独立保守性レビューが再現)。
+    # 同じコミットで足した tests/test_send_auth_bypass_e7234.py はこの作法を採って
+    # いたのに、ここだけ弱い側になっていた。
+    import importlib
+    helpers = importlib.import_module("beacon_cli.skills_helpers.dm_discover")
+    monkeypatch.setattr(helpers, "discover_and_aggregate",
+                        lambda **kw: copy.deepcopy(_SESSIONS))
 
     def _do(*, to, sender="sv-alice", sender_uid="uid-alice", confirmed=False):
         for k in ("BEACON_BUS_CHANNEL", "BEACON_BUS_PAYLOAD", "BEACON_BUS_SENDER",

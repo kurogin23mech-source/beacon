@@ -26,6 +26,7 @@ so the dependency graph stays one-directional and no cycle can form.
 
 import contextlib
 import hashlib
+import io
 import json
 import subprocess
 import logging
@@ -1891,12 +1892,55 @@ def _resolve_recipient_live(
         # does not depend on the dm_discover helper importing (e-3880).
         return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
+    # 生存確認の呼び出しは**出力ごと閉じ込める** (e-7234)。この先の
+    # ``_get_api_client`` は未ログイン等で素の ``print`` を出してから終了する。
+    # 終了していた頃はその後に JSON を出さないので無害だったが、下で ``SystemExit``
+    # を吸収して処理を続けるようにした結果、**その print が --json の出力に割り込む**
+    # ようになった。stderr へ移すのも駄目で、Bash ツールが 2 つの流れを結合するため
+    # stdout の JSON の前に merge されて解析を壊す (= ms-140 が扱う穴、壊れた解析は
+    # 重複送信を誘発する。tests/test_bus_send_live_check.py がこの清潔さを固定している)。
+    # 診断を捨てるのではなく、下の ``_notice`` で受け皿へ回す。
+    _diag = io.StringIO()
     try:
-        rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
-    except Exception:
+        with contextlib.redirect_stdout(_diag), contextlib.redirect_stderr(_diag):
+            rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
+    except (Exception, SystemExit) as exc:
         # Discovery raised (network / psutil / auth) — bypass the liveness
         # check, but still resolve identity: same-user recognition (the qual
         # gate) must not depend on local bridge discovery succeeding (e-3880).
+        #
+        # **SystemExit も受け止める** (e-7234): 未ログインのときの失敗は例外では
+        # なく ``sys.exit(1)`` で来る (discovery → query_me_projects →
+        # ``_get_api_client`` → 認証が無い → メッセージを出して終了)。SystemExit は
+        # ``BaseException`` 直系で ``Exception`` の子ではないので、``except
+        # Exception`` だけでは素通りし、**送信そのものがここで死ぬ**。上の一文が
+        # 迂回する対象として auth を名指ししているのに、その auth の経路だけ
+        # 抜けていた (2026-10-30 に実測。``issubclass(SystemExit, Exception)`` は
+        # False)。受け止める範囲をこの 1 呼び出しに限っているので、プロセス全体の
+        # 正当な終了を飲み込むことはない。
+        #
+        # 迂回したことは黙らせない: 生存確認を省いた事実が分からないと、宛先が
+        # 死んでいても「送れた」と読める。``_notice`` は --json のときは結果の
+        # notes へ、そうでなければ stderr へ回る (上の ms-140 の経緯を参照)。
+        # **知らせるのは新しく吸収した種類だけ** (e-7234)。
+        #
+        # 普通の例外 (ネットワーク断 / beacon_cli が subprocess の sys.path に無い 等)
+        # での迂回は、この経路の設計として**意図的に無言**で、すぐ上の import 失敗の
+        # 迂回も同じく無言。tests/test_bus_send_live_check.py::
+        # test_discovery_raises_bypasses がその清潔さを固定している。一過性・環境起因で
+        # 利用者に打てる手が無く、毎送信で 1 行出れば雑音になるだけなので変えない。
+        #
+        # ``SystemExit`` だけは性質が違う。未ログイン / cloud.json 不在という
+        # **利用者が直せる**事情で、しかも従来はここで**プロセスごと死んでいた**。
+        # 無言で迂回すると「生存確認が省かれた」ことも「ログインすれば直る」ことも
+        # 伝わらないまま、宛先が死んでいても送れたように見える。死ぬより良いが、
+        # 黙るより知らせる方が良い。飲み込んだ診断の 1 行目をそのまま添える。
+        if isinstance(exc, SystemExit):
+            _detail = (_diag.getvalue().strip().splitlines() or [""])[0]
+            _notice(
+                "生存確認を省きました (相手が今も居るかは未確認): "
+                + (_detail or type(exc).__name__)
+                + " — 送信そのものは続行します。")
         return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
     for row in rows:

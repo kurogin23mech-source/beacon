@@ -43,13 +43,14 @@
  * @param {string} [opts.stateSince]     ms-159 e-6245 — ISO8601 the session ENTERED that state.
  * @param {string} [opts.stateDetail]    ms-159 e-6488 — awaiting_human wait detail (what it waits for).
  * @param {number} [opts.contextPct]     ms-159 e-6499 — this session's context-window usage %.
+ * @param {object} [opts.where]          ms-159 e-7235 — {cwd, git:{branch, head_short, head_subject}}.
  * @returns {object}
  */
 // @e-2502-core-candidate — heartbeat body is bus protocol, currently
 //   duplicated in lib/codex_receive_loop.py::heartbeat_to_server. Move
 //   the shape to lib/bus_protocol.py once that lands; this function
 //   becomes a thin Node wrapper.
-export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince, stateDetail, contextPct }) {
+export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince, stateDetail, contextPct, where }) {
   const body = {
     last_active: nowIso,
     last_poll_at: nowIso,
@@ -96,6 +97,47 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
   // an un-computed session keeps the row shape (back-compat). 0 is a legit value
   // (fresh session) and IS sent — hence the null/undefined check, not falsy.
   if (contextPct !== undefined && contextPct !== null) body.context_pct = contextPct
+  // ms-159 e-7235 — 「どこで作業しているか」(cwd + git の branch / 先頭コミット) を
+  // 心拍に相乗りさせる。以前はこれが cold-start の 1 回だけで、心拍には時刻と状態しか
+  // 乗っていなかった。橋渡し役は会話を消しても生き続けるので、ターミナルを開いたまま
+  // ブランチを切り替えると古い値が残り続け、そこから導かれる「どの対象か」
+  // 「何をしているか」も一緒に古くなる。最終活動時刻だけが新鮮なので、古い情報が
+  // 権威あるものに見えるのが最も悪い。
+  //
+  // 当初の判断は「2 秒ごとの poll で git を spawn するコストは、古くなる窓に見合わない」
+  // だった。その後 heartbeat は poll から分離されて 15 秒間隔になった (ms-101 e-3013)
+  // ため、コストの前提が変わっている。見直した結果こちらへ倒した。
+  //
+  // **宣言は上書きしない**: サーバは derive_working_target(宣言, branch=…) の順で
+  // 宣言を第 1 優先に見るので、新鮮にしても影響するのは導出の fallback だけ。
+  // 送らない場合は従来どおりサーバの merge で前の値が保たれる (後方互換)。
+  if (where && typeof where === 'object') {
+    // cwd は **top-level** なのでサーバの浅いマージで安全に更新できる
+    // (指定した key だけ書き、ほかは触らない)。空なら送らない。
+    if (where.cwd) body.cwd = where.cwd
+    // git は **入れ子のマップ**なので事情が違う。サーバの upsert はどの保存層でも
+    // 浅いマージ (MySQL は `{**existing, **data}`、Firestore は `set(merge=True)`、
+    // DynamoDB も同等) で、**入れ子のマップは丸ごと置換される**。だから送った map に
+    // 無い項目は、以前の正しい値ごと消える。この罠は repo 側も認識しており、
+    // `actor.email` には項目単位で書く専用の口 (`stamp_session_actor_email`) が
+    // 全保存層に在る。
+    //
+    // よって git は **3 項目すべて揃っているときだけ送る** (独立 AX レビュー指摘)。
+    // 揃わないのは、たとえば HEAD が branch を指していないとき
+    // (`git symbolic-ref` が空を返す = rebase 中 / コミット指定で開いた worktree)。
+    // その状態で送ると、数秒前まで分かっていた branch が**無言で空になる**。
+    // 消すより前の値を残す方を選ぶ: 揃わないときは git を送らず、cwd だけ更新する。
+    // 前の値は古くなるが、detached は一時的な状態で、消えるより古い方が害が小さい。
+    //
+    // 残っている筋の通った直し方は、`actor.email` と同じ**項目単位の書き込み**を
+    // git にも用意すること (そうすれば detached の間は branch だけ据え置けて、
+    // 他の項目は新鮮に保てる)。それは保存層 3 つとサーバの配線を触るので別件。
+    const g = where.git
+    if (g && typeof g === 'object'
+        && g.branch && g.head_short && g.head_subject) {
+      body.git = g
+    }
+  }
   return body
 }
 
