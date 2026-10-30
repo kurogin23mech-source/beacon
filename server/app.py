@@ -4848,9 +4848,9 @@ def _fire_operation(pid: str, project: dict, op: dict, now_iso: str) -> dict:
 
 
 def _deadline_reminder_candidates(project: dict):
-    """Yield ``(item, kind, label, recipient_session)`` for every work item that
-    can carry a deadline — Targets (a milestone's ``target_date``) and their work
-    items (dev task / sales activity ``deadline``) — ms-139 e-4953.
+    """Yield the ``occupation.iter_deadline_candidates`` record for every work
+    item that can carry a deadline — Targets (a milestone's ``target_date``) and
+    their work items (dev task / sales activity ``deadline``) — ms-139 e-4953.
 
     A thin adapter over the SHARED occupation-agnostic enumeration
     ``occupation.iter_deadline_candidates`` (ms-142 e-5010): both this server
@@ -4863,12 +4863,48 @@ def _deadline_reminder_candidates(project: dict):
 
     ``recipient`` is the session that *claims* the item's Target; '' when
     unclaimed (no live owner to DM). ``kind`` is the occupation-agnostic label
-    (milestone / task / activity) the reminder message stamps."""
+    (milestone / task / activity) the reminder message stamps. ``target_id`` /
+    ``item['id']`` are what the dedup stamp is addressed by on the write path
+    (ms-185 e-7066), so the record is passed through whole rather than
+    projected down to four fields."""
     for cand in occupation.iter_deadline_candidates(project):
-        yield cand["item"], cand["kind"], cand["label"], cand["recipient"]
+        yield cand
 
 
-def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> bool:
+def _load_deadline_scope(pid: str, report: list) -> dict | None:
+    """締切判定に使う project doc を、保存層の専用の口から取る (ms-185 e-7066)。
+
+    ``db.get_project_deadline_scope`` は**全 backend が持つ** (詳細は
+    ``server/deadline_marks.py``)。だからここに「在るなら使う」の分岐は無い —
+    分岐があると、1 プロセスに 1 つしか無い可変 module である store_router が
+    別経路で読み込み直されたとき、呼び出し側が意図しない実装が選ばれる。
+
+    読めたものが**行分割された文書なのに Target が付いてこない**場合は異常として
+    鳴らす。以前この経路は静かに 0 件を返しており、「定期発火は緑 / 締切は永久に
+    発火しない」が本番で続いた (= 事故でしか気付けない形)。判定を「どの backend か」
+    ではなく「返ってきた中身」で行うので、将来 backend が増えても効く。
+
+    **鳴らし先は ``report``** (サーバログではない)。report は tick の応答
+    (``scheduled_fires``) と ``/api/system/tick-health`` の ``scheduled_by_source``
+    の原材料で、箱の外の見張りが読む唯一の面。ログにだけ書くと、その面からは
+    「0 件 = 何も期日が来ていない」と「0 件 = 見えていない」が**今までどおり
+    区別できない** = 直したつもりで同じ穴が残る。ログにも出すのは人の調査用。
+    """
+    project = db.get_project_deadline_scope(pid)
+    if project is not None \
+            and operations.get_schema_version(project) != operations.SCHEMA_V1_LEGACY \
+            and "milestones" not in project:
+        msg = (f"schema-blind read (schema_version="
+               f"{project.get('schema_version')}): the document is row-split but "
+               f"its Target collections are missing, so no deadline can be seen "
+               f"and no reminder can fire")
+        report.append({"project_id": pid, "error": msg})
+        _server_logger.error("deadline reminder %s for project %s. ms-185 e-7066.",
+                             msg, pid)
+    return project
+
+
+def _fire_due_deadlines(pid: str, now_iso: str, report: list) -> None:
     """締切超過の work item を検知し、claim 者のセッションへ 1 回だけ DM で知らせる
     — ms-139 e-4953。tick に相乗りする 2 つ目の source。
 
@@ -4879,11 +4915,24 @@ def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> 
     なく **通知** なので envelope 不要 (delivery=propose-to-ai で受信 AI の文脈に載せ、
     idle-wake で起こす)。claim 者セッションが無い項目は DM 先が無いので skip。
 
-    ``report`` に per-fire を積み、dedup 印を刻んだら True を返す (呼び出し側が
-    ``save_project`` する)。"""
+    ``report`` に per-fire を積む。**読み書きはこの source 自身が持つ**
+    (ms-185 e-7066): 読みは ``db.get_project_deadline_scope``、書きは
+    ``db.save_deadline_reminder_marks``。この 2 つは**必ず対**で、どちらも全保存層が
+    同じ名前で持つ (= 呼び出し側に「在れば使う」の分岐が無い)。対であることは
+    tests/test_tick_deadline_split_schema_e7066.py の
+    ``test_every_backend_exposes_the_deadline_pair`` が機械的に固定している。
+    以前は呼び出し側が読んだ 1 つの project dict を Operation 発火と共用して
+    いたが、Operation は projects 行 (meta) に載っており締切は分割された
+    Target 行に載っているので、**同じ読み手を共有できる前提自体が誤り**だった。
+    共有をやめたのがこの穴の構造的な閉じ方。"""
+    project = _load_deadline_scope(pid, report)
+    if not project:
+        return
     today = now_iso[:10]
-    changed = False
-    for item, kind, label, recipient in _deadline_reminder_candidates(project):
+    stamped: list = []
+    for cand in _deadline_reminder_candidates(project):
+        item, kind, label, recipient = (
+            cand["item"], cand["kind"], cand["label"], cand["recipient"])
         st = deadline.work_item_temporal_status(item, today)
         if st not in (deadline.TRANSITION_DUE, deadline.TRANSITION_OVERDUE):
             continue
@@ -4926,23 +4975,63 @@ def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> 
                            "fired": False,
                            "error": f"append_bus_event: {type(exc).__name__}"})
             continue
-        deadline.mark_reminded(item)  # 二重配信防止の dedup 印
-        item["deadline_reminded_at"] = now_iso
-        changed = True
+        # 二重配信防止の dedup 印。narrow read の doc は部分 hydrate なので
+        # そのまま書き戻せない (読まなかった子行を落として保存すると消える)。
+        # 印は id で指して、対になる書き手に刻ませる。
+        stamped.append({"target_id": cand["target_id"],
+                        "item_id": item.get("id", ""),
+                        "deadline": dl})
         report.append({"project_id": pid, "kind": kind, "label": label,
                        "deadline": dl, "fired": True, "recipient": recipient})
-    return changed
+    if stamped:
+        _persist_deadline_reminder_marks(pid, stamped, now_iso, report)
 
 
-def _fire_source_operations(pid: str, project: dict, now_iso: str,
-                            report: list) -> bool:
+def _persist_deadline_reminder_marks(pid: str, marks: list, now_iso: str,
+                                     report: list) -> None:
+    """発火済みの印を永続化する (ms-185 e-7066)。
+
+    読み手 (``get_project_deadline_scope``) と**対になる**書き手を使う。読んだ内容は
+    保存層によっては部分的 (MySQL v3 は締切に関係ない子行を読まない) なので、
+    その dict をこちらで丸ごと保存すると読まなかった行が消える。どこまで読んだかを
+    知っているのは保存層だけなので、書き戻しも保存層に任せる。
+
+    印が落ちると同じ締切で毎分 DM が飛ぶ (= 二重配信) ので、刻めなかった件数は
+    report に残して可視化する。"""
+    try:
+        applied = db.save_deadline_reminder_marks(pid, marks, now_iso)
+    except Exception as exc:  # pragma: no cover - defensive
+        report.append({"project_id": pid, "error":
+                       f"deadline mark persist: {type(exc).__name__}: {exc}"})
+        return
+    if applied != len(marks):
+        # ``error`` で積む。"warning" のような別名で積むと、見張り
+        # (lib/tick_health.summarize_scheduled_fires) は ``error`` と ``fired``
+        # しか見ないので「何も起きなかった (skipped)」に丸められ、**誰にも届かない**。
+        # 刻めなければ同じ締切で毎分知らせ続けるので、これは異常として数えてよい。
+        # 一部だけ失敗しても ``fired`` が立っていれば見張りは鳴らさない契約
+        # (error>0 かつ fired==0 のときだけ失敗扱い) なので、狼少年にもならない。
+        report.append({"project_id": pid, "error":
+                       f"deadline dedup marks: wanted {len(marks)}, "
+                       f"stamped {applied} (reminders may repeat)"})
+
+
+def _fire_source_operations(pid: str, now_iso: str, report: list) -> None:
     """source: Operation (= 繰り返す運用業務の永続ターゲット) の発火 — ms-107 e-3434。
 
     ``SCHEDULED_SOURCES`` の 1 要素。登録簿の契約は
-    ``(pid, project, now_iso, report) -> changed``: ``report`` に per-fire を積み、
-    プロジェクト文書に印を刻んだら True を返す (呼び出し側が保存する)。
-    締切リマインド (``_fire_due_deadlines``) と同じ形なので、どちらも同じ扱いで
-    回せる = 片方だけ特別扱いされて観測から漏れることがない。"""
+    ``(pid, now_iso, report) -> None``: ``report`` に per-fire を積み、印の
+    永続化まで source が自分で行う。締切リマインド (``_fire_due_deadlines``) と
+    同じ形なので、どちらも同じ扱いで回せる = 片方だけ特別扱いされて観測から
+    漏れることがない。
+
+    読み書きが source ごとに分かれているのは ms-185 e-7066 の結論: Operation は
+    projects 行 (meta) に同居し、締切は分割された Target 行に載る。1 つの読み手を
+    共有していたため、v1 読み取りで足りる Operation に合わせた結果、締切側が
+    行分割スキーマで何も見えなくなっていた。必要なものが違う以上、読み手も分ける。"""
+    project = db.get_project(pid)
+    if not project:
+        return
     changed = False
     for op in (project.get("operations", []) or []):
         if not tick_scheduler.is_due(_operation_schedule_descriptor(op), now_iso):
@@ -4964,7 +5053,14 @@ def _fire_source_operations(pid: str, project: dict, now_iso: str,
             result["consecutive_failures"] = tick_scheduler.record_failure(
                 _op_meta, now_iso)
             changed = True
-    return changed
+    if changed:
+        # Operation は projects 行に同居するので v1 save で正しく閉じる
+        # (= 分割された Target 行には触れない)。
+        try:
+            db.save_project(pid, project)
+        except Exception as exc:  # pragma: no cover
+            report.append({"project_id": pid,
+                           "error": f"save_project: {type(exc).__name__}"})
 
 
 # ms-185 e-7066 — 定期発火に相乗りしている source の**唯一の登録簿**。
@@ -4996,7 +5092,9 @@ def _fire_due_scheduled(now_iso: str) -> list:
 
     Source registry: ``SCHEDULED_SOURCES`` (above) lists every source this tick
     drives, each a ``(name, fire)`` pair with the entity-free contract
-    ``fire(pid, project, now_iso, report) -> changed``. Today there are **two**:
+    ``fire(pid, now_iso, report) -> None`` — the source reads and writes its own
+    project state (ms-185 e-7066: a single shared reader is what made the
+    deadline source blind on a row-split schema). Today there are **two**:
     Operations (dev/sales persistent target) and deadline reminders (ms-139
     e-4953). Account 定期連絡 and short-lived communication watch tasks plug in
     the same way later — the tick stays unaware of what it is firing, and the
@@ -5032,24 +5130,22 @@ def _fire_due_scheduled(now_iso: str) -> list:
     for pid in pids:
         if not pid:
             continue
-        try:
-            project = db.get_project(pid)
-        except Exception:
-            continue
-        if not project:
-            continue
-        changed = False
         # ms-185 e-7066 — source は 1 箇所の登録簿 (SCHEDULED_SOURCES) から回す。
         # 以前は Operation と締切リマインドがここに直書きされており、片方を
         # 落としても tick の応答は何も変わらなかった (= 気付けない)。登録簿を
         # 回す形にして、応答に載る source 名を**実際に回した登録簿から導く**。
         # 新しい source (Account 定期連絡 / 短命の watch タスク) は登録簿に 1 行
         # 足すだけで、観測面にも自動で載る。
+        #
+        # ms-185 e-7066 — 読み書きは **source 自身**が持つ。ここで 1 つ読んだ
+        # project dict を全 source で共有していたため、Operation に足りる v1
+        # 読み取りが締切側にも適用され、行分割スキーマ (MySQL v3) では締切が
+        # 1 件も見えないまま tick だけ緑、という状態が本番で続いた。source ごとに
+        # 必要なものが違う以上、共有の読み手を置かないのが構造的な閉じ方。
         for _source_name, _fire_source in SCHEDULED_SOURCES:
             _before = len(report)
             try:
-                if _fire_source(pid, project, now_iso, report):
-                    changed = True
+                _fire_source(pid, now_iso, report)
             except Exception as exc:  # pragma: no cover - defensive isolation
                 # 1 つの source の失敗が他の source を道連れにしない (相乗りして
                 # いる以上、締切リマインドの失敗で Operation が止まってはいけない)。
@@ -5059,12 +5155,6 @@ def _fire_due_scheduled(now_iso: str) -> list:
             # 何件出したか」を数えられるようにする。
             for _entry in report[_before:]:
                 _entry.setdefault("source", _source_name)
-        if changed:
-            try:
-                db.save_project(pid, project)
-            except Exception as exc:  # pragma: no cover
-                report.append({"project_id": pid,
-                               "error": f"save_project: {type(exc).__name__}"})
     return report
 
 

@@ -177,6 +177,25 @@ def save_project(project_id: str, data: dict) -> None:
     _table("projects").put_item(Item=item)
 
 
+# --- 締切リマインドの 2 つの口 (ms-185 e-7066) ------------------------------
+# 全 backend が同じ名前で持つ。詳しい経緯は server/deadline_marks.py を参照。
+# DynamoDB は project を 1 文書で持ち、行分割のレイアウトを持たない (1 MiB 上限は
+# Firestore 固有の制約だった) ので、丸ごと読んで丸ごと書けば過不足が無い。
+
+def get_project_deadline_scope(project_id: str) -> dict | None:
+    """締切判定に使う project doc を返す (この backend では丸ごと)。"""
+    return get_project(project_id)
+
+
+def save_deadline_reminder_marks(project_id: str, marks: list,
+                                 now_iso: str) -> int:
+    """二重配信を防ぐ印を刻んで保存する。刻めた件数を返す。"""
+    import deadline_marks  # noqa: PLC0415
+    return deadline_marks.save_marks_whole_doc(
+        get_project(project_id), marks, now_iso,
+        lambda doc: save_project(project_id, doc))
+
+
 def list_projects(user_id: str | None = None,
                   include_archived: bool = False) -> list[dict]:
     # Scan は全件読みで割高。dev 規模では問題なし。将来 user_id 検索を

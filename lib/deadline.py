@@ -156,3 +156,35 @@ def mark_reminded(item: dict) -> None:
     """work item に「現在の締切値でリマインド済み」を刻む (二重配信防止)。呼び出し側は
     通知の配信に成功した後に呼ぶ。締切が変われば次の tick で再び pending になる。"""
     item[REMINDED_FOR_KEY] = deadline_of(item)
+
+
+REMINDED_AT_KEY = "deadline_reminded_at"
+
+
+def stamp_marks(pairs, marks, now_iso: str) -> int:
+    """「このキーの項目に、この締切値で知らせた」という印をまとめて刻む
+    (ms-185 e-7066)。刻めた件数を返す。
+
+    ``pairs`` は ``((target_id, item_id), item)`` の列、``marks`` は
+    ``{"target_id", "item_id", "deadline"}`` を持つ列。**記録した時の締切値と
+    今の値が食い違う項目には刻まない** — 知らせた後に期日が動いたなら、その新しい
+    期日では改めて知らせるのが正しいため。
+
+    保存層が 3 つ (MySQL / Firestore / DynamoDB) あり、どれも「項目を列挙して印を
+    刻む」部分は同じなので、規則はここに 1 つだけ置く。collection を知らない純粋
+    関数のままなので、この module の立ち位置 (L2 = 規則は職種共通・具象は呼び出し側)
+    は変わらない — 列挙は呼び出し側が渡す。"""
+    wanted = {(m.get("target_id", ""), m.get("item_id", "")): m.get("deadline", "")
+              for m in (marks or [])}
+    if not wanted:
+        return 0
+    stamped = 0
+    for key, item in pairs:
+        if not isinstance(item, dict):
+            continue
+        if wanted.get(key) != deadline_of(item):
+            continue
+        mark_reminded(item)
+        item[REMINDED_AT_KEY] = now_iso
+        stamped += 1
+    return stamped
