@@ -763,10 +763,17 @@ log(`  session.json source=[${session.source || ''}] last_active=[${session.last
 //   Layer 2 — What     : focus.{milestone, recent_task}  (from .beacon/project.json)
 //   Layer 3 — Reach    : channels, budget                (from local config)
 //
-// Stamped ONCE on cold-start as part of the first heartbeat. Re-stamping on
-// every heartbeat would be wasteful — cwd never changes mid-session, branch
-// rarely does, and the cost of re-reading project.json + spawning git on
-// every 2s poll is not worth the staleness window.
+// Layer 0 / 2 / 3 は cold-start の 1 回だけ刻む (セッション中に変わらない /
+// project.json の読み直しが重い)。**Layer 1 (Where) は毎 heartbeat 刻み直す**
+// (ms-159 e-7235)。
+//
+// 当初は Layer 1 も 1 回だけで、理由は「cwd はセッション中に変わらない、branch が
+// 変わることは稀、2 秒ごとの poll で git を spawn するコストは古くなる窓に見合わない」
+// だった。実運用でその前提が 2 つ崩れた: (1) heartbeat は後に poll から分離されて
+// 15 秒間隔になった (ms-101 e-3013) のでコストの桁が変わった (2) マイルストーンごとに
+// ブランチを切る運用と、会話を消しても生き続けるターミナルのせいで、branch は
+// 「稀に」ではなく頻繁に変わる。結果、運用室の行が数時間前のブランチの対象と作業内容を
+// 表示し続け、最終活動時刻だけが新鮮なので古い情報が権威あるものに見えていた。
 
 function safeExec(cmd, args, opts = {}) {
   try {
@@ -825,10 +832,24 @@ function collectLayer0Identity() {
   }
 }
 
+// Layer 1 (Where) = cwd + git の branch / 先頭コミット。**cold-start だけでなく
+// 毎 heartbeat 刻み直す** (ms-159 e-7235)。ここが古いと、サーバがこの branch から
+// 導出する「どの対象か」と、head_subject から導出する「何をしているか」が一緒に
+// 古くなり、運用室の行が数時間前の作業内容を表示し続ける。最終活動時刻だけが
+// 新鮮なので、古い情報が権威あるものに見えるのが最も悪い。
+// 判断の経緯 (当初は 1 回刻みで、その前提が何故崩れたか) は上の Layer 0-3 の節を参照。
 function collectLayer1Where() {
+  // git の呼び出しは 2 回に畳んである (e-7235)。先頭コミットの短縮 hash と件名は
+  // 1 回の `git log` で両方取れるので、別々に呼ぶ必要がない。心拍ごとに刻み直す
+  // ようになった以上、ここは同期実行でイベントループを止める時間そのものなので、
+  // 1 回でも減らす価値がある (実測: 3 回で 106ms / 2 回で 71ms、15 秒間隔に対して
+  // 0.7% → 0.5%)。これ以上畳むには git の ref 解決を自前で書くことになり、
+  // 新しい知識が増えるので採らない。
   const branch = safeExec('git', ['symbolic-ref', '--short', '-q', 'HEAD'])
-  const headShort = safeExec('git', ['rev-parse', '--short', 'HEAD'])
-  const headSubject = safeExec('git', ['log', '-1', '--pretty=%s'])
+  const head = safeExec('git', ['log', '-1', '--pretty=%h%n%s'])
+  const nl = head.indexOf('\n')
+  const headShort = nl >= 0 ? head.slice(0, nl) : head
+  const headSubject = nl >= 0 ? head.slice(nl + 1) : ''
   return {
     cwd: CWD,
     git: {
@@ -1500,6 +1521,12 @@ if (!PROJECT_ID || !SESSION_ID) {
         stateSince,
         stateDetail,
         contextPct,
+        // ms-159 e-7235 — 「どこで作業しているか」を毎回読み直す。すぐ上の
+        // contextUsage と同じ作法 (= 名簿を新鮮に保つために毎 poll 読む)。
+        // Layer 1 だけに限っているのは、古くなって実害が出るのがここで、
+        // Layer 2 (project.json の読み直し) は重く、Layer 0 / 3 は
+        // セッション中に変わらないため。
+        where: collectLayer1Where(),
       })
       await apiPut(
         `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,
@@ -1779,11 +1806,12 @@ if (!PROJECT_ID || !SESSION_ID) {
 
   // ms-54 / e-1369: cold-start session metadata stamp. Layer 0-3 (Identity /
   // Where / What / Reach) are collected once and POSTed before the poll
-  // loop starts. Subsequent heartbeats keep the minimal body (last_active /
-  // last_poll_at / etc) so we don't repeat the cost of git spawns and
-  // project.json reads on every 2s tick. cwd never changes mid-session and
-  // branch / focus changes are rare enough that "restart bridge to refresh"
-  // is acceptable for v0.
+  // loop starts.
+  //
+  // ms-159 e-7235: このうち **Layer 1 (Where = cwd + git) はその後の heartbeat でも
+  // 毎回刻み直す** (上の collectLayer1Where の節を参照)。「restart bridge to refresh」
+  // は v0 の割り切りだったが、運用室が一次面になった今は許容できない。Layer 2
+  // (focus = project.json 読み直し) と Layer 0 / 3 は引き続き cold-start のみ。
   //
   // Also stamps actor.{machine, agent} that was previously missing on the
   // heartbeat-only path — the directory was showing `mach=-` for any

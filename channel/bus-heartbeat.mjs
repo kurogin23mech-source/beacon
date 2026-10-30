@@ -43,13 +43,14 @@
  * @param {string} [opts.stateSince]     ms-159 e-6245 — ISO8601 the session ENTERED that state.
  * @param {string} [opts.stateDetail]    ms-159 e-6488 — awaiting_human wait detail (what it waits for).
  * @param {number} [opts.contextPct]     ms-159 e-6499 — this session's context-window usage %.
+ * @param {object} [opts.where]          ms-159 e-7235 — {cwd, git:{branch, head_short, head_subject}}.
  * @returns {object}
  */
 // @e-2502-core-candidate — heartbeat body is bus protocol, currently
 //   duplicated in lib/codex_receive_loop.py::heartbeat_to_server. Move
 //   the shape to lib/bus_protocol.py once that lands; this function
 //   becomes a thin Node wrapper.
-export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince, stateDetail, contextPct }) {
+export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince, stateDetail, contextPct, where }) {
   const body = {
     last_active: nowIso,
     last_poll_at: nowIso,
@@ -96,6 +97,31 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
   // an un-computed session keeps the row shape (back-compat). 0 is a legit value
   // (fresh session) and IS sent — hence the null/undefined check, not falsy.
   if (contextPct !== undefined && contextPct !== null) body.context_pct = contextPct
+  // ms-159 e-7235 — 「どこで作業しているか」(cwd + git の branch / 先頭コミット) を
+  // 心拍に相乗りさせる。以前はこれが cold-start の 1 回だけで、心拍には時刻と状態しか
+  // 乗っていなかった。橋渡し役は会話を消しても生き続けるので、ターミナルを開いたまま
+  // ブランチを切り替えると古い値が残り続け、そこから導かれる「どの対象か」
+  // 「何をしているか」も一緒に古くなる。最終活動時刻だけが新鮮なので、古い情報が
+  // 権威あるものに見えるのが最も悪い。
+  //
+  // 当初の判断は「2 秒ごとの poll で git を spawn するコストは、古くなる窓に見合わない」
+  // だった。その後 heartbeat は poll から分離されて 15 秒間隔になった (ms-101 e-3013)
+  // ため、コストの前提が変わっている。見直した結果こちらへ倒した。
+  //
+  // **宣言は上書きしない**: サーバは derive_working_target(宣言, branch=…) の順で
+  // 宣言を第 1 優先に見るので、新鮮にしても影響するのは導出の fallback だけ。
+  // 送らない場合は従来どおりサーバの merge で前の値が保たれる (後方互換)。
+  if (where && typeof where === 'object') {
+    if (where.cwd) body.cwd = where.cwd
+    // 空の git は送らない。送ると、サーバの merge で**実在した値を空で上書きして
+    // 「不明」に落とす** (捏造しないのと同じ理由で、無いものは送らない)。
+    // `{}` も `{branch:'',...}` も truthy なので、中身が 1 つでも在るかを見る。
+    const g = where.git
+    if (g && typeof g === 'object'
+        && (g.branch || g.head_short || g.head_subject)) {
+      body.git = g
+    }
+  }
   return body
 }
 
