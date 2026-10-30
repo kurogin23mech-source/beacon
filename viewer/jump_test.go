@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -36,8 +38,8 @@ func TestAppleTerminalJumpScript(t *testing.T) {
 	if !strings.Contains(script, `application "Terminal"`) {
 		t.Errorf("Terminal.app を狙っていない: %q", script)
 	}
-	if !strings.Contains(script, "return matched") {
-		t.Errorf("見つかったかを返していない (見つからない時に落とさないため): %q", script)
+	if !strings.Contains(script, "return false") || !strings.Contains(script, "return true") {
+		t.Errorf("見つかったかを true/false で返していない (見つからない時に落とさないため): %q", script)
 	}
 }
 
@@ -91,8 +93,8 @@ func TestITerm2JumpScript(t *testing.T) {
 	if !strings.Contains(s, `application "iTerm2"`) {
 		t.Errorf("iTerm2 を狙っていない: %q", s)
 	}
-	if !strings.Contains(s, "return matched") {
-		t.Errorf("見つかったかを返していない: %q", s)
+	if !strings.Contains(s, "return false") || !strings.Contains(s, "return true") {
+		t.Errorf("見つかったかを true/false で返していない: %q", s)
 	}
 }
 
@@ -427,5 +429,198 @@ func TestJumpToTerminalWithStatuses(t *testing.T) {
 	if err := jumpToTerminalWith(runner("ttys000", nil, "true\n", nil),
 		"darwin", 100, "apple-terminal"); err != nil {
 		t.Errorf("正常系でエラー: %v", err)
+	}
+}
+
+// --- 並び替えとの衝突を構造で禁じる (e-7219) ---------------------------------
+
+// windowLoopBody は AppleScript から「windows をなめているブロック」の中身を抜き出す
+// (純関数)。`repeat with ... in windows` の行から、対応する `end repeat` までを返す。
+//
+// 入れ子の数え方: 行頭が `repeat` で始まる行が開き、`end repeat` だけの行が閉じる。
+// `exit repeat` は "repeat" を含むが開きではないので数えない。
+func windowLoopBody(script string) (string, bool) {
+	lines := strings.Split(script, "\n")
+	start := -1
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "repeat with ") && strings.HasSuffix(t, " in windows") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	depth := 0
+	for i := start; i < len(lines); i++ {
+		t := strings.TrimSpace(lines[i])
+		switch {
+		case t == "end repeat":
+			depth--
+			if depth == 0 {
+				return strings.Join(lines[start+1:i], "\n"), true
+			}
+		case strings.HasPrefix(t, "repeat"):
+			depth++
+		}
+	}
+	return "", false
+}
+
+// mutatingVerbs は端末の窓/タブの並びや選択状態を**変える** AppleScript の動詞。
+// これが「なめているブロック」の中に在ると、進行中の相対参照 (item N of every
+// window) が別の要素を指すか範囲外になり、-1719 で落ちる (e-7219)。
+var mutatingVerbs = []string{"select ", "set frontmost", "set selected", "activate"}
+
+// 前面化スクリプトは、窓をなめている最中に選択・前面化をしてはならない。
+//
+// これが e-7219 の真因そのもの: `select` は窓の前後関係 = windows の並びを変えるので、
+// 3 タブの窓の最後でないタブに一致して `select` すると、`item N of every window` が
+// 1 タブの窓を指すようになり、次の `item 2 of every tab` が範囲外になって落ちる。
+// 実機で旧スクリプトは 48 試行中 15 件失敗、新スクリプトは 48/48 成功
+// (手順: scripts/verify-jump-terminal-reorder.sh)。
+//
+// **テーブル (terminalDrivers) から導出して回す**ので、新しい端末 driver を足しても
+// この禁止が自動で効く (片方だけ直して終わる経路を閉じる = AC「片方だけ直して
+// 終わりにしない」)。
+func TestJumpScriptsDoNotMutateWhileScanning(t *testing.T) {
+	for _, d := range terminalDrivers {
+		script := d.script("ttys005")
+		body, ok := windowLoopBody(script)
+		if !ok {
+			t.Errorf("%s: windows をなめるブロックが見つからない (形が変わった?): %q",
+				d.appName, script)
+			continue
+		}
+		for _, verb := range mutatingVerbs {
+			if strings.Contains(body, verb) {
+				t.Errorf("%s: 窓をなめている最中に %q している。"+
+					"並びが変わって相対参照が壊れる (-1719) 原因そのもの。"+
+					"第 1 段は読むだけにして、選択は id の絶対参照で解決し直した"+
+					"第 2 段で行うこと (e-7219)", d.appName, verb)
+			}
+		}
+		// 第 2 段が id の絶対参照で解決し直していること。相対参照 (window 3 等) を
+		// 持ち回ると、解決し直す時点で同じ問題を踏む (e-7219 で実測済み)。
+		if !strings.Contains(script, "first window whose id is") {
+			t.Errorf("%s: 選択対象を id の絶対参照で解決し直していない: %q",
+				d.appName, script)
+		}
+	}
+}
+
+// ガード自体が drift で赤くなることを確かめる (test-the-test)。
+// 旧スクリプト (= 実機で 15/48 落ちた形) を食わせて、必ず検出されること。
+// これが無いと、緩い検査が「常に緑」のまま偽の安全を作る。
+func TestJumpScriptGuardCatchesTheOldForm(t *testing.T) {
+	oldITerm := `tell application "iTerm2"
+  set matched to false
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "/dev/ttys005" then
+          set matched to true
+          select w
+          select t
+          select s
+        end if
+      end repeat
+    end repeat
+  end repeat
+  if matched then activate
+  return matched
+end tell`
+	body, ok := windowLoopBody(oldITerm)
+	if !ok {
+		t.Fatal("旧スクリプトから windows ループを抜き出せない (抽出器が壊れている)")
+	}
+	found := false
+	for _, verb := range mutatingVerbs {
+		if strings.Contains(body, verb) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("旧スクリプト (実機で 15/48 失敗した形) を検出できていない。" +
+			"このガードは drift で赤くならないので、偽の安全になっている")
+	}
+
+	oldApple := `tell application "Terminal"
+  set matched to false
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "/dev/ttys005" then
+        set matched to true
+        set selected of t to true
+        set frontmost of w to true
+      end if
+    end repeat
+  end repeat
+  if matched then activate
+  return matched
+end tell`
+	body, ok = windowLoopBody(oldApple)
+	if !ok {
+		t.Fatal("旧 Terminal.app スクリプトから windows ループを抜き出せない")
+	}
+	found = false
+	for _, verb := range mutatingVerbs {
+		if strings.Contains(body, verb) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("旧 Terminal.app スクリプトを検出できていない (偽の安全)")
+	}
+}
+
+// osascript の失敗が、画面から原因を辿れる文面になること (e-7219 の AC)。
+// exec.ExitError を %v しただけでは "exit status 1" しか出ず、並び順の問題だと
+// 読み取れなかった。標準エラーを拾い、-1719 には平叙文の説明を添える。
+func TestOsascriptFailureDetail(t *testing.T) {
+	// 標準エラーが在れば、それを出す (終了コードではなく中身)。
+	ee := &exec.ExitError{ProcessState: nil}
+	ee.Stderr = []byte("  execution error: ... 正しくないインデックスです。 (-1719)\n")
+	got := osascriptFailureDetail(ee)
+	if !strings.Contains(got, "-1719") {
+		t.Errorf("標準エラーの中身を拾っていない: %q", got)
+	}
+	if !strings.Contains(got, "並び") {
+		t.Errorf("-1719 に平叙文の説明が添えられていない (番号だけでは原因が辿れない): %q", got)
+	}
+	// 標準エラーが空なら、元のエラー文字列に落ちる (情報を失わない)。
+	plain := errors.New("exec: \"osascript\": executable file not found")
+	if got := osascriptFailureDetail(plain); !strings.Contains(got, "osascript") {
+		t.Errorf("標準エラーが無い場合に元のエラーを失っている: %q", got)
+	}
+}
+
+// 手動の実機検証用に、生成される AppleScript をファイルへ書き出す
+// (scripts/verify-jump-terminal-reorder.sh が呼ぶ)。
+//
+// 実機検証でも**本番と同じ生成器を通す**ための継ぎ目。スクリプトを検証側に
+// 書き写すと、本番の生成器を直しても検証が古い形を測り続ける (= 緑のまま壊れる)。
+// 環境変数が無いときは何もしない (通常のテスト実行では skip)。
+func TestDumpJumpScriptsForManualVerification(t *testing.T) {
+	out := os.Getenv("BEACON_JUMP_SCRIPT_OUT")
+	ttys := os.Getenv("BEACON_JUMP_SCRIPT_TTYS")
+	harness := os.Getenv("BEACON_JUMP_SCRIPT_HARNESS")
+	if out == "" || ttys == "" || harness == "" {
+		t.Skip("BEACON_JUMP_SCRIPT_OUT / _TTYS / _HARNESS 未設定 (実機検証時のみ使う)")
+	}
+	build, err := jumpScriptBuilder(harness)
+	if err != nil {
+		t.Fatalf("harness %q の生成器が無い: %v", harness, err)
+	}
+	for _, tty := range strings.Split(ttys, ",") {
+		tty = strings.TrimSpace(tty)
+		if tty == "" {
+			continue
+		}
+		if err := os.WriteFile(out+"/jump_"+tty+".applescript",
+			[]byte(build(tty)), 0o644); err != nil {
+			t.Fatalf("書き出せない: %v", err)
+		}
 	}
 }
