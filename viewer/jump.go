@@ -106,21 +106,58 @@ func resolveTTYWith(run commandRunner, pid int) (string, error) {
 
 // appleTerminalJumpScript は tty を持つ Terminal.app のタブを前面化する
 // AppleScript を組む (純関数、テスト可能)。見つかれば "true"、無ければ "false" を返す。
+//
+// **2 段構成にしてある理由** (e-7219): 以前は windows をなめている最中に
+// `set frontmost of w to true` していた。前面化は窓の前後関係 —— つまり windows の
+// 並びそのもの —— を変えるので、進行中の `w` (= `window 3` のような相対参照) が
+// 別の窓を指すか範囲外になり、「正しくないインデックスです (-1719)」で落ちる。
+// 対象の窓が並びのどこに居るかで落ちるか通るかが変わるため、利用者には
+// 「飛べる時と飛べない時がある」と見えていた。
+//
+// 第 1 段は**読むだけ**で窓の id (整数、安定) を拾い、ループを抜ける。第 2 段は
+// その id の**絶対参照** (`first window whose id is N`) で解決し直してから選択する。
+// 絶対参照は並びが変わっても同じ窓を指し続けるので、選択による並び替えと衝突しない。
+// 「先に見つけてループを抜けてから選択する」だけでは直らない —— 持ち回る参照が
+// 相対参照のままだと、後から解決し直す時点で同じ問題を踏む (e-7219 で実測済み)。
+//
+// **ただし Terminal.app では、この落ち方は実際には起きない** (e-7219 で実測):
+// Terminal.app の AppleScript は iTerm2 とモデルが違い、**タブを 1 つずつ別の
+// `window` オブジェクトとして見せる**。3 タブの物理ウィンドウは 3 個の `window`
+// として現れ、どれも `tabs` は 1 個しか持たない (Terminal.app 2.14 で計測。同じ
+// 物理ウィンドウのタブは `bounds` が一致するので、そこで見分けられる)。
+// -1719 は `item 2 of every tab of item M of every window` が範囲外になる現象
+// なので、内側が常に 1 要素なら起こり得ない。iTerm2 3.7.6 は入れ子 (最大 3) で、
+// そちらでは 48 試行中 15 件落ちた。
+//
+// それでも同じ 2 段構成に揃えてある。理由は 2 つ。① 外側の `windows` の並びは
+// `set frontmost` で実際に変わるので、一致した後も列挙を続ける形は「どの窓を
+// 見たか」が不定になる (今は tty が一意なので結果は正しいが、前提に寄りかかって
+// いる)。② 片方だけ違う書き方で残すと、次に触る人がどちらが正しい形か判断できない。
+// **他方の端末で落ちたからこちらも落ちる、と一般化しないこと** —— ホストごとに
+// オブジェクトモデルが違うので、必ず計測してから言う。
 func appleTerminalJumpScript(tty string) string {
 	dev := "/dev/" + tty
 	return fmt.Sprintf(`tell application "Terminal"
-  set matched to false
+  -- 第 1 段: 読むだけ。ここで選択すると windows の並びが変わり、
+  -- なめている最中の相対参照が無効になって -1719 で落ちる (e-7219)。
+  set wid to missing value
   repeat with w in windows
     repeat with t in tabs of w
-      if tty of t is %q then
-        set matched to true
-        set selected of t to true
-        set frontmost of w to true
+      if tty of t is %[1]q then
+        set wid to id of w
+        exit repeat
       end if
     end repeat
+    if wid is not missing value then exit repeat
   end repeat
-  if matched then activate
-  return matched
+  if wid is missing value then return false
+  -- 第 2 段: id の絶対参照で解決し直してから選択する。並びが変わっても
+  -- 同じ窓/タブを指し続ける。
+  set tw to (first window whose id is wid)
+  set selected of (first tab of tw whose tty is %[1]q) to true
+  set frontmost of tw to true
+  activate
+  return true
 end tell`, dev)
 }
 
@@ -150,6 +187,13 @@ type terminalDriver struct {
 // terminalDrivers は対応端末の一覧 (= 受け付け側の唯一の正典)。空文字 "" は種類不明で、
 // macOS の既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
 // 前面化に未対応で、画面では fallback (パスのコピー) に回す。
+//
+// **実機検証スクリプトは、このテーブルから自動化されていない** (独立保守性レビュー
+// 指摘、e-7219)。`scripts/verify-jump-terminal-reorder.sh` は対応端末を独自の
+// `case` 文と端末ごとの列挙スクリプトで持っている (AppleScript のオブジェクト
+// モデルが端末ごとに違い、列挙の書き方を導出できないため)。**端末を足すときは
+// あちらにも 1 分岐足す**。ここに足すだけで揃うのは下の 4 点 (飛べる判定 /
+// スクリプト選択 / 表示名 / 画面のボタン) に限られる。
 //
 // 名乗り側 (channel/bus-harness-kind.mjs の TERM_PROGRAM_KINDS) の各行
 // `TERM_PROGRAM → 正典名` は、**同じ 1 つの driver** の rawNames (= 小文字の
@@ -295,24 +339,66 @@ func terminalAppName(harness string) string {
 
 // iTerm2JumpScript は tty を持つ iTerm2 のタブを前面化する AppleScript を組む
 // (純関数)。iTerm2 は window → tab → session の 3 段で、session が tty を持つ。
+//
+// **2 段構成にしてある理由** (e-7219): 以前は windows をなめている最中に `select w`
+// していた。`select` は窓を前面に出す = windows の並びを変えるので、進行中の `w`
+// (= `window 3` のような相対参照) が無効になり「正しくないインデックスです
+// (-1719)」で落ちる。詳しい経緯は appleTerminalJumpScript を参照 (同じ型の破れ)。
+//
+// 第 1 段は**読むだけ**で窓の id (整数) とセッションの id (UUID、安定) を拾い、
+// ループを抜ける。第 2 段はその id の**絶対参照**で解決し直してから選択する。
+// 窓の選択は最後に 1 回だけ行う。
+//
+// **第 2 段のタブ側も、持ち回った参照を使わない** (独立 AX レビュー指摘、e-7219)。
+// 以前は `select t` の直後に `select s` としていたが、`s` は `t` 相対の参照なので
+// 「タブの選択はタブの並びを変えない」という前提に寄りかかっていた。その前提は
+// 実測では成り立つ (iTerm2 3.7.6、3 タブの窓でタブ 2 → タブ 3 を選択しても
+// `tabs` の順序は不変) が、**版が変われば崩れうる前提をコードの正しさの根拠に
+// しない**。いまは `select t` の後に `current tab of tw` から id で引き直すので、
+// タブが並び替わっても必ず同じセッションを指す。
+//
+// `select t` 自体は省けない (実測: セッションだけを `select` してもタブは
+// 切り替わらず、current session は元のままだった)。だから「タブを選ぶ」と
+// 「セッションを選ぶ」の 2 手は必要で、その間に隙を作らないのがこの形。
 func iTerm2JumpScript(tty string) string {
 	dev := "/dev/" + tty
 	return fmt.Sprintf(`tell application "iTerm2"
-  set matched to false
+  -- 第 1 段: 読むだけ。ここで select すると windows の並びが変わり、
+  -- なめている最中の相対参照が無効になって -1719 で落ちる (e-7219)。
+  set wid to missing value
+  set sid to ""
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
-        if tty of s is %q then
-          set matched to true
-          select w
-          select t
-          select s
+        if tty of s is %[1]q then
+          set wid to id of w
+          set sid to id of s
+          exit repeat
         end if
       end repeat
+      if sid is not "" then exit repeat
     end repeat
+    if sid is not "" then exit repeat
   end repeat
-  if matched then activate
-  return matched
+  if sid is "" then return false
+  -- 第 2 段: id の絶対参照で解決し直してから選択する。窓の選択 (= 並び替えを
+  -- 起こす唯一の操作) は最後に 1 回だけ。
+  set tw to (first window whose id is wid)
+  repeat with t in tabs of tw
+    set hit to false
+    repeat with s in sessions of t
+      if id of s is sid then
+        select t
+        select (first session of (current tab of tw) whose id is sid)
+        set hit to true
+        exit repeat
+      end if
+    end repeat
+    if hit then exit repeat
+  end repeat
+  select tw
+  activate
+  return true
 end tell`, dev)
 }
 
@@ -324,6 +410,37 @@ func jumpScriptBuilder(harness string) (func(tty string) string, error) {
 	}
 	return nil, fmt.Errorf(
 		"この端末 (%s) への前面化は未対応です — 作業フォルダを手で開いてください", harness)
+}
+
+// appleScriptIndexErrorCode は AppleScript の「正しくないインデックスです」の
+// エラー番号。窓やタブをなめている最中に並びが変わったときに出るので、利用者には
+// 「並び順によって飛べる時と飛べない時がある」と見える (e-7219 の症状そのもの)。
+const appleScriptIndexErrorCode = "-1719"
+
+// osascriptFailureDetail は osascript の失敗から、画面に出して意味のある文面を作る。
+//
+// **なぜ必要か** (e-7219): `exec.ExitError` を `%v` で出すと "exit status 1" しか
+// 得られない。AppleScript が何に困ったかは標準エラーに書かれているので、それを
+// 拾わないと画面からは原因が一切辿れない。実際、並び順起因の失敗が 500 として
+// 出ていたが、文面からは並び順の問題だと読み取れなかった。
+//
+// さらに -1719 だけは**平叙文の説明を添える**。番号とローカライズされた
+// 「正しくないインデックスです」だけでは、読み手が「窓やタブの並びが変わったせい」
+// までは辿れない。前面化は 2 段構成にして並び替えと衝突しないようにしたが、別の
+// 端末アプリや将来の版で再発したときに、原因が文面から分かる状態を残しておく。
+func osascriptFailureDetail(err error) string {
+	detail := err.Error()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if d := strings.TrimSpace(string(ee.Stderr)); d != "" {
+			detail = d
+		}
+	}
+	if strings.Contains(detail, appleScriptIndexErrorCode) {
+		detail += " — 端末の窓やタブの並びが、探している最中に変わったようです" +
+			" (前面化の途中で並び替えが起きた)。もう一度試すと通ることがあります"
+	}
+	return detail
 }
 
 // jumpFailure は前面化に失敗した理由と、HTTP でどう伝えるべきかの status。
@@ -371,7 +488,7 @@ func jumpToTerminalWith(run commandRunner, goos string, pid int, harness string)
 	out, err := run("osascript", "-e", build(tty))
 	if err != nil {
 		return &jumpFailure{http.StatusInternalServerError,
-			fmt.Sprintf("端末の前面化に失敗しました (osascript): %v", err)}
+			fmt.Sprintf("端末の前面化に失敗しました: %s", osascriptFailureDetail(err))}
 	}
 	if strings.TrimSpace(string(out)) != "true" {
 		return &jumpFailure{http.StatusNotFound, fmt.Sprintf(
