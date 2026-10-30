@@ -188,6 +188,13 @@ type terminalDriver struct {
 // macOS の既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
 // 前面化に未対応で、画面では fallback (パスのコピー) に回す。
 //
+// **実機検証スクリプトは、このテーブルから自動化されていない** (独立保守性レビュー
+// 指摘、e-7219)。`scripts/verify-jump-terminal-reorder.sh` は対応端末を独自の
+// `case` 文と端末ごとの列挙スクリプトで持っている (AppleScript のオブジェクト
+// モデルが端末ごとに違い、列挙の書き方を導出できないため)。**端末を足すときは
+// あちらにも 1 分岐足す**。ここに足すだけで揃うのは下の 4 点 (飛べる判定 /
+// スクリプト選択 / 表示名 / 画面のボタン) に限られる。
+//
 // 名乗り側 (channel/bus-harness-kind.mjs の TERM_PROGRAM_KINDS) の各行
 // `TERM_PROGRAM → 正典名` は、**同じ 1 つの driver** の rawNames (= 小文字の
 // TERM_PROGRAM) と kinds (= 正典名) に対応していなければならない。別名を変える /
@@ -340,8 +347,19 @@ func terminalAppName(harness string) string {
 //
 // 第 1 段は**読むだけ**で窓の id (整数) とセッションの id (UUID、安定) を拾い、
 // ループを抜ける。第 2 段はその id の**絶対参照**で解決し直してから選択する。
-// 窓の選択は最後に 1 回だけ行う —— 並び替えを起こす操作はそれだけなので、
-// タブとセッションの選択を先に済ませておけば並び替えと衝突しない。
+// 窓の選択は最後に 1 回だけ行う。
+//
+// **第 2 段のタブ側も、持ち回った参照を使わない** (独立 AX レビュー指摘、e-7219)。
+// 以前は `select t` の直後に `select s` としていたが、`s` は `t` 相対の参照なので
+// 「タブの選択はタブの並びを変えない」という前提に寄りかかっていた。その前提は
+// 実測では成り立つ (iTerm2 3.7.6、3 タブの窓でタブ 2 → タブ 3 を選択しても
+// `tabs` の順序は不変) が、**版が変われば崩れうる前提をコードの正しさの根拠に
+// しない**。いまは `select t` の後に `current tab of tw` から id で引き直すので、
+// タブが並び替わっても必ず同じセッションを指す。
+//
+// `select t` 自体は省けない (実測: セッションだけを `select` してもタブは
+// 切り替わらず、current session は元のままだった)。だから「タブを選ぶ」と
+// 「セッションを選ぶ」の 2 手は必要で、その間に隙を作らないのがこの形。
 func iTerm2JumpScript(tty string) string {
 	dev := "/dev/" + tty
 	return fmt.Sprintf(`tell application "iTerm2"
@@ -371,7 +389,7 @@ func iTerm2JumpScript(tty string) string {
     repeat with s in sessions of t
       if id of s is sid then
         select t
-        select s
+        select (first session of (current tab of tw) whose id is sid)
         set hit to true
         exit repeat
       end if
