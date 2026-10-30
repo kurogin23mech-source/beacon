@@ -40,13 +40,25 @@ osascript -e "tell application \"System Events\" to return (name of processes) c
   | grep -q true || { echo "$APP が起動していません。開いてから再実行してください。" >&2; exit 2; }
 
 # --- 窓 id と tty を列挙 (読み取りのみ) -------------------------------------
+# 出力は 3 列: <物理ウィンドウの鍵> <window id> <tty>
+#
+# **2 つの端末でモデルが違う** (e-7219 の実測で判明):
+#   - iTerm2:       window -> tabs -> sessions。タブは窓の中に入れ子になる。
+#                   物理ウィンドウの鍵 = window id。
+#   - Terminal.app: **タブが 1 つずつ別の `window` オブジェクトとして見える**
+#                   (どれも tabs=1)。だから window id で数えると、3 タブの窓でも
+#                   「1 窓 1 タブ」に見えてしまう。物理ウィンドウの鍵には
+#                   `bounds` (画面上の位置と大きさ) を使う —— 同じ物理ウィンドウの
+#                   タブは bounds が一致する。
+# 鍵を取り違えると、タブが足りているのに「足りない」と警告してしまい、
+# 検証そのものが使えなくなる (実際にそうなっていた)。
 if [[ "$APP_KEY" == "iterm2" ]]; then
   ENUM='tell application "iTerm2"
 set o to ""
 repeat with w in windows
 repeat with t in tabs of w
 repeat with s in sessions of t
-set o to o & (id of w as text) & " " & (tty of s) & linefeed
+set o to o & (id of w as text) & " " & (id of w as text) & " " & (tty of s) & linefeed
 end repeat
 end repeat
 end repeat
@@ -57,25 +69,26 @@ else
 set o to ""
 repeat with w in windows
 repeat with t in tabs of w
-set o to o & (id of w as text) & " " & (tty of t) & linefeed
+set o to o & "b" & (bounds of w as text) & " " & (id of w as text) & " " & (tty of t) & linefeed
 end repeat
 end repeat
 return o
 end tell'
 fi
-osascript -e "$ENUM" | sed 's#/dev/##' | awk 'NF==2' > "$WORK/pairs.txt"
+osascript -e "$ENUM" | sed 's#/dev/##' | tr -d ',' | awk 'NF==3' > "$WORK/pairs.txt"
 
-WINS=($(awk '{print $1}' "$WORK/pairs.txt" | sort -u))
-TTYS=($(awk '{print $2}' "$WORK/pairs.txt" | sort -u))
-echo "$APP: 窓 ${#WINS[@]} 個 / tty ${#TTYS[@]} 本"
+WINS=($(awk '{print $2}' "$WORK/pairs.txt" | sort -u))
+TTYS=($(awk '{print $3}' "$WORK/pairs.txt" | sort -u))
+PHYS=$(awk '{print $1}' "$WORK/pairs.txt" | sort -u | wc -l | tr -d ' ')
+echo "$APP: 物理ウィンドウ $PHYS 個 / 端末オブジェクト ${#WINS[@]} 個 / tty ${#TTYS[@]} 本"
 MULTI=$(awk '{c[$1]++} END{m=0; for (k in c) if (c[k]>m) m=c[k]; print m}' "$WORK/pairs.txt")
-echo "  1 窓あたり最大タブ数: $MULTI"
+echo "  1 物理ウィンドウあたり最大タブ数: $MULTI"
 if (( MULTI < 3 )); then
   echo "  ⚠ タブ 3 枚以上の窓がありません。この状態では失敗条件を踏まないので、" >&2
   echo "    緑になっても「直った」証拠になりません。タブを増やして再実行してください。" >&2
 fi
-if (( ${#WINS[@]} < 3 )); then
-  echo "  ⚠ 窓が 3 つ未満です。並び替えの余地が小さいので同じ理由で証拠になりません。" >&2
+if (( PHYS < 3 )); then
+  echo "  ⚠ 物理ウィンドウが 3 つ未満です。並び替えの余地が小さいので同じ理由で証拠になりません。" >&2
 fi
 
 # --- 本番と同じ生成器から AppleScript を取る (写さない) ----------------------
@@ -111,7 +124,7 @@ for front in "${WINS[@]}"; do
     fi
   done
 done
-echo "新 (現行) : 成功 $PASS / 失敗 $FAIL  (試行 $((PASS+FAIL)) = 窓 ${#WINS[@]} x tty ${#TTYS[@]})"
+echo "新 (現行) : 成功 $PASS / 失敗 $FAIL  (試行 $((PASS+FAIL)) = 端末オブジェクト ${#WINS[@]} x tty ${#TTYS[@]})"
 
 if (( WITH_OLD )); then
   # 旧形式 (なめながら選択する形) を同条件で測り、条件が失敗を踏むことを示す。
