@@ -1395,7 +1395,7 @@ class ApiClient:
                        blockers=None,
                        needs_leader_judgment: bool = False,
                        time_on_task_seconds: int = 0) -> dict:
-        """Self-report /beacon-trek-pulse Skill invocation (ms-88 / e-2106).
+        """Self-report beacon-trek-pulse Skill invocation (ms-88 / e-2106).
 
         Layer 2 observability: the Skill calls this as Step 1 so the server
         knows the Skill actually fired in response to a scheduler tick.
@@ -1434,7 +1434,7 @@ class ApiClient:
                      kickoff_dm_event_id: str = "") -> dict:
         """Mark a session's Kickoff Ritual DM as sent (ms-88 / e-2138).
 
-        Called by ``/beacon-trek-pulse`` Skill's Step 0.4 after the kickoff
+        Called by ``beacon-trek-pulse`` Skill's Step 0.4 after the kickoff
         DM has been generated and posted to the trek leader. Until this is
         called, ``pulse-ack`` rejects further progress with HTTP 400
         ``kickoff_required`` — so this stamp is the structural gate that

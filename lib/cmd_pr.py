@@ -1160,7 +1160,7 @@ def _trek_finalize_consent_active() -> bool:
     """ms-92 / e-2169 — Trek 終結 1 confirm path opt-in detection.
 
     The structural ban on AI-session pr-merge (see below) has one explicit
-    escape hatch: the ``/beacon-trek-finalize`` 1-confirm collective
+    escape hatch: the ``beacon-trek-finalize`` 1-confirm collective
     merge path. That Skill exports ``BEACON_TREK_FINALIZE_CONSENT=1``
     before delegating to ``beacon pr merge`` so the ban knows the merge
     is happening with user collective approval, not as an AI-side
@@ -1177,7 +1177,7 @@ def _ai_session_merge_ban_active() -> bool:
     See CORE doc ``pr-review-autonomy-boundary`` for the rationale: AI
     sessions are authorised to approve / reject / request-changes on
     PRs, but **merge** belongs to the Trek-unit user collective
-    confirmation (= ``/beacon-trek-finalize``) so the AI can't
+    confirmation (= ``beacon-trek-finalize``) so the AI can't
     self-loop "I wrote it, I approved it, I merged it" without the
     user ever exercising codebase ownership.
 
@@ -1221,11 +1221,14 @@ def cmd_pr_merge():
             "  See CORE doc `pr-review-autonomy-boundary` for the role "
             "split (= AI approves, Trek-unit user merges, user releases).\n"
             "  Bypass paths (= one of these makes the merge proceed):\n"
-            "    1. /beacon-trek-finalize <trek-id> — 1-confirm "
-            "collective merge with the rest of the Trek's PRs.\n"
-            "    2. BEACON_PR_MERGE_USER_OVERRIDE=1 — explicit user "
+            # ms-185 e-7079: the first path used to be
+            # `beacon-trek-finalize <trek-id>`. That Skill was deleted in
+            # e-7069, so offering it here sent the reader after a command
+            # that cannot resolve — on a path that fires on EVERY AI-session
+            # merge attempt, not just Trek ones. Two remain, both real.
+            "    1. BEACON_PR_MERGE_USER_OVERRIDE=1 — explicit user "
             "opt-in for one-off merges.\n"
-            "    3. BEACON_SESSION_KIND=human — declare the calling "
+            "    2. BEACON_SESSION_KIND=human — declare the calling "
             "session is human-driven (= straight terminal use).",
             file=sys.stderr,
         )

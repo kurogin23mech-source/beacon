@@ -450,7 +450,7 @@ def _render_bus_event(ev: dict, q: str) -> Optional[dict]:
 
 
 def _render_trek_summary(ts: dict, q: str) -> dict:
-    """Render a Trek summary (= /beacon-trek summary-add 経由) into a row."""
+    """Render a Trek summary (= beacon-trek summary-add 経由) into a row."""
     text = ts.get("text") or ts.get("summary") or ""
     snippet = _snippet(text, q.lower() if q else "")
     tid = ts.get("id") or ""

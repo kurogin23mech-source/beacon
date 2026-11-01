@@ -170,6 +170,42 @@ def cmd_doc_show():
 # ---------------------------------------------------------------------------
 
 
+def _refuse_trek_write(verb: str, trek_id: str) -> None:
+    """Refuse a NEW ``--trek`` tag on a doc write (ms-185 e-7079).
+
+    ``--trek`` had three uses: filter a listing (read), and tag a doc on
+    add / update (write). e-7069 removed every way to create or inspect a
+    trek — ``beacon trek`` is gone and ``POST /api/treks`` is gone — so the
+    write became a one-way door: any string at all was accepted and stamped
+    into the doc's ``trek_id`` AND ``target`` frontmatter, with no way left
+    to tell a real id from a typo. An independent review of PR #827 made
+    the round trip with a never-existed id and it succeeded silently.
+
+    Keeping the existing records readable (``doc list --trek``) is the
+    forward-only principle; letting NEW unverifiable references be minted
+    is not the same thing. Disclosure (read) and suppression of the action
+    (write) are separate layers — this closes the write half.
+
+    Refuse loudly instead of ignoring the flag: a silently dropped flag
+    would make the caller believe the tag was applied.
+    """
+    print(
+        f"Error: --trek is no longer accepted by `beacon doc {verb}` "
+        "(ms-185 e-7069).\n"
+        f"  You passed: {trek_id}\n"
+        "  Why: there is no longer any way to create or verify a trek id, "
+        "so a new tag could not be checked against anything — it would be "
+        "stamped into this doc's `trek_id` and `target` frontmatter as an "
+        "unverifiable reference.\n"
+        "  Still available: `beacon doc list --trek <id>` reads the docs "
+        "that were already tagged (existing records stay readable).\n"
+        "  Instead, link this doc to a live Target: --ms <ms-id> / "
+        "--op <op-id> / --target <id>.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def cmd_doc_add():
     title = os.environ.get("BEACON_TITLE", "")
     content = os.environ.get("BEACON_CONTENT", "")
@@ -178,6 +214,8 @@ def cmd_doc_add():
     milestone = os.environ.get("BEACON_MS", "")
     operation = os.environ.get("BEACON_OP", "")
     trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
+    if trek_id.strip():
+        _refuse_trek_write("add", trek_id.strip())
     # ms-109 e-3754 — canonical target-class-agnostic doc linkage. --account /
     # --opportunity are new (sales Targets had no linkage key); --target is the
     # generic form. --ms / --op / --trek continue to work via the legacy vars
@@ -359,6 +397,8 @@ def cmd_doc_update():
     scope = os.environ.get("BEACON_SCOPE", "")
     milestone = os.environ.get("BEACON_MS", "")
     trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
+    if trek_id.strip():
+        _refuse_trek_write("update", trek_id.strip())
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     # e-1859: the bin/beacon wrapper sets BEACON_{MS,OP}_SET=1 whenever the
     # user typed --ms / --op (even with an empty value). This lets us treat

@@ -78,6 +78,15 @@ echo "[ci-strict-drift-guards] 旗 → env の写像が両フロントで揃っ�
 # ほか約 45 件が bash で通り python で落ちる状態だった。
 python3 "$ROOT/scripts/check-cli-env-parity.py"
 
+echo "[ci-strict-drift-guards] 命じている Skill が実在するか (ms-185 e-7079)…"
+# PR #827 で Skill 4 本を消したあと、受信 hook が「/beacon-trek-execute を
+# 確認なしで起動せよ」という文面をまだ組み立てていた。参照は Python の
+# f-string、Skill は Markdown ファイルで、両者を繋ぐ型も import も無いので
+# 検査が 1 つも気付かなかった (独立レビュー 2 体が同じ high として挙げた)。
+# 壊れたリンクなら人間は肩をすくめるが、存在しないコマンドを自律実行せよと
+# 言われた AI には逃げ道が無い。
+python3 "$ROOT/scripts/check-skill-reference-drift.py" --strict
+
 echo "[ci-strict-drift-guards] 成功表示が書き込みより先に出ていないか (ms-160 e-6688)…"
 # `beacon task done e-5981` が stdout に "Done: [e-5981] ..." を出しつつ、stderr に
 # 並行書き込みガードの中止を出して exit 1 し、タスクは todo のまま残った (2026-09-29)。

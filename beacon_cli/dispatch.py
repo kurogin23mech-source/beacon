@@ -1528,6 +1528,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_op_envelope_verify.add_argument("--json", action="store_true")
 
 
+    # ---- structurally-removed verbs (ms-185 e-7079) ----
+    # REMAINDER so `beacon trek list --json` still lands here instead of
+    # failing on an unrecognised argument — the point is to explain, and a
+    # caller who typed the old full command is exactly who needs the message.
+    p_trek_removed = sub.add_parser("trek", add_help=False)
+    p_trek_removed.add_argument("rest", nargs=argparse.REMAINDER)
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     # `beacon view` — 手元で盤を立ち上げてブラウザで見る (ms-170 e-6344)。
@@ -6070,6 +6077,42 @@ def _handle_dm(root: Path, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+# ms-185 e-7079: structurally-removed verbs announce themselves instead of
+# looking like a typo (argparse would say "invalid choice: 'trek'", which lists
+# the valid verbs but never says the verb USED to exist and was folded on
+# purpose). Registered as a REAL subparser + _HANDLERS entry rather than
+# intercepted before parsing, because the dispatch-parity guard measures
+# _HANDLERS membership: an early intercept behaves correctly while still
+# reading as "bash has a verb Python does not", and the only way to quiet that
+# would be to claim in ALLOW_BASH_ONLY_DISPATCH that the verb is bash-only —
+# which is false. The text matches bin/beacon's `trek)` arm; a notice on one
+# frontend only would leave Windows / pipx users with the worse experience.
+_REMOVED_VERBS = {
+    "trek": (
+        "Error: 'beacon trek' was removed (ms-185 e-7069). This is a\n"
+        "       structural removal, not a rename — there is no\n"
+        "       replacement verb and no soft deprecation.\n"
+        "\n"
+        "Why: the shared workspace it drove had zero live instances\n"
+        "     while costing 13% of the test suite, so it was folded.\n"
+        "\n"
+        "Still reachable for the records that already exist:\n"
+        "  beacon doc list --trek <id>     (docs tagged to a trek)\n"
+        "  beacon search --include-trek    (trek summaries in history)\n"
+        "  GET /api/treks/{id}             (read-only, server side)\n"
+        "\n"
+        "Writing NEW trek references is refused on purpose: nothing can\n"
+        "create or verify a trek id any more."
+    ),
+}
+
+
+def _handle_removed_verb(root: Optional[Path], args: argparse.Namespace) -> int:
+    """Print why a structurally-removed verb is gone (ms-185 e-7079)."""
+    print(_REMOVED_VERBS[args.command])
+    return 1
+
+
 _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "init": _handle_init,
     "status": _handle_status,
@@ -6143,6 +6186,12 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "stuck": _handle_stuck,
     "morning": _handle_morning,
     "attention": _handle_attention,  # ms-159 e-6246
+    # ms-185 e-7079 — removed verbs explain themselves, same text as bin/beacon.
+    # Spelled out rather than built from _REMOVED_VERBS: the dispatch-parity
+    # guard reads this table as source text, so a comprehension would register
+    # the verb at runtime while still reporting it as missing. A reader
+    # skimming for "is trek still wired?" has the same problem.
+    "trek": _handle_removed_verb,
 }
 
 

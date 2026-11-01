@@ -1145,6 +1145,11 @@ def make_router(
             include_archived=include_archived,
         )
 
+    # ms-185 e-7079: POST /api/treks (= the only creation path) was removed
+    # here. Everything below is read / mutate on treks that already exist, so
+    # no NEW trek can be made from any surface. Removing this router entirely
+    # is e-7070; until then these endpoints keep existing records reachable
+    # (ms-185 SPEC 方針5: do not make records silently unreadable).
     @router.get("/api/treks/{trek_id}")
     def get_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
         """Get a single trek by id. Caller must be creator or member."""

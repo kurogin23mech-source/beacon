@@ -386,7 +386,7 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
         # bypasses the leader review the same way an executor self-approve
         # would. The mirror only exists to unstick ``working`` / ``todo``
         # stamps left behind when the pool moved on; leave the review gate to
-        # the leader (via /beacon-trek-review + the endpoint's P5 gate above).
+        # the leader (via beacon-trek-review + the endpoint's P5 gate above).
         if current_state == "leader_review":
             continue
         # Direct mirror write (= bypass transition validation).

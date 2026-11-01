@@ -4550,6 +4550,30 @@ EOF
     --version|-V)
         python3 "$COMMANDS_PY" version
         ;;
+    trek)
+        # ms-185 e-7079: `trek` was removed structurally (e-7069), not
+        # renamed. Without this arm it fell to the generic wildcard below,
+        # where "Unknown command: trek" is indistinguishable from a typo for
+        # a verb that never existed — so an AI would retry variants or
+        # invent a workaround instead of learning that the feature is gone.
+        # Mirrors how `cloud push|pull|force-pull` announce their own
+        # structural removal rather than going silent.
+        echo "Error: 'beacon trek' was removed (ms-185 e-7069). This is a"
+        echo "       structural removal, not a rename — there is no"
+        echo "       replacement verb and no soft deprecation."
+        echo ""
+        echo "Why: the shared workspace it drove had zero live instances"
+        echo "     while costing 13% of the test suite, so it was folded."
+        echo ""
+        echo "Still reachable for the records that already exist:"
+        echo "  beacon doc list --trek <id>     (docs tagged to a trek)"
+        echo "  beacon search --include-trek    (trek summaries in history)"
+        echo "  GET /api/treks/{id}             (read-only, server side)"
+        echo ""
+        echo "Writing NEW trek references is refused on purpose: nothing can"
+        echo "create or verify a trek id any more."
+        exit 1
+        ;;
     *)
         echo "Unknown command: $1"
         usage
