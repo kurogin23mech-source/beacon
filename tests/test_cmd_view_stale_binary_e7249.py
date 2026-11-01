@@ -92,6 +92,79 @@ def test_newest_source_is_none_without_directory(tmp_path):
     assert cmd_view.newest_viewer_source(str(tmp_path / "nope")) is None
 
 
+def test_newest_source_reaches_into_subdirectories(tmp_path):
+    """**入れ子のソースも見る** (e-7249 保守性 review medium)。
+
+    build.sh は viewer/ で ``go build ./...`` する。``./...`` は再帰的なので、
+    サブディレクトリのソースも実行ファイルの中身を決める。浅く見るだけだと、
+    そこだけ新しくても「新しくない」と答えてしまう —— 黙って古いまま動くのを
+    止める検査が、自分で黙って古さを見落とす形になる。
+    """
+    d = _dir_with(tmp_path, {"main.go": 1000})
+    sub = tmp_path / "viewer" / "internal"
+    sub.mkdir(parents=True, exist_ok=True)
+    f = sub / "extra.go"
+    f.write_text("x", encoding="utf-8")
+    os.utime(f, (5000, 5000))
+    newest = cmd_view.newest_viewer_source(d)
+    assert newest is not None
+    assert newest[0] == 5000
+    assert "extra.go" in newest[1]          # どこのファイルか辿れる
+    assert "internal" in newest[1]          # 相対パスで返る
+
+
+def test_nested_source_newer_than_binary_is_stale(tmp_path):
+    """入れ子のソースが新しければ stale と答える (浅い走査だと fresh に化ける)。"""
+    d = _dir_with(tmp_path, {"main.go": 1000})
+    sub = tmp_path / "viewer" / "internal"
+    sub.mkdir(parents=True, exist_ok=True)
+    f = sub / "extra.go"
+    f.write_text("x", encoding="utf-8")
+    os.utime(f, (5000, 5000))
+    verdict, detail = cmd_view.binary_freshness(_binary(tmp_path, 2000),
+                                                viewer_dir=d)
+    assert verdict == "stale"
+    assert "extra.go" in detail
+
+
+def test_testdata_go_files_are_not_sources(tmp_path):
+    """``testdata/`` の ``.go`` は古さの根拠にしない (**除外が効く唯一の場所**)。
+
+    Go の道具は ``testdata/`` を無視するので、そこの ``.go`` は実行ファイルに
+    入らない。ファイル名の絞り込みは拡張子しか見ないため、ここで降りないと
+    「ビルドに入らないのに新しい」を建て直しの理由にしてしまう (= 嘘の古さ)。
+
+    最初はこの主張を ``dist/`` で書いていたが、反転ハーネスが偽の緑として
+    捕まえた —— ``dist/`` に並ぶのは実行ファイルで、それはファイル名の絞り込みが
+    既に弾くので、除外を外してもテストが緑のままだった。守っている機構と、
+    テストが名指しする機構がずれていた (e-7249、自作の反転ハーネスが検出)。
+    """
+    d = _dir_with(tmp_path, {"main.go": 1000})
+    td = tmp_path / "viewer" / "testdata"
+    td.mkdir(parents=True, exist_ok=True)
+    f = td / "fixture.go"
+    f.write_text("x", encoding="utf-8")
+    os.utime(f, (9999, 9999))
+    assert cmd_view.newest_viewer_source(d) == (1000, "main.go")
+    assert cmd_view.binary_freshness(_binary(tmp_path, 2000),
+                                     viewer_dir=d)[0] == "fresh"
+
+
+def test_built_binary_is_not_a_source_by_name(tmp_path):
+    """``dist/`` の実行ファイルは **ファイル名の絞り込み** が弾く。
+
+    走査から ``dist`` を外しているのは「歩かないため」(11MB の実行ファイルを
+    毎回 stat しない) で、古さの判定には影響しない。ここをディレクトリ除外の
+    功績として書くと、効いていない機構を守っているつもりになる。
+    """
+    d = _dir_with(tmp_path, {"main.go": 1000})
+    stray = tmp_path / "viewer" / "beacon-view-darwin-arm64"
+    stray.write_text("x", encoding="utf-8")
+    os.utime(stray, (9999, 9999))
+    # 除外ディレクトリの外 (viewer/ 直下) に置いても拾わない = 名前で弾いている
+    assert cmd_view.newest_viewer_source(d) == (1000, "main.go")
+
+
 # --- 3 値の判定 --------------------------------------------------------------
 
 def _binary(tmp_path, mtime):
@@ -184,7 +257,9 @@ def test_notice_names_both_rebuild_and_process_replacement():
     text = cmd_view.stale_binary_notice("/x/beacon-view", "detail")
     assert "build.sh" in text                       # 建て直す手段
     assert "終了" in text                            # 動いている盤を止めること
-    assert "BEACON_VIEW_SKIP_HANDSHAKE" in text     # 意図的な素通し口
+    # 素通し口は **この検査だけの口** を指す (版握手の口を指してはいけない)。
+    assert "BEACON_VIEW_SKIP_STALENESS_CHECK" in text
+    assert "BEACON_VIEW_SKIP_HANDSHAKE=1" not in text
     assert "e-7249" in text                         # 経緯への辿り口
 
 
@@ -220,7 +295,7 @@ class _ExecCalled(Exception):
 
 def _wire(monkeypatch, *, freshness):
     """cmd_view() の外部依存を差し替え、呼び出し記録を返す。"""
-    calls = {"execv": None, "printed": []}
+    calls = {"execv": None, "printed": [], "streams": []}
     for k in ("BEACON_JSON", "BEACON_VIEW_PORT", "BEACON_VIEW_NO_OPEN",
               "BEACON_VIEW_HOST", "BEACON_VIEW_EXPOSE",
               "BEACON_VIEW_SKIP_HANDSHAKE", "BEACON_PROJECT_FILE"):
@@ -240,10 +315,30 @@ def _wire(monkeypatch, *, freshness):
     monkeypatch.setattr(cmd_view.os, "execv", _fake_execv)
     import builtins
     real_print = builtins.print
-    monkeypatch.setattr(
-        builtins, "print",
-        lambda *a, **k: calls["printed"].append(" ".join(str(x) for x in a))
-        if a else real_print(*a, **k))
+
+    def _record_print(*a, **k):
+        """print を記録する。**宛先 (file kwarg) ごと残す** (e-7249 AX review high)。
+
+        以前は ``*a`` だけを記録して ``**k`` を捨てていた。そのため
+        ``file=sys.stderr`` を ``file=sys.stdout`` に変えても全テストが緑のまま
+        通り、「診断は stderr に出る」という主張を 1 件も守れていなかった
+        (独立レビューが変異と実 CLI 実行の両方で実証)。stdout は委譲先 Go 盤の
+        出力用に空けておく約束なので、混ざると stdout を機械で読む側が誤動作する。
+        """
+        if not a:
+            return real_print(*a, **k)
+        text = " ".join(str(x) for x in a)
+        target = k.get("file")
+        if target is sys.stderr:
+            stream = "stderr"
+        elif target is None or target is sys.stdout:
+            stream = "stdout"
+        else:
+            stream = getattr(target, "name", repr(target))
+        calls["printed"].append(text)
+        calls["streams"].append((stream, text))
+
+    monkeypatch.setattr(builtins, "print", _record_print)
     return calls
 
 
@@ -284,11 +379,46 @@ def test_skip_env_still_reports_staleness(monkeypatch):
     どこにも残らないと、受入条件を誤って満たしたと記録する穴がまた開く。
     """
     calls = _wire(monkeypatch, freshness=("stale", "jump.go が新しい"))
-    monkeypatch.setenv("BEACON_VIEW_SKIP_HANDSHAKE", "1")
+    monkeypatch.setenv("BEACON_VIEW_SKIP_STALENESS_CHECK", "1")
     with pytest.raises(_ExecCalled):
         cmd_view.cmd_view()
     assert calls["execv"] is not None                        # 起動はする
     assert any("古いです" in line for line in calls["printed"])  # 名乗る
+
+
+def test_staleness_warning_goes_to_stderr_not_stdout(monkeypatch):
+    """古い事実は **stderr** に出る。stdout には出さない。
+
+    stdout は委譲先 (Go 盤) の出力用に空けてある約束なので、診断が混ざると
+    stdout を機械で読む側が「委譲に成功した」と誤認する。宛先を見ないまま
+    「stderr に残る」と言う試験は、宛先が入れ替わっても緑のままで、守れていない
+    (独立レビューが変異と実 CLI 実行の両方で実証、e-7249 AX review high)。
+    """
+    calls = _wire(monkeypatch, freshness=("stale", "jump.go が新しい"))
+    monkeypatch.setenv("BEACON_VIEW_SKIP_STALENESS_CHECK", "1")
+    with pytest.raises(_ExecCalled):
+        cmd_view.cmd_view()
+    on_stderr = [t for s, t in calls["streams"] if s == "stderr"]
+    on_stdout = [t for s, t in calls["streams"] if s == "stdout"]
+    assert any("古いです" in t for t in on_stderr), (
+        f"古い事実が stderr に出ていない: {calls['streams']}")
+    assert not any("古いです" in t for t in on_stdout), (
+        f"診断が stdout に漏れている: {on_stdout}")
+
+
+def test_version_handshake_skip_does_not_downgrade_staleness(monkeypatch):
+    """**版握手の素通し口は、建て直し忘れの検出には効かない** (e-7249 AX review)。
+
+    2 つは別の問いなので別の口にしてある。1 本に束ねると、版違いを承知で
+    `BEACON_VIEW_SKIP_HANDSHAKE` を立てた人が、古い実行ファイルで起動する
+    保護まで無自覚に外すことになる (名前は「握手」単数なので予告もできない)。
+    """
+    calls = _wire(monkeypatch, freshness=("stale", "jump.go が新しい"))
+    monkeypatch.setenv("BEACON_VIEW_SKIP_HANDSHAKE", "1")
+    with pytest.raises(SystemExit) as ei:
+        cmd_view.cmd_view()
+    assert calls["execv"] is None                      # 止まる
+    assert "手元のソースより古い" in str(ei.value)
 
 
 def test_skip_env_does_not_silence_freshness_check(monkeypatch):
@@ -302,7 +432,7 @@ def test_skip_env_does_not_silence_freshness_check(monkeypatch):
     monkeypatch.setattr(cmd_view, "binary_freshness",
                         lambda binary, **kw: (seen.append(binary),
                                               ("fresh", ""))[1])
-    monkeypatch.setenv("BEACON_VIEW_SKIP_HANDSHAKE", "1")
+    monkeypatch.setenv("BEACON_VIEW_SKIP_STALENESS_CHECK", "1")
     with pytest.raises(_ExecCalled):
         cmd_view.cmd_view()
     assert seen == ["/x/beacon-view"]

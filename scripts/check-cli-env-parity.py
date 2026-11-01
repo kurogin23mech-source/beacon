@@ -84,6 +84,14 @@ AMBIENT_ENV = {
     ("doctor", "BEACON_DOCTOR_SKIP_SKILL_DRIFT"),
     ("bus_send", "BEACON_QUALGATE_OFF"),
     ("summary", "BEACON_SUPPRESS_DEPRECATION"),
+    # `beacon view` の 2 つの素通し口 (ms-170 e-7249 で個別判定した)。どちらも
+    # 「合っていないと承知のうえでその盤を見たい」ときの操作者向けの口で、旗に
+    # する予定が無い (旗にすると、間違った盤を開くのが普段の選択肢に見える)。
+    # 以前は KNOWN_GAPS に「内部用か未実装かは個別判定が要る」として置かれて
+    # いた。判定したのでここへ移す。双子の片方だけ免除すると、同じ判断の 2 行が
+    # 別の欄に分かれて、次に読む人がどちらが正しいか分からなくなる。
+    ("view", "BEACON_VIEW_SKIP_HANDSHAKE"),
+    ("view", "BEACON_VIEW_SKIP_STALENESS_CHECK"),
 }
 
 
@@ -540,10 +548,6 @@ KNOWN_GAPS: dict = {
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
     ("trigger_fire", "BEACON_TRIGGER_TREK_ID", "python"):
         "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
-    ("view", "BEACON_VIEW_SKIP_HANDSHAKE", "bash"):
-        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
-    ("view", "BEACON_VIEW_SKIP_HANDSHAKE", "python"):
-        "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
 }
 
 if __name__ == "__main__":

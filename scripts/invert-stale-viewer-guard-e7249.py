@@ -13,23 +13,41 @@
 * **作業コピーで変異させる**。リポジトリのファイルを in-place で書き換えないので、
   バイトコードキャッシュが変異版を持ち越す穴 (``-B`` では閉じない) と、隣で走る
   pytest が変異中のファイルを読む穴が構造的に消える。
-* **反転ごとに「赤くなるべきテスト」を名指しする**。終了コードだけを見ると、変異が
-  構文を壊しただけのケースが「守られている」に化ける。
+* **入口で引数を裁く** (`ih.parse_cli` = 穴 4 の引数側)。``--help`` や打ち間違えた
+  フラグを黙って捨てて本物の変異を走らせない。共有部品に委ねるので、裁き方が
+  姉妹ハーネスと食い違わない。
+* **赤の理由を構造で見る** (`ih.classify_pytest_result` = 穴 3)。終了コードが非 0
+  でも、収集に失敗しただけ (rc 2〜5) や要約行が error を数えている場合は「捕まえた」
+  に数えない。変異が構文を壊しただけのケースが「守られている」に化けるのを防ぐ。
+* **反転ごとに「赤くなるべきテスト」を名指しする**。
 * **目印が見つからなければ失敗扱い**。コードが動いたときに反転を黙って消すと、
   ハーネスが緑のまま中身が空になる (SKIP は緑と同じ害)。
 
+**`ih.guarded_main` を使わず `ih.parse_cli` を直に呼ぶ理由** (e-7249 保守性 review、
+指摘の一部を意図して採らなかった箇所): `guarded_main` は引数の裁きと **repo 単位の
+排他ロック** を束ねている。ロックは「共有ファイルを in-place で変異させるハーネス
+同士が衝突しないため」のもので、このハーネスは作業コピーしか変異させないので守る
+対象が無い。一方このハーネスは test (`test_inversion_harness_is_wired`) から呼ばれ、
+ロックは ``run()`` の全区間 (約 10 秒) 保持される。すでに `invert-note-backup-ordering`
+と `invert-retired-provenance-guard` の 2 本が「`guarded_main` を使い、かつ test から
+呼ばれる」状態なので、ここで 3 本目の競合者になると、要らないロックのために CI が
+不定期に赤くなる (``REFUSED: another invert harness is running``)。**要らない保護を
+足して壊れる形**を避け、引数の裁きと赤の判定だけを共有部品から受け取る。
+
 使い方:
     python3 scripts/invert-stale-viewer-guard-e7249.py
-
-pytest からは呼ばない (CI は並列で走るため)。
 """
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import invert_harness as ih  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -68,7 +86,7 @@ INVERSIONS = [
     (
         "古くても委譲を止めない (= 黙って古いまま起動する)",
         "lib/cmd_view.py",
-        "        if not skip_handshake:\n"
+        "        if not skip_staleness:\n"
         "            raise SystemExit(stale_binary_notice(binary, stale_detail))",
         "        if False:\n"
         "            raise SystemExit(stale_binary_notice(binary, stale_detail))",
@@ -78,7 +96,7 @@ INVERSIONS = [
         "素通し口では判定そのものを飛ばす (= 古い事実がどこにも残らない)",
         "lib/cmd_view.py",
         "    verdict, stale_detail = binary_freshness(binary)",
-        '    verdict, stale_detail = (("fresh", "") if skip_handshake\n'
+        '    verdict, stale_detail = (("fresh", "") if skip_staleness\n'
         "                             else binary_freshness(binary))",
         ["test_skip_env_still_reports_staleness",
          "test_skip_env_does_not_silence_freshness_check"],
@@ -106,6 +124,46 @@ INVERSIONS = [
         '    if verdict in ("stale", "unknown"):\n',
         ["test_unknown_freshness_delegates"],
     ),
+    # --- ここから下は独立レビュー (PR#828) 由来の反転 ---
+    (
+        "診断を stdout に出す (= 委譲先の出力に混ざり、読む側が誤認する)",
+        "lib/cmd_view.py",
+        '              "BEACON_VIEW_SKIP_STALENESS_CHECK=1 のため起動します",\n'
+        "              file=sys.stderr, flush=True)",
+        '              "BEACON_VIEW_SKIP_STALENESS_CHECK=1 のため起動します",\n'
+        "              file=sys.stdout, flush=True)",
+        ["test_staleness_warning_goes_to_stderr_not_stdout"],
+    ),
+    (
+        "ソース走査を浅く戻す (= 入れ子のソースが新しくても見落とす)",
+        "lib/cmd_view.py",
+        "    for root, dirs, names in walk(viewer_dir):",
+        "    for root, dirs, names in list(walk(viewer_dir))[:1]:",
+        ["test_newest_source_reaches_into_subdirectories",
+         "test_nested_source_newer_than_binary_is_stale"],
+    ),
+    (
+        "testdata を走査対象に戻す (= ビルドに入らない .go を古さの根拠にする)",
+        "lib/cmd_view.py",
+        "        dirs[:] = [d for d in dirs if d not in VIEWER_SOURCE_SKIP_DIRS]\n",
+        "",
+        ["test_testdata_go_files_are_not_sources"],
+    ),
+    (
+        "ファイル名の絞り込みを外す (= 実行ファイル自身を古さの根拠にする)",
+        "lib/cmd_view.py",
+        "            if not _is_viewer_source(name):\n                continue\n",
+        "",
+        ["test_built_binary_is_not_a_source_by_name",
+         "test_testdata_go_files_are_not_sources"],
+    ),
+    (
+        "2 つの素通し口を 1 本に束ね直す (= 名前が予告しない保護まで外れる)",
+        "lib/cmd_view.py",
+        '    skip_staleness = os.environ.get("BEACON_VIEW_SKIP_STALENESS_CHECK") == "1"',
+        "    skip_staleness = skip_handshake",
+        ["test_version_handshake_skip_does_not_downgrade_staleness"],
+    ),
 ]
 
 
@@ -122,14 +180,22 @@ def _scratch_tree() -> str:
     return tmp
 
 
-def _run(tree: str, tests) -> subprocess.CompletedProcess:
+def _run(tree: str, tests):
+    """作業コピーで pytest を走らせ ``(捕まえたか, 表示用の末尾, 終了コード)``。
+
+    「捕まえたか」の判定は `ih.classify_pytest_result` に委ねる (穴 3)。手元に
+    写すと、1 本だけ直って姉妹に旧判定が残る形になる。
+    """
     expr = " or ".join(tests)
-    return subprocess.run(
+    r = subprocess.run(
         [sys.executable, "-B", "-m", "pytest", *TEST_FILES, "-q",
          "-p", "no:randomly", "-p", "no:cacheprovider", "-k", f"({expr})"],
         cwd=tree, capture_output=True, text=True, timeout=600,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        env={**ih.isolated_env(), "PYTHONDONTWRITEBYTECODE": "1"},
     )
+    tail = (r.stdout + r.stderr).strip().split("\n")[-1]
+    caught, shown = ih.classify_pytest_result(r, tail)
+    return caught, shown, r
 
 
 def main() -> int:
@@ -137,12 +203,13 @@ def main() -> int:
     failures = []
     try:
         all_tests = sorted({t for inv in INVERSIONS for t in inv[4]})
-        base = _run(tree, all_tests)
-        if base.returncode != 0:
+        base_caught, base_tail, base_proc = _run(tree, all_tests)
+        if base_proc.returncode != 0:
             print("基準が緑ではありません。反転の前にテストを直してください:")
-            print(base.stdout[-4000:])
+            print(base_tail)
+            print((base_proc.stdout + base_proc.stderr)[-4000:])
             return 1
-        print(f"基準は緑 ({len(all_tests)} 件)\n")
+        print(f"基準は緑 ({len(all_tests)} 件): {base_tail}\n")
 
         for name, rel, old, new, tests in INVERSIONS:
             path = os.path.join(tree, rel)
@@ -158,15 +225,17 @@ def main() -> int:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(original.replace(old, new, 1))
             try:
-                proc = _run(tree, tests)
-                if proc.returncode == 0:
+                caught, shown, _proc = _run(tree, tests)
+                if caught:
+                    print(f"  赤くなった {name}")
+                else:
+                    # 「赤くならなかった」と「赤の理由が違った (収集失敗等)」を
+                    # 区別して報告する。後者を『守られている』に数えないのが
+                    # ih.classify_pytest_result の役目 (穴 3)。
                     failures.append(
                         f"{name}: {rel} の機構を外しても "
-                        f"{', '.join(tests)} が緑のままでした "
-                        "(= これらのテストは実際には守っていません)。")
-                    print(f"  偽の緑     {name}")
-                else:
-                    print(f"  赤くなった {name}")
+                        f"{', '.join(tests)} が守りませんでした — {shown}")
+                    print(f"  守れず     {name} — {shown}")
             finally:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(original)
@@ -184,4 +253,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # 入口で引数を裁く (穴 4 の引数側)。--help は使い方を出して終わり、未知の
+    # フラグは非 0 で拒否する — 黙って捨てて本物の変異を走らせない。
+    # 排他ロック (guarded_main) は採らない: 理由は module docstring。
+    ih.parse_cli(sys.argv, __doc__)
     sys.exit(main())

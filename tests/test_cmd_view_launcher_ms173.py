@@ -223,7 +223,7 @@ def _wire(monkeypatch, *, binary, execv_error=None):
     e-6518 で Python 素朴盤 (serve) は撤去されたので serve の差し替えは無い。
     見つからない / 起動失敗は SystemExit で終わる (呼び出し側が pytest.raises で受ける)。
     """
-    calls = {"execv": None, "printed": []}
+    calls = {"execv": None, "printed": [], "streams": []}
 
     monkeypatch.setattr(cmd_view, "resolve_viewer_binary",
                         lambda **kw: binary)
@@ -253,10 +253,30 @@ def _wire(monkeypatch, *, binary, execv_error=None):
 
     import builtins
     real_print = builtins.print
-    monkeypatch.setattr(
-        builtins, "print",
-        lambda *a, **k: calls["printed"].append(" ".join(str(x) for x in a))
-        if a else real_print(*a, **k))
+
+    def _record_print(*a, **k):
+        """print を記録する。**宛先 (file kwarg) ごと残す** (e-7249 AX review high)。
+
+        以前は ``*a`` だけを記録して ``**k`` を捨てていた。そのため
+        ``file=sys.stderr`` を ``file=sys.stdout`` に変えても全テストが緑のまま
+        通り、「診断は stderr に出る」という主張を 1 件も守れていなかった
+        (独立レビューが変異と実 CLI 実行の両方で実証)。stdout は委譲先 Go 盤の
+        出力用に空けておく約束なので、混ざると stdout を機械で読む側が誤動作する。
+        """
+        if not a:
+            return real_print(*a, **k)
+        text = " ".join(str(x) for x in a)
+        target = k.get("file")
+        if target is sys.stderr:
+            stream = "stderr"
+        elif target is None or target is sys.stdout:
+            stream = "stdout"
+        else:
+            stream = getattr(target, "name", repr(target))
+        calls["printed"].append(text)
+        calls["streams"].append((stream, text))
+
+    monkeypatch.setattr(builtins, "print", _record_print)
     return calls
 
 

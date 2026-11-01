@@ -1,11 +1,16 @@
 """`beacon view` — 運用室 (Go 版 beacon-view) に委譲する入口 (ms-170)。
 
 環境変数 (dispatch 層が渡す BEACON_VIEW_PORT / HOST / EXPOSE / NO_OPEN のほか):
-  BEACON_VIEW_SKIP_HANDSHAKE=1 … 委譲前の握手 2 つ (版握手 e-6482 / 建て直し忘れの
-    検出 e-7249) を意図して飛ばす。通常は不要 — 古い beacon-view へ黙って委譲しない
-    ための握手なので、飛ばすのは「古いと承知で古い盤を見たい」ときだけ。
-    飛ばしても **古いという事実は stderr に出る** (止めるのを飛ばすだけで、知るのを
-    飛ばすわけではない)。
+  BEACON_VIEW_SKIP_HANDSHAKE=1 … 版握手 (e-6482) だけを飛ばす。版が食い違う
+    beacon-view へ黙って委譲しないための握手なので、飛ばすのは「版違いと承知で
+    その盤を見たい」ときだけ。
+  BEACON_VIEW_SKIP_STALENESS_CHECK=1 … 建て直し忘れの検出 (e-7249) だけを、
+    止める側から警告側へ下げる。飛ばしても **古いという事実は stderr に出る**
+    (止めるのを飛ばすだけで、知るのを飛ばすわけではない)。
+
+  この 2 つを 1 本のフラグに束ねない (e-7249 AX review medium)。名前が「握手」
+  単数なのに 2 つの保護を同時に無効化すると、版違いを承知で立てた人が、建て直し
+  忘れの検出まで無自覚に外すことになる。別々の問いなので別々の口にする。
 
 
 **Go 一本化 (e-6518)**: 盤 / 運用室 (セッション一覧・状態・端末ジャンプ) の表示は
@@ -283,12 +288,31 @@ def viewer_handshake(binary: str, expected_version: str, *, run=None):
 # ——取得失敗と「古くない」を同じ値に畳むと、比べられなかった環境が黙って緑になる。
 
 # 実行ファイルの中身を決めるファイル。build.sh は viewer/ で `go build ./...` する
-# ので、見るのは viewer/ の中だけでよい。
+# ので、見るのは viewer/ の中だけでよい。**ただし `./...` は再帰的**なので、
+# viewer/ の下のディレクトリも同じく見る (e-7249 保守性 review medium)。
+#
+# 最初の実装は viewer/ 直下だけを浅く見ていた。いま viewer/ はフラットなので
+# 発火しないが、ソースがサブディレクトリに分かれた瞬間に、そこだけ新しくても
+# 「新しくない」と答える。この検査は「黙って古いまま動く」を止めるために在るので、
+# 自分が黙って古さを見落とす形は許されない (独立レビューが入れ子の実例で実証)。
 #
 # 試験ファイル (*_test.go) は実行ファイルに入らないので除く。入れると、試験だけを
 # 直したときにも建て直しを強いることになり、それは嘘の staleness になる (緩すぎる
 # ガードと同じく、厳しすぎるガードも「どうせ誤報だ」と読まれて効かなくなる)。
 VIEWER_SOURCE_PATTERNS = ("*.go", "page.html", "go.mod", "go.sum")
+
+# 走査から外すディレクトリ。
+#
+# **効いているのは `testdata` です。** Go の道具は `testdata/` を無視するので、
+# そこに `.go` が在っても実行ファイルには入らない。下のファイル名の絞り込みは
+# 拡張子しか見ないため、ここで降りないと「ビルドに入らないのに新しい」を古さの
+# 根拠にしてしまう (= 嘘の古さ)。
+#
+# `dist` / `.git` / `node_modules` は、下のファイル名の絞り込みが既に弾くので
+# 古さの判定には影響しない。**歩かないため**に挙げてある (dist は 11MB の
+# 実行ファイルが並ぶので、毎回 stat するのは無駄)。守りとしては二重で、
+# この 3 つを外しても判定は変わらない —— テストもそう書いてある。
+VIEWER_SOURCE_SKIP_DIRS = ("dist", "testdata", ".git", "node_modules")
 
 
 def _is_viewer_source(name: str) -> bool:
@@ -299,28 +323,32 @@ def _is_viewer_source(name: str) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in VIEWER_SOURCE_PATTERNS)
 
 
-def newest_viewer_source(viewer_dir: str, *, listdir=None, getmtime=None):
-    """``viewer_dir`` 内のソースで最も新しい更新時刻を ``(mtime, name)`` で返す。
+def newest_viewer_source(viewer_dir: str, *, walk=None, getmtime=None):
+    """``viewer_dir`` 以下のソースで最も新しい更新時刻を ``(mtime, name)`` で返す。
+
+    ``name`` は ``viewer_dir`` からの相対パス (入れ子なら ``internal/extra.go``)
+    なので、案内文に出したときどのファイルが新しいのか辿れる。
 
     対象が 1 つも無い / ディレクトリが無いときは ``None`` (= 判定できない)。
-    ``listdir`` / ``getmtime`` は試験用の差し替え口。
+    ``walk`` / ``getmtime`` は試験用の差し替え口。
     """
-    listdir = listdir or os.listdir
+    walk = walk or os.walk
     getmtime = getmtime or os.path.getmtime
-    try:
-        names = listdir(viewer_dir)
-    except OSError:
-        return None
     newest = None
-    for name in names:
-        if not _is_viewer_source(name):
-            continue
-        try:
-            mtime = getmtime(os.path.join(viewer_dir, name))
-        except OSError:
-            continue
-        if newest is None or mtime > newest[0]:
-            newest = (mtime, name)
+    for root, dirs, names in walk(viewer_dir):
+        # 出力先などは入力ではないので降りない (dirs の in-place 書き換えで枝刈り)。
+        dirs[:] = [d for d in dirs if d not in VIEWER_SOURCE_SKIP_DIRS]
+        for name in names:
+            if not _is_viewer_source(name):
+                continue
+            full = os.path.join(root, name)
+            try:
+                mtime = getmtime(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, viewer_dir)
+            if newest is None or mtime > newest[0]:
+                newest = (mtime, rel)
     return newest
 
 
@@ -385,8 +413,8 @@ def stale_binary_notice(binary: str, detail: str) -> str:
         "    2. viewer/build.sh で建て直す\n"
         "    3. 盤を開き直す\n"
         "  盤の中身だけなら beacon view --json で取得できます (画面は出ません)。\n"
-        "  この検査を意図して飛ばすには BEACON_VIEW_SKIP_HANDSHAKE=1 を指定します"
-        " (飛ばしても古い事実は stderr に出ます)。"
+        "  この検査だけを意図して飛ばすには BEACON_VIEW_SKIP_STALENESS_CHECK=1 を"
+        "指定します (飛ばしても古い事実は stderr に出ます)。"
     )
 
 
@@ -483,6 +511,8 @@ def cmd_view() -> None:
         # beacon-view が無い。素朴盤に落とさず、入手 / 更新手順を出して終了する。
         raise SystemExit(FALLBACK_NOTICE)
     skip_handshake = os.environ.get("BEACON_VIEW_SKIP_HANDSHAKE") == "1"
+    # 建て直し忘れの検出は **別の口** で下げる (e-7249 AX review medium)。
+    skip_staleness = os.environ.get("BEACON_VIEW_SKIP_STALENESS_CHECK") == "1"
     if not skip_handshake:
         # __version__ の真実源は commands (lib/cmd_project._beacon_version と同じ
         # 出所)。遅延 import なのは commands が重く、--json 経路では不要なため。
@@ -497,12 +527,22 @@ def cmd_view() -> None:
     # 建て直し忘れの検出 (e-7249)。版握手の後に置くが、**skip env でも判定自体は
     # 行う** —— 飛ばしたいのは「止めること」であって「知ること」ではない。古いまま
     # 起動したという事実が残らないと、受入条件を誤って満たしたと記録する穴が開く。
+    #
+    # 診断は必ず stderr へ。stdout は委譲先 (Go 盤) の出力用に空けておく約束で、
+    # 混ざると stdout を機械で読む側が「委譲に成功した」と誤認する。
     verdict, stale_detail = binary_freshness(binary)
     if verdict == "stale":
-        if not skip_handshake:
+        if not skip_staleness:
             raise SystemExit(stale_binary_notice(binary, stale_detail))
         print(f"警告: beacon-view が手元のソースより古いです ({stale_detail})。"
-              "BEACON_VIEW_SKIP_HANDSHAKE=1 のため起動します",
+              "BEACON_VIEW_SKIP_STALENESS_CHECK=1 のため起動します",
+              file=sys.stderr, flush=True)
+    elif verdict == "unknown" and stale_detail and "配布版" not in stale_detail:
+        # 「比べられなかった」を無音にしない (e-7249 AX review low)。配布版は
+        # viewer のソースを持たないのが正しい状態なので毎回は言わないが、手元に
+        # ソースが在るのに比べられなかった (権限 / マウント等) のは別の話。
+        # 確認して問題なかったことと、確認できなかったことを出力で区別する。
+        print(f"注意: beacon-view の新しさを判定できませんでした ({stale_detail})",
               file=sys.stderr, flush=True)
     argv = viewer_argv(binary, project_root=_project_root(), port=port,
                        host=host, expose=expose, no_open=no_open)
