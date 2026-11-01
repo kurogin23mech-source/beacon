@@ -5269,20 +5269,29 @@ EOF
         ensure_project
         shift
         _view_port=""; _view_no_open=""; _view_json=""
-        _view_host=""; _view_expose=""
+        _view_host=""; _view_expose=""; _view_no_reuse=""; _view_idle=""
         while [ $# -gt 0 ]; do
             case "$1" in
                 # help は副作用ゼロで出す (旧: *) で握り潰されサーバ+ブラウザが
                 # 起動していた = ms-170 #742 AX review HIGH)。
+                #
+                # **文面は持たない** (ms-170 e-7147): `beacon view --help` は手前の
+                # 一括処理が台帳 (lib/commands.py _help_registry) から描くので、ここは
+                # 実際には通らない。通らない所に旗の一覧を書き写すと、台帳を直しても
+                # こちらが古いまま残り、どちらが正しいか読む人に分からなくなる。
+                # 万一ここに来たときも同じ台帳から描く。
                 -h|--help)
-                    echo "usage: beacon view [--port N] [--host ADDR] [--expose] [--no-open] [--json]"
-                    echo "  盤をブラウザで見る。既定は 127.0.0.1 (自分の機械の中だけ)。"
-                    echo "  --host で外に開くには --expose の明示が要る (盤は認証を持たない)。"
+                    BEACON_HELP_QUERY="view" python3 "$COMMANDS_PY" help_render
                     exit 0 ;;
                 --port) _need_flag_value "$#" "$1"; _view_port="$2"; shift 2 ;;
                 --port=*) _view_port="${1#*=}"; shift ;;
                 --no-open) _view_no_open="1"; shift ;;
                 --json) _view_json="1"; shift ;;
+                # 盤の二重起動と居残り (ms-170 e-7147)。既定は「既に在る盤を使う」
+                # 「誰も見なければ畳む」。どちらも承知で外せるように口を開けておく。
+                --no-reuse) _view_no_reuse="1"; shift ;;
+                --idle-timeout) _need_flag_value "$#" "$1"; _view_idle="$2"; shift 2 ;;
+                --idle-timeout=*) _view_idle="${1#*=}"; shift ;;
                 # サーバ設置 (e-6345)。--host を自分の機械の外に向けるときは
                 # --expose の明示が要る (盤は認証を持たないため)。
                 --host) _need_flag_value "$#" "$1"; _view_host="$2"; shift 2 ;;
@@ -5298,6 +5307,8 @@ EOF
             BEACON_VIEW_HOST="$_view_host" \
             BEACON_VIEW_EXPOSE="$_view_expose" \
             BEACON_JSON="$_view_json" \
+            BEACON_VIEW_NO_REUSE="$_view_no_reuse" \
+            BEACON_VIEW_IDLE_TIMEOUT="$_view_idle" \
             python3 "$COMMANDS_PY" view
         ;;
     cycle)

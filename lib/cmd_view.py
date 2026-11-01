@@ -4,6 +4,10 @@
   BEACON_VIEW_SKIP_HANDSHAKE=1 … 版握手 (e-6482) だけを飛ばす。版が食い違う
     beacon-view へ黙って委譲しないための握手なので、飛ばすのは「版違いと承知で
     その盤を見たい」ときだけ。
+  BEACON_VIEW_NO_REUSE=1 … 既に動いている同じプロジェクトの盤を使わず、必ず
+    新しく立てる (ms-170 e-7147)。
+  BEACON_VIEW_IDLE_TIMEOUT=<時間> … 誰も見に来なくなってから盤を畳むまでの時間
+    (例 ``2h`` / ``0`` で畳まない)。空なら Go 側の既定に従う。
   BEACON_VIEW_SKIP_STALENESS_CHECK=1 … 建て直し忘れの検出 (e-7249) だけを、
     止める側から警告側へ下げる。飛ばしても **古いという事実は stderr に出る**
     (止めるのを飛ばすだけで、知るのを飛ばすわけではない)。
@@ -459,14 +463,24 @@ def _project_root() -> str:
 
 
 def viewer_argv(binary: str, *, project_root: str, port: int, host: str,
-                expose: bool, no_open: bool) -> list:
-    """beacon-view を起動する argv を組み立てる (フラグ写像を 1 箇所に固める)。"""
+                expose: bool, no_open: bool, no_reuse: bool = False,
+                idle_timeout: str = "") -> list:
+    """beacon-view を起動する argv を組み立てる (フラグ写像を 1 箇所に固める)。
+
+    ``no_reuse`` / ``idle_timeout`` は盤の二重起動と居残りの口 (ms-170 e-7147)。
+    既定 (= 偽 / 空) のときは何も渡さない —— 既定値を argv に書き写すと、Go 側の
+    既定を変えたときにここが古い値で上書きし続ける (既定の真実源は 1 つにする)。
+    """
     argv = [binary, "--path", project_root, "--port", str(port),
             "--host", host]
     if expose:
         argv.append("--expose")
     if no_open:
         argv.append("--no-open")
+    if no_reuse:
+        argv.append("--no-reuse")
+    if idle_timeout:
+        argv.extend(["--idle-timeout", idle_timeout])
     return argv
 
 
@@ -488,6 +502,10 @@ def cmd_view() -> None:
     no_open = os.environ.get("BEACON_VIEW_NO_OPEN") == "1"
     host = os.environ.get("BEACON_VIEW_HOST") or LOOPBACK
     expose = os.environ.get("BEACON_VIEW_EXPOSE") == "1"
+    # 盤の二重起動と居残りの口 (ms-170 e-7147)。既定は Go 側が持つので、ここでは
+    # 指定されたときだけ渡す。
+    no_reuse = os.environ.get("BEACON_VIEW_NO_REUSE") == "1"
+    idle_timeout = os.environ.get("BEACON_VIEW_IDLE_TIMEOUT") or ""
     if os.environ.get("BEACON_JSON") == "1":
         # 画面を立てずに、いまの盤をそのまま出す (別の道具に渡したいとき用)。
         # --json は盤だけで運用室 (セッション一覧) を含まないため、Go 版に委譲せず
@@ -545,7 +563,8 @@ def cmd_view() -> None:
         print(f"注意: beacon-view の新しさを判定できませんでした ({stale_detail})",
               file=sys.stderr, flush=True)
     argv = viewer_argv(binary, project_root=_project_root(), port=port,
-                       host=host, expose=expose, no_open=no_open)
+                       host=host, expose=expose, no_open=no_open,
+                       no_reuse=no_reuse, idle_timeout=idle_timeout)
     # どの実体に委譲したかを名乗る (silent narrowing を防ぐ)。execv は成功すれば
     # 戻らないので、事前に 1 行出しておく。
     # 診断ログは stderr へ (PR #752 AX1)。stdout は Go 盤の出力用に空けておく —

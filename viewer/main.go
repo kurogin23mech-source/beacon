@@ -26,6 +26,10 @@ func main() {
 	expose := flag.Bool("expose", false, "自分の機械の外に開くことを承知して指定する")
 	noOpen := flag.Bool("no-open", false, "ブラウザを自動で開かない")
 	asJSON := flag.Bool("json", false, "画面を出さず、盤の中身をそのまま出力する")
+	noReuse := flag.Bool("no-reuse", false,
+		"既に動いている同じプロジェクトの盤を使わず、必ず新しく立てる")
+	idleTimeout := flag.Duration("idle-timeout", defaultIdleTimeout,
+		"この時間だけ誰も見に来なければ盤を畳む (0 で畳まない)")
 	showVersion := flag.Bool("version", false, "版を出して終わる (beacon 側の委譲前の版握手用)")
 	flag.Parse()
 
@@ -127,9 +131,48 @@ func main() {
 		}
 	}
 
+	// 同じプロジェクトの盤が既に生きているなら、そちらを使う (ms-170 e-7147)。
+	//
+	// `listen` は希望の口が塞がっていれば黙って別の空き口を借りるので、この確認が
+	// 無いと呼ぶたびに盤が増え、ランダムな口に散る (実測: 3 回開くと 3 本増える)。
+	// 控えの番号が生きているかだけでなく **実際に問い合わせて同じプロジェクトを
+	// 配っているか** まで確かめる (portfile.go)。
+	//
+	// `--port` を明示されたときは再利用しない。口を指定するのは「そこに立てたい」
+	// という意思表示なので、黙って別の口の盤へ送ると指示と違う結果になる。
+	reuseKey := *path
+	if src != nil {
+		reuseKey = filepath.Dir(src.BeaconDir)
+	}
+	pf := portfilePath(reuseKey)
+	if !*noReuse && *port == defaultPort {
+		if url := liveBoardURL(readPortfile(pf), reuseKey); url != "" {
+			// 住所の出し方は新規に立てたときと同じ 1 行に揃える。呼び出し側
+			// (scripts/open-board.py) はこの行だけを見て住所を拾うので、ここが
+			// 揃っていないと「立ったのに住所が読めない」ことになる。
+			fmt.Printf("盤を開きました: %s\n", url)
+			fmt.Println("  (既に動いている盤を使いました。新しくは立てていません)")
+			reportOrphanBoards(os.Getpid())
+			if !*noOpen {
+				OpenBrowser(url)
+			}
+			return
+		}
+	}
+
 	srv, err := NewServer(src, *host, *port, *expose)
 	if err != nil {
 		fail(err)
+	}
+
+	// 控えを置く。置けなくても盤は成立する (= 次回の再利用ができないだけ) ので、
+	// 失敗は伝えるだけで止めない。黙って落とすと「なぜ毎回増えるのか」が追えない。
+	if err := writePortfile(pf, boardRecord{
+		Port: srv.Port(), PID: os.Getpid(), Host: srv.Host,
+		Path: reuseKey, StartedAt: time.Now().Format(time.RFC3339),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"注意: 盤の控えを置けませんでした (%v)。次回も新しい盤が立ちます\n", err)
 	}
 
 	fmt.Printf("盤を開きました: %s\n", srv.URL)
@@ -145,12 +188,13 @@ func main() {
 			"認証は無いので、この口に届く全員が読めます。")
 	}
 	fmt.Println("  終了: Ctrl+C")
+	reportOrphanBoards(os.Getpid())
 
 	if !*noOpen && isLoopback(srv.Host) {
 		OpenBrowser(srv.URL)
 	}
 
-	if err := srv.Serve(); err != nil {
+	if err := srv.ServeWithIdleTimeout(*idleTimeout); err != nil {
 		fail(err)
 	}
 	waitIfWindowWillClose()

@@ -87,3 +87,40 @@ var (
 	alivePids   map[int]bool
 	alivePidsAt time.Time
 )
+
+// boardProcessPIDs は、この機械で動いている beacon-view の番号を返す
+// (自分自身は含まない)。非 Windows 版と同じ役目 — 意図は process_other.go の
+// 同名関数の説明を参照。
+func boardProcessPIDs(selfPID int) []int {
+	// tasklist は Windows に標準で入っている。追加の部品を持ち込まない。
+	raw, err := exec.Command("tasklist", "/fo", "csv", "/nh").Output()
+	if err != nil {
+		return nil
+	}
+	// CSV は `"名前","番号",...` の並びなので、前 2 列を取り出して
+	// 共通の解析 (parseBoardPIDs) が読める `番号 名前` の形に直す。
+	var b strings.Builder
+	for _, line := range strings.Split(raw2s(raw), "\n") {
+		cols := splitCSV2(strings.TrimSpace(line))
+		if len(cols) < 2 {
+			continue
+		}
+		b.WriteString(cols[1] + " " + cols[0] + "\n")
+	}
+	return parseBoardPIDs(b.String(), selfPID)
+}
+
+func raw2s(raw []byte) string { return string(raw) }
+
+// splitCSV2 は tasklist の行から前 2 列 (名前, 番号) を取り出す。
+// 引用符で囲まれた単純な CSV なので、専用の部品は持ち込まない。
+func splitCSV2(line string) []string {
+	var out []string
+	for _, part := range strings.Split(line, `","`) {
+		out = append(out, strings.Trim(part, `"`))
+		if len(out) == 2 {
+			break
+		}
+	}
+	return out
+}

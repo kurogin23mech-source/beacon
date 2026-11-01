@@ -645,11 +645,33 @@ func (s *Server) Serve() error {
 	return http.Serve(s.ln, s.handler())
 }
 
+// ServeWithIdleTimeout は Serve に「誰も見ていなければ畳む」見張りを足したもの
+// (ms-170 e-7147)。`timeout <= 0` なら従来どおり畳まない。
+func (s *Server) ServeWithIdleTimeout(timeout time.Duration) error {
+	if timeout <= 0 {
+		return s.Serve()
+	}
+	tracker := newIdleTracker(time.Now())
+	// 確認の間隔は閾値の 1/10 (最短 5 秒)。細かく見ても早く畳めるわけではないが、
+	// 粗すぎると閾値を大きく超えてから畳むことになる。
+	check := timeout / 10
+	if check < 5*time.Second {
+		check = 5 * time.Second
+	}
+	watchIdle(tracker, timeout, check, time.Now, exitIdle)
+	return http.Serve(s.ln, wrapWithIdleTracking(s.handler(), tracker, time.Now))
+}
+
 // Close は受け口を畳む。
 func (s *Server) Close() error { return s.ln.Close() }
 
 // OpenBrowser は既定のブラウザで盤を開く。
 // 開けなくても盤は住所を打てば見られるので、失敗しても止めない。
+//
+// **終わった子を回収する** (ms-170 e-7147): 以前は `Start()` だけで `Wait()` を
+// していなかった。`open` / `xdg-open` はすぐ終わるのに回収されないので、盤が
+// 動いている間ずっと ``<defunct>`` が残る (2026-11-02 実測: 盤 1 本につき 1 件)。
+// 待つのは別の筋で行う —— ここで待つと、ブラウザが開くまで盤の起動が止まる。
 func OpenBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -660,5 +682,8 @@ func OpenBrowser(url string) {
 	default:
 		cmd = exec.Command("xdg-open", url)
 	}
-	_ = cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	go func() { _ = cmd.Wait() }()
 }

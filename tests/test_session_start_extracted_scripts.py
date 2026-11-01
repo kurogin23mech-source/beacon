@@ -150,11 +150,14 @@ def test_view_reports_failure_when_child_dies(tmp_path, monkeypatch):
     assert "log:" in marker
 
 
-def test_view_failure_when_url_present_but_child_dead(tmp_path, monkeypatch):
-    """A URL in the log does NOT beat a dead child (AX748-1 liveness-first).
+def test_view_failure_when_url_present_but_child_died_badly(tmp_path, monkeypatch):
+    """A URL in the log does NOT excuse a **non-zero** exit (AX748-1).
 
-    A child that prints a URL and then exits must be reported as a failure, not
-    a false VIEWER_URL success — liveness is checked before the URL.
+    Narrowed in ms-170 e-7147: the original claim was "a child that prints a URL
+    and then exits is a failure, full stop". Reuse made that false — the viewer
+    now prints the serving line of an already-running board and exits 0 on
+    purpose. What stays true is this case: a child that exits non-zero failed,
+    whatever it managed to print on the way out.
     """
     monkeypatch.chdir(tmp_path)
     log = tmp_path / "view.log"
@@ -167,6 +170,47 @@ def test_view_failure_when_url_present_but_child_dead(tmp_path, monkeypatch):
     )
     assert marker.startswith("VIEWER_LAUNCH_FAILED=exited-1")
     assert not marker.startswith("VIEWER_URL")
+
+
+def test_view_reports_url_when_child_exits_zero_after_announcing(
+        tmp_path, monkeypatch):
+    """Exit 0 **plus** a serving line is success: the board was reused.
+
+    ms-170 e-7147: when a board for the same project is already up, the viewer
+    prints that board's serving line and exits 0 instead of starting a second
+    one. Reading that as a failure reports red for the path that works —
+    measured 2026-11-02, four of five opens came back as ``exited-0`` while the
+    board was serving fine.
+    """
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn",
+        _fake_spawn_writing("盤を開きました: http://127.0.0.1:7377/\n", rc_seq=(0,)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    assert marker == "VIEWER_URL=http://127.0.0.1:7377/", marker
+
+
+def test_view_failure_when_child_exits_zero_without_announcing(
+        tmp_path, monkeypatch):
+    """Exit 0 **without** a serving line is still a failure.
+
+    Exit code alone must not be read as success — a child that left without
+    saying where the board is did not give the caller anything to open. Both
+    facts are required (this is the half that keeps the rule from going slack).
+    """
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "view.log"
+    monkeypatch.setattr(
+        BOARD, "_spawn", _fake_spawn_writing(None, rc_seq=(0,)),
+    )
+    marker = BOARD.launch_and_observe(
+        "/bin/beacon", str(log), wait_seconds=0.05, poll_interval=0.01
+    )
+    assert marker.startswith("VIEWER_LAUNCH_FAILED=exited-0"), marker
 
 
 def test_view_unconfirmed_when_alive_but_no_url(tmp_path, monkeypatch):
