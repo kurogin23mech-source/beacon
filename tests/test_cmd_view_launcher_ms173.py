@@ -244,6 +244,12 @@ def _wire(monkeypatch, *, binary, execv_error=None):
     # 到達しない (PR#758 CI red の実経路)。
     monkeypatch.setattr(cmd_view, "viewer_handshake",
                         lambda binary, expected, **kw: (True, expected))
+    # 建て直し忘れの検出 (e-7249) も既定では成立扱いに差し替える。偽バイナリ
+    # (/x/beacon-view) は時刻が読めず実装上 "unknown" に落ちるが、それに寄りかかると
+    # 「たまたま通っている」テストになる。意図を明示して固定する (stale 側の分岐は
+    # test_cmd_view_stale_binary_e7249.py が持つ)。
+    monkeypatch.setattr(cmd_view, "binary_freshness",
+                        lambda binary, **kw: ("fresh", ""))
 
     import builtins
     real_print = builtins.print
