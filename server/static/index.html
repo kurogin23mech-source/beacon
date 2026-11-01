@@ -4788,10 +4788,6 @@ function renderMainContent() {
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
-      <!-- ms-97 / e-2606 — Project tab bar から Treks タブを削除 (= e-2251 で
-           merge された SPEC § 方針 6 と真逆の配置を revert)。 Trek は project と
-           独立な first-class object なので、 ハンバーガーメニュー top-level
-           Treks セクション (= renderTreksSection in renderMenu) から入る。 -->
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>`;
   return `
     <div class="tab-bar fade-in stagger-1">${isSales ? salesTabBar : devTabBar}</div>
@@ -6982,7 +6978,6 @@ function renderMilestoneCard(ms, index) {
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
         ${tabBar}
         <div class="tgt-detail-panel">${tabContent}</div>
-        ${renderRelatedTreksWidget('milestone', ms.id)}
       </div>
     `;
   }
@@ -7082,18 +7077,6 @@ async function switchTab(tab) {
       try { state.attackListContent[d.doc_id] = await dataSource.getDocContentById(d.doc_id); }
       catch (_e) { state.attackListContent[d.doc_id] = ''; }
     }));
-  }
-  if (tab === 'operations') {
-    // ms-69 / e-1664: pre-warm related-treks for every operation on the
-    // project so the widget renders immediately as the op cards paint.
-    // Skip ops we already have cached.
-    const ops = (state.project && state.project.operations) || [];
-    const missing = ops.filter(o => state.relatedTreks['op:' + o.id] === undefined);
-    if (missing.length) {
-      Promise.all(missing.map(o => dataSource.loadRelatedTreks('operation', o.id)))
-        .then(() => render())
-        .catch(() => {});
-    }
   }
   if (tab === 'releases') {
     // ms-84 / e-2326 follow-up — slim WS broadcast drops the heavy
@@ -7681,7 +7664,7 @@ function _renderSettingsAgentsTab() {
     <div class="settings-section">
       <div class="label" style="margin-bottom:4px;">
         ${esc(myEmail || 'You')} — online sessions
-        <span class="beacon-tooltip" data-tooltip="Lists only your own online sessions. Filter by Trek. Leave a Trek from the terminal (beacon trek leave).">
+        <span class="beacon-tooltip" data-tooltip="Lists only your own online sessions.">
           <span class="beacon-tooltip-icon">?</span>
         </span>
       </div>
@@ -8035,33 +8018,6 @@ function _trekStatusIcon(s) {
   if (s === 'planning') return '○';
   if (s === 'archived') return '\u{1F4E6}';
   return '?';
-}
-
-// ms-69 / e-1664 — Related Treks widget rendered inline on milestone /
-// operation / task detail. Reads from state.relatedTreks (= cache keyed by
-// "ms:..." / "op:..." / "task:..."). Returns empty string when not yet
-// loaded or when there are no matches, so the widget never adds visual
-// noise to work items that no trek covers.
-function renderRelatedTreksWidget(kind, id) {
-  const prefix = kind === 'milestone' ? 'ms' : kind === 'operation' ? 'op' : 'task';
-  const key = prefix + ':' + id;
-  const treks = state.relatedTreks[key];
-  if (!treks || treks.length === 0) return '';
-  const row = (t) => `
-    <div data-action="trek-jump-from-widget" data-trek-id="${esc(t.trek_id)}"
-         style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;font-size:0.78rem;border-bottom:1px solid var(--border);">
-      <span>${_trekStatusIcon(t.status)}</span>
-      <span style="flex:1;">${esc(t.title || '')}</span>
-      ${t.halt ? '<span style="color:#c75;" title="halted">⚠</span>' : ''}
-      <span style="color:var(--text-dim);font-size:0.72rem;">${esc(t.status || '')}</span>
-    </div>`;
-  return `
-    <div style="margin-top:14px;padding:8px 12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;">
-      <div style="font-size:0.7rem;color:var(--text-secondary);letter-spacing:0.05em;margin-bottom:4px;">
-        RELATED TREKS (${treks.length})
-      </div>
-      ${treks.map(row).join('')}
-    </div>`;
 }
 
 // Short session id rendering: keep prefix + suffix, elide middle.
@@ -9054,105 +9010,6 @@ function _renderTrekDetail(t) {
     </section>`;
 }
 
-function renderTreksSection() {
-  // Detail view first (if a trek is open) so loading shows immediately.
-  if (state.openTrekId) {
-    const t = (state.treks || []).find(x => x.trek_id === state.openTrekId);
-    if (!t) {
-      return `
-        <section class="retro-section fade-in">
-          <span class="retro-back" data-action="close-trek">← back to Treks</span>
-          <div class="retro-empty">Trek not found (= it was archived elsewhere or you're not a member).</div>
-        </section>`;
-    }
-    return _renderTrekDetail(t);
-  }
-  // List view (ms-86 / e-2251): show ALL treks the caller belongs to
-  // (= creator or member), not just treks scoped to the current project.
-  // Trek は cross-project な独立 scope (= SPEC IgCFK8I34cBfPco3UE06 中心原則 1
-  // 「Project ⟷ Trek は M:N 独立オブジェクト」)。 project filter を外して
-  // user 全 Trek を 1 画面で一覧できるようにする。 紐付く project は各行で
-  // chip 表示 (= 何の project に絡む Trek かは 1 行で読み取れる)。
-  // /api/treks endpoint 側で caller=member の絞り込みは既に走っているので、
-  // ここで追加 filter する必要は無い。
-  const allTreks = state.treks || [];
-  if (allTreks.length === 0) {
-    return `
-      <section class="retro-section fade-in">
-        <div class="milestones-header" style="margin-bottom:4px;">
-          <span class="milestones-title">Treks</span>
-          <span class="milestones-count">0</span>
-        </div>
-        <div class="retro-empty" style="margin-top:10px;">
-          You don't belong to any treks yet (= a trek is a cross-project, cross-session coordination workspace).
-        </div>
-        <div style="margin-top:14px;padding:10px 12px;font-size:0.72rem;color:var(--text-dim);background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;line-height:1.5;">
-          ℹ Treks are created from the terminal:
-          <code style="display:block;margin-top:6px;color:var(--accent);">beacon trek create "title" --type persistent</code>
-        </div>
-      </section>`;
-  }
-  // Split active vs archived for visual grouping (mock convention).
-  const active = allTreks.filter(t => t.status !== 'archived');
-  const archived = allTreks.filter(t => t.status === 'archived');
-  // ms-86 / e-2251 — derive distinct project count per trek (= "this trek
-  // spans N projects" chip). scope[] entries carry a `project` field per
-  // normalize_scope_entry (lib/trek.py L922-936). De-duplicate by project id
-  // so a 5-task / 1-project trek shows "1 project" rather than "5 projects".
-  const trekRow = (t) => {
-    const halt = !!t.halt;
-    const memberCount = (t.members || []).length;
-    const scopeEntries = t.scope || [];
-    const scopeCount = scopeEntries.length;
-    const projectIds = new Set();
-    for (const s of scopeEntries) {
-      if (s && s.project) projectIds.add(s.project);
-    }
-    const projectCount = projectIds.size;
-    return `
-      <div class="trek-list-row" data-action="open-trek" data-trek-id="${esc(t.trek_id)}">
-        <span class="status-dot ${_trekBadgeClass(t.status)}"></span>
-        <span class="name">${esc(t.title || '')}${halt ? '<span class="halt-mark">⚠</span>' : ''}<span class="id">${esc(t.trek_id)}</span></span>
-        <span class="counts">${memberCount}m / ${scopeCount}s</span>
-        <span class="counts">${projectCount} project${projectCount === 1 ? '' : 's'}</span>
-        <span class="counts">${esc(t.type || '')}</span>
-      </div>`;
-  };
-  let html = `
-    <section class="retro-section fade-in" style="margin-bottom:6px;">
-      <div class="milestones-header" style="margin-bottom:4px;">
-        <span class="milestones-title">Treks</span>
-        <span class="milestones-count">${active.length} active / ${archived.length} archived</span>
-      </div>
-    </section>`;
-  if (active.length) {
-    html += `
-      <section class="retro-section fade-in" style="margin-bottom:12px;">
-        <div class="trek-section-title" style="margin-bottom:6px;">ACTIVE</div>
-        ${active.map(trekRow).join('')}
-      </section>`;
-  }
-  if (archived.length) {
-    html += `
-      <section class="retro-section fade-in" style="margin-bottom:12px;">
-        <div class="trek-section-title" style="margin-bottom:6px;">ARCHIVED</div>
-        ${archived.map(trekRow).join('')}
-      </section>`;
-  }
-  html += `
-    <div class="trek-cli-hint" style="margin-top:14px;">
-      Start a new trek from the terminal:
-      <code>beacon trek create "title" --type persistent</code>
-    </div>`;
-  return html;
-}
-
-async function openRetro(week) {
-  try { await dataSource.loadRetroContent(week); }
-  catch (e) { state.retroContent = { week, content: 'Failed to load retro document.' }; }
-  render();
-}
-
 function closeRetro() { state.retroContent = null; render(); }
 
 // ---- Documents ----
@@ -9877,7 +9734,6 @@ function renderOperationsSection() {
         <div class="op-section-label">Incidents</div>
         ${incidentsHtml}${resolvedHtml}
       </div>` : ''}
-      ${renderRelatedTreksWidget('operation', op.id)}
     </div>`;
   };
 
@@ -10214,10 +10070,6 @@ function handleCommonAction(action, el) {
         if (state.milestoneEntries[msId] === undefined) {
           fetchMilestoneEntries(msId);
         }
-        // ms-69 / e-1664: lazy-load related treks on first expand.
-        if (state.relatedTreks['ms:' + msId] === undefined) {
-          dataSource.loadRelatedTreks('milestone', msId).then(() => render());
-        }
         // ms-162 e-5833: lazy-load the (project-wide) decision stream once, on
         // the first target detail open. Filtered per-target at render time.
         ensureDecisionsLoaded();
@@ -10422,9 +10274,10 @@ function handleCommonAction(action, el) {
       openDocument(el.dataset.docId); return true;
     case 'open-retro':
       openRetro(el.dataset.week); return true;
-    // ms-69 / e-1659 — Trek detail
-    case 'open-trek':
-      openTrek(el.dataset.trekId); return true;
+    // ms-185 e-7079: 入口 (= open-trek) は落とした。close-trek は到達不能に
+    // なった Trek detail の markup (= trek-crumb の「← Back」) と対で残す —
+    // 片方だけ外すと markup が handler の無い action を出す形になり、
+    // frontend drift ガードが拾う。描画側ごと消すのは e-7070 の範囲。
     case 'close-trek':
       closeTrek(); return true;
     // ms-86 / e-2133 — session ref (= s-N badge) クリックで実 session id を
@@ -10461,9 +10314,7 @@ function handleCommonAction(action, el) {
       } catch (_e) { /* noop */ }
       return true;
     }
-    // ms-69 / e-1659 v3 — sidebar trek nav + settings overlay
-    case 'menu-open-trek':
-      closeMenu(); openTrek(el.dataset.trekId); return true;
+    // ms-69 / e-1659 v3 — settings overlay
     case 'open-settings':
       openSettings(); return true;
     case 'close-settings':
@@ -10521,16 +10372,6 @@ function handleCommonAction(action, el) {
     case 'settings-export-json':
       if (typeof exportProject === 'function') exportProject(_settingsViewedProjectId());
       return true;
-    // ms-69 / e-1664 — Related Treks widget on work item detail
-    // ms-97 / e-2606 — Trek tab は廃止されたので、 widget からは trek detail
-    // page に直接遷移する (= openTrek が main 領域を上書きするので tab 経由
-    // 不要)。 entry modal が開いていれば閉じる (= 遷移先で見えなくする)。
-    case 'trek-jump-from-widget': {
-      const tid = el.dataset.trekId;
-      if (state.openEntryId) closeEntryModal();
-      openTrek(tid);
-      return true;
-    }
     // ms-97 / e-2609 — Trek detail の pending scope-add / scope-remove
     // approval button。 trek doc の pending_scope_changes entry を 1 click
     // で server に commit / reject させる経路。 backend (= e-2611 / e-2603)
@@ -10655,17 +10496,6 @@ function openEntryDetail(entryId) {
   if (!result) return;
   state.openEntryId = entryId;
   renderEntryModal(result.entry, result.ms || result.op);
-  // ms-69 / e-1664: lazy-load related treks for this task entry. When the
-  // data lands, re-render the modal so the widget appears (or stays empty,
-  // in which case the widget is silent).
-  if (state.relatedTreks['task:' + entryId] === undefined) {
-    dataSource.loadRelatedTreks('task', entryId).then(() => {
-      // Only re-render the modal if it's still showing the same entry.
-      if (state.openEntryId === entryId) {
-        renderEntryModal(result.entry, result.ms || result.op);
-      }
-    });
-  }
 }
 
 function renderEntryModal(entry, parent) {
@@ -10713,15 +10543,11 @@ function renderEntryModal(entry, parent) {
         <div class="entry-modal-desc">${esc(entry.description)}</div>
         <div class="entry-modal-meta">${priorityBadge}${statusText}${reasonMissing}</div>
         ${authorField}${motivation}${ac}${behavior}${resolves}${detail}${doneReason}${cancelReason}${restoreReason}
-        ${renderRelatedTreksWidget('task', entry.id)}
       </div>
     </div>
   `;
   overlay.style.display = 'flex';
   overlay.querySelector('[data-action="close-entry-modal"]')?.addEventListener('click', closeEntryModal);
-  overlay.querySelectorAll('[data-action="trek-jump-from-widget"]').forEach(node => {
-    node.addEventListener('click', handleAction);
-  });
 }
 
 function closeEntryModal() {
@@ -10901,45 +10727,6 @@ async function renderMenu() {
   // Sort: created_at \u964d\u9806 (= newest first)\u3002 server side \u304c\u65e2\u306b\u540c sort \u3092\u8fd4\u3059
   // (lib/trek_store.list_treks L110-112) \u304c\u3001 cache \u9806\u5e8f\u305a\u308c\u3084\u5225 source \u304b\u3089\u306e
   // upsert \u306b\u5099\u3048\u3066 client \u5074\u3067\u3082 defensive \u306b\u4e26\u3079\u76f4\u3059\u3002
-  const renderTreksSection = () => {
-    const treks = state.treks;
-    if (treks === undefined || treks === null) {
-      return '<div class="menu-user" style="color:var(--text-dim);">Loading\u2026</div>';
-    }
-    const active = treks
-      .filter(t => t.status !== 'archived')
-      .slice()
-      .sort((a, b) => {
-        const ax = (a.created_at || '') + (a.trek_id || '');
-        const bx = (b.created_at || '') + (b.trek_id || '');
-        return bx.localeCompare(ax);
-      });
-    if (active.length === 0) {
-      return '<div class="menu-user" style="color:var(--text-dim);">You are not a member of any active treks.</div>';
-    }
-    return active.map(t => {
-      const halt = !!t.halt;
-      const projectIds = new Set();
-      for (const s of (t.scope || [])) {
-        if (s && s.project) projectIds.add(s.project);
-      }
-      const projectCount = projectIds.size;
-      const memberCount = (t.members || []).length;
-      const subParts = [
-        `${projectCount} project${projectCount === 1 ? '' : 's'}`,
-        `${memberCount}m`,
-      ];
-      if (halt) subParts.unshift('\u26a0 halted');
-      return `
-        <button class="menu-item ${state.openTrekId === t.trek_id ? 'current' : ''}"
-                data-action="menu-open-trek" data-trek-id="${esc(t.trek_id)}">
-          ${esc(t.title || '')}
-          <div class="menu-item-sub">${subParts.join(' \u00b7 ')} \u00b7 ${esc(t.trek_id)}</div>
-        </button>
-      `;
-    }).join('');
-  };
-
   const renderSessionsSection = () => {
     const sessions = state.onlineSessions;
     if (sessions === undefined || sessions === null) {
@@ -10985,11 +10772,6 @@ async function renderMenu() {
       </div>
 
       <div class="menu-section">
-        <div class="menu-section-title">Treks</div>
-        <div id="menu-treks-list">${renderTreksSection()}</div>
-      </div>
-
-      <div class="menu-section">
         <div class="menu-section-title">Online Agents</div>
         <div id="menu-sessions-list">${renderSessionsSection()}</div>
       </div>
@@ -11028,15 +10810,6 @@ async function renderMenu() {
   // object \u306a\u306e\u3067\u3001 project switcher \u3068\u540c\u3058 menu \u968e\u5c64\u306b\u4e26\u3076\u306e\u304c\u81ea\u7136\u306a\u52d5\u7dda\u3002
   // /api/treks \u306f include_archived=true \u3067\u5168\u53d6\u5f97\u3057\u3001 list \u5074\u306e filter \u3067 active
   // \u306e\u307f\u8868\u793a (= active \u304c glance\u3001 archived \u306f detail \u7d4c\u7531\u3067\u306e\u307f\u5230\u9054)\u3002
-  if (!state.treks || state.treks.length === 0) {
-    dataSource.loadTreks().then(() => {
-      refillSection('menu-treks-list', renderTreksSection());
-    }).catch(() => {
-      refillSection('menu-treks-list',
-        '<div class="menu-user" style="color:var(--text-dim);">No treks.</div>');
-    });
-  }
-
   if (!state.onlineSessions || state.onlineSessions.length === 0) {
     dataSource.loadOnlineSessions().then(() => {
       refillSection('menu-sessions-list', renderSessionsSection());
@@ -11804,32 +11577,13 @@ async function init() {
     waitForGsi();
     return;
   }
-  // ms-86 / e-2250 — Trek detail is project-agnostic. If the URL carries
-  // ?trek=<id>, honor it after the normal project load resolves so the
-  // shell has a project to render under but the Trek detail view comes up
-  // immediately. URL-side ``?project=`` is still respected when present
-  // (= it just gets dropped once openTrek() runs and rewrites the URL).
   const urlProjectId = getProjectIdFromUrl();
-  const urlTrekId = getTrekIdFromUrl();
   if (urlProjectId) {
     await selectProject(urlProjectId);
-  } else if (urlTrekId) {
-    // Cold link with no project context — pick the caller's first
-    // project so the shell can render, then openTrek() takes over.
-    await loadProjects();
-    if (state.projects.length >= 1) await selectProject(state.projects[0].project_id);
   } else {
     await loadProjects();
     if (state.projects.length === 1) await selectProject(state.projects[0].project_id);
     else render();
-  }
-  // ms-86 / e-2250 — once any project (if needed) is in place, open the
-  // Trek the URL pointed at. Treks are loaded by loadTreks() inside
-  // selectProject; openTrek() will fall back to a fresh fetch if it
-  // can't find the trek in the cache. Wrap in a try/catch so a stale
-  // URL doesn't break the rest of init.
-  if (urlTrekId) {
-    try { await openTrek(urlTrekId); } catch (_e) { /* stale ?trek= */ }
   }
   await handleHashNav();
 
