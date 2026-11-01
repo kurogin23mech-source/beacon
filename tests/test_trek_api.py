@@ -265,20 +265,48 @@ def reset_store():
         _restore_db(prior)
 
 
+def _store_trek(title: str, uid: str, email: str, sid: str) -> str:
+    """Arrange a bare trek directly in the store and return its trek_id.
+
+    ms-185 e-7079: POST /api/treks (= the creation entrance) is gone. Tests
+    that need a trek to ALREADY EXIST arrange it here instead; what they
+    assert (listing filters, membership rules, ...) is unrelated to the
+    creation endpoint's own contract.
+    """
+    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
+    doc = trek_mod.new_trek(
+        title=title,
+        creator_user_id=uid,
+        creator_email=email,
+        creator_session_id=sid,
+    )
+    app_module.db.save_trek(doc["trek_id"], doc)
+    return doc["trek_id"]
+
+
 def _create_seed_trek(*, status: str = "active") -> str:
     """Create a trek with LEADER as leader + MEMBER joined + INVITED pending.
 
     Returns the trek_id. Status defaults to ``active`` so members can mutate.
     """
     _impersonate(LEADER_UID, LEADER_EMAIL)
-    r = client.post("/api/treks", json={
-        "title": "Seed trek",
-        "description": "for tests",
-        "type": "persistent",
-        "creator_session_id": "sv-leader",
-    })
-    assert r.status_code == 200, r.text
-    trek_id = r.json()["trek_id"]
+    # ms-185 e-7079: POST /api/treks (= the only creation entrance) is gone, so
+    # the arrangement step writes the trek straight to the store. These tests
+    # are about behaviour AFTER a trek exists (membership, blockers, review
+    # gates, slot preconditions); they are not the creation entrance's contract,
+    # so they stay alive until the body itself is removed (e-7070). The fields
+    # mirror what the removed endpoint produced.
+    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
+    new_doc = trek_mod.new_trek(
+        title="Seed trek",
+        creator_user_id=LEADER_UID,
+        creator_email=LEADER_EMAIL,
+        creator_session_id="sv-leader",
+        description="for tests",
+        type_="persistent",
+    )
+    app_module.db.save_trek(new_doc["trek_id"], new_doc)
+    trek_id = new_doc["trek_id"]
 
     # Invite MEMBER and have them join.
     r = client.post(f"/api/treks/{trek_id}/members",
@@ -311,66 +339,6 @@ class TestAuth:
         app_module.app.dependency_overrides.clear()
         r = client.get("/api/treks")
         assert r.status_code == 401
-
-    def test_unauthenticated_create_returns_401(self):
-        app_module.app.dependency_overrides.clear()
-        r = client.post("/api/treks", json={
-            "title": "x", "creator_session_id": "sv-x",
-        })
-        assert r.status_code == 401
-
-
-# ---------------------------------------------------------------------------
-# CRUD happy paths
-# ---------------------------------------------------------------------------
-
-class TestCreate:
-    def test_create_minimal(self):
-        _impersonate(LEADER_UID, LEADER_EMAIL)
-        r = client.post("/api/treks", json={
-            "title": "Hello", "creator_session_id": "sv-leader",
-        })
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["title"] == "Hello"
-        assert body["status"] == "planning"
-        assert body["type"] == "persistent"
-        assert body["leader_session_id"] == "sv-leader"
-        assert body["creator_actor"]["user_id"] == LEADER_UID
-        # Caller is auto-added as leader-role member.
-        assert any(m["user_id"] == LEADER_UID and m["role"] == "leader"
-                   for m in body["members"])
-
-    def test_create_temporary_type(self):
-        _impersonate(LEADER_UID, LEADER_EMAIL)
-        r = client.post("/api/treks", json={
-            "title": "T", "type": "temporary",
-            "creator_session_id": "sv-leader",
-        })
-        assert r.status_code == 200
-        assert r.json()["type"] == "temporary"
-
-    def test_create_rejects_blank_title(self):
-        _impersonate(LEADER_UID, LEADER_EMAIL)
-        r = client.post("/api/treks", json={
-            "title": "   ", "creator_session_id": "sv-leader",
-        })
-        assert r.status_code == 400
-
-    def test_create_rejects_missing_session(self):
-        _impersonate(LEADER_UID, LEADER_EMAIL)
-        r = client.post("/api/treks", json={
-            "title": "T", "creator_session_id": "",
-        })
-        assert r.status_code == 400
-
-    def test_create_rejects_invalid_type(self):
-        _impersonate(LEADER_UID, LEADER_EMAIL)
-        r = client.post("/api/treks", json={
-            "title": "T", "type": "bogus",
-            "creator_session_id": "sv-leader",
-        })
-        assert r.status_code == 400
 
 
 class TestGetList:
@@ -410,11 +378,7 @@ class TestGetList:
         trek_id = _create_seed_trek()
         # Another user creates a private trek — should NOT appear in
         # LEADER's listing.
-        _impersonate(STRANGER_UID, STRANGER_EMAIL)
-        r = client.post("/api/treks", json={
-            "title": "Stranger trek", "creator_session_id": "sv-s",
-        })
-        assert r.status_code == 200
+        _store_trek("Stranger trek", STRANGER_UID, STRANGER_EMAIL, "sv-s")
         _impersonate(LEADER_UID, LEADER_EMAIL)
         r = client.get("/api/treks")
         assert r.status_code == 200
@@ -427,10 +391,7 @@ class TestGetList:
         trek_id = _create_seed_trek(status="planning")
         _impersonate(LEADER_UID, LEADER_EMAIL)
         # Start an additional trek to active.
-        r = client.post("/api/treks", json={
-            "title": "Other", "creator_session_id": "sv-l",
-        })
-        other_id = r.json()["trek_id"]
+        other_id = _store_trek("Other", LEADER_UID, LEADER_EMAIL, "sv-l")
         r = client.post(f"/api/treks/{other_id}/start")
         assert r.status_code == 200
         r = client.get("/api/treks", params={"status": "active"})
@@ -730,10 +691,7 @@ class TestLeave:
         # Leader removes MEMBER + INVITED + transfers; then this is brittle —
         # just keep it simple by creating a solo trek.
         _impersonate(LEADER_UID, LEADER_EMAIL)
-        r = client.post("/api/treks", json={
-            "title": "Solo", "creator_session_id": "sv-l",
-        })
-        trek_id = r.json()["trek_id"]
+        trek_id = _store_trek("Solo", LEADER_UID, LEADER_EMAIL, "sv-l")
         # Leader is the only member, and they cannot leave (=archive instead).
         r = client.delete(f"/api/treks/{trek_id}/members/me")
         assert r.status_code == 400

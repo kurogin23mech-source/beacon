@@ -144,12 +144,18 @@ def _seed_pre_a_trek() -> str:
     docs; the inline auto-migrate only triggers on a fresh join.
     """
     _impersonate(LEADER_UID, LEADER_EMAIL)
-    r = client.post("/api/treks", json={
-        "title": "migrate endpoint pre-A",
-        "creator_session_id": "sv-leader",
-    })
-    assert r.status_code == 200, r.text
-    trek_id = r.json()["trek_id"]
+    # ms-185 e-7079: POST /api/treks (= the creation entrance) is gone. These
+    # tests are about the migrate endpoint's behaviour on an EXISTING trek, so
+    # the arrangement step writes to the store instead.
+    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
+    _doc = trek_mod.new_trek(
+        title="migrate endpoint pre-A",
+        creator_user_id=LEADER_UID,
+        creator_email=LEADER_EMAIL,
+        creator_session_id="sv-leader",
+    )
+    app_module.db.save_trek(_doc["trek_id"], _doc)
+    trek_id = _doc["trek_id"]
     assert client.post(
         f"/api/treks/{trek_id}/members",
         json={"email": MEMBER_EMAIL}).status_code == 200

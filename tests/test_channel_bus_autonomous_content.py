@@ -208,42 +208,10 @@ def _probe_channel_to_skill(channel: str) -> str | None:
     return json.loads(proc.stdout)["out"]
 
 
-def test_channel_to_skill_mapping_covers_operation_and_trek_channels():
-    assert _probe_channel_to_skill("operation-trigger") == "/beacon-operation-execute"
-    assert _probe_channel_to_skill("trek-progress-check") == "/beacon-trek-execute"
-    assert _probe_channel_to_skill("trek-trigger") == "/beacon-trek-execute"
-    assert _probe_channel_to_skill("trek-task-review") == "/beacon-trek-review"
-    # ms-92 / e-2164 — leader-digest channel maps to /beacon-trek-execute
-    # (the leader's stance reminder lives inside that Skill, see e-2166).
-    assert _probe_channel_to_skill("trek-leader-digest") == "/beacon-trek-execute"
 
 
-def test_gate_passes_for_trek_leader_digest_auto_execute():
-    """ms-92 / e-2164 — leader-digest is auto-execute and must launch
-    the Skill without user confirmation, same as the other trek channels.
-    """
-    assert _probe_gate("trek-leader-digest", "auto-execute", False) is True
 
 
-def test_trek_leader_digest_content_carries_summary_and_launch_directive():
-    """leader-digest narrative must surface active/stuck/idle counts +
-    the launch directive so the leader-side AI knows what to do."""
-    out = _probe_content({
-        "event_id": "evt-digest-1",
-        "channel": "trek-leader-digest",
-        "payload": {
-            "trek_id": "tk-leader-x",
-            "summary": {
-                "active": 3, "stuck": 1, "idle": 1,
-                "needs_leader_judgment": 1,
-            },
-        },
-    })
-    assert "TREK LEADER DIGEST" in out
-    assert "tk-leader-x" in out
-    assert "active=3" in out
-    assert "stuck=1" in out
-    assert "/beacon-trek-execute" in out
 
 
 def test_channel_to_skill_returns_null_for_unmapped_channel():
@@ -251,16 +219,10 @@ def test_channel_to_skill_returns_null_for_unmapped_channel():
     assert _probe_channel_to_skill("unknown-channel") is None
 
 
-def test_gate_passes_for_trek_progress_check_auto_execute():
-    assert _probe_gate("trek-progress-check", "auto-execute", False) is True
 
 
-def test_gate_passes_for_trek_trigger_auto_execute():
-    assert _probe_gate("trek-trigger", "auto-execute", False) is True
 
 
-def test_gate_passes_for_trek_task_review_auto_execute():
-    assert _probe_gate("trek-task-review", "auto-execute", False) is True
 
 
 def test_gate_blocks_trek_channel_with_non_auto_execute_delivery():
@@ -278,66 +240,10 @@ def test_gate_blocks_all_trek_channels_when_opt_out_env_set():
     assert _probe_gate("trek-task-review", "auto-execute", True) is False
 
 
-def test_trek_progress_check_content_carries_launch_directive():
-    # ms-88 / e-2105 (Phase 1 narrative 強化) で header と本文が更新された。
-    # 新仕様: 「必須アクション」 + TTL 期限 + auto-stall 罰則明示 + 3 経路
-    # (= pulse / execute / task-state) を提示する。 旧 "Run this autonomously"
-    # は consequence 強度が足りなかったため置換。
-    # e-4117: 期限は enforcement TTL (= 既定 1440 分 / 24h) に一致。旧「12 分」
-    # 表記は enforcement の 120× 過大だったので撤去 (narrative の空手形防止)。
-    out = _probe_content({
-        "event_id": "evt-trek-1",
-        "channel": "trek-progress-check",
-        "payload": {
-            "trek_id": "tk-abc",
-            "trigger_name": "trek_progress_tk-abc",
-        },
-    })
-    assert "TREK ACTION REQUIRED" in out
-    # consequence 明示 (= 怠ると auto-stall) は narrative 強度の核
-    assert "auto-stall" in out
-    # TTL は enforcement 既定 (24h) にフォールバックし、旧「12 分」は出ない
-    assert "24 時間 (= 1440 分)以内" in out
-    assert "12 分" not in out
-    # 3 経路 (pulse 推奨 + execute 既存 + task-state manual) が出る
-    assert "/beacon-trek-pulse tk-abc" in out
-    assert "/beacon-trek-execute tk-abc" in out
-    assert "beacon trek task-state" in out
-    assert "trek_id: tk-abc" in out
-    assert "trigger_name: trek_progress_tk-abc" in out
 
 
-def test_trek_trigger_content_uses_same_executor_skill():
-    """trek-trigger and trek-progress-check both share the strengthened
-    narrative (ms-88 e-2105). Both events should expose the same enforcement
-    framing so executors invoked by either path enter the same flow."""
-    out = _probe_content({
-        "event_id": "evt-trek-2",
-        "channel": "trek-trigger",
-        "payload": {"trek_id": "tk-xyz"},
-    })
-    assert "TREK ACTION REQUIRED" in out
-    assert "/beacon-trek-execute tk-xyz" in out
 
 
-def test_trek_progress_check_content_carries_ttl_metadata_when_provided():
-    """server (ms-88 / e-2107) sends ttl_deadline_at + last_activity_at +
-    ttl_minutes so the narrative carries actionable "by when" data. The
-    builder must surface these when present, but degrade gracefully when
-    the server hasn't been redeployed yet (= older payloads omit them)."""
-    out = _probe_content({
-        "event_id": "evt-trek-ttl",
-        "channel": "trek-progress-check",
-        "payload": {
-            "trek_id": "tk-ttl-1",
-            "last_activity_at": "2026-06-19T22:00:00Z",
-            "ttl_deadline_at": "2026-06-19T22:12:00Z",
-            "ttl_minutes": 12,
-        },
-    })
-    assert "last_activity_at: 2026-06-19T22:00:00Z" in out
-    assert "ttl_deadline_at: 2026-06-19T22:12:00Z" in out
-    assert "ttl_minutes: 12" in out
 
 
 def test_trek_progress_check_content_omits_ttl_metadata_when_absent():
@@ -351,53 +257,10 @@ def test_trek_progress_check_content_omits_ttl_metadata_when_absent():
     assert "ttl_minutes:" not in out
 
 
-def test_trek_task_review_content_carries_picker_directive():
-    """trek-task-review routes to /beacon-trek-review with the trek_id +
-    task_id positional args, matching the Skill's invocation contract."""
-    out = _probe_content({
-        "event_id": "evt-trek-3",
-        "channel": "trek-task-review",
-        "payload": {
-            "trek_id": "tk-abc",
-            "task_id": "e-2048",
-            "state": "waiting-review",
-            "note": "implementation chunk done, leader review needed",
-        },
-    })
-    assert "## TREK ACTION — trek task review required" in out
-    assert "/beacon-trek-review tk-abc e-2048" in out
-    assert "approve / re-work / forward-to-user" in out
-    assert "task_id: e-2048" in out
-    assert "state: waiting-review" in out
-    # Executor note must be preserved (truncated only if long).
-    assert "implementation chunk done" in out
 
 
-def test_trek_task_review_content_truncates_long_executor_note():
-    long_note = "x" * 300
-    out = _probe_content({
-        "event_id": "evt-trek-4",
-        "channel": "trek-task-review",
-        "payload": {
-            "trek_id": "tk-1",
-            "task_id": "e-1",
-            "state": "done",
-            "note": long_note,
-        },
-    })
-    # 200-char cap with ellipsis matches the bus.mjs cap on free-form text.
-    assert "x" * 200 + "…" in out
-    assert "x" * 201 not in out
 
 
-def test_trek_content_defaults_to_question_mark_when_payload_empty():
-    out = _probe_content({
-        "event_id": "evt-trek-5",
-        "channel": "trek-progress-check",
-        "payload": {},
-    })
-    assert "trek_id: ?" in out
-    assert "/beacon-trek-execute ?" in out
 
 
 def test_unknown_channel_falls_back_to_operation_format():
@@ -426,41 +289,7 @@ def _enforcement_default_ttl_min() -> int:
     return int(trek_scheduler.DEFAULT_WORKING_TTL_MINUTES)
 
 
-def test_trek_narrative_uses_server_passed_ttl_minutes():
-    """When the server passes ttl_minutes, the narrative shows exactly that —
-    not a hardcoded value."""
-    out = _probe_content({
-        "event_id": "e1", "channel": "trek-progress-check",
-        "payload": {"trek_id": "tk-1", "ttl_minutes": 30},
-    })
-    assert "30 分以内に実行" in out
-    assert "12 分" not in out  # the old hardcoded, drifted value is gone
 
 
-def test_trek_narrative_falls_back_to_enforcement_default_not_12min():
-    """No ttl_minutes in the payload → the narrative falls back to the REAL
-    enforcement default (1440 min = 24h), never the stale 12-min figure.
-
-    This is the drift guard: the mjs fallback constant is asserted equal to
-    lib/trek_scheduler.DEFAULT_WORKING_TTL_MINUTES, so bumping the enforcement
-    TTL without updating the narrative fallback fails here."""
-    out = _probe_content({
-        "event_id": "e2", "channel": "trek-progress-check",
-        "payload": {"trek_id": "tk-1"},  # no ttl_minutes
-    })
-    default_min = _enforcement_default_ttl_min()
-    assert default_min == 1440  # pin the current enforcement value explicitly
-    # 1440 min renders as "24 時間 (= 1440 分)".
-    assert f"{default_min // 60} 時間 (= {default_min} 分)以内に実行" in out
-    assert "12 分" not in out
 
 
-def test_trek_narrative_header_and_action_line_agree_on_ttl():
-    """Both the header and the 必須アクション line must quote the same TTL —
-    a half-updated narrative (header says X, body says Y) is its own drift."""
-    out = _probe_content({
-        "event_id": "e3", "channel": "trek-progress-check",
-        "payload": {"trek_id": "tk-1", "ttl_minutes": 1440},
-    })
-    # Appears in the header AND the 必須アクション bullet.
-    assert out.count("24 時間 (= 1440 分)以内") >= 2

@@ -116,6 +116,24 @@ LEADER_UID = "uid-leader"
 MEMBER_UID = "uid-member"
 
 
+def _store_trek_doc(title: str, uid: str, email: str, sid: str) -> str:
+    """Arrange a bare trek directly in the store and return its trek_id.
+
+    ms-185 e-7079: POST /api/treks (= the creation entrance) is gone. What the
+    tests below assert is behaviour on an EXISTING trek, not the creation
+    endpoint's own contract, so the arrangement step writes to the store.
+    """
+    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
+    doc = trek_mod.new_trek(
+        title=title,
+        creator_user_id=uid,
+        creator_email=email,
+        creator_session_id=sid,
+    )
+    app_module.db.save_trek(doc["trek_id"], doc)
+    return doc["trek_id"]
+
+
 def _impersonate(uid: str) -> None:
     def _fake_auth():
         return {"sub": uid, "email": f"{uid}@x"}
@@ -152,11 +170,8 @@ def _create_trek_with_member_and_scope() -> str:
     GET /api/treks/{id}) is unchanged; only the setup steps grew.
     """
     _impersonate(LEADER_UID)
-    r = client.post("/api/treks", json={
-        "title": "Contract pin trek",
-        "creator_session_id": "sv-leader",
-    })
-    trek_id = r.json()["trek_id"]
+    trek_id = _store_trek_doc("Contract pin trek", LEADER_UID,
+                              "leader@x", "sv-leader")
     # invite MEMBER + have them join
     client.post(f"/api/treks/{trek_id}/members", json={"email": "member@x"})
     _impersonate(MEMBER_UID)
