@@ -13,9 +13,10 @@
 * **作業コピーで変異させる**。リポジトリのファイルを in-place で書き換えないので、
   バイトコードキャッシュが変異版を持ち越す穴 (``-B`` では閉じない) と、隣で走る
   pytest が変異中のファイルを読む穴が構造的に消える。
-* **入口で引数を裁く** (`ih.parse_cli` = 穴 4 の引数側)。``--help`` や打ち間違えた
-  フラグを黙って捨てて本物の変異を走らせない。共有部品に委ねるので、裁き方が
-  姉妹ハーネスと食い違わない。
+* **入口は共有部品 1 箇所に寄せる** (`ih.guarded_main` = 穴 4)。``--help`` や
+  打ち間違えたフラグを黙って捨てて本物の変異を走らせない。引数の裁きと排他ロックを
+  自分で書かないので、裁き方が姉妹ハーネスと食い違わない
+  (`tests/test_invert_harness_entrypoint_guards.py` が AST で強制している)。
 * **赤の理由を構造で見る** (`ih.classify_pytest_result` = 穴 3)。終了コードが非 0
   でも、収集に失敗しただけ (rc 2〜5) や要約行が error を数えている場合は「捕まえた」
   に数えない。変異が構文を壊しただけのケースが「守られている」に化けるのを防ぐ。
@@ -23,16 +24,16 @@
 * **目印が見つからなければ失敗扱い**。コードが動いたときに反転を黙って消すと、
   ハーネスが緑のまま中身が空になる (SKIP は緑と同じ害)。
 
-**`ih.guarded_main` を使わず `ih.parse_cli` を直に呼ぶ理由** (e-7249 保守性 review、
-指摘の一部を意図して採らなかった箇所): `guarded_main` は引数の裁きと **repo 単位の
-排他ロック** を束ねている。ロックは「共有ファイルを in-place で変異させるハーネス
-同士が衝突しないため」のもので、このハーネスは作業コピーしか変異させないので守る
-対象が無い。一方このハーネスは test (`test_inversion_harness_is_wired`) から呼ばれ、
-ロックは ``run()`` の全区間 (約 10 秒) 保持される。すでに `invert-note-backup-ordering`
-と `invert-retired-provenance-guard` の 2 本が「`guarded_main` を使い、かつ test から
-呼ばれる」状態なので、ここで 3 本目の競合者になると、要らないロックのために CI が
-不定期に赤くなる (``REFUSED: another invert harness is running``)。**要らない保護を
-足して壊れる形**を避け、引数の裁きと赤の判定だけを共有部品から受け取る。
+**pytest から呼ぶのはこのハーネスだけ** (= 姉妹の既定と違う点、理由を書き残す):
+姉妹は ``lib/`` を in-place で変異させるので pytest に配線できない (CI は ``-n 4``
+並列で、隣の worker が変異中のファイルを読む)。だから「手で直列に走らせる」が既定で、
+`tests/test_invert_harness_entrypoint_guards.py` もそう明記している。このハーネスは
+作業コピーしか変異させないので、その危険が構造的に無く、配線してよい。配線する利点は
+**人が思い出さなくても走る**こと —— 手で走らせる約束は、忘れたときに何も言わない。
+
+排他ロックは `guarded_main` が取る。いま pytest から走る locked なハーネスは
+これだけなので競合しない。将来もう 1 本を pytest に配線するなら、そこで初めて
+``REFUSED: another invert harness is running`` が出るので、黙って壊れることはない。
 
 使い方:
     python3 scripts/invert-stale-viewer-guard-e7249.py
@@ -253,8 +254,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # 入口で引数を裁く (穴 4 の引数側)。--help は使い方を出して終わり、未知の
-    # フラグは非 0 で拒否する — 黙って捨てて本物の変異を走らせない。
-    # 排他ロック (guarded_main) は採らない: 理由は module docstring。
-    ih.parse_cli(sys.argv, __doc__)
-    sys.exit(main())
+    # 入口は共有部品 1 箇所に寄せる (引数の裁き + 排他ロック)。
+    # `tests/test_invert_harness_entrypoint_guards.py` がこれを AST で強制する。
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, pathlib.Path(REPO)))
