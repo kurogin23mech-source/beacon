@@ -48,10 +48,22 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# 走査から外すディレクトリ (生成物・依存・別 worktree)。
+# 走査から外すディレクトリ (生成物・依存・別 worktree・道具の作業場所)。
+#
+# `.claude` は道具 (Claude Code) の作業場所で、**git 管理下に 1 ファイルも無い**。
+# 中にはレビュアーを走らせたときの作業コピー (`.claude/worktrees/agent-*`) が
+# 残り、そこはリポジトリの過去の状態そのものなので、今は直してある古い書き方が
+# そのまま在る。歩くと「直したのに指摘される」ので、毎回ノイズが出て、やがて
+# この検査の出力ごと読み流されるようになる (= 緑も赤も信用されなくなる)。
+#
+# 線引きは「レビュアーの作業コピーを除く」ではなく **リポジトリが実際に運んで
+# いるコードだけを見る**。前者だと置き場所が変わった瞬間に漏れるが、後者なら
+# 道具が何を置いても関係ない。`.claude` が追跡されていないことは
+# `tests/test_pid_liveness_scan_scope.py` が固定する。
 SKIP_DIRS = {
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".worktrees",
-    ".trash", ".archive", "build", "dist", ".mypy_cache", ".pytest_cache",
+    ".claude", ".trash", ".archive", "build", "dist", ".mypy_cache",
+    ".pytest_cache",
 }
 
 # ``os.kill(pid, 0)`` を書いてよい唯一の場所たち。
