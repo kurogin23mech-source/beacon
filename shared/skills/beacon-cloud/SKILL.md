@@ -451,7 +451,6 @@ read-only なので確認不要、即時実行して終了。
 
 - `/beacon-init` — Beacon プロジェクトの初期化 (= local mode / cloud mode 両対応の初回 setup)。本 Skill は cloud mode 切り替え後の継続運用に focus。
 - `/beacon-member` — メンバー操作。cloud mode 必須なので、本 Skill で cloud mode が有効化されてから使う。
-- `/beacon-trek` — Trek 操作。同様に cloud mode 必須。
 - `/beacon-dm-send` / `/beacon-dm-respond` — DM 送受信。cloud project_id を経由するため cloud mode 必須。
 
 cloud mode の **on/off 切り替え** だけが本 Skill の責務。他の cloud 依存 Skill とは重ならない。
