@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
@@ -131,3 +132,60 @@ def test_repo_root_itself_stays_clean():
     rc, out = _run_guard(ROOT)
     assert rc == 0, out
     assert "ok" in out
+
+
+# --- 盤の受入確認の手順 (ms-170 e-7252) -------------------------------------
+#
+# 手順そのものは実機のセッションが要るので、ここで固定するのは **手順が在ること**
+# と、**過去に踏んだ罠に戻っていないこと**。実測 (前後 3 通りの判定が区別できる)
+# は scripts/verify-on-running-board.sh の docstring と e-7252 の完了理由に在る。
+
+_VERIFY = ROOT / "scripts" / "verify-on-running-board.sh"
+
+
+def test_running_board_verification_procedure_exists():
+    """手順が在り、実行できる形で置かれている (受入条件 3)。"""
+    assert _VERIFY.is_file(), f"手順がありません: {_VERIFY}"
+    assert os.access(_VERIFY, os.X_OK), "実行できる形になっていません"
+
+
+def test_procedure_queries_the_running_board_not_a_standalone_artifact():
+    """**動いている盤に問い合わせる**形であること (受入条件 1)。
+
+    生成物を単体で走らせた結果を根拠にしたのが元の事故なので、手順が盤の口を
+    叩いていることを押さえる。
+    """
+    text = _VERIFY.read_text(encoding="utf-8")
+    assert "/api/jump" in text, "盤に問い合わせていない"
+    assert "/api/state" in text, "盤が応えるようになるのを待っていない"
+    assert "/api/sessions" in text, "的を盤自身から取っていない"
+
+
+def test_procedure_compares_before_and_after():
+    """前と後の両方を立てて同じ問い合わせを投げる形であること (受入条件 2)。"""
+    text = _VERIFY.read_text(encoding="utf-8")
+    for token in ("PORT_BEFORE", "PORT_AFTER", "sweep"):
+        assert token in text, f"前後の比較の骨格が無い: {token}"
+
+
+def test_procedure_does_not_use_mapfile():
+    """`mapfile` を使わない (macOS 同梱の bash 3.2 に無い)。
+
+    最初これで落ちた。可搬性の回帰の受け皿。
+    """
+    text = _VERIFY.read_text(encoding="utf-8")
+    code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("mapfile" in ln for ln in code), (
+        "mapfile は macOS の bash 3.2 に無い")
+
+
+def test_procedure_refuses_to_call_an_order_artifact_a_fix():
+    """**順序で説明できる差を「直った」と言わない** (自分が 2 度踏んだ罠)。
+
+    問い合わせ自体が窓の並びを変えるので、先に投げた側が不利になる。総数の差だけ
+    で判定すると、前後に同じ実行ファイルを渡しても「直った」と出る (実測)。判定の
+    根拠が「後から周を回った側での失敗」であることを押さえる。
+    """
+    text = _VERIFY.read_text(encoding="utf-8")
+    assert "before_second_fails" in text, "後から回ったときの失敗を数えていない"
+    assert "順序では説明できない" in text, "判定の根拠が書かれていない"
