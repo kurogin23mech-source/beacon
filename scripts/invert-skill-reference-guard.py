@@ -12,9 +12,29 @@ This script injects each defect the guard claims to catch, runs the guard, and
 restores the file immediately. It asserts RED for every defect and GREEN for the
 untouched tree. Any case that stays green is a hole in the guard, not a pass.
 
-Run:  python3 -B scripts/invert-skill-reference-guard.py
-      (-B matters: a stale __pycache__ entry can answer from the previous
-       version of the guard and produce a green that means nothing.)
+## なぜ共有部品 (``invert_harness``) を通すのか
+
+最初の版はこの mutate/restore を自前で書き、``python3 -B`` を対策として
+挙げていた。**それは誤りで、共有部品の docstring が明示的に否定している**:
+Apple 同梱の Python は ``~/Library/Caches/com.apple.python/`` に ``.pyc`` を
+書き、``-B`` は **書き込みを止めるだけで読み込みは止めない**。このハーネスは
+変異の 2 件で **ガード自身の .py** を書き換えて戻すので、変異版の ``.pyc`` が
+残れば次の実行が旧バイトコードから答える — つまり **偽の緑** が出る。偽の安全
+を測るための道具が偽の安全を作るのでは、測った意味が消える。
+
+もう 1 つ自前実装が落としていたのが排他ロックである。このハーネスは
+``lib/`` の共有ファイルを in-place で書き換えるので、2 本が同時に走ると
+互いの変異を読み、復元が相手の書き込みを巻き戻す (lost update)。このリポジトリは
+fork 並走が常態なので、「同時に走らせない」という**お願い**では守られない。
+
+共有部品はこの 2 つ (と引数の裁き、環境を汚さない保証) を 1 箇所に持っている。
+写すと片方だけ直って drift するので (実際に e-7065 と e-7077 で起きた)、
+import して使う。pytest を走らせる姉妹と違い本ハーネスの対象は **スクリプト**
+なので、``run_pytest`` / ``classify_pytest_result`` は使わず、終了コードと
+メッセージを自前で見る (ガードは終了コードを契約として持っているため、
+pytest の 1 と 2〜5 を分ける必要がない)。
+
+使い方:  python3 scripts/invert-skill-reference-guard.py   (引数は取らない)
 
 Exit 0 = the guard is load-bearing. Exit 1 = at least one defect slipped past.
 """
@@ -24,15 +44,25 @@ from __future__ import annotations
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import invert_harness as ih  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 GUARD = REPO / "scripts" / "check-skill-reference-drift.py"
 
 
 def run_guard() -> tuple[int, str]:
+    """ガードを隔離環境で走らせる。
+
+    ``ih.isolated_env()`` がバイトコードキャッシュを実行ごとの一時ディレクトリ
+    へ逃がす (穴 1-a)。``-B`` も併せて渡すが、それは書き込み抑止の二重化で
+    あって対策の本体ではない。
+    """
     r = subprocess.run(
         [sys.executable, "-B", str(GUARD), "--strict"],
-        cwd=REPO, capture_output=True, text=True,
+        cwd=REPO, capture_output=True, text=True, env=ih.isolated_env(),
     )
     return r.returncode, (r.stdout + r.stderr)
 
@@ -65,15 +95,37 @@ class Mutation:
         try:
             self.path.write_text(original.replace(self.old, self.new, 1),
                                  encoding="utf-8")
+            # 変異のたびにキャッシュ鍵を変える (穴 1-b)。変異対象がガード自身の
+            # .py である 2 件では、これが無いと旧バイトコードから答えが返る。
+            ih.invalidate_bytecode_cache(self.path, REPO)
             rc, out = run_guard()
         finally:
-            self.path.write_text(original, encoding="utf-8")
-        if rc == 0:
-            return False, "guard stayed GREEN with the defect injected"
+            ih.restore({self.path: original}, REPO)
+
+        # 赤の理由を 2 段で見る (穴 3)。
+        #
+        # 1 段目は共有部品の分類器。終了コードの意味はこのガードでも pytest と
+        # 同じ向きに読める: 1 = 指摘あり (= 狙っていた赤)、2 = argparse の使い方
+        # エラー (= 壊し方が下手で起動に失敗した) なので INVALID。判定を手元に
+        # 写すと 1 本だけ直って姉妹が旧判定のまま並ぶため、ここは共有に委ねる。
+        tail = out.strip().split("\n")[-1] if out.strip() else ""
+        caught, shown = ih.classify_pytest_result(
+            SimpleNamespace(returncode=rc), tail)
+        if not caught:
+            if rc == 0:
+                return False, "guard stayed GREEN with the defect injected"
+            return False, shown
+
+        # 2 段目はメッセージの検査。**スクリプトを対象にする本ハーネスでは
+        # 終了コードだけでは足りない**: 変異がガードの構文を壊すと python は
+        # rc=1 で traceback を出すので、1 段目はそれを「捕まえた」と読む
+        # (pytest なら収集失敗が rc=2 に分かれるが、素のスクリプトにはその
+        # 区別が無い)。狙った指摘の名前が出力に在ることまで要求して初めて、
+        # 「壊し方が下手なだけ」と「ガードが効いた」が分かれる。
         if self.expect_in_output not in out:
             return False, (f"went red, but the message never mentions "
                            f"{self.expect_in_output!r} — the reader would not "
-                           f"know what to fix")
+                           f"know what to fix (壊し方が下手なだけの赤かもしれない)")
         return True, "RED, and the message names the defect"
 
 
@@ -106,6 +158,29 @@ MUTATIONS = [
         '("lib/trek.py", "beacon-trek-pulse"):',
         '("lib/trek.py", "beacon-trek-pulse-renamed-away"):',
         "no longer match anything",
+    ),
+    # 5. The scan reaching the Skill dirs. A Skill telling an AI to run a
+    #    deleted Skill is the most common shape of this defect, and the first
+    #    version of the guard did not look there at all (an injection into all
+    #    three copies left the whole strict-guard suite green). Pinned here so
+    #    the dirs cannot quietly fall back out of SCAN_DIRS.
+    Mutation(
+        "a Skill names a non-existent Skill (Skill dirs are in scope)",
+        REPO / "skills" / "beacon-task.md",
+        "## 制約",
+        "## 制約\n\n完了後は " + MISSING_A + " を起動する。\n",
+        MISSING_A.lstrip("/"),
+    ),
+    # 6. The alias model must not degrade into "anything /beacon-* is fine".
+    #    Aliases resolve because a Skill DECLARES them in its frontmatter; a
+    #    name nobody declares must still fail. Injected in the same frontmatter
+    #    shape as a real alias, so only the declaration check separates them.
+    Mutation(
+        "an undeclared alias-shaped name in a Skill body still fails",
+        REPO / "skills" / "beacon-note.md",
+        "## 制約",
+        "## 制約\n\nサブコマンド hint (" + MISSING_B + ") で起動された場合。\n",
+        MISSING_B.lstrip("/"),
     ),
     # 4. Loosening the detector itself: if the token-boundary rule is dropped,
     #    every URL and path matches and the report floods. A flooded report is
@@ -155,4 +230,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # 入口は共有部品 1 箇所 (穴 4): 未知の引数は何も書かずに拒否し、repo 単位の
+    # 排他ロックを取ってから本体を呼ぶ。ロックが取れなければ 1 行断って終わる。
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, REPO))

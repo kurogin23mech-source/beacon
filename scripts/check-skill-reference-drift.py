@@ -67,8 +67,25 @@ SKILL_LOCATIONS = (
 )
 
 # Production surfaces that can put a slash command in front of an AI.
+#
+# The Skill directories are in this list on purpose, and they are the reason the
+# guard earns its keep: **a Skill telling an AI to run another Skill is the most
+# common shape this defect takes**, not a Python f-string. e-7069 had to remove
+# 9 such references by hand, in each of the three places Skills live (27 edits).
+# A first version of this guard scanned only the code directories; an injection
+# test then put `/beacon-<deleted>` into all three copies of one Skill and the
+# whole strict-guard suite stayed green. Leaving them out would have made the
+# green line ("every reference in production code resolves") read far wider than
+# what was actually checked — and a green that overstates its coverage is worse
+# than no guard, because people stop looking.
+#
 # Order is only for stable output.
-SCAN_DIRS = ("bin", "lib", "server", "channel", "scripts", "beacon_cli", "desktop")
+SCAN_DIRS = (
+    "bin", "lib", "server", "channel", "scripts", "beacon_cli", "desktop",
+    # the three places a Skill lives; `shared` and `plugins` are walked whole
+    # because everything under them is shipped instruction text
+    "skills", "shared", "plugins",
+)
 SCAN_SUFFIXES = (".py", ".sh", ".mjs", ".js", ".md", ".html")
 
 # Not production instruction surfaces:
@@ -121,6 +138,38 @@ KNOWN_PROSE_REFERENCES = {
     ("server/routers_treks.py", "beacon-trek-review"):
         "pending e-7070: Trek router, unreachable for creation since e-7079",
 
+    # --- Skill prose, found when the scan widened to the Skill dirs -------
+    # Two kinds, both genuinely prose rather than an instruction. Listed per
+    # (file, skill) and per copy, because the three Skill copies are separate
+    # files and a regression in only one of them must still fail.
+    #
+    #   (a) history: a migration note recording that the old dm-reply command
+    #       was folded into this Skill on 2026-06-10. Removing the name would
+    #       delete the only record of where it went — the opposite of helpful.
+    #   (b) a Skill that is planned but not written (the bus-budget one, marked
+    #       将来 in the text itself, so a reader is not misled). If it is ever
+    #       created these rows go stale and the guard says so.
+    #
+    # Note the spelling here: these comments name the Skills WITHOUT a leading
+    # slash on purpose. This file is itself scanned, so quoting the dangling
+    # spelling would make the guard report its own documentation — it did, on
+    # the first attempt. Same reason the inversion harness composes its fake
+    # names at runtime instead of writing them as literals.
+    ("skills/beacon-dm-send.md", "beacon-dm-reply"):
+        "prose/history: migration note recording that beacon-dm-reply was "
+        "folded into this Skill on 2026-06-10",
+    ("skills/beacon-dm-send.md", "beacon-bus-budget"):
+        "prose/planned: listed as 将来 in the text; budget is CLI-only today",
+    ("shared/skills/beacon-dm-send/SKILL.md", "beacon-dm-reply"):
+        "prose/history: migration note recording that beacon-dm-reply was "
+        "folded into this Skill on 2026-06-10",
+    ("shared/skills/beacon-dm-send/SKILL.md", "beacon-bus-budget"):
+        "prose/planned: listed as 将来 in the text; budget is CLI-only today",
+    ("plugins/beacon/skills/beacon-dm-send/SKILL.md", "beacon-dm-reply"):
+        "prose/history: migration note recording that beacon-dm-reply was "
+        "folded into this Skill on 2026-06-10",
+    ("plugins/beacon/skills/beacon-dm-send/SKILL.md", "beacon-bus-budget"):
+        "prose/planned: listed as 将来 in the text; budget is CLI-only today",
     # --- Pre-existing, found BY this guard on its first run ---------------
     # Not introduced by ms-185. Recorded rather than fixed here so the guard
     # can land green; fixing them is their own (small) change.
@@ -172,8 +221,65 @@ def _is_family_prose(name: str) -> bool:
     return name.endswith("-") or "*" in name or name in PLACEHOLDER_NAMES
 
 
+def _declared_trigger_aliases() -> set:
+    """Alias names that Skills declare for themselves in their frontmatter.
+
+    A Skill's frontmatter carries a ``triggers:`` list — the phrases that invoke
+    it — and short aliases live there: ``beacon-session-start`` declares
+    ``/beacon-start``, ``beacon-dm-respond`` declares ``/beacon-dm-approve`` and
+    ``/beacon-dm-deny``. **These are declarations, not references.** There is no
+    file named ``skills/beacon-start.md`` and there is not meant to be.
+
+    So an alias is a real answer to this guard's question — "does the thing we
+    tell an AI to run exist?" — and must count as existing, in frontmatter and
+    in body prose alike ("サブコマンド hint (`/beacon-dm-approve`) で起動された
+    場合…" is a Skill describing its own alias).
+
+    Resolving them *by nature* rather than listing them in the allowlist matters:
+    50 Skills declare aliases, so an allowlist would need dozens of rows that say
+    nothing except "this one is fine", and each new alias would turn the guard
+    red until someone added a row. A guard that cries wolf gets switched off,
+    which is the same failure as no guard. (CORE doc: 免除とガードは「性質」で
+    閉じる — 狭すぎても緩すぎても破れる.)
+    """
+    aliases = set()
+    for loc in SKILL_LOCATIONS:
+        pattern = loc.format(name="*")
+        for path in REPO.glob(pattern):
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if not text.startswith("---"):
+                continue
+            end = text.find("\n---", 3)
+            if end == -1:
+                continue
+            front = text[3:end]
+            in_triggers = False
+            for line in front.splitlines():
+                if re.match(r"^\w[\w-]*:", line):
+                    in_triggers = line.startswith("triggers:")
+                    continue
+                if not in_triggers:
+                    continue
+                m = re.match(r"\s*-\s*/(beacon-[a-z0-9][a-z0-9-]*)\s*$", line)
+                if m:
+                    aliases.add(m.group(1))
+    return aliases
+
+
+_ALIAS_CACHE: "set | None" = None
+
+
 def skill_exists(name: str) -> bool:
-    return any((REPO / loc.format(name=name)).exists() for loc in SKILL_LOCATIONS)
+    """True if ``name`` resolves to a Skill file OR to a declared alias."""
+    if any((REPO / loc.format(name=name)).exists() for loc in SKILL_LOCATIONS):
+        return True
+    global _ALIAS_CACHE
+    if _ALIAS_CACHE is None:
+        _ALIAS_CACHE = _declared_trigger_aliases()
+    return name in _ALIAS_CACHE
 
 
 def iter_production_files():
@@ -245,10 +351,13 @@ def render(report: dict) -> str:
     if report["ok"]:
         return (
             "[skill-reference-drift] OK: every /beacon-<skill> reference in "
-            "production code resolves to a Skill that exists "
+            "production code resolves to a Skill file or to an alias a Skill "
+            "declares for itself "
             f"({report['references']} references across {report['scanned_files']} files; "
             f"{report['allowlisted']} allowlisted prose rows, all still matching; "
-            "looked in skills/, shared/skills/, plugins/beacon/skills/)."
+            "scanned bin/ lib/ server/ channel/ scripts/ beacon_cli/ desktop/ "
+            "and all three Skill dirs — tests/, CHANGELOG.md, mocks/, mockups/ "
+            "are excluded on purpose)."
         )
     lines = ["[skill-reference-drift] Drift detected:", ""]
     if report["dangling"]:
