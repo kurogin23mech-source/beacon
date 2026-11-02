@@ -165,7 +165,12 @@ func main() {
 		return
 	}
 
-	srv, err := NewServer(src, *host, *port, *expose)
+	// 占めている席は盤を立てるときに決める (ms-170 思想 review medium / 保守性
+	// review high)。画面からクラウドの取得元に切り替えても席は動かないので、
+	// 再利用・控え・居残り判定が取得元によって割れない。構築後に変えられない
+	// 形にしてあるのは、隣の『取得元切り替え時にリセットする』形に引きずられて
+	// 席を消す変更が入っても、型で止まるようにするため。
+	srv, err := NewServer(src, *host, *port, *expose, reuseKey)
 	if err != nil {
 		fail(err)
 	}
@@ -208,7 +213,14 @@ func main() {
 		OpenBrowser(srv.URL)
 	}
 
-	if err := srv.ServeWithIdleTimeout(*idleTimeout); err != nil {
+	// 既定はモードで変える (サーバに置いた盤は畳まない)。渡された値はどの
+	// モードでも尊重する。理由は idleTimeoutFor (idle.go)。
+	idleRequested := flagWasSet(flag.Visit, "idle-timeout")
+	effectiveIdle := idleTimeoutFor(*expose, *idleTimeout, idleRequested)
+	// **必ず 1 行名乗る** (AX review medium)。出すかどうかを「モードが上書きしたか」
+	// で決めていたため、`--idle-timeout 0` を明示したときだけ無言だった。
+	fmt.Println(idleAnnouncement(effectiveIdle, *expose, idleRequested))
+	if err := srv.ServeWithIdleTimeout(effectiveIdle); err != nil {
 		fail(err)
 	}
 	waitIfWindowWillClose()

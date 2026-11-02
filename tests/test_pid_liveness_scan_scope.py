@@ -309,3 +309,52 @@ def test_viewer_flag_parity_guard_is_wired_into_ci():
     ci = (ROOT / "scripts" / "ci-strict-drift-guards.sh").read_text(
         encoding="utf-8")
     assert "check-viewer-flag-parity.py" in ci
+
+
+# --- 盤を畳む既定の説明が 3 箇所で揃っているか (ms-170 保守性 review medium) ---
+#
+# 既定は Go (viewer/idle.go) が持ち、その説明が help 台帳 (lib/commands.py) と
+# viewer/README.md にも書かれている。独立レビューが「README は直したのに help
+# 台帳が『無条件に 30 分で畳む』のまま残り、既存の drift ガードは旗の**名前**しか
+# 見ないので緑だった」と指摘した。値そのものを 1 箇所に寄せるのは言語を跨ぐので、
+# ここでは **モード依存であることが 3 箇所すべてで述べられているか** を見る。
+
+def _help_view_description():
+    r = subprocess.run([str(ROOT / "bin" / "beacon"), "view", "--help"],
+                       cwd=ROOT, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r.stdout + r.stderr
+
+
+def test_the_idle_default_is_declared_once_in_go():
+    """既定値の持ち主は Go の 1 箇所。"""
+    idle = (ROOT / "viewer" / "idle.go").read_text(encoding="utf-8")
+    assert idle.count("defaultIdleTimeout = ") == 1, (
+        "既定値の宣言が 1 箇所でない (写しが増えると片方だけ直る)")
+    assert "30 * time.Minute" in idle
+
+
+def test_every_copy_says_the_default_depends_on_the_mode():
+    """**3 箇所すべて**がモード依存を述べている。
+
+    help 台帳だけが取り残されていたのが実際の drift。1 箇所でも「無条件に畳む」
+    と読める状態だと、それを読んだ人が誤った前提で動く。
+    """
+    help_text = _help_view_description()
+    readme = (ROOT / "viewer" / "README.md").read_text(encoding="utf-8")
+    idle = (ROOT / "viewer" / "idle.go").read_text(encoding="utf-8")
+
+    # help: --expose では畳まないことに触れている
+    assert "--expose" in help_text and "never does" in help_text, (
+        f"help 台帳がモード依存を述べていない:\n{help_text}")
+    # README: 設置した盤は畳まないと書いてある
+    assert "自ら畳みません" in readme, "README がモード依存を述べていない"
+    # 実装: 理由がコードのそばに在る
+    assert "サーバに置いた盤は畳まない" in idle, "実装側に理由が無い"
+
+
+def test_the_help_text_does_not_claim_an_unconditional_close():
+    """「常に 30 分で畳む」と読める言い方が help に残っていない。"""
+    help_text = _help_view_description()
+    assert "closes after 30m with nobody watching —" not in help_text, (
+        "help がモードに関係なく畳むと述べている (実際は --expose で畳まない)")

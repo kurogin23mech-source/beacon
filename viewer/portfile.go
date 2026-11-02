@@ -154,13 +154,39 @@ func liveBoardURL(rec *boardRecord, wantPath string) string {
 		return ""
 	}
 	var state struct {
-		Path string `json:"path"`
-		CWD  string `json:"cwd"`
+		Path     string `json:"path"`
+		CWD      string `json:"cwd"`
+		ReuseKey string `json:"reuse_key"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
 		return ""
 	}
-	if !sameBoardPath(state.Path, wantPath) {
+	// 席 (reuse_key) と、いま配っている道 (path) の **両方** を見る。
+	//
+	// `path` は取得元をクラウドに切り替えると空になるので、それだけで判定すると
+	// 「どの席でもない」と読んでしまう (ms-170 思想 review medium)。だから席を足した。
+	//
+	// **ただし席だけを信じてはいけない** (ms-170 AX review high)。盤には
+	// `/api/open` という、動いたまま **ローカルの別プロジェクトに切り替える**
+	// 経路が前から在る。席は起動時に決めて動かないので、切り替えた後の盤は
+	// 「席 = projA / 配っている道 = projB」になる。席だけを見ると、projA を
+	// 求めた相手に **projB を配っている盤** を成功扱いで渡してしまう。私の変更前は
+	// `path` 比較でこれを検出できていたので、席を無条件に優先させたのは回帰だった。
+	//
+	// そこで **食い違ったら一致と見なさない** (fail closed)。
+	//   - 席だけ在る (= クラウドに切り替えた盤): 席で判定する
+	//   - 両方在る: 両方が一致していなければ使わない
+	//   - 席が無い (= 古い盤): `path` で判定する
+	// 使わないと判断した側は新しい盤が立つだけなので、害は「1 本増える」に留まる。
+	// 逆に誤って渡すと、求めたのと違うプロジェクトのデータを見せることになる。
+	if state.ReuseKey != "" && !sameBoardPath(state.ReuseKey, wantPath) {
+		return ""
+	}
+	if state.Path != "" && !sameBoardPath(state.Path, wantPath) {
+		return ""
+	}
+	if state.ReuseKey == "" && state.Path == "" {
+		// どちらも名乗らない盤は、どの席のものか分からない。
 		return ""
 	}
 	return fmt.Sprintf("http://%s:%d/", host, rec.Port)

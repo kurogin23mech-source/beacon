@@ -48,7 +48,28 @@ type Server struct {
 	Host     string
 	startDir string // 起動した場所。どこを探したかを画面で伝えるのに使う。
 	expose   bool   // 外向きに公開しているか。端末へ飛ぶ操作は公開時に無効化する。
+
+	// reuseKey は「この盤が占めている席」。盤が二重に立たないための控え
+	// (portfile.go) と突き合わせる鍵で、**起動時に決めて以後変えない**。
+	//
+	// **なぜ `beaconDir()` では駄目か** (ms-170 思想 review medium): 画面から
+	// クラウドの取得元に切り替えると `s.src = nil` になり `beaconDir()` は空を
+	// 返す。空は「どの席でもない」と読まれるので、クラウドに向けた盤は
+	// (a) 再利用されず (b) 控えを他の盤に上書きされ (c) 居残りとして kill を
+	// 勧められる —— この MS が閉じようとした「使うたびに増える」が、取得元を
+	// クラウドにした盤にだけ残っていた。席は取得元の切り替えで動かない。
+	//
+	// **非公開にしてある** (ms-170 保守性 review high): 以前は公開の可変
+	// フィールドで、「以後変えない」はこのコメントだけが守っていた。独立
+	// レビューが `/api/cloud/open` の直後に 1 行足して席を消し、**全テストが
+	// 緑のまま**この PR が直したバグを再現させた。隣に `s.src = nil` /
+	// `s.cloud = c` という「取得元切り替え時にリセットする」形が在るので、
+	// 席も一緒にリセットする類推は自然に起きる。型で止める。
+	reuseKey string
 }
+
+// ReuseKey は、この盤が占めている席を返す (読み取りのみ)。
+func (s *Server) ReuseKey() string { return s.reuseKey }
 
 // jumpAvailable は「端末へ飛ぶ」を許してよいか。
 //
@@ -69,7 +90,10 @@ func (s *Server) beaconDir() string {
 }
 
 // NewServer は受け口を立てる。``expose`` が無いまま外向きの host を指定されたら断る。
-func NewServer(src *LocalSource, host string, port int, expose bool) (*Server, error) {
+// NewServer は受け口を立てる。``reuseKey`` はこの盤が占める席で、ここで決めて
+// 以後変わらない (上のフィールドの説明を参照)。
+func NewServer(src *LocalSource, host string, port int, expose bool,
+	reuseKey string) (*Server, error) {
 	if host == "" {
 		host = loopbackHost
 	}
@@ -84,7 +108,8 @@ func NewServer(src *LocalSource, host string, port int, expose bool) (*Server, e
 		return nil, err
 	}
 	cwd, _ := os.Getwd()
-	s := &Server{src: src, ln: ln, Host: host, startDir: cwd, expose: expose}
+	s := &Server{src: src, ln: ln, Host: host, startDir: cwd, expose: expose,
+		reuseKey: reuseKey}
 	s.URL = fmt.Sprintf("http://%s/", ln.Addr().String())
 	if isLoopback(host) {
 		// 表示用の住所は指定された名前を保つ (localhost と書かれたら localhost と出す)。
@@ -129,6 +154,9 @@ func (s *Server) handler() http.Handler {
 			"has_project": s.src != nil,
 			"path":        s.beaconDir(),
 			"cwd":         s.startDir,
+			// この盤が占めている席 (ms-170 思想 review medium)。`path` は取得元を
+			// クラウドに切り替えると空になるので、席の同一性はこちらで見る。
+			"reuse_key": s.reuseKey,
 			// クラウドから選ぶ経路はまだ無い。**画面に出す前にここで正直に伝える**
 			// (使えない入口を並べておくと、押しても何も起きない状態になる)。
 			"cloud_available": true,
