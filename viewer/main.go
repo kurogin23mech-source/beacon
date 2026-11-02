@@ -29,7 +29,7 @@ func main() {
 	noReuse := flag.Bool("no-reuse", false,
 		"既に動いている同じプロジェクトの盤を使わず、必ず新しく立てる")
 	idleTimeout := flag.Duration("idle-timeout", defaultIdleTimeout,
-		"この時間だけ誰も見に来なければ盤を畳む (0 で畳まない)")
+		"この時間だけ誰も見に来なければ盤を畳む (既定 0 = 畳まない)")
 	showVersion := flag.Bool("version", false, "版を出して終わる (beacon 側の委譲前の版握手用)")
 	flag.Parse()
 

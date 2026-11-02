@@ -179,14 +179,17 @@ func TestBoardAnnouncesItsSeatEndToEnd(t *testing.T) {
 	}
 }
 
-func TestLocalBoardAnnouncesThatItWillClose(t *testing.T) {
+func TestLocalBoardAnnouncesThatItWillNotClose(t *testing.T) {
 	// 起動時の案内が実際の挙動と一致していること。削っても何も落ちなかった
 	// ので、ここで押さえる (保守性 review low)。
+	//
+	// e-7264 で既定を反転した (以前は手元の盤だけ 30 分で畳み、この試験は
+	// 「畳むと名乗る」ことを固定していた)。畳まなくなったので案内も変わる。
+	// 案内と挙動が食い違うと、利用者は盤が死んだ理由を取り違える。
 	bin := _buildBinary(t)
 	proj := _project(t)
 	board := _startBoard(t, bin, "--path", proj, "--no-open", "--no-reuse")
-	board.waitFor(t, "無操作での終了")
-	board.refuteAfterStartup(t, "無操作での終了", "しません")
+	board.waitFor(t, "無操作での終了: しません")
 }
 
 func TestExposedBoardAnnouncesThatItWillNotClose(t *testing.T) {

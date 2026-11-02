@@ -106,17 +106,25 @@ func TestWatchIdleClosesWithAReason(t *testing.T) {
 
 // --- 起動モードごとの既定 (ms-170 思想 review medium) ------------------------
 
-func TestServerDeployedBoardsNeverSelfClose(t *testing.T) {
-	// サーバに置いた盤を畳むと「しばらく放っておくと盤が死んでいる」状態になる。
-	// 畳む理由 (手元で開くたびに積み上がる) が設置物には無い。
-	if got := idleTimeoutFor(true, 0, false); got != 0 {
-		t.Fatalf("サーバ設置の既定が畳む側になっている: %v", got)
+func TestNoBoardSelfClosesByDefault(t *testing.T) {
+	// e-7264: どちらのモードでも既定では畳まない。
+	//
+	// 以前は「設置した盤は畳まない / 手元の盤は 30 分で畳む」と分けていた。
+	// 手元を畳む理由は積み上がりだが、それは席 (reuse_key) による再利用で
+	// 閉じている。一方で畳むことの害は実地で重く、席を離れて戻ると盤が死んで
+	// おり、開いたままのタブは無言で繋がらなくなっていた (2026-11-02 に
+	// 「運用室が全然動かない」として報告された)。
+	//
+	// **両モードを 1 つの試験で押さえる**。片方だけ書くと、次に誰かが片側の
+	// 既定を戻したときに気付けない。
+	for _, exposed := range []bool{true, false} {
+		if got := idleTimeoutFor(exposed, 0, false); got != 0 {
+			t.Errorf("exposed=%v の既定が畳む側になっている: %v "+
+				"(畳むのは --idle-timeout を明示したときだけ)", exposed, got)
+		}
 	}
-}
-
-func TestLocalBoardsCloseByDefault(t *testing.T) {
-	if got := idleTimeoutFor(false, 0, false); got != defaultIdleTimeout {
-		t.Fatalf("手元の既定が %v (期待 %v)", got, defaultIdleTimeout)
+	if defaultIdleTimeout != 0 {
+		t.Errorf("既定の定数が 0 でない: %v", defaultIdleTimeout)
 	}
 }
 
@@ -165,7 +173,8 @@ func TestIdleAnnouncementAlwaysSaysSomething(t *testing.T) {
 		requested  bool
 		wantSubstr string
 	}{
-		{"手元の既定", 30 * time.Minute, false, false, "30m0s 誰も見に来なければ"},
+		{"30 分を明示", 30 * time.Minute, false, true, "30m0s 誰も見に来なければ"},
+		{"手元の既定 (畳まない)", 0, false, false, "しません"},
 		{"0 を明示", 0, false, true, "しません (指定により)"},
 		{"負を明示", -5 * time.Minute, false, true, "しません (指定により)"},
 		{"設置モード", 0, true, false, "しません (サーバ設置のため)"},
