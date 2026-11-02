@@ -151,3 +151,38 @@ func TestTheCloseMessageDoesNotAskARemoteViewerToRunACommand(t *testing.T) {
 		t.Fatal("畳まなかった")
 	}
 }
+
+// --- 起動時に名乗る 1 行 (ms-170 AX review medium) ---------------------------
+
+func TestIdleAnnouncementAlwaysSaysSomething(t *testing.T) {
+	// **3 通りの「畳まない」すべてで名乗る**。以前は --idle-timeout 0 を
+	// 明示したときだけ無言で、意思を持って指定した場合こそ確かめたいのに
+	// そこが名乗らない形だった。
+	cases := []struct {
+		name       string
+		effective  time.Duration
+		exposed    bool
+		requested  bool
+		wantSubstr string
+	}{
+		{"手元の既定", 30 * time.Minute, false, false, "30m0s 誰も見に来なければ"},
+		{"0 を明示", 0, false, true, "しません (指定により)"},
+		{"負を明示", -5 * time.Minute, false, true, "しません (指定により)"},
+		{"設置モード", 0, true, false, "しません (サーバ設置のため)"},
+		{"設置で明示", 0, true, true, "しません (指定により)"},
+		{"指定された値", 2 * time.Hour, false, true, "2h0m0s 誰も見に来なければ"},
+	}
+	for _, c := range cases {
+		got := idleAnnouncement(c.effective, c.exposed, c.requested)
+		if got == "" {
+			t.Errorf("%s: 何も名乗らなかった", c.name)
+			continue
+		}
+		if !strings.Contains(got, c.wantSubstr) {
+			t.Errorf("%s: %q に %q が無い", c.name, got, c.wantSubstr)
+		}
+		if !strings.Contains(got, "無操作での終了") {
+			t.Errorf("%s: 見出しが無い: %q", c.name, got)
+		}
+	}
+}

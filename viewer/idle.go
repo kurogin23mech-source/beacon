@@ -120,6 +120,29 @@ func watchIdle(t *idleTracker, timeout, check time.Duration, now func() time.Tim
 	}()
 }
 
+// idleAnnouncement は、起動時に名乗る 1 行を組み立てる (純関数)。
+//
+// **実効値だけで決める** (ms-170 AX review medium): 以前は「モードが旗の既定を
+// 上書きしたか」で出すかどうかを決めていた。そのため `--idle-timeout 0` を
+// **明示した**ときだけ無言になった —— 意思を持って指定した場合こそ、効いたことを
+// 確かめたいのに、そこが唯一名乗らない形だった。出力を grep して意図が通ったかを
+// 見る側は「旗が効かなかった」と誤読する。
+//
+// 理由 (なぜ畳まないのか) は飾りとして添えるだけで、**出すかどうかの条件にしない**。
+func idleAnnouncement(effective time.Duration, exposed, wasRequested bool) string {
+	if effective > 0 {
+		return fmt.Sprintf("  無操作での終了: %s 誰も見に来なければ畳みます", effective)
+	}
+	switch {
+	case wasRequested:
+		return "  無操作での終了: しません (指定により)"
+	case exposed:
+		return "  無操作での終了: しません (サーバ設置のため)"
+	default:
+		return "  無操作での終了: しません"
+	}
+}
+
 // exitIdle は見張りが畳むときの既定の後始末。理由を言い残してから終わる。
 func exitIdle(reason string) {
 	fmt.Fprintln(os.Stderr, reason)

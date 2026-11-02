@@ -46,9 +46,9 @@ func TestPortfilePathIsStableAcrossSpellings(t *testing.T) {
 	}
 	plain := portfilePath(dir)
 	for _, spelling := range []string{
-		dir + string(filepath.Separator),  // 末尾の区切りあり
-		filepath.Join(dir, "."),           // 自分自身を指す形
-		filepath.Join(sub, ".."),          // 一度降りて戻る形
+		dir + string(filepath.Separator), // 末尾の区切りあり
+		filepath.Join(dir, "."),          // 自分自身を指す形
+		filepath.Join(sub, ".."),         // 一度降りて戻る形
 	} {
 		if got := portfilePath(spelling); got != plain {
 			t.Errorf("同じ場所で控えが分かれた:\n  素=%s\n  %q=%s",
@@ -461,10 +461,105 @@ func TestLiveBoardURLFallsBackToPathForOlderBoards(t *testing.T) {
 	}
 }
 
-func TestSeatIsReportedByTheServer(t *testing.T) {
-	// 盤が実際に席を名乗ること (名乗らないと上の仕組みが効かない)。
-	srv := &Server{ReuseKey: "/some/project"}
-	if srv.ReuseKey != "/some/project" {
-		t.Fatal("席を保持していない")
+func TestSeatIsReportedOverHTTPByTheRealServer(t *testing.T) {
+	// **本物の `handler()` を HTTP で叩いて確かめる** (ms-170 保守性 review high)。
+	//
+	// 最初は `&Server{ReuseKey: "x"}` に代入して読み戻すだけの試験を書いていた。
+	// 代入した値が読めるかしか見ていないので、`main` が席を渡す 1 行を消しても、
+	// `/api/state` が空を返すようにしても緑のまま通った (独立レビューが両方を
+	// 個別に変異させて実証)。この PR が機能する根拠そのものが未検証だった。
+	dir := t.TempDir()
+	srv, err := NewServer(nil, loopbackHost, 0, false, dir)
+	if err != nil {
+		t.Fatalf("盤を立てられない: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+	resp, err := http.Get(ts.URL + "/api/state")
+	if err != nil {
+		t.Fatalf("/api/state を叩けない: %v", err)
+	}
+	defer resp.Body.Close()
+	var state struct {
+		ReuseKey string `json:"reuse_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		t.Fatalf("応答を読めない: %v", err)
+	}
+	if state.ReuseKey != dir {
+		t.Fatalf("席を名乗っていない: got %q want %q", state.ReuseKey, dir)
+	}
+}
+
+func TestSeatCannotBeChangedAfterTheBoardIsUp(t *testing.T) {
+	// 席は起動時に決めて以後変えない。**型で止める** (ms-170 保守性 review high)。
+	//
+	// 以前は公開の可変フィールドで、約束はコメントだけだった。独立レビューが
+	// `/api/cloud/open` の直後に 1 行足して席を消し、全テスト緑のままこの PR が
+	// 直したバグを再現させた。隣に `s.src = nil` / `s.cloud = c` という
+	// 「取得元切り替え時にリセットする」形が在るので、席も消す類推は自然に起きる。
+	//
+	// この試験は「読む口しか無い」ことを押さえる。書く口が復活したら、
+	// ここではなく **コンパイルが** 落ちる (それが狙い) ので、ここでは席が
+	// 構築時の値を保つことだけを確かめる。
+	dir := t.TempDir()
+	srv, err := NewServer(nil, loopbackHost, 0, false, dir)
+	if err != nil {
+		t.Fatalf("盤を立てられない: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	if srv.ReuseKey() != dir {
+		t.Fatalf("席が構築時の値と違う: %q", srv.ReuseKey())
+	}
+	// 取得元を切り替える経路を通しても席は動かない (/api/cloud/open 相当)。
+	srv.src = nil
+	if srv.ReuseKey() != dir {
+		t.Fatalf("取得元を外したら席が動いた: %q", srv.ReuseKey())
+	}
+}
+
+// --- 席と配っている道が食い違う盤は使わない (ms-170 AX review high) ----------
+
+func TestLiveBoardURLRefusesWhenTheSeatAndTheServedPathDisagree(t *testing.T) {
+	// `/api/open` は動いたまま **ローカルの別プロジェクトに切り替える**既存の
+	// 経路。席は起動時に決めて動かないので、切り替えた後は「席 = projA /
+	// 配っている道 = projB」になる。席だけを信じると、projA を求めた相手に
+	// projB を配っている盤を成功扱いで渡す (独立レビューが実機で再現した)。
+	//
+	// 変更前は `path` 比較でこれを検出できていたので、席の無条件優先は回帰だった。
+	projA := t.TempDir()
+	projB := t.TempDir()
+	_, port, host := _boardServerWith(t, map[string]any{
+		"reuse_key": projA,                           // 起動時の席
+		"path":      filepath.Join(projB, ".beacon"), // いま配っているのは別物
+	})
+	rec := &boardRecord{Port: port, PID: os.Getpid(), Host: host, Path: projA}
+	if got := liveBoardURL(rec, projA); got != "" {
+		t.Fatalf("別プロジェクトを配っている盤を渡した: %s", got)
+	}
+}
+
+func TestLiveBoardURLAcceptsWhenBothAgree(t *testing.T) {
+	// 両方在って一致していれば使う (締めすぎて再利用が死んでいないことの確認)。
+	dir := t.TempDir()
+	_, port, host := _boardServerWith(t, map[string]any{
+		"reuse_key": dir,
+		"path":      filepath.Join(dir, ".beacon"),
+	})
+	rec := &boardRecord{Port: port, PID: os.Getpid(), Host: host, Path: dir}
+	if got := liveBoardURL(rec, dir); got == "" {
+		t.Fatal("席と道が一致している盤を使わなかった")
+	}
+}
+
+func TestLiveBoardURLRefusesABoardThatNamesNeither(t *testing.T) {
+	// どちらも名乗らない盤は、どの席のものか分からない。
+	dir := t.TempDir()
+	_, port, host := _boardServerWith(t, map[string]any{})
+	rec := &boardRecord{Port: port, PID: os.Getpid(), Host: host, Path: dir}
+	if got := liveBoardURL(rec, dir); got != "" {
+		t.Fatalf("何も名乗らない盤を使うと判断した: %s", got)
 	}
 }
