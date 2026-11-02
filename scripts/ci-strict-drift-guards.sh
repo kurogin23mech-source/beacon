@@ -70,6 +70,13 @@ echo "[ci-strict-drift-guards] Windows-unsafe pid liveness probes (ms-133 e-6591
 # (both did, before the 2026-09-29 independent AX review caught the hole).
 python3 "$ROOT/scripts/check-pid-liveness.py" --strict
 
+echo "[ci-strict-drift-guards] 盤に渡す旗が Go 側に実在するか (ms-170 e-7147)…"
+# 旗の名前は 4 箇所に手で書かれている (Go の flag 定義 / bash / Python / help 台帳)。
+# check-cli-help-drift.py は後ろの 3 つだけを突き合わせ、Go 側は見ていないので、
+# Go で旗名を変えても緑のまま通る。壊れるのは `beacon view --no-reuse` を実際に
+# 叩いた瞬間で、go test にも pytest にも出ない (独立レビュー PR#829 保守性)。
+python3 "$ROOT/scripts/check-viewer-flag-parity.py"
+
 echo "[ci-strict-drift-guards] 旗 → env の写像が両フロントで揃っているか (ms-160 e-6674)…"
 # 旗の名前を比べる check-cli-help-drift.py はこの級を原理的に見られない。片方の
 # フロントに無い旗は「不一致」ではなく「不在」で、両方に無ければ揃っていると

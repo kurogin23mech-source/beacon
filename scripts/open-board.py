@@ -46,10 +46,13 @@ Contract of THIS launcher (only):
 consolidation, ms-170 e-6518; the Go viewer is now the sole board producer.)
 This launcher does not re-describe that (single source of truth).
 
-Known limitation (AX-4, deferred): re-running session-start spawns a fresh
-``beacon view`` each time — there is no reuse of an already-running viewer yet.
-Idempotent reuse belongs viewer-side (a portfile / liveness check) and is
-folded into the Go bundling work (e-6476). Tracked as a follow-up task.
+Reuse (ms-170 e-7147): re-running session-start no longer piles up boards. The
+viewer itself keeps a per-project note of the port it serves on, probes it for
+liveness, and when a board for the same project is already up it prints that
+board's serving line and exits 0 instead of starting a second one. This
+launcher therefore treats "child exited 0 **and** printed a serving line" as
+success — see the comment in ``launch_and_observe``. Reuse lives viewer-side
+because only the viewer knows which board belongs to which project.
 
 Always exits 0 — never blocks session-start beyond a short bounded wait.
 
@@ -151,9 +154,20 @@ def launch_and_observe(
     """Spawn the viewer, observe its startup, return the marker line to print.
 
     Always returns a non-empty marker (see module docstring for the KEY=VALUE
-    grammar). A dead child never yields ``VIEWER_URL`` even if a URL reached the
-    log first — liveness is checked before the URL, so a child that printed a
-    URL and then exited is reported as a failure, not a false success.
+    grammar).
+
+    **Two facts decide success when the child is gone** (ms-170 e-7147): the exit
+    code AND whether a serving line was printed. ``rc == 0`` together with a URL
+    is success — that is the reuse path, where the viewer announces the board
+    already serving this project and exits on purpose. ``rc != 0`` is a failure
+    whatever it printed, and ``rc == 0`` with no URL is also a failure (nothing
+    was announced, so the caller has nothing to open).
+
+    This docstring said the opposite until e-7147 ("a dead child never yields
+    VIEWER_URL"). That was true while every board was a long-lived server, and
+    reuse made it false. It is spelled out here because a stale contract in a
+    docstring reads as authoritative and would justify "fixing" the code back
+    toward the bug it replaced.
     """
     try:
         log_fd = open(log_path, "w", encoding="utf-8")
@@ -176,10 +190,25 @@ def launch_and_observe(
 
     deadline = monotonic() + wait_seconds
     while monotonic() < deadline:
-        # Liveness first: a dead child is a failure regardless of any URL it may
-        # have printed on its way out.
         rc = proc.poll()
         if rc is not None:
+            # The child is gone. Whether that is success depends on *why*.
+            #
+            # Until the viewer learned to reuse an already-running board
+            # (ms-170 e-7147) every board was a long-lived server, so "child
+            # exited" could only mean it failed to start. Reuse broke that
+            # premise: on reuse the viewer prints the serving line for the
+            # board that is already up and exits 0 immediately. Reading that
+            # as a failure reports a red marker for the path that works —
+            # measured 2026-11-02, four of five opens came back as
+            # ``exited-0`` while the board was serving fine.
+            #
+            # So judge on the two facts we have: the exit code, and whether a
+            # serving line was actually printed. Scan once more here because
+            # the URL may have landed in the same instant the child exited.
+            url = _scan_url(log_path)
+            if rc == 0 and url:
+                return f"VIEWER_URL={url}"
             return f"VIEWER_LAUNCH_FAILED=exited-{rc} (log: {log_path})"
         url = _scan_url(log_path)
         if url:

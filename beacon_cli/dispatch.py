@@ -1546,6 +1546,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_view.add_argument("--host", default="")
     p_view.add_argument("--expose", dest="view_expose", action="store_true")
     p_view.add_argument("--json", action="store_true")
+    # 盤の二重起動と居残り (ms-170 e-7147)。bash 側と同じ旗を同じ名前で持つ。
+    p_view.add_argument("--no-reuse", dest="view_no_reuse", action="store_true")
+    p_view.add_argument("--idle-timeout", dest="view_idle_timeout", default="")
     p_project = sub.add_parser("project", add_help=False)
     p_project.add_argument("--help", "-h", action="store_true", dest="show_help")
     project_sub = p_project.add_subparsers(dest="project_cmd", metavar="<subcmd>")
@@ -4627,6 +4630,8 @@ def _handle_view(root: Path, args: argparse.Namespace) -> int:
         "BEACON_VIEW_HOST": getattr(args, "host", "") or "",
         "BEACON_VIEW_EXPOSE": "1" if getattr(args, "view_expose", False) else "",
         "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        "BEACON_VIEW_NO_REUSE": "1" if getattr(args, "view_no_reuse", False) else "",
+        "BEACON_VIEW_IDLE_TIMEOUT": getattr(args, "view_idle_timeout", "") or "",
     })
 
 
