@@ -1079,6 +1079,14 @@ func TestStuckRunningSurfacesInPage(t *testing.T) {
 			"stale-running の行が待機中に沈み、許可待ちで止まったセッションに " +
 			"誰も気づけない (ms-173 独立レビュー AX-4)")
 	}
+	// e-7262: その推論が、同じ行の**より新しい観測**に負けること。手元の道具が
+	// idle を申告したら「作業中のまま止まっている」の前提は崩れているので、
+	// 確認待ちにしてはならない。この 1 行が落ちると誤発火が戻る。
+	if !strings.Contains(string(page), `&& s.state !== "idle"`) {
+		t.Error("page.html の stale-running 分岐が s.state を見ていない — " +
+			"ローカルが idle と言っている行まで「確認待ち」で出てしまう " +
+			"(推論が同じ行の直接の観測と矛盾してはならない、e-7262)")
+	}
 }
 
 // 「要対応のみ」が「生きている全部」に退化しないこと (ms-173 AC2)。
