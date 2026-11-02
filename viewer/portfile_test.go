@@ -93,6 +93,12 @@ func TestWriteThenReadPortfileRoundTrips(t *testing.T) {
 // _boardServer は `/api/state` だけを返す偽の盤。生きているかの判定が
 // 「応答」と「配っている道」をどう見るかを試すために使う。
 func _boardServer(t *testing.T, servedPath string) (*httptest.Server, int, string) {
+	return _boardServerWith(t, map[string]any{"path": servedPath})
+}
+
+// _boardServerWith は `/api/state` が返す中身を丸ごと指定できる版。
+// 席 (reuse_key) を名乗る / 名乗らない の両方を試すために要る。
+func _boardServerWith(t *testing.T, state map[string]any) (*httptest.Server, int, string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +106,7 @@ func _boardServer(t *testing.T, servedPath string) (*httptest.Server, int, strin
 				http.NotFound(w, r)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"path": servedPath})
+			_ = json.NewEncoder(w).Encode(state)
 		}))
 	t.Cleanup(srv.Close)
 	// httptest の住所から口を取り出す (127.0.0.1:NNNN)。
@@ -410,5 +416,55 @@ func TestTrackedBoardPIDsSurvivesAMissingDirectory(t *testing.T) {
 		func(*boardRecord, string) string { return "http://x/" })
 	if len(got) != 0 {
 		t.Fatalf("無いディレクトリで何か返した: %v", got)
+	}
+}
+
+// --- 取得元を切り替えた盤でも席が動かない (ms-170 思想 review medium) --------
+
+func TestLiveBoardURLUsesTheSeatNotTheDataSource(t *testing.T) {
+	// **クラウドの取得元に切り替えた盤**を模す: `path` は空 (src==nil のため)
+	// だが、席 (reuse_key) は起動時の道のまま。これを「どの席でもない」と読むと、
+	// その盤は再利用されず・控えを奪われ・居残りとして kill を勧められる ——
+	// この MS が閉じた「使うたびに増える」が、クラウドに向けた盤にだけ残る。
+	dir := t.TempDir()
+	_, port, host := _boardServerWith(t, map[string]any{
+		"path": "", "reuse_key": dir,
+	})
+	rec := &boardRecord{Port: port, PID: os.Getpid(), Host: host, Path: dir}
+	if got := liveBoardURL(rec, dir); got == "" {
+		t.Fatal("取得元を切り替えた盤を『別の席』と判断した")
+	}
+}
+
+func TestLiveBoardURLStillRejectsAnotherSeat(t *testing.T) {
+	// 席で見るようにしても、別プロジェクトの盤は弾く (緩めていない)。
+	mine := t.TempDir()
+	other := t.TempDir()
+	_, port, host := _boardServerWith(t, map[string]any{
+		"path": "", "reuse_key": other,
+	})
+	rec := &boardRecord{Port: port, PID: os.Getpid(), Host: host, Path: mine}
+	if got := liveBoardURL(rec, mine); got != "" {
+		t.Fatalf("別の席の盤を自分の席と見間違えた: %s", got)
+	}
+}
+
+func TestLiveBoardURLFallsBackToPathForOlderBoards(t *testing.T) {
+	// 席を名乗らない古い盤は `path` で突き合わせる (急に再利用できなくならない)。
+	dir := t.TempDir()
+	_, port, host := _boardServerWith(t, map[string]any{
+		"path": filepath.Join(dir, ".beacon"),
+	})
+	rec := &boardRecord{Port: port, PID: os.Getpid(), Host: host, Path: dir}
+	if got := liveBoardURL(rec, dir); got == "" {
+		t.Fatal("席を名乗らない古い盤を再利用できないと判断した")
+	}
+}
+
+func TestSeatIsReportedByTheServer(t *testing.T) {
+	// 盤が実際に席を名乗ること (名乗らないと上の仕組みが効かない)。
+	srv := &Server{ReuseKey: "/some/project"}
+	if srv.ReuseKey != "/some/project" {
+		t.Fatal("席を保持していない")
 	}
 }

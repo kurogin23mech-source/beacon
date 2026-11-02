@@ -154,13 +154,22 @@ func liveBoardURL(rec *boardRecord, wantPath string) string {
 		return ""
 	}
 	var state struct {
-		Path string `json:"path"`
-		CWD  string `json:"cwd"`
+		Path     string `json:"path"`
+		CWD      string `json:"cwd"`
+		ReuseKey string `json:"reuse_key"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
 		return ""
 	}
-	if !sameBoardPath(state.Path, wantPath) {
+	// 席 (reuse_key) を先に見る。`path` は取得元をクラウドに切り替えると空に
+	// なるので、それだけで判定すると「どの席でもない」と読んでしまう
+	// (ms-170 思想 review medium)。古い盤は席を名乗らないので、そのときだけ
+	// `path` に落ちる (名乗る盤が増えれば自然に正確になる)。
+	if state.ReuseKey != "" {
+		if !sameBoardPath(state.ReuseKey, wantPath) {
+			return ""
+		}
+	} else if !sameBoardPath(state.Path, wantPath) {
 		return ""
 	}
 	return fmt.Sprintf("http://%s:%d/", host, rec.Port)

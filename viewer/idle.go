@@ -26,9 +26,29 @@ import (
 	"time"
 )
 
-// defaultIdleTimeout は、問い合わせが途切れてから畳むまでの時間。
-// 0 以下にすると畳まない (= 従来どおり居残る)。
+// defaultIdleTimeout は、問い合わせが途切れてから畳むまでの時間 (手元で開いた盤)。
+// 0 以下にすると畳まない。
 const defaultIdleTimeout = 30 * time.Minute
+
+// idleTimeoutFor は、その起動モードでの既定を返す (ms-170 思想 review medium)。
+//
+// **サーバに置いた盤は畳まない。** 畳む理由は「手元で開くたびに盤が積み上がって
+// 端末が重くなる」ことで、設置した 1 本にはその理由が無い。むしろ誰も見ていない
+// 時間があるのは設置物として普通なので、既定で終了すると「しばらく放っておくと
+// 盤が死んでいる」状態になる。SPEC 方針 3 は「ローカル起動もサーバ設置も同じ
+// ものの起動モードの違い」と言っており、**モードごとに既定が違うこと自体は
+// その範囲**。隠すと方針を裏切るので、ここで明示し help にも書く。
+//
+// 利用者が `--idle-timeout` を渡したときは、その値をどのモードでも尊重する。
+func idleTimeoutFor(exposed bool, requested time.Duration, wasRequested bool) time.Duration {
+	if wasRequested {
+		return requested
+	}
+	if exposed {
+		return 0
+	}
+	return defaultIdleTimeout
+}
 
 // idleTracker は最後に問い合わせが来た時刻を覚えておく。
 type idleTracker struct {
@@ -87,9 +107,12 @@ func watchIdle(t *idleTracker, timeout, check time.Duration, now func() time.Tim
 		for {
 			time.Sleep(check)
 			if idle := t.idleFor(now()); shouldClose(idle, timeout) {
+				// 開き直し方は **この盤を動かしている人** に向けて書く。
+				// 遠隔の閲覧者に `beacon view` を実行させることはできないので、
+				// 設置した盤では畳まない (idleTimeoutFor) 前提の文言にしてある。
 				stop(fmt.Sprintf(
 					"%s のあいだ誰も見ていないので盤を畳みます "+
-						"(また見るには beacon view を実行してください)",
+						"(開き直すには、この機械で beacon view を実行してください)",
 					timeout))
 				return
 			}
