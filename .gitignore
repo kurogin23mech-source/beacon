@@ -40,3 +40,11 @@ iac/
 # bus テストが本物の残高を読んで落ちる (e-6621 の現象)。追跡対象にしない。
 .beacon/bus-budget.json
 tests/_leak_census.json
+
+# 盤の実行ファイル (手元ビルドの成果物、11MB)。
+# `git add viewer/` で丸ごと拾って誤ってコミットしたことがある (2026-11-02)。
+# viewer/dist/ は既に無視されているが、build 先を変えたときの受け皿として
+# 素の名前も挙げておく。
+viewer/beacon-view
+viewer/beacon-view-*
+viewer/viewer
