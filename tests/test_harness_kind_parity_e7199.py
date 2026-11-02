@@ -229,4 +229,23 @@ def test_node_output_for_each_known_terminal_lands_in_its_go_driver():
     # 知らない端末は接頭辞付きの生の形で、Go が剥がした残りは rawNames に無い (= 未対応に落ちる)。
     assert out["WezTerm"] == js_raw_prefix() + "WezTerm"
     assert not _drivers_with(drivers, "rawNames", "wezterm")
-    assert out[""] == "terminal" and _drivers_with(drivers, "kinds", "terminal")
+    # TERM_PROGRAM が無いときの下限値。**Go の受け付け表に在ってはならない**
+    # (e-7261 で kinds から外した)。
+    #
+    # 以前はここが「下限値も受け付け表に在ること」を要求していた。つまり
+    # 「どの端末か分からない」を Apple Terminal の別名として受け、不明なら
+    # Terminal.app を既定にして「飛べる」と答える契約だった。iTerm しか使って
+    # いない機械ではその既定が必ず外れ、Terminal.app に向けて AppleScript を
+    # 投げて空振りする (= 運用室から押しても無反応) 形で実害が出た。
+    #
+    # いまの契約: 下限値は「分からない」を意味し、受け付け表では解決しない。
+    # viewer は解決しなかったときだけ pid のプロセス環境に TERM_PROGRAM を訊いて
+    # 確定させる (viewer/jump.go resolveHarnessWith)。名乗りが届かない / bridge が
+    # 端末の環境を継承できない場合にも実際に飛べるようにするため、推測の既定値を
+    # やめてプロセスに訊く側へ寄せた。
+    assert out[""] == "terminal", "名乗り側の下限値が変わった"
+    assert not _drivers_with(drivers, "kinds", "terminal"), (
+        "下限値 'terminal' が Go の受け付け表に戻っている — 「分からない」が"
+        "特定の端末の別名に化け、別の端末を使っている人に黙って外れる (e-7261)")
+    assert not _drivers_with(drivers, "kinds", ""), (
+        "空の名乗りが Go の受け付け表に戻っている — 同じ理由 (e-7261)")
