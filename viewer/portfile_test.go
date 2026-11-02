@@ -12,6 +12,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -228,5 +229,186 @@ func TestResolvePathLeavesAWhollyMissingTreeAbsolute(t *testing.T) {
 		"no-such-root-xyz", "a", "b"))
 	if !filepath.IsAbs(got) {
 		t.Fatalf("絶対の道になっていない: %s", got)
+	}
+}
+
+// --- 再利用の判定 (e-7147 保守性 review high: main() 内だと試験が通らない) ----
+
+func _noRec(string) *boardRecord { return nil }
+
+func TestDecideReuseHonoursNoReuse(t *testing.T) {
+	// `--no-reuse` を無効化する変異で緑のままだった箇所。ここで固定する。
+	called := false
+	live := func(*boardRecord, string) string { called = true; return "http://x/" }
+	got := decideReuse(true, false, "/p", "/pf", _noRec, live)
+	if got.URL != "" {
+		t.Fatalf("--no-reuse を無視して再利用した: %+v", got)
+	}
+	if called {
+		t.Fatal("--no-reuse なのに盤を探しに行った (無駄な問い合わせ)")
+	}
+	if got.Reason == "" {
+		t.Fatal("なぜ使わないのかを言っていない")
+	}
+}
+
+func TestDecideReuseHonoursAnExplicitPort(t *testing.T) {
+	// 口を指定するのは「そこに立てたい」という意思表示。
+	live := func(*boardRecord, string) string { return "http://x/" }
+	got := decideReuse(false, true, "/p", "/pf", _noRec, live)
+	if got.URL != "" {
+		t.Fatalf("--port 明示を無視して再利用した: %+v", got)
+	}
+	if !strings.Contains(got.Reason, "--port") {
+		t.Fatalf("理由が --port を指していない: %s", got.Reason)
+	}
+}
+
+func TestDecideReuseUsesALiveBoard(t *testing.T) {
+	live := func(*boardRecord, string) string { return "http://127.0.0.1:7377/" }
+	got := decideReuse(false, false, "/p", "/pf", _noRec, live)
+	if got.URL != "http://127.0.0.1:7377/" {
+		t.Fatalf("生きた盤を使わなかった: %+v", got)
+	}
+	if got.Reason != "" {
+		t.Fatalf("使うのに理由が付いている: %s", got.Reason)
+	}
+}
+
+func TestDecideReuseFallsThroughWhenNoBoardIsUsable(t *testing.T) {
+	live := func(*boardRecord, string) string { return "" }
+	got := decideReuse(false, false, "/p", "/pf", _noRec, live)
+	if got.URL != "" {
+		t.Fatalf("使えない盤を使うと判断した: %+v", got)
+	}
+	if got.Reason == "" {
+		t.Fatal("なぜ使わないのかを言っていない")
+	}
+}
+
+func TestDecideReusePassesTheProjectKeyThrough(t *testing.T) {
+	// 道を取り違えると別プロジェクトの盤に繋ぐので、何を渡したかを押さえる。
+	var sawKey, sawPortfile string
+	rec := func(p string) *boardRecord { sawPortfile = p; return &boardRecord{Port: 1} }
+	live := func(_ *boardRecord, key string) string { sawKey = key; return "" }
+	decideReuse(false, false, "/project", "/tmp/note.json", rec, live)
+	if sawKey != "/project" {
+		t.Fatalf("プロジェクトの道が渡っていない: %q", sawKey)
+	}
+	if sawPortfile != "/tmp/note.json" {
+		t.Fatalf("控えの場所が渡っていない: %q", sawPortfile)
+	}
+}
+
+// --- 旗が実際に渡されたかの判定 ------------------------------------------
+
+func TestFlagWasSetSeesAnExplicitDefaultValue(t *testing.T) {
+	// **値比較では近似できない**ことの固定 (保守性 review medium)。
+	// 既定値と同じ値を明示的に渡した人も「そこに立てたい」と言っている。
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	port := fs.Int("port", defaultPort, "")
+	if err := fs.Parse([]string{"-port", strconv.Itoa(defaultPort)}); err != nil {
+		t.Fatalf("parse できない: %v", err)
+	}
+	if *port != defaultPort {
+		t.Fatalf("前提が崩れた: %d", *port)
+	}
+	if !flagWasSet(fs.Visit, "port") {
+		t.Fatal("既定値と同じ値を明示したのに『渡されていない』と判断した")
+	}
+}
+
+func TestFlagWasSetIsFalseWhenOmitted(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	fs.Int("port", defaultPort, "")
+	if err := fs.Parse([]string{}); err != nil {
+		t.Fatalf("parse できない: %v", err)
+	}
+	if flagWasSet(fs.Visit, "port") {
+		t.Fatal("渡していないのに『渡された』と判断した")
+	}
+}
+
+// --- 控えを上書きしてよいかの判定 (e-7147 AX review high) --------------------
+
+func TestShouldNotClobberALiveBoardsRecord(t *testing.T) {
+	// **この PR の目的そのものを守る試験**。以前は無条件に書いていたので、
+	// --no-reuse の盤が生きた盤の控えを上書きし、その盤が再利用から永久に
+	// 見えなくなっていた (= 「使うたびに増える」が戻る)。検証手順自身が
+	// --no-reuse を使うので、確かめるたびに本番の盤を孤児にしていた。
+	existing := &boardRecord{Port: 19001, PID: 4242, Path: "/p"}
+	live := func(*boardRecord, string) string { return "http://127.0.0.1:19001/" }
+	ok, reason := shouldWritePortfile(existing, "/p", 9999, live)
+	if ok {
+		t.Fatal("生きた盤の控えを上書きすると判断した")
+	}
+	if reason == "" {
+		t.Fatal("なぜ触らないのかを言っていない")
+	}
+	if !strings.Contains(reason, "4242") {
+		t.Fatalf("どの盤が席を取っているか言っていない: %s", reason)
+	}
+}
+
+func TestShouldWriteOverADeadRecord(t *testing.T) {
+	existing := &boardRecord{Port: 19001, PID: 4242, Path: "/p"}
+	dead := func(*boardRecord, string) string { return "" }
+	if ok, _ := shouldWritePortfile(existing, "/p", 9999, dead); !ok {
+		t.Fatal("死んだ控えを書き換えられないと判断した (席が空かない)")
+	}
+}
+
+func TestShouldWriteOverOwnRecord(t *testing.T) {
+	// 自分の控えは更新できないと、口が変わったときに古い番号が残る。
+	existing := &boardRecord{Port: 19001, PID: 777, Path: "/p"}
+	live := func(*boardRecord, string) string { return "http://127.0.0.1:19001/" }
+	if ok, _ := shouldWritePortfile(existing, "/p", 777, live); !ok {
+		t.Fatal("自分の控えを更新できないと判断した")
+	}
+}
+
+func TestShouldWriteWhenThereIsNoRecord(t *testing.T) {
+	live := func(*boardRecord, string) string { return "http://x/" }
+	if ok, _ := shouldWritePortfile(nil, "/p", 1, live); !ok {
+		t.Fatal("控えが無いのに書けないと判断した")
+	}
+}
+
+// --- 控えに載っている生きた盤を集める (居残りの判別に使う) ------------------
+
+func TestTrackedBoardPIDsCollectsLiveRecordsOnly(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, rec boardRecord) {
+		if err := writePortfile(filepath.Join(dir, name), rec); err != nil {
+			t.Fatalf("置けない: %v", err)
+		}
+	}
+	write("beacon-view-aaa.json", boardRecord{Port: 1, PID: 101, Path: "/a"})
+	write("beacon-view-bbb.json", boardRecord{Port: 2, PID: 202, Path: "/b"})
+	write("unrelated.json", boardRecord{Port: 3, PID: 303, Path: "/c"})
+	// 101 だけ生きている扱いにする
+	live := func(rec *boardRecord, _ string) string {
+		if rec.PID == 101 {
+			return "http://x/"
+		}
+		return ""
+	}
+	got := trackedBoardPIDs(dir, live)
+	if _, ok := got[101]; !ok {
+		t.Fatalf("生きた控えを拾えていない: %v", got)
+	}
+	if _, ok := got[202]; ok {
+		t.Fatalf("死んだ控えを拾った: %v", got)
+	}
+	if _, ok := got[303]; ok {
+		t.Fatalf("beacon-view- 以外の名前まで読んだ: %v", got)
+	}
+}
+
+func TestTrackedBoardPIDsSurvivesAMissingDirectory(t *testing.T) {
+	got := trackedBoardPIDs(filepath.Join(t.TempDir(), "nope"),
+		func(*boardRecord, string) string { return "http://x/" })
+	if len(got) != 0 {
+		t.Fatalf("無いディレクトリで何か返した: %v", got)
 	}
 }

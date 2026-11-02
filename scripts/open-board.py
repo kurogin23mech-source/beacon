@@ -154,9 +154,20 @@ def launch_and_observe(
     """Spawn the viewer, observe its startup, return the marker line to print.
 
     Always returns a non-empty marker (see module docstring for the KEY=VALUE
-    grammar). A dead child never yields ``VIEWER_URL`` even if a URL reached the
-    log first — liveness is checked before the URL, so a child that printed a
-    URL and then exited is reported as a failure, not a false success.
+    grammar).
+
+    **Two facts decide success when the child is gone** (ms-170 e-7147): the exit
+    code AND whether a serving line was printed. ``rc == 0`` together with a URL
+    is success — that is the reuse path, where the viewer announces the board
+    already serving this project and exits on purpose. ``rc != 0`` is a failure
+    whatever it printed, and ``rc == 0`` with no URL is also a failure (nothing
+    was announced, so the caller has nothing to open).
+
+    This docstring said the opposite until e-7147 ("a dead child never yields
+    VIEWER_URL"). That was true while every board was a long-lived server, and
+    reuse made it false. It is spelled out here because a stale contract in a
+    docstring reads as authoritative and would justify "fixing" the code back
+    toward the bug it replaced.
     """
     try:
         log_fd = open(log_path, "w", encoding="utf-8")

@@ -673,17 +673,39 @@ func (s *Server) Close() error { return s.ln.Close() }
 // 動いている間ずっと ``<defunct>`` が残る (2026-11-02 実測: 盤 1 本につき 1 件)。
 // 待つのは別の筋で行う —— ここで待つと、ブラウザが開くまで盤の起動が止まる。
 func OpenBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
+	openWith(browserCommand(runtime.GOOS, url))
+}
+
+// browserCommand は、その OS で住所を開く道具の組み立て (純関数)。
+func browserCommand(goos, url string) *exec.Cmd {
+	switch goos {
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "darwin":
-		cmd = exec.Command("open", url)
+		return exec.Command("open", url)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		return exec.Command("xdg-open", url)
 	}
+}
+
+// openWith は起こして **必ず回収する**。
+//
+// 回収を別関数に出した理由 (e-7147 保守性 review medium): `OpenBrowser` のままでは
+// 実ブラウザが起きてしまい試験にできず、`cmd.Wait()` の行を消しても `go test` は
+// 緑のままだった (独立レビューが実測)。受入条件そのものなのに機械的な回帰防止が
+// 無かった。ここを分けると、害のない道具 (`true` など) を渡して回収を確かめられる。
+//
+// 待つのは別の筋で行う —— ここで待つと、ブラウザが開くまで盤の起動が止まる。
+// 返す channel は試験が「回収し終わった」を待つためのもの (本番は無視してよい)。
+func openWith(cmd *exec.Cmd) <-chan struct{} {
+	reaped := make(chan struct{})
 	if err := cmd.Start(); err != nil {
-		return
+		close(reaped)
+		return reaped
 	}
-	go func() { _ = cmd.Wait() }()
+	go func() {
+		_ = cmd.Wait()
+		close(reaped)
+	}()
+	return reaped
 }

@@ -140,24 +140,29 @@ func main() {
 	//
 	// `--port` を明示されたときは再利用しない。口を指定するのは「そこに立てたい」
 	// という意思表示なので、黙って別の口の盤へ送ると指示と違う結果になる。
+	// **明示されたかは `flag.Visit` で見る** —— 値が既定と同じかどうかで近似すると、
+	// 既定値を明示的に渡した人の意思を取り違える (e-7147 保守性 review medium)。
+	//
+	// 判定そのものは `decideReuse` (portfile.go) に出してある。main() の中に置くと
+	// どの試験も通らず、`--no-reuse` を無効化しても緑のままだった (同 review high)。
 	reuseKey := *path
 	if src != nil {
 		reuseKey = filepath.Dir(src.BeaconDir)
 	}
 	pf := portfilePath(reuseKey)
-	if !*noReuse && *port == defaultPort {
-		if url := liveBoardURL(readPortfile(pf), reuseKey); url != "" {
-			// 住所の出し方は新規に立てたときと同じ 1 行に揃える。呼び出し側
-			// (scripts/open-board.py) はこの行だけを見て住所を拾うので、ここが
-			// 揃っていないと「立ったのに住所が読めない」ことになる。
-			fmt.Printf("盤を開きました: %s\n", url)
-			fmt.Println("  (既に動いている盤を使いました。新しくは立てていません)")
-			reportOrphanBoards(os.Getpid())
-			if !*noOpen {
-				OpenBrowser(url)
-			}
-			return
+	decision := decideReuse(*noReuse, flagWasSet(flag.Visit, "port"),
+		reuseKey, pf, readPortfile, liveBoardURL)
+	if decision.URL != "" {
+		// 住所の出し方は新規に立てたときと同じ 1 行に揃える。呼び出し側
+		// (scripts/open-board.py) はこの行だけを見て住所を拾うので、ここが
+		// 揃っていないと「立ったのに住所が読めない」ことになる。
+		fmt.Printf("盤を開きました: %s\n", decision.URL)
+		fmt.Println("  (既に動いている盤を使いました。新しくは立てていません)")
+		reportOrphanBoards(os.Getpid())
+		if !*noOpen {
+			OpenBrowser(decision.URL)
 		}
+		return
 	}
 
 	srv, err := NewServer(src, *host, *port, *expose)
@@ -165,9 +170,18 @@ func main() {
 		fail(err)
 	}
 
-	// 控えを置く。置けなくても盤は成立する (= 次回の再利用ができないだけ) ので、
-	// 失敗は伝えるだけで止めない。黙って落とすと「なぜ毎回増えるのか」が追えない。
-	if err := writePortfile(pf, boardRecord{
+	// 控えを置く。ただし **席を取っている生きた盤が他に居るなら触らない**
+	// (e-7147 AX review high)。`--no-reuse` / `--port` 明示で再利用を飛ばした盤が
+	// 上書きすると、その生きた盤が再利用から永久に見えなくなり「使うたびに増える」
+	// が戻る。判断は shouldWritePortfile (portfile.go)。
+	//
+	// 置けなくても盤は成立する (= 次回の再利用ができないだけ) ので、失敗は伝える
+	// だけで止めない。黙って落とすと「なぜ毎回増えるのか」が追えない。
+	okToWrite, keepReason := shouldWritePortfile(
+		readPortfile(pf), reuseKey, os.Getpid(), liveBoardURL)
+	if !okToWrite {
+		fmt.Fprintf(os.Stderr, "注意: %s\n", keepReason)
+	} else if err := writePortfile(pf, boardRecord{
 		Port: srv.Port(), PID: os.Getpid(), Host: srv.Host,
 		Path: reuseKey, StartedAt: time.Now().Format(time.RFC3339),
 	}); err != nil {

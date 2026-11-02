@@ -103,27 +103,50 @@ func exitIdle(reason string) {
 	os.Exit(0)
 }
 
-// reportOrphanBoards は、控えに載っていない盤が居残っていれば伝える
+// reportOrphanBoards は、**どの控えにも載っていない**盤が居残っていれば伝える
 // (ms-170 e-7147、受入条件 4)。
 //
-// 控え (portfile.go) が効くのは控えを置いた盤に対してだけ。控えの仕組みが入る
-// 前に立った盤は、ランダムな口で孤児として残り続け、控えからは見えない。再利用で
-// **新しい孤児は生まれなくなる**が、既に居るものは誰も教えてくれないと気づけない。
+// 控えが効くのは控えを置いた盤に対してだけ。控えの仕組みが入る前に立った盤は
+// ランダムな口で残り続け、控えからは見えない。再利用で **新しい居残りは生まれ
+// なくなる**が、既に居るものは誰も教えてくれないと気づけない。
 //
-// 伝えるだけで、勝手に終わらせない。他のプロジェクトの盤かもしれないし、人が
-// 意図して複数立てていることもある。終わらせるかは人が決める。
+// **生きている盤を「居残り」と呼ばない** (e-7147 AX review misleading): 以前は
+// beacon-view のプロセスを数えるだけで、控えに載っている他プロジェクトの盤まで
+// 「以前からの居残り」と呼び、`kill` を添えて勧めていた。手元で 2 つの
+// プロジェクトを開くのは普通のことなので、普段使いで destructive な助言が出る。
+// しかも上書きの穴 (同 review high) と重なると、**いま開こうとした盤を殺せ**と
+// 言いうる。だから控えを総なめして、載っている生きた盤は除いてから数える。
+//
+// 伝えるだけで、勝手に終わらせない。人が意図して複数立てていることもある。
 func reportOrphanBoards(selfPID int) {
-	// 1 本は自分が使っている / 立てた盤なので、それを超えた分だけを孤児として扱う。
-	others := boardProcessPIDs(selfPID)
-	if len(others) <= 1 {
+	running := boardProcessPIDs(selfPID)
+	if len(running) == 0 {
+		return
+	}
+	tracked := trackedBoardPIDs(os.TempDir(), liveBoardURL)
+	var orphans []int
+	others := 0
+	for _, pid := range running {
+		if _, ok := tracked[pid]; ok {
+			others++
+			continue
+		}
+		orphans = append(orphans, pid)
+	}
+	if others > 0 {
+		fmt.Fprintf(os.Stderr,
+			"ℹ 他のプロジェクトの盤が %d 件開いています (控えに載っているので"+
+				"そのプロジェクトからは再利用されます)\n", others)
+	}
+	if len(orphans) == 0 {
 		return
 	}
 	fmt.Fprintf(os.Stderr,
-		"注意: この機械で beacon-view が %d 本動いています。"+
-			"いまは 1 本に畳まれるので新しくは増えませんが、"+
-			"以前からの居残りがあります: %v\n", len(others), others)
+		"注意: どの控えにも載っていない beacon-view が %d 件あります: %v\n",
+		len(orphans), orphans)
 	fmt.Fprintln(os.Stderr,
-		"  要らなければ終了してください (例: kill "+pidList(others)+")")
+		"  控えの仕組みが入る前に立った盤と思われます。要らなければ終了して"+
+			"ください (例: kill "+pidList(orphans)+")")
 }
 
 func pidList(pids []int) string {

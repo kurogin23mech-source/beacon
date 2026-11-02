@@ -34,6 +34,57 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 判定 (純粋な計算。実機の盤を要らない形に出してある)。
+#
+# **なぜ関数に出したか** (e-7147 保守性 review high): 判定が本文に埋まっていると、
+# 試験からは文字列の有無しか見られない。実際、判定を「常に直った」に固定しても
+# 試験 5 件は緑のままだった (独立レビューが実測)。判定を無意味にする変更が
+# 「試験が通ったから安全」として通ってしまう形だった。
+#
+# 写しは作らない。下の `--verdict` の口が **この関数** を呼ぶので、試験が動かすのは
+# 本番と同じ判定。
+verdict() {
+    local sum_before="$1" sum_after="$2" before_second_fails="$3"
+    if [ "$sum_after" -gt 0 ]; then
+        echo "判定: 直っていません (後の側で合計 $sum_after 件失敗)"
+        return 1
+    fi
+    if [ "$before_second_fails" -gt 0 ]; then
+        echo "判定: 直ったと言えます"
+        echo "      前の側は、後の側が先に周を回して並びを整えた後でも"
+        echo "      $before_second_fails 件失敗しました。順序では説明できないので、"
+        echo "      中身の違いによるものです。後の側は合計 0 件。"
+        return 0
+    fi
+    if [ "$sum_before" -eq 0 ]; then
+        echo "判定: 証拠になりません。前の側も 1 件も失敗していないので、この的では"
+        echo "      差が出ません (再現条件を狭めるか、的を増やしてください)"
+        return 3
+    fi
+    echo "判定: 証拠として弱いです。前の側の失敗 $sum_before 件は、すべて先に周を"
+    echo "      回ったときのものでした。問い合わせは窓の並びを変えるので、先に回った"
+    echo "      側は不利になります —— この差は順序で説明できてしまいます。"
+    echo "      PAIRS を増やして測り直してください"
+    return 3
+}
+
+# 試験から **判定だけ** を駆動する口 (e-7147 保守性 review high)。
+#
+#   scripts/verify-on-running-board.sh --verdict <前の失敗> <後の失敗> <後から回った前の失敗>
+#
+# 実機の盤を立てずに、本番と同じ判定関数を固定の数値で動かせる。判定を変えたら
+# 試験が赤くなる —— 文字列の有無を見るだけの試験では、判定を無意味にしても
+# 緑のままだった。
+if [ "${1:-}" = "--verdict" ]; then
+    if [ "$#" -ne 4 ]; then
+        echo "usage: $0 --verdict <前の失敗> <後の失敗> <後から回った前の失敗>" >&2
+        exit 2
+    fi
+    verdict "$2" "$3" "$4"
+    exit $?
+fi
+
 BEFORE="${1:-}"
 AFTER="${2:-$ROOT/viewer/dist/beacon-view-darwin-arm64}"
 
@@ -60,31 +111,71 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 盤を 1 本立てて、応えるようになるまで待つ。
+# 盤を 1 本立てて、**その盤が実際に使った口** を返す。
 #
 # 再利用 (e-7147) と居残りの自動終了は **意図して切る**: ここでは「この実行
 # ファイルの盤」を名指しで立てたいので、既に在る盤に繋がれては測定にならない。
+#
+# **頼んだ口が応えたことを「自分の盤が立った」と読まない** (e-7249/e-7147 AX
+# review high): 盤は頼んだ口が塞がっていると**黙って別の空き口を借りる**。だから
+# 頼んだ口を curl して 200 が返っても、応えているのは **先に居た別のプロセス**
+# かもしれない。それを掴んだまま前後比較を回すと、片方の列がまるごと別物を
+# 測ったまま確信ありげな判定が出る —— この手順が防ごうとしている失敗
+# (「動いていた実行ファイルが古いものだった」) を、検証側で再現してしまう。
+#
+# そこで **盤自身が名乗る住所を読む**。`open-board.py` と同じ作法で、固定の
+# 「盤を開きました: <住所>」行から実際の口を取る。頼んだ口が先に塞がっていたら
+# そこで止める (黙って別物を測るより、測れないと言うほうがよい)。
 start_board() {
     local bin="$1" port="$2" log="$3"
+    if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$port/api/state"; then
+        echo "Error: 口 $port は既に誰かが使っています。別物を測ってしまうので" >&2
+        echo "       止めます。PORT_BEFORE / PORT_AFTER で空いている口を指定するか、" >&2
+        echo "       その盤を終了してください" >&2
+        return 1
+    fi
     "$bin" --path "$ROOT" --port "$port" --host 127.0.0.1 --no-open \
         --no-reuse --idle-timeout 0 >"$log" 2>&1 &
-    PIDS+=("$!")
+    local child="$!"
+    PIDS+=("$child")
+    local actual=""
     for _ in $(seq 1 40); do
-        if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$port/api/state"; then
-            return 0
+        actual="$(sed -n 's/^盤を開きました: *http:\/\/[^:]*:\([0-9]*\)\/.*/\1/p' \
+            "$log" | head -1)"
+        if [ -n "$actual" ]; then
+            break
+        fi
+        if ! kill -0 "$child" 2>/dev/null; then
+            echo "Error: $bin が起動せずに終了しました (log: $log)" >&2
+            sed -n '1,5p' "$log" >&2
+            return 1
         fi
         sleep 0.25
     done
-    echo "Error: $bin が $port で応えません (log: $log)" >&2
-    sed -n '1,5p' "$log" >&2
-    return 1
+    if [ -z "$actual" ]; then
+        echo "Error: $bin が住所を名乗りませんでした (log: $log)" >&2
+        sed -n '1,5p' "$log" >&2
+        return 1
+    fi
+    if [ "$actual" != "$port" ]; then
+        # 頼んだ口が使えず別の口を借りた。測定自体は続けられるが、どの口を
+        # 測っているかは必ず言う (黙って別の口を測ると後から辿れない)。
+        echo "注意: $bin は頼んだ口 $port ではなく $actual を使いました" >&2
+    fi
+    if ! curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$actual/api/state"; then
+        echo "Error: $bin が $actual で応えません (log: $log)" >&2
+        return 1
+    fi
+    echo "$actual"
 }
 
 echo "前の実行ファイル: $BEFORE"
 echo "後の実行ファイル: $AFTER"
 echo
-start_board "$BEFORE" "$PORT_BEFORE" "$TMP/before.log" || exit 1
-start_board "$AFTER" "$PORT_AFTER" "$TMP/after.log" || exit 1
+# 実際に使われた口を受け取って以降はそれを使う (頼んだ口ではなく実物を測る)。
+PORT_BEFORE="$(start_board "$BEFORE" "$PORT_BEFORE" "$TMP/before.log")" || exit 1
+PORT_AFTER="$(start_board "$AFTER" "$PORT_AFTER" "$TMP/after.log")" || exit 1
+echo "前の盤: 口 $PORT_BEFORE / 後の盤: 口 $PORT_AFTER"
 
 # 的を集める。盤自身が知っているセッション一覧から取るので、環境によって的の数は
 # 変わる (固定の pid を書き込まない = 別の機械でも走る)。
@@ -181,24 +272,5 @@ echo "的 $total_targets 件 × $PAIRS 組 (= 片側 $((PAIRS * total_targets)) 
 echo "前: 合計 $sum_before 件失敗 (後から回ったとき $before_second_fails 件)"
 echo "後: 合計 $sum_after 件失敗 (後から回ったとき $after_second_fails 件)"
 echo
-if [ "$sum_after" -gt 0 ]; then
-    echo "判定: 直っていません (後の側で合計 $sum_after 件失敗)"
-    exit 1
-fi
-if [ "$before_second_fails" -gt 0 ]; then
-    echo "判定: 直ったと言えます"
-    echo "      前の側は、後の側が先に周を回して並びを整えた後でも"
-    echo "      $before_second_fails 件失敗しました。順序では説明できないので、"
-    echo "      中身の違いによるものです。後の側は合計 0 件。"
-    exit 0
-fi
-if [ "$sum_before" -eq 0 ]; then
-    echo "判定: 証拠になりません。前の側も 1 件も失敗していないので、この的では"
-    echo "      差が出ません (再現条件を狭めるか、的を増やしてください)"
-    exit 3
-fi
-echo "判定: 証拠として弱いです。前の側の失敗 $sum_before 件は、すべて先に周を"
-echo "      回ったときのものでした。問い合わせは窓の並びを変えるので、先に回った"
-echo "      側は不利になります —— この差は順序で説明できてしまいます。"
-echo "      PAIRS を増やして測り直してください (例: PAIRS=6 $0 ...)"
-exit 3
+verdict "$sum_before" "$sum_after" "$before_second_fails"
+exit $?

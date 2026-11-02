@@ -464,15 +464,24 @@ def _project_root() -> str:
 
 def viewer_argv(binary: str, *, project_root: str, port: int, host: str,
                 expose: bool, no_open: bool, no_reuse: bool = False,
-                idle_timeout: str = "") -> list:
+                idle_timeout: str = "", port_explicit: bool = True) -> list:
     """beacon-view を起動する argv を組み立てる (フラグ写像を 1 箇所に固める)。
 
     ``no_reuse`` / ``idle_timeout`` は盤の二重起動と居残りの口 (ms-170 e-7147)。
     既定 (= 偽 / 空) のときは何も渡さない —— 既定値を argv に書き写すと、Go 側の
     既定を変えたときにここが古い値で上書きし続ける (既定の真実源は 1 つにする)。
+
+    ``port_explicit`` が偽なら ``--port`` を渡さない (ms-170 e-7147)。**ここが
+    効いている理由**: Go 側は「利用者が口を指定したか」で再利用の可否を決める
+    (指定は『そこに立てたい』の意思表示なので、黙って別の口の盤へ送らない)。
+    以前はここが常に ``--port 7377`` を渡していたため、Go 側からは毎回「指定
+    された」ように見え、**正規経路では再利用が一度も起きなかった**。隔離した
+    場所では効くのに実際の `beacon view` では効かない、という形で現れた。
     """
-    argv = [binary, "--path", project_root, "--port", str(port),
-            "--host", host]
+    argv = [binary, "--path", project_root]
+    if port_explicit:
+        argv.extend(["--port", str(port)])
+    argv.extend(["--host", host])
     if expose:
         argv.append("--expose")
     if no_open:
@@ -491,6 +500,9 @@ def cmd_view() -> None:
     # 手掛かりを文言に埋める (bash / dispatch のどちらの frontend も env 経由で
     # ここを通るので、ここ 1 箇所で両 frontend を閉じる)。
     raw_port = os.environ.get("BEACON_VIEW_PORT") or ""
+    # 利用者が口を指定したか。Go 側の再利用の可否がこれで決まるので、
+    # 「指定されていない」を「既定値を指定した」に化けさせない (e-7147)。
+    port_explicit = bool(raw_port)
     try:
         port = int(raw_port) if raw_port else DEFAULT_PORT
     except ValueError:
@@ -564,7 +576,8 @@ def cmd_view() -> None:
               file=sys.stderr, flush=True)
     argv = viewer_argv(binary, project_root=_project_root(), port=port,
                        host=host, expose=expose, no_open=no_open,
-                       no_reuse=no_reuse, idle_timeout=idle_timeout)
+                       no_reuse=no_reuse, idle_timeout=idle_timeout,
+                       port_explicit=port_explicit)
     # どの実体に委譲したかを名乗る (silent narrowing を防ぐ)。execv は成功すれば
     # 戻らないので、事前に 1 行出しておく。
     # 診断ログは stderr へ (PR #752 AX1)。stdout は Go 盤の出力用に空けておく —

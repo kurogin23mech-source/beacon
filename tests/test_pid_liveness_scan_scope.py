@@ -143,10 +143,91 @@ def test_repo_root_itself_stays_clean():
 _VERIFY = ROOT / "scripts" / "verify-on-running-board.sh"
 
 
+def _verdict(before_fails, after_fails, before_second_fails):
+    """手順スクリプトの **本物の判定** を固定の数値で動かす。
+
+    `--verdict` は試験用の口で、本番の経路と同じ `verdict()` 関数を呼ぶ (写しでは
+    ない)。だから判定を変えると、ここが赤くなる。
+    """
+    r = subprocess.run(
+        ["bash", str(_VERIFY), "--verdict",
+         str(before_fails), str(after_fails), str(before_second_fails)],
+        capture_output=True, text=True, timeout=120)
+    return r.returncode, r.stdout + r.stderr
+
+
 def test_running_board_verification_procedure_exists():
     """手順が在り、実行できる形で置かれている (受入条件 3)。"""
     assert _VERIFY.is_file(), f"手順がありません: {_VERIFY}"
     assert os.access(_VERIFY, os.X_OK), "実行できる形になっていません"
+
+
+# --- 判定を **実行して** 確かめる (文字列の有無では守れなかった) -------------
+#
+# 最初はスクリプト本文に特定の語が含まれるかだけを assert していた。独立レビューが
+# 変異で実証したところ、判定を「常に直った」に固定しても (語はコメントに残るので)
+# 試験は全件緑のままだった。**判定ロジックを無意味にする変更が「試験が通ったから
+# 安全」として通る**形で、これはこの手順が防ごうとしている「弱い根拠で閉じる」
+# そのものだった。いま試験は本物の判定を数値で動かし、終了コードと文面を見る。
+
+def test_verdict_says_not_fixed_when_the_new_side_fails():
+    """後の側に失敗が在れば「直っていない」(他の条件より先に効く)。"""
+    rc, out = _verdict(0, 4, 0)
+    assert rc == 1, out
+    assert "直っていません" in out
+
+
+def test_verdict_says_fixed_only_with_a_failure_that_order_cannot_explain():
+    """後から周を回った側でも失敗が出ていれば「直った」。"""
+    rc, out = _verdict(3, 0, 2)
+    assert rc == 0, out
+    assert "直ったと言えます" in out
+
+
+def test_verdict_refuses_when_the_old_side_never_failed():
+    """前の側が 1 件も失敗しなければ、差が出ないので証拠にならない。"""
+    rc, out = _verdict(0, 0, 0)
+    assert rc == 3, out
+    assert "証拠になりません" in out
+
+
+def test_verdict_refuses_a_difference_that_order_can_explain():
+    """**これが肝**: 前の側の失敗が「先に回ったとき」だけなら証拠にしない。
+
+    問い合わせ自体が窓の並びを変えるので、先に回った側は不利になる。総数の差だけ
+    で判定すると、前後に同じ実行ファイルを渡しても「直った」と出る (実測した)。
+    """
+    rc, out = _verdict(3, 0, 0)
+    assert rc == 3, out
+    assert "順序で説明できて" in out
+    assert "直ったと言えます" not in out
+
+
+def test_verdict_entry_rejects_wrong_argument_counts():
+    """数を間違えたら黙って既定で走らない (何を測ったか分からなくなる)。"""
+    r = subprocess.run(["bash", str(_VERIFY), "--verdict", "1"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "usage:" in (r.stdout + r.stderr)
+
+
+def test_the_verdict_tests_would_catch_a_neutered_judgement(tmp_path):
+    """test-the-test: 判定を「常に直った」に固定した写しを作り、上の試験が
+
+    捕まえられることを確かめる。偽の安全を自分で作らないための反転。
+    """
+    mutated = tmp_path / "mutated.sh"
+    text = _VERIFY.read_text(encoding="utf-8")
+    broken = text.replace(
+        'if [ "$before_second_fails" -gt 0 ]; then',
+        'if true; then  # before_second_fails / 順序では説明できない', 1)
+    assert broken != text, "変異を当てる目印が見つからない (判定が動いた?)"
+    mutated.write_text(broken, encoding="utf-8")
+    # 壊した判定では「順序で説明できる差」を直ったと言ってしまう
+    r = subprocess.run(["bash", str(mutated), "--verdict", "3", "0", "0"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and "直ったと言えます" in r.stdout, (
+        "変異が効いていない = この反転は何も確かめていない")
 
 
 def test_procedure_queries_the_running_board_not_a_standalone_artifact():
@@ -179,13 +260,52 @@ def test_procedure_does_not_use_mapfile():
         "mapfile は macOS の bash 3.2 に無い")
 
 
-def test_procedure_refuses_to_call_an_order_artifact_a_fix():
-    """**順序で説明できる差を「直った」と言わない** (自分が 2 度踏んだ罠)。
 
-    問い合わせ自体が窓の並びを変えるので、先に投げた側が不利になる。総数の差だけ
-    で判定すると、前後に同じ実行ファイルを渡しても「直った」と出る (実測)。判定の
-    根拠が「後から周を回った側での失敗」であることを押さえる。
+
+# --- 盤に渡す旗が Go 側に実在するか (ms-170 e-7147 保守性 review) ------------
+
+_FLAG_PARITY = ROOT / "scripts" / "check-viewer-flag-parity.py"
+
+
+def test_viewer_flag_parity_guard_passes_on_the_real_tree():
+    """いま実リポジトリで揃っていること。"""
+    r = subprocess.run([sys.executable, str(_FLAG_PARITY)], cwd=ROOT,
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_viewer_flag_parity_guard_goes_red_on_drift(tmp_path):
+    """**drift で赤くなること** (test-the-test)。
+
+    Go 側の旗名を変えた写しを作り、ガードが非 0 で落ちることを確かめる。
+    緩い一致で緑のまま通るガードは、無いより悪い (このリポジトリが何度も
+    踏んだ形)。
     """
-    text = _VERIFY.read_text(encoding="utf-8")
-    assert "before_second_fails" in text, "後から回ったときの失敗を数えていない"
-    assert "順序では説明できない" in text, "判定の根拠が書かれていない"
+    import shutil
+
+    tree = tmp_path / "repo"
+    (tree / "viewer").mkdir(parents=True)
+    (tree / "lib").mkdir()
+    (tree / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts" / "check-viewer-flag-parity.py",
+                tree / "scripts" / "check-viewer-flag-parity.py")
+    shutil.copy(ROOT / "lib" / "cmd_view.py", tree / "lib" / "cmd_view.py")
+    go = (ROOT / "viewer" / "main.go").read_text(encoding="utf-8")
+    broken = go.replace('flag.Bool("no-reuse"', 'flag.Bool("force-new"', 1)
+    assert broken != go, "変異を当てる目印が無い (旗の定義の書き方が変わった?)"
+    (tree / "viewer" / "main.go").write_text(broken, encoding="utf-8")
+
+    r = subprocess.run(
+        [sys.executable, str(tree / "scripts" / "check-viewer-flag-parity.py")],
+        cwd=tree, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 1, (
+        "Go 側の旗名を変えてもガードが緑のままでした:\n"
+        f"{r.stdout}\n{r.stderr}")
+    assert "no-reuse" in (r.stdout + r.stderr)
+
+
+def test_viewer_flag_parity_guard_is_wired_into_ci():
+    """CI の束から呼ばれていること (置いただけで走らない形にしない)。"""
+    ci = (ROOT / "scripts" / "ci-strict-drift-guards.sh").read_text(
+        encoding="utf-8")
+    assert "check-viewer-flag-parity.py" in ci

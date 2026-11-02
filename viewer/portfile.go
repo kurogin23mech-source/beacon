@@ -23,6 +23,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -212,6 +213,109 @@ func parseBoardPIDs(psOutput string, selfPID int) []int {
 		}
 		if strings.HasPrefix(strings.ToLower(name), "beacon-view") {
 			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// reuseDecision は「既に動いている盤を使うか」の判定 (純関数)。
+//
+// **main() から出した理由** (e-7147 保守性 review high): 判定が `main()` の中に
+// あると、どの試験も通らない。`--no-reuse` を無効化する変異を当てても
+// `go test ./...` は緑のままだった (独立レビューが実測)。部品 (`liveBoardURL` /
+// `portfilePath`) は個別に試験されていても、**それをどう組み合わせて呼ぶか**という
+// 配線はどこにも固定されていなかった。idle.go の `shouldClose` と同じく、判定を
+// 純関数にして時計や入出力を注入する形に揃える。
+type reuseDecision struct {
+	URL    string // 空でなければ、この住所の盤を使う
+	Reason string // なぜ使わないと決めたか (人向け。使う場合は空)
+}
+
+// decideReuse は、再利用してよいなら住所を入れた判定を返す。
+//
+// `portExplicit` は「利用者が口を明示したか」。**値が既定と同じかどうかでは
+// 近似しない** (e-7147 保守性 review medium): `--port 7377` と既定値を明示的に
+// 渡した人も「そこに立てたい」と言っているので、値比較だと意思を取り違える。
+// 明示されたかは `flag.Visit` でしか分からないので、呼び出し側が渡す。
+func decideReuse(noReuse, portExplicit bool, reuseKey, portfile string,
+	readRec func(string) *boardRecord, liveURL func(*boardRecord, string) string,
+) reuseDecision {
+	if noReuse {
+		return reuseDecision{Reason: "--no-reuse が指定されました"}
+	}
+	if portExplicit {
+		return reuseDecision{Reason: "--port が指定されました (そこに立てる意思表示)"}
+	}
+	url := liveURL(readRec(portfile), reuseKey)
+	if url == "" {
+		return reuseDecision{Reason: "使える盤が見つかりませんでした"}
+	}
+	return reuseDecision{URL: url}
+}
+
+// flagWasSet は、その旗が実際にコマンドラインで渡されたかを返す。
+// `flag.Visit` は **渡された旗だけ** を巡るので、既定値と同じ値を明示された
+// 場合も正しく「渡された」と分かる。
+func flagWasSet(visit func(func(*flag.Flag)), name string) bool {
+	found := false
+	visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+// shouldWritePortfile は、控えを書き換えてよいかを返す (純関数)。
+//
+// **なぜ要るのか** (e-7147 AX review high): 以前は無条件に書いていた。`--no-reuse`
+// や `--port` 明示で再利用を飛ばした盤も書くので、**生きている盤の控えを上書き**
+// してしまう。上書きされた盤は再利用の仕組みから永久に見えなくなり、次に開いた人
+// は新しい盤を立てる —— つまり「使うたびに増える」が戻る。この PR が閉じようと
+// している状態そのもの。しかも検証手順 (scripts/verify-on-running-board.sh) が
+// `--no-reuse` を使うので、確かめるたびに本番の盤を孤児にしていた。
+//
+// 規則は「席を取っている生きた盤が自分でないなら、触らない」。最後に書いた者が
+// 勝つ形をやめる。
+func shouldWritePortfile(existing *boardRecord, reuseKey string, selfPID int,
+	liveURL func(*boardRecord, string) string) (bool, string) {
+	if existing == nil {
+		return true, ""
+	}
+	if existing.PID == selfPID {
+		return true, ""
+	}
+	if liveURL(existing, reuseKey) == "" {
+		// 死んでいる / 別物に入れ替わっている / 別プロジェクトを配っている。
+		// どれも席が空いているのと同じなので、自分の控えに書き換えてよい。
+		return true, ""
+	}
+	return false, fmt.Sprintf(
+		"このプロジェクトの盤は既に %d 番が配っているので、控えはそのままにします "+
+			"(上書きすると、その盤が再利用から見えなくなります)", existing.PID)
+}
+
+// trackedBoardPIDs は、控えに載っていて **いま生きている** 盤の番号を集める。
+//
+// 置き場所を総なめするので、別プロジェクトの盤も入る。居残り (= 誰の控えにも
+// 載っていない盤) を見分けるために使う (e-7147 AX review misleading)。
+func trackedBoardPIDs(dir string, liveURL func(*boardRecord, string) string) map[int]string {
+	out := map[int]string{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "beacon-view-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		rec := readPortfile(filepath.Join(dir, name))
+		if rec == nil || rec.PID <= 0 {
+			continue
+		}
+		if liveURL(rec, rec.Path) != "" {
+			out[rec.PID] = rec.Path
 		}
 	}
 	return out
