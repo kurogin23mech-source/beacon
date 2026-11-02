@@ -369,13 +369,55 @@ const (
 	// JumpBlockedUnsupportedTerminal は前面化に未対応の端末 (kitty / VS Code 等)。
 	// 画面はこの値のときだけ fallback (パスのコピー) を出す。
 	JumpBlockedUnsupportedTerminal = "unsupported-terminal"
+	// JumpBlockedBackgroundSession は端末の中で動いていないセッション
+	// (Claude Code の台帳で kind="bg")。前面化する窓が **原理的に存在しない**。
+	//
+	// unsupported-terminal と分ける理由 (e-7263): 両者は対処が真逆になる。未対応
+	// 端末は「受け付け表に足せば飛べる」が、バックグラウンド実行は何を足しても
+	// 飛べない。潰すと読み手は「kitty でも使っているのか」「対応を増やせばいいのか」
+	// と受け取り、延々と直らないものを直そうとする。JumpBlockedUnsupportedOS を
+	// exposed から分離したのと同じ理由 (#756 独立 AX レビュー)。
+	//
+	// 実測 (2026-11-02): 台帳は kind を区別して持っているのに viewer が読んで
+	// 捨てていたため、バックグラウンドのセッション 1 件が「この端末は前面化に
+	// 未対応です」と表示されていた。
+	JumpBlockedBackgroundSession = "background-session"
 )
+
+// AllJumpBlockedReasons は飛べない理由の全値 (= 閉じた enum の唯一の一覧)。
+//
+// 試験と画面の突合がここを回すので、理由を足したら**手写しの列挙を直す必要が無い**
+// — 逆に、足したのに画面の対応表 (JUMP_BLOCKED_REASON) に無ければ
+// TestJumpBlockedLiteralMatchesPage が赤くなる。以前は試験側に 5 値を手で並べて
+// いたため、6 値目を足しても試験が気付かない形だった (e-7263 で気付いて直した)。
+var AllJumpBlockedReasons = []string{
+	JumpBlockedExposed,
+	JumpBlockedUnsupportedOS,
+	JumpBlockedRemoteMachine,
+	JumpBlockedNoPID,
+	JumpBlockedBackgroundSession,
+	JumpBlockedUnsupportedTerminal,
+}
 
 // jumpVerdict は「このセッションへ飛べるか」の最終 1 値と、飛べない理由を返す
 // (純関数)。判定の真実源はここ 1 つで、画面は結果を読むだけ。
 // envBlocked はこの盤の環境ブロック (jumpEnvBlocked の結果、空 = 環境は OK)。
 // 理由は影響範囲の広い順に選ぶ: 環境 (盤全体) → マシン → プロセス → 端末種別。
 func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool, string) {
+	return jumpVerdictKind(envBlocked, remote, pid, harness, "")
+}
+
+// jumpVerdictKind は素性 (interactive / bg) も見る版 (e-7263)。
+//
+// 素性は端末種別より **前** に見る: バックグラウンド実行は端末を持たないので、
+// 端末種別が何であろうと飛べない。順序を逆にすると、bg のセッションに
+// 「この端末は未対応」という直せそうな理由が付き、対処を誤らせる。
+//
+// kind が空 (= 素性が分からない道具) のときは従来どおり端末種別だけで判定する。
+// 「分からない」を bg 扱いにして飛べなくするのは、知らないことを根拠に機能を
+// 止めることになる。
+func jumpVerdictKind(envBlocked string, remote bool, pid int,
+	harness, kind string) (bool, string) {
 	switch {
 	case envBlocked != "":
 		return false, envBlocked
@@ -383,11 +425,18 @@ func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool,
 		return false, JumpBlockedRemoteMachine
 	case pid <= 0:
 		return false, JumpBlockedNoPID
+	case kind == sessionKindBackground:
+		return false, JumpBlockedBackgroundSession
 	case !jumpableHarness(harness):
 		return false, JumpBlockedUnsupportedTerminal
 	}
 	return true, ""
 }
+
+// sessionKindBackground は Claude Code の台帳が「端末の中で動いていない」
+// セッションに付ける素性。綴りは台帳 (~/.claude/sessions/<pid>.json の kind) の
+// 値そのもの — tests/... ではなく viewer/local_sessions.go が読み元。
+const sessionKindBackground = "bg"
 
 // resolveHarnessesWith は一覧の各行の端末種別を、名乗りが特定していない行だけ
 // プロセスに訊いて埋める (e-7261)。**判定の前に走らせる**: jumpVerdict は
@@ -414,8 +463,9 @@ func resolveHarnessesWith(run commandRunner, sessions []SessionOverview) {
 // 受け口側がここで確定させる。
 func applyJumpVerdicts(sessions []SessionOverview, envBlocked string) {
 	for i := range sessions {
-		sessions[i].Jumpable, sessions[i].JumpBlocked = jumpVerdict(
-			envBlocked, sessions[i].Remote, sessions[i].PID, sessions[i].Harness)
+		sessions[i].Jumpable, sessions[i].JumpBlocked = jumpVerdictKind(
+			envBlocked, sessions[i].Remote, sessions[i].PID,
+			sessions[i].Harness, sessions[i].Kind)
 	}
 }
 

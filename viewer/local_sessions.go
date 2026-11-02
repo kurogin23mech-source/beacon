@@ -71,6 +71,15 @@ type LocalSessionRow struct {
 	// **端末へ飛ぶ (jump-to-terminal) の起点。** ここから制御端末 (tty) を辿り、
 	// その tty を持つ端末ウィンドウを前面化する。分からない道具では 0 = 飛べない。
 	PID int `json:"pid,omitempty"`
+	// Kind はセッションの素性 (interactive / bg)。Claude Code の台帳が持っている。
+	//
+	// **端末へ飛べるかの前提**: bg は端末の中で動いていないので、前面化する窓が
+	// 原理的に存在しない。これを運ばないと「飛べない理由」が端末種別の話に潰れ、
+	// 「対応端末を増やせば飛べる」と誤読される (e-7263 — 実測: 台帳は
+	// kind='bg' と 'interactive' を区別して持っているのに、ここで読んで捨てて
+	// いたため、バックグラウンドのセッションが unsupported-terminal と表示されて
+	// いた)。空 = 素性が分からない道具 (= 従来どおり端末種別で判定する)。
+	Kind string `json:"kind,omitempty"`
 	// SessionID は Beacon の名簿上の識別子 (sv-...)。この行のプロセス (PID) が
 	// 立てた bridge の名乗り札 (<フォルダ>/.beacon/bridges/<sid>.json の parent_pid)
 	// から引く。引けたときだけ非空 — 名簿との突合を identity で閉じる鍵 (e-6446)。
@@ -260,6 +269,9 @@ func claudeFromRegistry(home string) []LocalSessionRow {
 			Running: processAlive(rec.PID),
 			// 端末へ飛ぶために、プロセス番号も残す (生きている時のみ意味がある)。
 			PID: rec.PID,
+			// 素性 (interactive / bg)。bg は端末を持たないので飛べない —
+			// その理由を端末種別と混ぜないために運ぶ (e-7263)。
+			Kind: rec.Kind,
 		})
 	}
 	return rows

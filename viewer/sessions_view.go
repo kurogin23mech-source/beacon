@@ -133,6 +133,12 @@ type SessionOverview struct {
 	// jump_available && pid && jumpable の 3 値 AND で再構成していた — 判定の正典が
 	// Go という宣言が最後の AND で破れていた (#744 独立レビュー)。
 	Jumpable bool `json:"jumpable"`
+	// Kind はセッションの素性 (interactive / bg、手元の台帳由来)。
+	//
+	// **飛べない理由を割るための項目。** bg は端末の中で動いていないので前面化
+	// する窓が無く、それは「この端末は未対応」とは別の話 (直せば飛べるのか、
+	// 原理的に飛べないのかが真逆になる)。空 = 素性が分からない道具。
+	Kind string `json:"kind,omitempty"`
 	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。値は jump.go の閉じた
 	// enum (exposed / unsupported-os / remote-machine / no-pid /
 	// unsupported-terminal) が唯一の正典。画面は unsupported-terminal のときだけ
@@ -388,6 +394,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			Running: r.Running, ToolRunning: r.ToolRunning,
 			Branch: gitBranch(r.Directory),
 			PID:    r.PID, // 手元で拾ったセッションのプロセス番号 (端末へ飛ぶ起点)
+			Kind:   r.Kind, // 素性 (interactive / bg) — 飛べない理由を割る源 (e-7263)
 		}
 
 		proj := lookup.forDir(r.Directory)

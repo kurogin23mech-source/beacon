@@ -162,3 +162,71 @@ func TestJumpResolvesHarnessItself(t *testing.T) {
 		t.Errorf("Terminal.app を狙っている (導出が効いていない): %.80s", script)
 	}
 }
+
+// 素性 (interactive / bg) で「飛べない理由」を割ること (e-7263)。
+//
+// 実測 (2026-11-02): Claude Code の台帳は kind='bg' と 'interactive' を区別して
+// 持っているのに viewer が読んで捨てていたため、バックグラウンドのセッション
+// (pe-schema-merge-status / pid 78608) が「この端末は前面化に未対応です」と
+// 表示されていた。対処が真逆になる 2 つの理由が 1 つの値に潰れていた形。
+func TestBackgroundSessionGetsItsOwnReason(t *testing.T) {
+	for _, c := range []struct {
+		kind     string
+		harness  string
+		wantOK   bool
+		wantWhy  string
+		why      string
+	}{
+		{"bg", "iterm2", false, JumpBlockedBackgroundSession,
+			"端末種別が対応済みでも、bg は飛び先が無い"},
+		{"bg", "", false, JumpBlockedBackgroundSession,
+			"bg は端末種別より先に判定する (端末の話に潰さない)"},
+		{"interactive", "iterm2", true, "",
+			"interactive は従来どおり飛べる"},
+		{"interactive", "kitty", false, JumpBlockedUnsupportedTerminal,
+			"interactive で未対応端末なら端末種別の理由"},
+		{"", "iterm2", true, "",
+			"素性が分からない道具は従来どおり端末種別だけで判定する"},
+		{"", "kitty", false, JumpBlockedUnsupportedTerminal,
+			"素性不明を bg 扱いにして止めない"},
+	} {
+		ok, why := jumpVerdictKind("", false, 100, c.harness, c.kind)
+		if ok != c.wantOK || why != c.wantWhy {
+			t.Errorf("jumpVerdictKind(kind=%q, harness=%q) = (%v,%q), want (%v,%q) — %s",
+				c.kind, c.harness, ok, why, c.wantOK, c.wantWhy, c.why)
+		}
+	}
+}
+
+// 素性より影響範囲の広い理由が先に出ること (順序の契約)。
+func TestBroaderReasonsWinOverKind(t *testing.T) {
+	if _, why := jumpVerdictKind(JumpBlockedExposed, false, 100, "iterm2", "bg");
+		why != JumpBlockedExposed {
+		t.Errorf("公開中は盤全体の話なので素性より先: got %q", why)
+	}
+	if _, why := jumpVerdictKind("", true, 100, "iterm2", "bg");
+		why != JumpBlockedRemoteMachine {
+		t.Errorf("別マシンは素性より先: got %q", why)
+	}
+	if _, why := jumpVerdictKind("", false, 0, "iterm2", "bg");
+		why != JumpBlockedNoPID {
+		t.Errorf("pid 無しは素性より先: got %q", why)
+	}
+}
+
+// 一覧の適用経路も素性を見ていること (applyJumpVerdicts が渡していないと、
+// 判定関数だけ直して「足した」つもりになる = 配線漏れ)。
+func TestApplyJumpVerdictsPassesKind(t *testing.T) {
+	rows := []SessionOverview{
+		{PID: 1, Harness: "iterm2", Kind: "bg"},
+		{PID: 2, Harness: "iterm2", Kind: "interactive"},
+	}
+	applyJumpVerdicts(rows, "")
+	if rows[0].Jumpable || rows[0].JumpBlocked != JumpBlockedBackgroundSession {
+		t.Errorf("一覧が素性を渡していない: jumpable=%v blocked=%q",
+			rows[0].Jumpable, rows[0].JumpBlocked)
+	}
+	if !rows[1].Jumpable {
+		t.Error("interactive の行まで落ちている")
+	}
+}

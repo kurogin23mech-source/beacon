@@ -325,11 +325,12 @@ func TestJumpBlockedEnumClosed(t *testing.T) {
 	want := map[string]bool{
 		"exposed": true, "unsupported-os": true, "remote-machine": true,
 		"no-pid": true, "unsupported-terminal": true,
+		"background-session": true,
 	}
-	got := []string{JumpBlockedExposed, JumpBlockedUnsupportedOS,
-		JumpBlockedRemoteMachine, JumpBlockedNoPID, JumpBlockedUnsupportedTerminal}
+	got := AllJumpBlockedReasons
 	if len(got) != len(want) {
-		t.Fatalf("enum の数が合わない: %d / %d", len(got), len(want))
+		t.Fatalf("enum の数が合わない: %d / %d — 理由を足したら "+
+			"AllJumpBlockedReasons と この表の両方に入れること", len(got), len(want))
 	}
 	for _, v := range got {
 		if !want[v] {
@@ -347,8 +348,7 @@ func TestJumpBlockedLiteralMatchesPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("page.html が読めない: %v", err)
 	}
-	for _, v := range []string{JumpBlockedExposed, JumpBlockedUnsupportedOS,
-		JumpBlockedRemoteMachine, JumpBlockedNoPID, JumpBlockedUnsupportedTerminal} {
+	for _, v := range AllJumpBlockedReasons {
 		needle := `"` + v + `"`
 		if !strings.Contains(string(page), needle) {
 			t.Errorf("page.html に %s が無い — Go 定数と画面の理由対応表"+
