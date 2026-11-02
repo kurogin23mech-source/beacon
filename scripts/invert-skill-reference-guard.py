@@ -75,32 +75,96 @@ def run_guard() -> tuple[int, str]:
 _S = "/" + "beacon" + "-"
 MISSING_A = _S + "this-skill-does-not-exist"
 MISSING_B = _S + "some-other-missing-skill"
+# A REAL alias, declared by beacon-session-start in its frontmatter triggers.
+# Composed for the same reason as the fake names: this file is scanned, and the
+# alias-scoping case below would otherwise make the harness trip its own
+# subject. (Writing it as a literal is how the first draft of case 9 turned the
+# baseline red — and the guard also caught that the name invented for the
+# comment did not exist at all, which is the guard doing its job on its own
+# harness.)
+REAL_ALIAS = _S + "start"
 
 
-class Mutation:
-    """Apply a text edit, run the guard, restore the file no matter what."""
+class _Edits:
+    """Apply one or more text edits together, restore them all, no matter what.
 
-    def __init__(self, label: str, path: pathlib.Path, old: str, new: str,
-                 expect_in_output: str):
+    Multi-edit exists for ONE reason, and it is worth stating because a
+    single-edit harness quietly produces a worthless case: an exclusion rule
+    can only be shown to be load-bearing by removing it **while something that
+    needs it is present**. The markdown-link exclusion has nothing in this tree
+    that exercises it (measured: zero ``](/beacon-…)`` occurrences), so a
+    one-edit "delete the exclusion" mutation cannot go red — and a case that
+    cannot go red is as harmful as no case, because the summary line counts it
+    as a pass. So the case plants a link AND removes the exclusion in one step.
+    """
+
+    def __init__(self, edits):
+        self.edits = list(edits)      # [(path, old, new), ...]
+
+    def apply(self):
+        originals = {}
+        for path, old, new in self.edits:
+            text = path.read_text(encoding="utf-8")
+            if old not in text:
+                self.restore(originals)
+                return None, f"anchor not found in {path.name}: {old[:60]!r}"
+            originals[path] = text
+            path.write_text(text.replace(old, new, 1), encoding="utf-8")
+            # 編集のたびにキャッシュ鍵を変える (穴 1-b)。対象がガード自身の .py
+            # である case では、これが無いと旧バイトコードから答えが返る。
+            ih.invalidate_bytecode_cache(path, REPO)
+        return originals, ""
+
+    @staticmethod
+    def restore(originals):
+        if originals:
+            ih.restore(originals, REPO)
+
+
+class ExemptionHolds(_Edits):
+    """Assert the guard stays GREEN — i.e. a legitimate shape is NOT reported.
+
+    The sibling of a mutation. A false positive is not a softer failure than a
+    miss: a guard that cries wolf gets switched off, and then it catches
+    nothing at all. So the exclusions get their own case type instead of being
+    taken on trust.
+    """
+
+    def __init__(self, label: str, edits):
+        super().__init__(edits)
         self.label = label
-        self.path = path
-        self.old = old
-        self.new = new
+
+    def check(self) -> tuple[bool, str]:
+        originals, err = self.apply()
+        if originals is None:
+            return False, err
+        try:
+            rc, out = run_guard()
+        finally:
+            self.restore(originals)
+        if rc != 0:
+            return False, ("guard went RED on a shape it is supposed to exempt "
+                           "(false positive):\n         " + out.strip()[:300])
+        return True, "GREEN, the legitimate shape is not reported"
+
+
+class Mutation(_Edits):
+    """Apply edit(s), run the guard, restore no matter what. Expect RED."""
+
+    def __init__(self, label: str, path, old: str = "", new: str = "",
+                 expect_in_output: str = "", edits=None):
+        super().__init__(edits if edits is not None else [(path, old, new)])
+        self.label = label
         self.expect_in_output = expect_in_output
 
     def check(self) -> tuple[bool, str]:
-        original = self.path.read_text(encoding="utf-8")
-        if self.old not in original:
-            return False, f"anchor not found in {self.path.name}: {self.old[:60]!r}"
+        originals, err = self.apply()
+        if originals is None:
+            return False, err
         try:
-            self.path.write_text(original.replace(self.old, self.new, 1),
-                                 encoding="utf-8")
-            # 変異のたびにキャッシュ鍵を変える (穴 1-b)。変異対象がガード自身の
-            # .py である 2 件では、これが無いと旧バイトコードから答えが返る。
-            ih.invalidate_bytecode_cache(self.path, REPO)
             rc, out = run_guard()
         finally:
-            ih.restore({self.path: original}, REPO)
+            self.restore(originals)
 
         # 赤の理由を 2 段で見る (穴 3)。
         #
@@ -182,6 +246,58 @@ MUTATIONS = [
         "## 制約\n\nサブコマンド hint (" + MISSING_B + ") で起動された場合。\n",
         MISSING_B.lstrip("/"),
     ),
+    # 7. The bare-name shape with an imperative — the exact spelling PR #827
+    #    used to go quiet: the earlier review fix deleted the leading slash from
+    #    five imperative comments and the guard stopped seeing them. If this
+    #    stays green, "change the spelling" is a way past the guard again.
+    Mutation(
+        "a bare name on an imperative line (slash deleted)",
+        REPO / "lib" / "tick_health.py",
+        '"""',
+        '"""launch: ' + MISSING_A.lstrip("/") + ' now.\n\n',
+        MISSING_A.lstrip("/"),
+    ),
+    # 8. The tool-call shape an AI harness actually emits. No slash anywhere.
+    Mutation(
+        "a tool-call shaped reference (skill=\"...\")",
+        REPO / "lib" / "tick_health.py",
+        '"""',
+        '"""Run Skill(skill="' + MISSING_B.lstrip("/") + '") here.\n\n',
+        MISSING_B.lstrip("/"),
+    ),
+    # 9. Alias scoping. An alias answers for its OWN Skill's files; used
+    #    elsewhere it must be reported. The flat global namespace this replaced
+    #    meant one line added to any unrelated Skill excused a dangling
+    #    reference anywhere. Injected as a REAL alias (declared by
+    #    beacon-session-start) referenced from an unrelated lib file, so the
+    #    only thing that can make it red is the scoping rule.
+    Mutation(
+        "another Skill's alias used outside its own files",
+        REPO / "lib" / "tick_health.py",
+        '"""',
+        '"""See ' + REAL_ALIAS + ' for details.\n\n',
+        "outside the Skill that declared it",
+    ),
+    # 10. The markdown-link exclusion, shown to be load-bearing. Two edits in
+    #     one step, because the tree has nothing that exercises the exclusion
+    #     (measured: zero ``](/beacon-…)`` occurrences), so deleting the rule on
+    #     its own cannot turn anything red — see _Edits for why that matters.
+    #     Plant a link to a non-existent Skill, delete the exclusion, require
+    #     RED. The paired ExemptionHolds case below plants the same link with
+    #     the exclusion intact and requires GREEN; the two together say the rule
+    #     exempts exactly the link shape and nothing more.
+    Mutation(
+        "the markdown-link exclusion is deleted while a link is present",
+        None,
+        expect_in_output=MISSING_A.lstrip("/"),
+        edits=[
+            (REPO / "skills" / "beacon-task.md", "## 制約",
+             "## 制約\n\n詳細は [FAQ](" + MISSING_A + ") を参照。\n"),
+            (GUARD,
+             'if (m.start(1), m.group(1)) in link_targets:',
+             'if False:'),
+        ],
+    ),
     # 4. Loosening the detector itself: if the token-boundary rule is dropped,
     #    every URL and path matches and the report floods. A flooded report is
     #    not a working guard either, so the harness pins the boundary rule by
@@ -196,6 +312,27 @@ MUTATIONS = [
 ]
 
 
+# 除外が「効いている」ことも試験する。見逃しだけを測って誤検知を測らないと、
+# 緩い除外が静かに入り込む経路が開いたままになる。
+EXEMPTIONS = [
+    ExemptionHolds(
+        "a markdown link to a non-existent Skill is NOT reported",
+        [(REPO / "skills" / "beacon-task.md", "## 制約",
+          "## 制約\n\n詳細は [FAQ](" + MISSING_A + ") を参照。\n")],
+    ),
+    ExemptionHolds(
+        "a quoted absolute path starting with the prefix is NOT reported",
+        [(REPO / "skills" / "beacon-task.md", "## 制約",
+          "## 制約\n\n設定は `" + MISSING_A + "/settings.json` に置く。\n")],
+    ),
+    ExemptionHolds(
+        "a Skill's own alias used inside its own file is NOT reported",
+        [(REPO / "skills" / "beacon-session-start.md", "## 制約",
+          "## 制約\n\n" + REAL_ALIAS + " で起動された場合も同じ。\n")],
+    ),
+]
+
+
 def main() -> int:
     rc, out = run_guard()
     if rc != 0:
@@ -203,15 +340,26 @@ def main() -> int:
               "tree, so nothing below can be concluded.\n")
         print(out)
         return 1
-    print(f"baseline: GREEN ({len(MUTATIONS)} defects to inject)\n")
+    total = len(MUTATIONS) + len(EXEMPTIONS)
+    print(f"baseline: GREEN ({len(MUTATIONS)} defects to inject, "
+          f"{len(EXEMPTIONS)} exemptions to confirm)\n")
 
     failures = 0
+    print("  defects must go RED:")
     for m in MUTATIONS:
         ok, detail = m.check()
         mark = "PASS" if ok else "HOLE"
         if not ok:
             failures += 1
         print(f"  [{mark}] {m.label}\n         {detail}")
+    print()
+    print("  exemptions must stay GREEN:")
+    for e in EXEMPTIONS:
+        ok, detail = e.check()
+        mark = "PASS" if ok else "WOLF"
+        if not ok:
+            failures += 1
+        print(f"  [{mark}] {e.label}\n         {detail}")
 
     rc_after, _ = run_guard()
     print()
@@ -222,10 +370,12 @@ def main() -> int:
     print("tree restored: GREEN")
 
     if failures:
-        print(f"\n{failures} of {len(MUTATIONS)} defects slipped past the guard. "
-              "The guard is not load-bearing for those cases.")
+        print(f"\n{failures} of {total} cases failed. Either a defect slipped "
+              "past the guard, or the guard reported a shape it must exempt — "
+              "both make it a worse instrument than its green suggests.")
         return 1
-    print(f"\nall {len(MUTATIONS)} defects were caught; the guard is load-bearing.")
+    print(f"\nall {total} cases held ({len(MUTATIONS)} defects caught, "
+          f"{len(EXEMPTIONS)} exemptions confirmed); the guard is load-bearing.")
     return 0
 
 

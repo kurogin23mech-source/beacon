@@ -465,10 +465,23 @@ _TREK_SCHEDULER_CHANNELS = {
     "trek-trigger",
 }
 
+# ms-185 e-7079: the same four channels, named for what they now mean to the
+# RECEIVER — retired, i.e. disclosed and never acted on. An alias of the set
+# above, deliberately not a copy: a second literal list would let someone add a
+# channel in one place and forget the other, which is the drift this file
+# already pays for elsewhere.
+TREK_RETIRED_CHANNELS = _TREK_SCHEDULER_CHANNELS
 
-# ms-97 P2 (= review finding H2): the Level 3 imperative blocks below inject a
-# "You MUST immediately invoke /beacon-… <id>" instruction straight into the AI
-# context. Those instructions are only safe when the triggering event was minted
+
+# ms-97 P2 (= review finding H2). HISTORICAL, and it still governs the
+# surviving channels: there used to be imperative blocks on these channels that
+# injected a "you must run this now" instruction straight into the AI context.
+# ms-185 e-7079 removed those blocks (the Skills they named are gone) and left
+# only a disclosure that names no command, so nothing on these channels forces
+# an invoke today. The provenance gate below is NOT dead with them — it decides
+# whether an event keeps ``auto-execute`` at all, which still matters for the
+# operation channels. The reasoning, unchanged: such instructions are only safe
+# when the triggering event was minted
 # by the Beacon server itself during a scheduler / operation tick (= a
 # T1-system envelope, ``issuer == "beacon-system"``). A project editor can post
 # an ``auto-execute`` event on these channels, but they can NOT forge a valid
@@ -485,8 +498,9 @@ _TREK_SCHEDULER_CHANNELS = {
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
 # Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
-# imperative command strings. Even after the provenance gate, defend the
-# f-string against a malformed id (newline / markdown / shell metacharacter)
+# injected text — for the operation channels still as a command, for the
+# retired Trek channels only as the disclosed event id. Even after the
+# provenance gate, defend the f-string against a malformed id (newline / markdown / shell metacharacter)
 # leaking into the injected instruction by restricting to the id charset Beacon
 # actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
@@ -835,10 +849,10 @@ def _format_trek_retired_block(events: list[dict]) -> str:
     """Disclose a Trek-channel event WITHOUT naming an action (ms-185 e-7079).
 
     This replaces four "TREK ACTION" / "TREK LEADER DIGEST" builders that each
-    ended in ``launch: beacon-trek-execute <id>`` (or ``beacon-trek-review``)
-    plus the line "Run this autonomously without asking the user first". Those
-    Skills no longer exist: e-7069 deleted all four of them from every place
-    they were installed. The producers, however, are still live — the server
+    ended in a launch line naming one of the four Trek Skills, plus the line
+    "Run this autonomously without asking the user first". Those Skills no
+    longer exist: e-7069 deleted all four of them from every place they were
+    installed. The producers, however, are still live — the server
     tick calls ``_run_trek_tick`` unconditionally (server/app.py) and the
     review endpoint still emits ``trek-task-review`` — so events on these
     channels can still arrive until the body is removed in e-7070.
@@ -895,10 +909,7 @@ def _render_context(events: list[dict], notify_only_count: int,
                     budget: dict | None = None,
                     auto_execute_downgraded_count: int = 0,
                     autonomous_actions: list[dict] | None = None,
-                    trek_actions: list[dict] | None = None,
-                    trek_progress_check_actions: list[dict] | None = None,
-                    trek_task_review_actions: list[dict] | None = None,
-                    trek_leader_digest_actions: list[dict] | None = None,
+                    trek_retired_events: list[dict] | None = None,
                     cross_user_notices: dict | None = None) -> str:
     """Build the additionalContext markdown for AI inject.
 
@@ -913,17 +924,15 @@ def _render_context(events: list[dict], notify_only_count: int,
     block is emitted ABOVE the generic event list so the AI sees the
     instruction before the noise.
 
-    ``trek_actions`` is the analogous subset for the ``trek-trigger``
-    channel (ms-75 / e-1870). When non-empty, a "TREK ACTION" block is
-    emitted right after the operation block.
-
-    ``trek_progress_check_actions`` / ``trek_task_review_actions`` /
-    ``trek_leader_digest_actions`` are the ms-97 / e-2711 Level 3
-    imperative dispatches for the periodic trek DMs. Each gets its own
-    block ABOVE the generic event list, ensuring the AI sees "You MUST
-    immediately invoke …" before the noise. The blocks share the
-    visual pattern with TREK ACTION / AUTONOMOUS ACTION so the AI's
-    block-parser handles all four uniformly.
+    ``trek_retired_events`` (ms-185 e-7079) is the subset of ``events`` that
+    arrived on one of ``TREK_RETIRED_CHANNELS``. It used to be four separate
+    parameters feeding four imperative blocks, one per channel, each telling
+    the AI to launch a Trek Skill autonomously. Those Skills are gone and the
+    blocks with them: the four channels now produce ONE disclosure block
+    (:func:`_format_trek_retired_block`) that says an event arrived and names
+    no command. One list, because the consumer does not distinguish them —
+    keeping four parameters would advertise a distinction the code no longer
+    makes.
     """
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
@@ -937,15 +946,8 @@ def _render_context(events: list[dict], notify_only_count: int,
     autonomous_block = _format_autonomous_action_block(autonomous_actions or [])
     if autonomous_block:
         parts.append(autonomous_block)
-    # ms-185 e-7079: the four Trek channels used to get four separate
-    # "TREK ACTION" imperatives, each ending in a `beacon-trek-*` launch.
-    # Those Skills are gone (e-7069) while the producers are still live, so
-    # all four collapse into ONE disclosure block that names no command.
-    trek_retired_block = _format_trek_retired_block(
-        list(trek_actions or [])
-        + list(trek_progress_check_actions or [])
-        + list(trek_task_review_actions or [])
-        + list(trek_leader_digest_actions or []))
+    # ms-185 e-7079: one disclosure block for all of TREK_RETIRED_CHANNELS.
+    trek_retired_block = _format_trek_retired_block(list(trek_retired_events or []))
     if trek_retired_block:
         parts.append(trek_retired_block)
     budget_line = _format_budget_line(budget)
@@ -1275,14 +1277,12 @@ def main() -> None:
     inject: list[dict] = []
     notify_only: list[dict] = []
     autonomous_actions: list[dict] = []
-    trek_actions: list[dict] = []
-    # ms-97 / e-2711 — Level 3 imperative dispatch buckets for the
-    # periodic trek DMs. Same opt-in posture as trek-trigger: only
-    # auto-execute + channel in allowlist lands here; otherwise the
-    # event is downgraded to propose-to-ai with the standard marker.
-    trek_progress_check_actions: list[dict] = []
-    trek_task_review_actions: list[dict] = []
-    trek_leader_digest_actions: list[dict] = []
+    # ms-185 e-7079 — one bucket for every retired Trek channel. The opt-in
+    # posture is unchanged (only auto-execute + channel in allowlist lands
+    # here; otherwise the event is downgraded to propose-to-ai with the
+    # standard marker), but the four buckets are one now that they all feed a
+    # single disclosure block.
+    trek_retired_events: list[dict] = []
     downgraded_count = 0
     downgraded_audit: list[dict] = []
     for ev in unread:
@@ -1315,31 +1315,16 @@ def main() -> None:
                 # generic event list, so the AI launches
                 # /beacon-operation-execute without scanning the noise.
                 autonomous_actions.append(ev)
-            elif channel == "trek-trigger":
-                # ms-75 / e-1870: opted-in trek-trigger events get a
-                # structured "TREK ACTION" block so the AI launches
-                # beacon-trek-execute <trek-id> without scanning the noise.
-                # Same pattern as operation-trigger, twin scope-level entry.
-                trek_actions.append(ev)
-            elif channel == "trek-progress-check":
-                # ms-97 / e-2711: opted-in trek-progress-check events get a
-                # Level 3 imperative "You MUST immediately invoke
-                # beacon-trek-execute <trek-id>" block. Closes the
-                # "AI acks the DM but never invokes the Skill" pathology.
-                trek_progress_check_actions.append(ev)
-            elif channel == "trek-task-review":
-                # ms-97 / e-2711: opted-in trek-task-review events get a
-                # Level 3 imperative "You MUST immediately invoke
-                # beacon-trek-review <trek-id> <task-id>" block. Closes
-                # the leader-side mechanical ack pathology.
-                trek_task_review_actions.append(ev)
-            elif channel == "trek-leader-digest":
-                # ms-97 / e-2711 (× e-2707): opted-in trek-leader-digest
-                # events read payload.task_state_aggregate.leader_review_queue
-                # and force beacon-trek-review invoke when non-empty.
-                # When queue is empty, the block surfaces "digest only"
-                # without forcing invoke.
-                trek_leader_digest_actions.append(ev)
+            elif channel in TREK_RETIRED_CHANNELS:
+                # ms-185 e-7079: these four channels used to get four separate
+                # imperative blocks, each telling the AI to launch one of the
+                # Trek Skills autonomously. The Skills are gone (e-7069) and the
+                # blocks with them; what remains is ONE disclosure block that
+                # says an event arrived and names no command.
+                #
+                # The producers are still live until e-7070 folds them, which is
+                # why these channels are still matched at all rather than dropped.
+                trek_retired_events.append(ev)
         if delivery == "notify-user-only":
             notify_only.append(ev)
         else:
@@ -1430,10 +1415,7 @@ def main() -> None:
         monitor_suggested, budget,
         downgraded_count,
         autonomous_actions,
-        trek_actions,
-        trek_progress_check_actions,
-        trek_task_review_actions,
-        trek_leader_digest_actions,
+        trek_retired_events,
         cross_user_notices=cross_user_notices,
     ))
 
