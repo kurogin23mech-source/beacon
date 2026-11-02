@@ -73,10 +73,14 @@ func TestJumpScriptBuilder(t *testing.T) {
 	if err != nil || !strings.Contains(b("ttys000"), `application "iTerm2"`) {
 		t.Errorf("iterm2 が iTerm2 を狙っていない (err=%v)", err)
 	}
-	// 空 (種類不明) → 既定の Terminal.app。
-	b, err = jumpScriptBuilder("")
-	if err != nil || !strings.Contains(b("ttys000"), `application "Terminal"`) {
-		t.Errorf("空 harness が Terminal.app 既定になっていない (err=%v)", err)
+	// 空 / "terminal" (= どちらも「どの端末か分からない」) → 既定で埋めず断る
+	// (e-7261)。以前は Terminal.app を既定にしていたので、iTerm しか使っていない
+	// 機械で黙って外れ、「何も起きない」としか見えなかった。導出は
+	// resolveHarnessWith の仕事で、builder は与えられた種類だけを見る。
+	for _, unknown := range []string{"", "terminal"} {
+		if b, err := jumpScriptBuilder(unknown); err == nil || b != nil {
+			t.Errorf("harness %q を既定の端末で埋めている (不明は断ること)", unknown)
+		}
 	}
 	// 未対応 (kitty 等) → エラー (落とさず fallback の理由)。builder は nil。
 	if b, err := jumpScriptBuilder("kitty"); err == nil || b != nil {
@@ -266,7 +270,10 @@ func TestJumpVerdict(t *testing.T) {
 		why        string
 	}{
 		{"", false, 100, "apple-terminal", true, "", "このマシン・対応端末は飛べる"},
-		{"", false, 100, "", true, "", "harness 不明は Terminal.app 既定で飛べる"},
+		{"", false, 100, "", false, JumpBlockedUnsupportedTerminal,
+			"harness 不明は既定で埋めず unsupported-terminal (e-7261)"},
+		{"", false, 100, "terminal", false, JumpBlockedUnsupportedTerminal,
+			"名乗り側の下限値 terminal も「分からない」なので同じ扱い (e-7261)"},
 		{JumpBlockedExposed, false, 100, "apple-terminal", false, JumpBlockedExposed,
 			"環境 (公開中/非loopback) が最優先で塞ぐ"},
 		{JumpBlockedUnsupportedOS, true, 0, "kitty", false, JumpBlockedUnsupportedOS,

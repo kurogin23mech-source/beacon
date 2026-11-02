@@ -484,6 +484,11 @@ func (s *Server) handler() http.Handler {
 		view.Total = total
 		view.Shown = len(view.Sessions)
 		view.RosterStatus = rosterStatus
+		// 名乗りが端末を特定していない行だけ、プロセスに訊いて埋める (e-7261)。
+		// **判定より前**に置くこと: 埋める前に判定すると、名乗りが届いていない
+		// 行が一律で「飛べない」に落ちる。逆に埋めずに既定値 (Terminal.app) で
+		// 埋めていたのが、iTerm の機械で黙って外れていた元の不具合。
+		resolveHarnessesWith(defaultRunner, view.Sessions)
 		// 「端末へ飛べるか」の最終 1 値をここで確定させる (e-6427)。組み立ては
 		// サーバの環境 (loopback / --expose / OS) を知らないので、知っている
 		// 受け口が全行に書き込む。画面は jumpable / jump_blocked を読むだけ。

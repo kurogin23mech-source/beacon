@@ -203,7 +203,24 @@ type terminalDriver struct {
 // が在って実機で一度も飛べなかった)。
 var terminalDrivers = []terminalDriver{
 	{
-		kinds:    []string{"", "apple-terminal", "terminal", "apple_terminal"},
+		// "" と "terminal" は**ここに置かない** (e-7261)。どちらも
+		// 「どの端末か分からない」であって「Apple Terminal である」ではない。
+		// 以前は両方を Apple Terminal の別名として登録し、不明なら Terminal.app
+		// を既定にして「飛べる」と答えていた (jump_test の
+		// 「harness 不明は Terminal.app 既定で飛べる」がその決定)。
+		//
+		// 実機で起きたこと (2026-11-02 実測): iTerm しか使っていない機械で、
+		// 名乗りが届いていない 3 セッションと、bridge が TERM_PROGRAM を継承でき
+		// ずに下限値 "terminal" を送った 1 セッションの計 4 行が、すべて
+		// 「飛べる」と表示されたまま Terminal.app 用のスクリプトを iTerm の tty に
+		// 投げていた。AppleScript は対象を見つけられないので**何も起きない**。
+		// 利用者には「運用室が全然 iTerm に遷移しない」としか見えない。
+		//
+		// 既定で埋めるのをやめ、代わりに **プロセスに訊く** (resolveHarnessWith)。
+		// 端末の種類はプロセスの性質であり、同じ機械に居る盤は pid を持っている
+		// ので、名乗りが無くても確かめられる。既定値は推測で、推測が外れたとき
+		// 「飛べる」と嘘をつく側に倒れていた。
+		kinds:    []string{"apple-terminal", "apple_terminal"},
 		rawNames: []string{"apple_terminal"},
 		script:   appleTerminalJumpScript,
 		appName:  "Terminal.app",
@@ -235,6 +252,71 @@ func splitHarnessKind(harness string) (raw bool, key string) {
 		return true, strings.TrimSpace(strings.TrimPrefix(k, rawTerminalPrefix))
 	}
 	return false, k
+}
+
+// unknownHarnessKinds は「どの端末か分からない」を意味する名乗り (e-7261)。
+//
+// ふたつとも端末の種類ではなく **情報の欠如** を表す:
+//   ""         … 名乗りが届いていない (名簿に居ない / 古い bridge)。名乗り側
+//                (channel/bus-harness-kind.mjs) はこの値を返さない — 下限は
+//                "terminal" なので、空は「送られてこなかった」でしかない。
+//   "terminal" … 名乗り側の下限値 = TERM_PROGRAM が **bridge の環境に** 無かった。
+//                bridge は MCP ホストが起こすので端末の環境を継承しないことが
+//                あり、端末の中で動いている claude 本体には TERM_PROGRAM が
+//                在るのにこちらだけ空、という形が実機で起きる。
+//
+// どちらも Apple Terminal と同じ扱いにしてはならない。混ぜると「分からない」が
+// 「Terminal.app である」に化け、別の端末を使っている人に対して黙って外れる。
+var unknownHarnessKinds = map[string]bool{"": true, "terminal": true}
+
+// unknownHarness は名乗りが端末の種類を特定していないか (純関数)。
+func unknownHarness(harness string) bool {
+	_, k := splitHarnessKind(harness)
+	return unknownHarnessKinds[k]
+}
+
+// termProgramPrefix は ps が返す環境の中で端末アプリが立てる変数。
+const termProgramPrefix = "TERM_PROGRAM="
+
+// termProgramForPIDWith は pid のプロセス環境から TERM_PROGRAM を読む。
+// 取れなければ "" (= 導出できない)。失敗は呼び出し側で「不明のまま」に畳む。
+//
+// macOS の ps は -E で環境を command の後ろに連ねて出す。環境変数の値に空白は
+// 入り得るが、ここで要るのは TERM_PROGRAM の値だけで、端末アプリ名に空白は
+// 入らない (Apple_Terminal / iTerm.app)。空白区切りの最初の一致を取る。
+func termProgramForPIDWith(run commandRunner, pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	out, err := run("ps", "-E", "-o", "command=", "-p", strconv.Itoa(pid))
+	if err != nil {
+		return ""
+	}
+	for _, field := range strings.Fields(string(out)) {
+		if strings.HasPrefix(field, termProgramPrefix) {
+			return strings.TrimSpace(strings.TrimPrefix(field, termProgramPrefix))
+		}
+	}
+	return ""
+}
+
+// resolveHarnessWith は「飛ぶ先を決めるための端末の種類」を確定する (e-7261)。
+//
+// 名乗りが端末を特定していれば **それを信じる** (別マシンのセッションや、
+// プロセスを覗けない場合でも効く唯一の材料)。特定していないときだけ、pid の
+// プロセス環境に訊いて `terminal:<TERM_PROGRAM>` の生の形を組む。生の形の解決は
+// 既存の rawNames 経路がそのまま受けるので、**語彙は 1 つも増えない**
+// (TERM_PROGRAM を小文字にした綴りが rawNames そのもの: apple_terminal /
+// iterm.app)。導出もできなければ名乗りをそのまま返す = 不明のまま、
+// jumpVerdict が unsupported-terminal として正直に落とす。
+func resolveHarnessWith(run commandRunner, pid int, declared string) string {
+	if !unknownHarness(declared) {
+		return declared
+	}
+	if tp := termProgramForPIDWith(run, pid); tp != "" {
+		return rawTerminalPrefix + tp
+	}
+	return declared
 }
 
 // driverForHarness は harness に対応する driver を返す (無ければ nil)。
@@ -305,6 +387,25 @@ func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool,
 		return false, JumpBlockedUnsupportedTerminal
 	}
 	return true, ""
+}
+
+// resolveHarnessesWith は一覧の各行の端末種別を、名乗りが特定していない行だけ
+// プロセスに訊いて埋める (e-7261)。**判定の前に走らせる**: jumpVerdict は
+// 「対応端末か」で最終 1 値を決めるので、埋める前に判定すると、名乗りが無い行が
+// 一律で落ちる (または以前のように既定値で嘘の true になる)。
+//
+// 訊くのは **別マシンでなく pid が在る行だけ**。別マシンのプロセスはこの機械の
+// ps で覗けないので、訊いても必ず空が返る = 無駄な ps を人数分走らせることになる。
+// 名乗りが特定済みの行も訊かない (resolveHarnessWith が先に返す)。実測では
+// 11 行中 4 行だけが対象。
+func resolveHarnessesWith(run commandRunner, sessions []SessionOverview) {
+	for i := range sessions {
+		if sessions[i].Remote || sessions[i].PID <= 0 {
+			continue
+		}
+		sessions[i].Harness = resolveHarnessWith(
+			run, sessions[i].PID, sessions[i].Harness)
+	}
 }
 
 // applyJumpVerdicts は一覧の全行に最終判定を書き込む。envBlocked はこの盤 (サーバ)
@@ -469,7 +570,12 @@ func jumpToTerminalWith(run commandRunner, goos string, pid int, harness string)
 		return &jumpFailure{http.StatusNotImplemented,
 			"端末の前面化はこの OS では未対応です (現状 macOS のみ)"}
 	}
-	// 端末種別で前面化スクリプトを選ぶ。未対応端末は環境起因 = 501。
+	// 端末種別を確定させてからスクリプトを選ぶ (e-7261)。画面は一覧で配った
+	// harness をそのまま送ってくるので、**一覧側で導出していても**ここで再確定
+	// する: 古いタブ / API を直接叩く呼び出し元という別の入口が残っており、
+	// 片方だけ塞ぐと「どの経路から来たか」で挙動が割れる。
+	harness = resolveHarnessWith(run, pid, harness)
+	// 未対応端末は環境起因 = 501。
 	build, err := jumpScriptBuilder(harness)
 	if err != nil {
 		return &jumpFailure{http.StatusNotImplemented, err.Error()}
