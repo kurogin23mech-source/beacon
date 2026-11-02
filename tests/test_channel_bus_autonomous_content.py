@@ -208,21 +208,9 @@ def _probe_channel_to_skill(channel: str) -> str | None:
     return json.loads(proc.stdout)["out"]
 
 
-
-
-
-
-
-
 def test_channel_to_skill_returns_null_for_unmapped_channel():
     assert _probe_channel_to_skill("dm") is None
     assert _probe_channel_to_skill("unknown-channel") is None
-
-
-
-
-
-
 
 
 def test_gate_blocks_trek_channel_with_non_auto_execute_delivery():
@@ -240,12 +228,6 @@ def test_gate_blocks_all_trek_channels_when_opt_out_env_set():
     assert _probe_gate("trek-task-review", "auto-execute", True) is False
 
 
-
-
-
-
-
-
 def test_trek_progress_check_content_omits_ttl_metadata_when_absent():
     out = _probe_content({
         "event_id": "evt-trek-no-ttl",
@@ -255,12 +237,6 @@ def test_trek_progress_check_content_omits_ttl_metadata_when_absent():
     assert "ttl_deadline_at:" not in out
     assert "last_activity_at:" not in out
     assert "ttl_minutes:" not in out
-
-
-
-
-
-
 
 
 def test_unknown_channel_falls_back_to_operation_format():
@@ -280,16 +256,3 @@ def test_unknown_channel_falls_back_to_operation_format():
 # e-4117 (ms-88): Trek TTL narrative must match the real enforcement TTL, and
 # must not drift from lib/trek_scheduler.DEFAULT_WORKING_TTL_MINUTES.
 # -----------------------------------------------------------------------------
-
-def _enforcement_default_ttl_min() -> int:
-    """Read the enforcement default straight from the Python source of truth."""
-    import sys
-    sys.path.insert(0, str(REPO_ROOT / "lib"))
-    import trek_scheduler  # noqa: PLC0415
-    return int(trek_scheduler.DEFAULT_WORKING_TTL_MINUTES)
-
-
-
-
-
-

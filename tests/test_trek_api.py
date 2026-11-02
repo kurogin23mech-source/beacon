@@ -266,22 +266,14 @@ def reset_store():
 
 
 def _store_trek(title: str, uid: str, email: str, sid: str) -> str:
-    """Arrange a bare trek directly in the store and return its trek_id.
+    """Arrange a bare trek in the store and return its trek_id.
 
-    ms-185 e-7079: POST /api/treks (= the creation entrance) is gone. Tests
-    that need a trek to ALREADY EXIST arrange it here instead; what they
-    assert (listing filters, membership rules, ...) is unrelated to the
-    creation endpoint's own contract.
+    ms-185 e-7079: the arrangement itself lives in tests/_trek_fixtures.py —
+    one place, carrying the "temporary until e-7070" note. This wrapper is
+    kept so the call sites below read unchanged.
     """
-    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
-    doc = trek_mod.new_trek(
-        title=title,
-        creator_user_id=uid,
-        creator_email=email,
-        creator_session_id=sid,
-    )
-    app_module.db.save_trek(doc["trek_id"], doc)
-    return doc["trek_id"]
+    from _trek_fixtures import seed_trek
+    return seed_trek(app_module, title=title, uid=uid, email=email, sid=sid)
 
 
 def _create_seed_trek(*, status: str = "active") -> str:
@@ -294,19 +286,16 @@ def _create_seed_trek(*, status: str = "active") -> str:
     # the arrangement step writes the trek straight to the store. These tests
     # are about behaviour AFTER a trek exists (membership, blockers, review
     # gates, slot preconditions); they are not the creation entrance's contract,
-    # so they stay alive until the body itself is removed (e-7070). The fields
-    # mirror what the removed endpoint produced.
-    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
-    new_doc = trek_mod.new_trek(
-        title="Seed trek",
-        creator_user_id=LEADER_UID,
-        creator_email=LEADER_EMAIL,
-        creator_session_id="sv-leader",
-        description="for tests",
-        type_="persistent",
-    )
-    app_module.db.save_trek(new_doc["trek_id"], new_doc)
-    trek_id = new_doc["trek_id"]
+    # so they stay alive until the body itself is removed (e-7070).
+    #
+    # Goes through the shared helper like every other arrangement. This spot
+    # used to re-inline the same three statements fifteen lines below
+    # `_store_trek`, which is how an independent maintainability review spotted
+    # the duplication in the first place: the helper existed and was not used.
+    from _trek_fixtures import seed_trek
+    trek_id = seed_trek(app_module, title="Seed trek", uid=LEADER_UID,
+                        email=LEADER_EMAIL, sid="sv-leader",
+                        description="for tests")
 
     # Invite MEMBER and have them join.
     r = client.post(f"/api/treks/{trek_id}/members",

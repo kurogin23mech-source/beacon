@@ -1156,36 +1156,37 @@ def cmd_pr_request_changes():
         if rationale:
             print(f"  Reason: {rationale}")
 
-def _trek_finalize_consent_active() -> bool:
-    """ms-92 / e-2169 — Trek 終結 1 confirm path opt-in detection.
-
-    The structural ban on AI-session pr-merge (see below) has one explicit
-    escape hatch: the ``beacon-trek-finalize`` 1-confirm collective
-    merge path. That Skill exports ``BEACON_TREK_FINALIZE_CONSENT=1``
-    before delegating to ``beacon pr merge`` so the ban knows the merge
-    is happening with user collective approval, not as an AI-side
-    individual-PR self-merge.
-
-    The env var is **per-process** (not persisted), so a forgotten leak
-    cannot turn a future AI session into an unrestricted merger.
-    """
-    return os.environ.get("BEACON_TREK_FINALIZE_CONSENT", "") == "1"
-
+# REMOVED (ms-185 e-7079): `_trek_finalize_consent_active`, which let
+# `BEACON_TREK_FINALIZE_CONSENT=1` bypass the merge ban below.
+#
+# That bypass existed for one caller: the `beacon-trek-finalize` Skill, which
+# exported the variable before delegating to `beacon pr merge` so the ban could
+# tell a collective confirmation from an AI self-merge. e-7069 deleted that
+# Skill from all three places it lived, and a grep over bin / lib / server /
+# scripts / skills / shared / plugins / beacon_cli / channel finds **no
+# remaining code that sets this variable**. Nothing legitimate can turn it on.
+#
+# A bypass nobody can legitimately set is not harmless. It stays reachable by
+# accident or by a leaked environment, it is one of the three signals that
+# decide whether the merge ban fires at all, and the refusal message had
+# already been edited to advertise only "Two" paths — so the message and the
+# code disagreed, which is how an independent maintainability review of
+# PR #827 found it. Removing it makes the code say what the message says.
 def _ai_session_merge_ban_active() -> bool:
     """ms-92 / e-2169 — refuse AI-session individual PR merge.
 
     See CORE doc ``pr-review-autonomy-boundary`` for the rationale: AI
     sessions are authorised to approve / reject / request-changes on
-    PRs, but **merge** belongs to the Trek-unit user collective
-    confirmation (= ``beacon-trek-finalize``) so the AI can't
-    self-loop "I wrote it, I approved it, I merged it" without the
-    user ever exercising codebase ownership.
+    PRs, but **merge** belongs to the user, so the AI can't self-loop
+    "I wrote it, I approved it, I merged it" without the user ever
+    exercising codebase ownership. (Until ms-185 e-7079 the sanctioned
+    merger was a Trek-unit collective confirmation; that Skill is gone,
+    and with it the third bypass signal — see the note above the
+    function.)
 
     The ban is on by default for AI sessions and bypassed only when
-    one of three explicit signals is present:
+    one of two explicit signals is present:
 
-      * ``BEACON_TREK_FINALIZE_CONSENT=1`` — Trek-finalize Skill is
-        the merger (= the 1-confirm collective approval path).
       * ``BEACON_PR_MERGE_USER_OVERRIDE=1`` — user explicit opt-in
         escape hatch (= user prompt phrased the merge directly).
       * ``BEACON_SESSION_KIND=human`` — non-AI session (= straight
@@ -1195,8 +1196,6 @@ def _ai_session_merge_ban_active() -> bool:
 
     Returns True if the ban should fire (= refuse the merge).
     """
-    if _trek_finalize_consent_active():
-        return False
     if os.environ.get("BEACON_PR_MERGE_USER_OVERRIDE", "") == "1":
         return False
     kind = (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower()
@@ -1221,11 +1220,11 @@ def cmd_pr_merge():
             "  See CORE doc `pr-review-autonomy-boundary` for the role "
             "split (= AI approves, Trek-unit user merges, user releases).\n"
             "  Bypass paths (= one of these makes the merge proceed):\n"
-            # ms-185 e-7079: the first path used to be
-            # `beacon-trek-finalize <trek-id>`. That Skill was deleted in
-            # e-7069, so offering it here sent the reader after a command
-            # that cannot resolve — on a path that fires on EVERY AI-session
-            # merge attempt, not just Trek ones. Two remain, both real.
+            # ms-185 e-7079: there used to be a third path, a Trek-unit
+            # collective confirmation. The Skill that minted it was deleted in
+            # e-7069 and the bypass itself is now gone too, so these two are
+            # the whole list — the message and _ai_session_merge_ban_active
+            # agree on the count.
             "    1. BEACON_PR_MERGE_USER_OVERRIDE=1 — explicit user "
             "opt-in for one-off merges.\n"
             "    2. BEACON_SESSION_KIND=human — declare the calling "

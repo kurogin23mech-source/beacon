@@ -103,16 +103,3 @@ def test_re_open_clears_halt_reason_so_next_review_is_not_stuck():
     assert vs["mode"] == "completion"
 
 
-# ---------------------------------------------------------------------------
-# AX/maintainability review PR#545 — pin the skill to the lib so the verdict
-# lists have a single source of truth (not a hand-copied prose mirror).
-# ---------------------------------------------------------------------------
-
-import pathlib  # noqa: E402
-
-_SKILL = (pathlib.Path(__file__).resolve().parent.parent
-          / "skills" / "beacon-trek-review.md")
-
-
-
-

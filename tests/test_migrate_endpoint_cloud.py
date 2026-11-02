@@ -146,16 +146,10 @@ def _seed_pre_a_trek() -> str:
     _impersonate(LEADER_UID, LEADER_EMAIL)
     # ms-185 e-7079: POST /api/treks (= the creation entrance) is gone. These
     # tests are about the migrate endpoint's behaviour on an EXISTING trek, so
-    # the arrangement step writes to the store instead.
-    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
-    _doc = trek_mod.new_trek(
-        title="migrate endpoint pre-A",
-        creator_user_id=LEADER_UID,
-        creator_email=LEADER_EMAIL,
-        creator_session_id="sv-leader",
-    )
-    app_module.db.save_trek(_doc["trek_id"], _doc)
-    trek_id = _doc["trek_id"]
+    # the arrangement step writes to the store — via the one shared helper.
+    from _trek_fixtures import seed_trek
+    trek_id = seed_trek(app_module, title="migrate endpoint pre-A",
+                        uid=LEADER_UID, email=LEADER_EMAIL, sid="sv-leader")
     assert client.post(
         f"/api/treks/{trek_id}/members",
         json={"email": MEMBER_EMAIL}).status_code == 200

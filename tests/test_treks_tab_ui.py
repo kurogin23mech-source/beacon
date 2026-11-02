@@ -1,18 +1,17 @@
-"""Web UI navigation tests for the v3 Trek refactor (ms-69 / e-1659 v3).
+"""Web UI navigation tests — the pieces that OUTLIVED the Trek entry points.
 
-Background — v1 (initial e-1659) added a "Treks" tab on the project page.
-v2 reshaped the trek detail view to mock-faithful sections but kept the
-tab. v3 (this version) realises the mock's actual navigation:
+History, because the filename no longer says what the file tests: v1 of
+ms-69 / e-1659 added a "Treks" tab to the project page, v2 reshaped the trek
+detail view, and v3 moved Treks into the sidebar. ms-185 then removed the
+feature's entry points entirely (e-7069 / e-7079) and the tests that pinned
+them went with it.
 
-  * Treks live in the **sidebar** (= MENU / PROJECTS / TREKS / ONLINE AGENTS),
-    not as a project-level tab.
-  * The header gets a **Settings button** and an **Avatar dropdown**.
-  * **Settings overlay** has two tabs: Projects & Members / Agents & Treks.
-  * Trek detail is opened from the sidebar and replaces the project view
-    full-page (not embedded in any tab).
-
-These tests pin the structural pieces so future "simplify" edits can't
-silently regress the mock navigation.
+What remains here are the structural pieces that were introduced alongside
+that navigation work and are still live: the header Settings button, the
+avatar dropdown, and the Settings overlay. They are pinned so a future
+"simplify" edit cannot silently regress them. There is no Treks tab and no
+sidebar Treks entry to test any more — do not add one back expecting this
+file to cover it.
 """
 
 from __future__ import annotations

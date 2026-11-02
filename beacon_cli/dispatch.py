@@ -1201,7 +1201,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_add.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_add.add_argument("--ms", dest="doc_ms", default="")
     p_doc_add.add_argument("--op", dest="doc_op", default="")
-    p_doc_add.add_argument("--trek", dest="doc_trek", default="")
+    # NO --trek here (ms-185 e-7079). The write side refuses a Trek tag in
+    # lib/cmd_doc.py (_refuse_trek_write), and bin/beacon never declared the
+    # flag on `doc add` at all — so this parser was the only way to reach that
+    # refusal, while advertising the flag as a normal accepted option. An
+    # independent maintainability review of PR #827 called that out: the parser
+    # is where an AI looks to learn what a verb accepts, so a flag whose
+    # behaviour is decided two modules away makes the parser lie. argparse now
+    # answers "unrecognized arguments: --trek", which is the same outcome the
+    # lib refusal produced, from the place that declares the contract.
+    # `doc list --trek` stays — reading existing records is deliberate
+    # (ms-185 SPEC 方針5: records are never retroactively unreadable).
     p_doc_add.add_argument("--json", action="store_true")
     p_doc_add.add_argument("--content", default="")
     p_doc_add.add_argument("--stdin", action="store_true")
@@ -1240,7 +1250,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_update.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_update.add_argument("--ms", dest="doc_ms", default="")
     p_doc_update.add_argument("--op", dest="doc_op", default="")
-    p_doc_update.add_argument("--trek", dest="doc_trek", default="")
+    # NO --trek here either, same reason as `doc add` above.
     # ms-131 e-4497 — canonical --target linkage (previously bash-only). default
     # None distinguishes "absent" from "--target '' " (detach).
     p_doc_update.add_argument("--target", dest="doc_target", default=None)
@@ -3901,7 +3911,6 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_SCOPE": args.scope or "",
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
-            "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
             "BEACON_JSON": "1" if args.json else "",
             "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }
@@ -3949,7 +3958,6 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_SCOPE": args.scope or "",
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
-            "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
             # ms-131 e-4497 — forward --target + the absent-vs-empty marker so
             # Windows users can relink and detach like the bash path.
             "BEACON_TARGET": _doc_target or "",

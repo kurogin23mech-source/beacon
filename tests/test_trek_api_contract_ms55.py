@@ -117,21 +117,14 @@ MEMBER_UID = "uid-member"
 
 
 def _store_trek_doc(title: str, uid: str, email: str, sid: str) -> str:
-    """Arrange a bare trek directly in the store and return its trek_id.
+    """Arrange a bare trek in the store and return its trek_id.
 
-    ms-185 e-7079: POST /api/treks (= the creation entrance) is gone. What the
-    tests below assert is behaviour on an EXISTING trek, not the creation
-    endpoint's own contract, so the arrangement step writes to the store.
+    ms-185 e-7079: the arrangement itself lives in tests/_trek_fixtures.py —
+    one place, carrying the "temporary until e-7070" note. This wrapper is
+    kept so the call sites below read unchanged.
     """
-    import trek as trek_mod  # noqa: PLC0415  (test-local, mirrors the router)
-    doc = trek_mod.new_trek(
-        title=title,
-        creator_user_id=uid,
-        creator_email=email,
-        creator_session_id=sid,
-    )
-    app_module.db.save_trek(doc["trek_id"], doc)
-    return doc["trek_id"]
+    from _trek_fixtures import seed_trek
+    return seed_trek(app_module, title=title, uid=uid, email=email, sid=sid)
 
 
 def _impersonate(uid: str) -> None:

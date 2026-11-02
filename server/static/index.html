@@ -7147,6 +7147,14 @@ function _setUrlForProjectView(projectId) {
   } catch (_) { /* non-fatal: URL sync is best-effort */ }
 }
 
+// RETIRING (ms-185 e-7079) — unreachable, kept for a reviewable deletion.
+// Nothing calls openTrek() any more: e-7079 removed the menu entry, the
+// related-items list, the ?trek=<id> deep link and the open-trek handler, and
+// e-7069 removed the CLI and the four Skills. The only crumb that still names
+// a Trek action is the detail view's own "Back", which cannot be reached
+// because the detail view cannot be opened. The ~500 lines below are kept so
+// deleting the body stays a separate, reviewable change: that is e-7070.
+// Do not wire a new caller to this.
 async function openTrek(trekId) {
   state.openTrekId = trekId;
   state.openTrekDocs = [];
