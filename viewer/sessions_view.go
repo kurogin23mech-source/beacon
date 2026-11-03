@@ -49,13 +49,13 @@ type Attribution struct {
 
 // SessionOverview は一覧の 1 行。
 type SessionOverview struct {
-	Tool       string       `json:"tool"`
-	Name       string       `json:"name"`
-	State      string       `json:"state"`
-	Title      string       `json:"title"`
-	Directory  string       `json:"directory"`
-	Branch     string       `json:"branch"`
-	LastActive string       `json:"last_active"`
+	Tool       string `json:"tool"`
+	Name       string `json:"name"`
+	State      string `json:"state"`
+	Title      string `json:"title"`
+	Directory  string `json:"directory"`
+	Branch     string `json:"branch"`
+	LastActive string `json:"last_active"`
 	// Running は **手元で観測したプロセス生存** (processAlive)。出自はローカル観測に
 	// 限る (e-6454 で TransportLive と分離。以前は名乗りの主で上書きしていたが、
 	// 「running=ローカルにプロセスがある」の意味を潰さないよう合成をやめた)。
@@ -65,10 +65,10 @@ type SessionOverview struct {
 	// ws_live OR poll_health.healthy)。名乗りの主 (claimer) の行にだけ立つ。
 	// 「生きているか」の表示・停止隠しの判定は Running か TransportLive の **合成**
 	// (どちらかが真なら生存) で行う — 出自 (ローカル観測 / サーバ判定) を潰さない。
-	TransportLive bool `json:"transport_live"`
-	Project    *ProjectRef  `json:"project,omitempty"`
-	Target     *Attribution `json:"target,omitempty"`
-	Task       *Attribution `json:"task,omitempty"`
+	TransportLive bool         `json:"transport_live"`
+	Project       *ProjectRef  `json:"project,omitempty"`
+	Target        *Attribution `json:"target,omitempty"`
+	Task          *Attribution `json:"task,omitempty"`
 	// TargetSource は担当 (working_target) がどう決まったか。サーバが解決した値
 	// (declared=宣言 / fork / branch / cwd 等) をそのまま運ぶ。運用室のカード木は
 	// これが "fork" の行を子として字下げする (e-6549 — 親子はエッジで示す)。
@@ -221,7 +221,7 @@ const (
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
 //
-// ``named`` は Beacon に名乗っているセッションの名簿 (取れていれば渡す)。
+// “named“ は Beacon に名乗っているセッションの名簿 (取れていれば渡す)。
 // 名簿と突き合わせて、確かな担当が分かるものはそちらを優先する。
 func AllSessions(since time.Duration, now time.Time,
 	named []SessionRow) SessionsView {
@@ -296,7 +296,7 @@ func indexNamedBySID(named []SessionRow) map[string]SessionRow {
 // セッションが名乗っているように見える (2026-09-11 に観測)。件数は、同一キーに複数の
 // live が畳まれた事実を開示する (CollapsedPeers) ために持ち帰る。
 //
-// ``consumedSID`` は identity 突合 (sid) で既に持ち主が決まった名簿行 — fallback の
+// “consumedSID“ は identity 突合 (sid) で既に持ち主が決まった名簿行 — fallback の
 // 取り合いから外す (identity で確定した行を推測突合が二重に配らない)。同一キーに
 // 複数残る場合は **最新の 1 行** を採る (last-write-wins だと入力順という無関係な
 // 偶然が持ち主を決め、幽霊行が勝ち得た — e-6563 で観測)。
@@ -407,7 +407,7 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			Directory: r.Directory, LastActive: r.LastActive,
 			Running: r.Running, ToolRunning: r.ToolRunning,
 			Branch: gitBranch(r.Directory),
-			PID:    r.PID, // 手元で拾ったセッションのプロセス番号 (端末へ飛ぶ起点)
+			PID:    r.PID,  // 手元で拾ったセッションのプロセス番号 (端末へ飛ぶ起点)
 			Kind:   r.Kind, // 素性 (interactive / bg) — 飛べない理由を割る源 (e-7263)
 		}
 

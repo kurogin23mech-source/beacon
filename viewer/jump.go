@@ -36,7 +36,7 @@ func defaultRunner(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).Output()
 }
 
-// psProbeTimeout は一覧の導出で叩く ps 1 件あたりの待ち時間の上限 (e-7265)。
+// psProbeTimeout は導出で叩く ps 1 件あたりの待ち時間の上限 (e-7265)。
 //
 // 名前が `probeTimeout` でないのは、portfile.go が控えへの HTTP 問い合わせ用に
 // その名前を既に使っているから。別の外部依存の別の上限なので、同じ名前にすると
@@ -53,15 +53,27 @@ func defaultRunner(name string, args ...string) ([]byte, error) {
 // 補助であって、失敗しても飛べない理由を正直に出せば済む。だから短い。
 const psProbeTimeout = 2 * time.Second
 
-// boundedRunner は probeTimeout で必ず打ち切る実行器 (e-7265)。
+// probeRunner は **ps へのプローブ専用** の継ぎ目 (e-7266)。
 //
-// 既定の実行器と別にしてあるのは、**打ち切ってよい呼び出しだけに適用する**ため。
-// 前面化そのもの (osascript) は人が待っている操作なので、ここで一律に短い上限を
-// かけると「押したのに何も起きない」を作る。上限をかける範囲を取り違えないよう、
-// 実行器の側で分ける。
-func boundedRunner(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), psProbeTimeout)
-	defer cancel()
+// commandRunner と形が違う (context を受け取る) のは、**上限を呼び出し元の選択に
+// しないため**。
+//
+// 最初の版は「上限つきの実行器」と「上限無しの実行器」を 2 本用意し、
+// 呼ぶ側がプローブには上限つきを渡す約束にしていた。両方が同じ型 `commandRunner`
+// だったので、渡し間違えてもコンパイルもテストも赤くならない —— そして **実際に
+// 間違えていた**: 一覧経路 (`/api/sessions`) は上限つきを渡していたが、単発ジャンプ
+// 経路 (`jumpToTerminal`) は既定の実行器を渡しており、同じ `ps -E` が無期限に走った。
+// 人が押して待っている側にだけ上限が無い、という最悪の割れ方で、独立レビュー 2 体が
+// 別々に実測して指摘した。
+//
+// いまは **上限を termProgramForPIDWith が自分で張る**。どの経路から呼ばれても、
+// どの実行器を渡されても、プローブは psProbeTimeout で諦める。前面化そのもの
+// (osascript) は人が待っている操作なので、そちらは従来どおり commandRunner のまま
+// —— 型が違うので、取り違えると**コンパイルが通らない**。
+type probeRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+// execProbeRunner は実プロセスを context 付きで起動する既定のプローブ実行器。
+func execProbeRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
@@ -337,18 +349,19 @@ const (
 	probeUnreadable
 )
 
-// termProgramPrefixInEnv は ps が返す環境の中で端末アプリが立てる変数。
-//
 // termProgramForPIDWith は pid のプロセス環境から TERM_PROGRAM を読む。
 //
 // macOS の ps は -E で環境を command の後ろに連ねて出す。環境変数の値に空白は
 // 入り得るが、ここで要るのは TERM_PROGRAM の値だけで、端末アプリ名に空白は
 // 入らない (Apple_Terminal / iTerm.app)。空白区切りの最初の一致を取る。
-func termProgramForPIDWith(run commandRunner, pid int) (string, probeResult) {
+func termProgramForPIDWith(run probeRunner, pid int) (string, probeResult) {
 	if pid <= 0 {
 		return "", probeUnreadable
 	}
-	out, err := run("ps", "-E", "-o", "command=", "-p", strconv.Itoa(pid))
+	// **上限はここで張る** (e-7266)。呼び出し元に選ばせない — 詳細は probeRunner。
+	ctx, cancel := context.WithTimeout(context.Background(), psProbeTimeout)
+	defer cancel()
+	out, err := run(ctx, "ps", "-E", "-o", "command=", "-p", strconv.Itoa(pid))
 	if err != nil {
 		return "", probeUnreadable
 	}
@@ -374,7 +387,7 @@ func termProgramForPIDWith(run commandRunner, pid int) (string, probeResult) {
 // (TERM_PROGRAM を小文字にした綴りが rawNames そのもの: apple_terminal /
 // iterm.app)。導出もできなければ名乗りをそのまま返す = 不明のまま、
 // jumpVerdict が unsupported-terminal として正直に落とす。
-func resolveHarnessWith(run commandRunner, pid int, declared string) (string, probeResult) {
+func resolveHarnessWith(run probeRunner, pid int, declared string) (string, probeResult) {
 	if !unknownHarness(declared) {
 		// 名乗りで足りているので訊いていない。「読めた」とは言わない。
 		return declared, probeOK
@@ -480,7 +493,21 @@ var AllJumpBlockedReasons = []string{
 // jumpVerdict は「このセッションへ飛べるか」の最終 1 値と、飛べない理由を返す
 // (純関数)。判定の真実源はここ 1 つで、画面は結果を読むだけ。
 // envBlocked はこの盤の環境ブロック (jumpEnvBlocked の結果、空 = 環境は OK)。
-// 理由は影響範囲の広い順に選ぶ: 環境 (盤全体) → マシン → プロセス → 端末種別。
+//
+// **理由は影響範囲の広い順に選ぶ。いまの順序は 6 段階** (e-7266 で表を現在の
+// switch に合わせた。以前は 4 段階のままで、新しい 2 理由をどこに挿すか読み手が
+// switch の物理順を自分で読むしかなかった):
+//
+//  1. exposed / unsupported-os  … 盤全体の話 (この盤からはどこへも飛べない)
+//  2. remote-machine            … そのマシンの端末はこの盤から前面化できない
+//  3. no-pid                    … 端末を辿る起点が無い
+//  4. background-session        … 端末の中で動いていない (窓が原理的に無い)
+//  5. process-unreadable        … プロセスを読めなかった (待てば変わりうる)
+//  6. unsupported-terminal      … 読めたが受け付け表に無い端末
+//
+// 4 が 5 より先なのは、素性が分かっているほうが確定した事実だから。5 が 6 より先
+// なのは、読めていないのに「端末種別の話」と言うと対処を誤らせるから。
+// **AllJumpBlockedReasons の並びもこの順序**にしてある。
 func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool, string) {
 	return jumpVerdictKind(envBlocked, remote, pid, harness, "", "")
 }
@@ -529,25 +556,31 @@ const sessionKindBackground = "bg"
 // ps で覗けないので、訊いても必ず空が返る = 無駄な ps を人数分走らせることになる。
 // 名乗りが特定済みの行も訊かない (resolveHarnessWith が先に返す)。実測では
 // 11 行中 4 行だけが対象。
-func resolveHarnessesWith(run commandRunner, sessions []SessionOverview) {
-	for i := range sessions {
-		if sessions[i].Remote || sessions[i].PID <= 0 {
-			continue
-		}
-		h, res := resolveHarnessWith(run, sessions[i].PID, sessions[i].Harness)
-		sessions[i].Harness = h
-		if res == probeUnreadable {
-			// 「読めなかった」を行に残す。端末種別の話に潰すと、一時的な権限・
-			// プロセス消失の問題に「対応端末を増やせ」という的外れな対処を促す
-			// (e-7265)。
-			sessions[i].HarnessProbe = harnessProbeUnreadable
-		}
-	}
+func resolveHarnessesWith(run probeRunner, sessions []SessionOverview) {
+	// **キャッシュ無しは、キャッシュ有りの薄い包み** (e-7266)。
+	//
+	// 以前は同じループ (別マシン / pid 無しを飛ばす選り分けと、読めなかった印の
+	// 付け方) が 2 箇所に在った。本番が呼ぶのは Cached 側だけで、試験は非本番側を
+	// 固定していたので、**選り分けを変えると本番の退行が試験に出ない**形だった
+	// (独立保守性レビュー)。resolve は c == nil を既に扱えるので、包みで足りる。
+	resolveHarnessesCached(run, nil, sessions)
 }
 
 // harnessProbeUnreadable は「プロセスを読めなかった」を表す行の印 (e-7265)。
 // 空 = 読めた、または訊く必要が無かった。
 const harnessProbeUnreadable = "unreadable"
+
+// rowMark は導出結果を行の印に写す (e-7266)。
+//
+// int enum (probeResult) と行の印 (string) の変換が 2 つのループに手書きされて
+// いたので 1 箇所に寄せた。4 値目を足したとき、変換を直し忘れても型が通って
+// しまう形だった (独立保守性レビュー)。
+func (r probeResult) rowMark() string {
+	if r == probeUnreadable {
+		return harnessProbeUnreadable
+	}
+	return ""
+}
 
 // applyJumpVerdicts は一覧の全行に最終判定を書き込む。envBlocked はこの盤 (サーバ)
 // の環境ブロック理由 (jumpEnvBlocked の結果、空 = 環境は OK)。組み立て
@@ -702,12 +735,13 @@ func (e *jumpFailure) Error() string { return e.Msg }
 //
 // harness は端末の種類。未対応の種類は **エラーで落とさず理由を返す** (SPEC 方針4)。
 func jumpToTerminal(pid int, harness string) error {
-	return jumpToTerminalWith(defaultRunner, runtime.GOOS, pid, harness)
+	return jumpToTerminalWith(defaultRunner, execProbeRunner, runtime.GOOS, pid, harness)
 }
 
 // jumpToTerminalWith は実行器と OS を差し替え可能にした本体 (テスト可能)。
 // 失敗はすべて *jumpFailure で返し、受け口が HTTP status に写せるようにする。
-func jumpToTerminalWith(run commandRunner, goos string, pid int, harness string) error {
+func jumpToTerminalWith(run commandRunner, probe probeRunner,
+	goos string, pid int, harness string) error {
 	if goos != "darwin" {
 		return &jumpFailure{http.StatusNotImplemented,
 			"端末の前面化はこの OS では未対応です (現状 macOS のみ)"}
@@ -716,7 +750,10 @@ func jumpToTerminalWith(run commandRunner, goos string, pid int, harness string)
 	// harness をそのまま送ってくるので、**一覧側で導出していても**ここで再確定
 	// する: 古いタブ / API を直接叩く呼び出し元という別の入口が残っており、
 	// 片方だけ塞ぐと「どの経路から来たか」で挙動が割れる。
-	harness, _ = resolveHarnessWith(run, pid, harness)
+	// プローブは **専用の継ぎ目** で呼ぶ。`run` (osascript / tty 用) を渡すと型が
+	// 合わないので、一覧経路とジャンプ経路で上限の有無が割れることが起きない
+	// (e-7266 — それが実際に起きていた)。
+	harness, _ = resolveHarnessWith(probe, pid, harness)
 	// 未対応端末は環境起因 = 501。
 	build, err := jumpScriptBuilder(harness)
 	if err != nil {

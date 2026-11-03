@@ -104,7 +104,7 @@ func TestWatchIdleClosesWithAReason(t *testing.T) {
 	}
 }
 
-// --- 起動モードごとの既定 (ms-170 思想 review medium) ------------------------
+// --- 既定 (モード非依存、e-7264) ------------------------
 
 func TestNoBoardSelfClosesByDefault(t *testing.T) {
 	// e-7264: どちらのモードでも既定では畳まない。

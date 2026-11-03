@@ -506,7 +506,7 @@ func TestFilterSessions(t *testing.T) {
 	pA := &ProjectRef{Name: "A"}
 	pB := &ProjectRef{Name: "B"}
 	sessions := []SessionOverview{
-		{Who: "", Project: pA, Running: true, ToolRunning: true},          // 自分/A/作業中
+		{Who: "", Project: pA, Running: true, ToolRunning: true},                // 自分/A/作業中
 		{Who: "me@example.com", Project: pB, Running: true, ToolRunning: false}, // 自分/B/要対応
 		{Who: "other@example.com", Project: pA, Remote: true, Running: true},    // 他人/A
 	}
@@ -615,7 +615,7 @@ func TestOpsRoomAtScale(t *testing.T) {
 				s.Remote = true
 				s.Running = true
 			} else {
-				s.Who = ""     // このマシン = 自分
+				s.Who = "" // このマシン = 自分
 				s.PID = 1000 + p*perProject + k
 				wantSelf++
 				if k%2 == 0 {

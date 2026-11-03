@@ -96,9 +96,6 @@ func (s *Server) beaconDir() string {
 	return s.src.BeaconDir
 }
 
-// NewServer は受け口を立てる。“expose“ が無いまま外向きの host を指定されたら断る。
-// NewServer は受け口を立てる。“reuseKey“ はこの盤が占める席で、ここで決めて
-// 以後変わらない (上のフィールドの説明を参照)。
 // probeCache は導出のキャッシュを遅延で用意する (e-7265)。
 //
 // NewServer を触らずに済ませるため、使う時に作る。盤 1 本に 1 つなので、
@@ -110,6 +107,9 @@ func (s *Server) probeCache() *harnessProbeCache {
 	return s.probes
 }
 
+// NewServer は受け口を立てる。“expose“ が無いまま外向きの host を指定されたら
+// 断る。“reuseKey“ はこの盤が占める席で、ここで決めて以後変わらない
+// (上のフィールドの説明を参照)。
 func NewServer(src *LocalSource, host string, port int, expose bool,
 	reuseKey string) (*Server, error) {
 	if host == "" {
@@ -506,10 +506,10 @@ func (s *Server) handler() http.Handler {
 		// **判定より前**に置くこと: 埋める前に判定すると、名乗りが届いていない
 		// 行が一律で「飛べない」に落ちる。逆に埋めずに既定値 (Terminal.app) で
 		// 埋めていたのが、iTerm の機械で黙って外れていた元の不具合。
-		// 実行器は **打ち切れる側** を使う (e-7265)。`/api/sessions` は 5 秒ごとに
-		// 叩かれる道なので、ps が返らないと一覧全体が無期限に止まる。前面化そのもの
-		// (osascript) は人が待っている操作なので既定の実行器のまま。
-		resolveHarnessesCached(boundedRunner, s.probeCache(), view.Sessions)
+		// プローブ専用の実行器 (probeRunner)。上限は termProgramForPIDWith が
+		// 自分で張るので、ここで選ぶことはしない (e-7266 — 以前は呼び出し元に
+		// 上限つき/無しを選ばせており、ジャンプ経路だけ無界になっていた)。
+		resolveHarnessesCached(execProbeRunner, s.probeCache(), view.Sessions)
 		// 「端末へ飛べるか」の最終 1 値をここで確定させる (e-6427)。組み立ては
 		// サーバの環境 (loopback / --expose / OS) を知らないので、知っている
 		// 受け口が全行に書き込む。画面は jumpable / jump_blocked を読むだけ。

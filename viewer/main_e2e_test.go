@@ -193,10 +193,15 @@ func TestLocalBoardAnnouncesThatItWillNotClose(t *testing.T) {
 }
 
 func TestExposedBoardAnnouncesThatItWillNotClose(t *testing.T) {
-	// サーバ設置では畳まない、を名乗ることまで含めて 1 つの振る舞い。
+	// 設置モードでも畳まない、を名乗ることまで含めて 1 つの振る舞い。
+	//
+	// e-7266: 期待を **完全文** にした。以前は "しません" の部分一致で、3 通りの
+	// 「畳まない」がすべてその語を含むため、理由の文面が変わっても緑のまま通った
+	// (同じ型の弱さを idle_test で直したのに、ここに残っていた)。設置モードは
+	// もう固有の理由を名乗らない (e-7264 でモード分岐を撤去) ので、既定と同じ文。
 	bin := _buildBinary(t)
 	proj := _project(t)
 	board := _startBoard(t, bin, "--path", proj, "--no-open", "--no-reuse",
 		"--host", "127.0.0.1", "--expose")
-	board.waitFor(t, "しません")
+	board.waitFor(t, "無操作での終了: しません (既定)")
 }

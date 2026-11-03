@@ -39,7 +39,7 @@ func (c *Credentials) Expired(now time.Time) bool {
 	if c.TokenExpiry == 0 {
 		return false // 期限の記載が無いものは、使ってみて判断する
 	}
-	return now.Add(60 * time.Second).Unix() > c.TokenExpiry
+	return now.Add(60*time.Second).Unix() > c.TokenExpiry
 }
 
 // CredentialsPath は認証情報の置き場所。beacon 本体と同じ場所を使う。
@@ -157,7 +157,7 @@ func PollLogin(api, code string) (*Credentials, error) {
 
 // --- クラウドから読む ------------------------------------------------------
 
-// CloudSource はクラウド上のプロジェクト 1 件。``Store`` のクラウド側に当たる。
+// CloudSource はクラウド上のプロジェクト 1 件。“Store“ のクラウド側に当たる。
 type CloudSource struct {
 	API       string
 	Token     string
@@ -261,6 +261,7 @@ func (c *CloudSource) SessionsAllProjects() ([]SessionRow, error) {
 //   - この rosterSessionDTO.ContextPct (decode)
 //   - SessionRow.ContextPct (board.go, 名簿の内部表現)
 //   - SessionOverview.ContextPct (sessions_view.go, 運用室の表示行)
+//
 // どれか 1 つの名前を変えるときは 4 箇所すべてを直す (co-writer 関係)。
 type rosterSessionDTO struct {
 	SessionID  string `json:"session_id"`
@@ -277,7 +278,7 @@ type rosterSessionDTO struct {
 	// あり、対応の仕方が違う (後者は許可待ちの疑いが濃い)。状態名だけでは区別できない
 	// ので由来を運ぶ (ms-173 独立レビュー AX-4)。古いサーバでは空。
 	StateOrigin string `json:"state_origin"`
-	Actor      struct {
+	Actor       struct {
 		Email   string `json:"email"`
 		Machine string `json:"machine"`
 	} `json:"actor"`

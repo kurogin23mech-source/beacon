@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,8 +22,11 @@ import (
 //   2. 分からないときはプロセスに訊いて、**実際に飛べるようにする**
 
 // fakeRunner は ps の応答を差し替える (pid → TERM_PROGRAM の値)。
-func fakeRunner(env map[int]string, calls *[]string) commandRunner {
-	return func(name string, args ...string) ([]byte, error) {
+//
+// e-7266: プローブの継ぎ目は probeRunner (context を受ける) に分かれた。上限は
+// termProgramForPIDWith が自分で張るので、偽の実行器は ctx を無視してよい。
+func fakeRunner(env map[int]string, calls *[]string) probeRunner {
+	return func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if calls != nil {
 			*calls = append(*calls, name+" "+strings.Join(args, " "))
 		}
@@ -158,8 +162,6 @@ func TestJumpResolvesHarnessItself(t *testing.T) {
 	var script string
 	run := func(name string, args ...string) ([]byte, error) {
 		switch {
-		case name == "ps" && len(args) >= 1 && args[0] == "-E":
-			return []byte("/bin/claude TERM_PROGRAM=iTerm.app\n"), nil
 		case name == "ps":
 			return []byte("ttys003\n"), nil // tty 解決
 		case name == "osascript":
@@ -168,8 +170,11 @@ func TestJumpResolvesHarnessItself(t *testing.T) {
 		}
 		return nil, errors.New("unexpected " + name)
 	}
+	// プローブは別の継ぎ目 (e-7266)。型が違うので、ここで run を渡すとコンパイル
+	// が通らない —— それが「経路で上限の有無が割れる」を構造的に止めている。
+	probe := fakeRunner(map[int]string{123: "iTerm.app"}, nil)
 	// 画面が空の harness を送ってきても、iTerm2 を狙うこと。
-	if err := jumpToTerminalWith(run, "darwin", 123, ""); err != nil {
+	if err := jumpToTerminalWith(run, probe, "darwin", 123, ""); err != nil {
 		t.Fatalf("空 harness で飛べなかった: %v", err)
 	}
 	if !strings.Contains(script, `application "iTerm2"`) {

@@ -88,9 +88,9 @@ type LocalSessionRow struct {
 
 // LocalSessions は、与えられたプロジェクトのフォルダで動いていたセッションを集める。
 //
-// ``root`` に一致するもの、およびその配下のフォルダのものを拾う (worktree のように
+// “root“ に一致するもの、およびその配下のフォルダのものを拾う (worktree のように
 // 枝分かれした作業場所も同じプロジェクトの作業として見せたいため)。
-// ``since`` より古いものは落とす。
+// “since“ より古いものは落とす。
 func LocalSessions(root string, since time.Duration, now time.Time) []LocalSessionRow {
 	rows := []LocalSessionRow{}
 	home, err := os.UserHomeDir()
