@@ -46,6 +46,30 @@ Deliberately conservative — both directions of imprecision are stated:
   * the bash side reads the 60 lines above the dispatch line, which is where
     the ``VAR=... python3 "$COMMANDS_PY" <verb>`` idiom puts its assignments.
 
+How much that first bullet costs, measured (ms-185 e-7079, independent AX
+review). Handlers here are sibling ``if cmd == "...":`` branches that each
+build a dict literal assigned to the SAME local name ``env``. Read per
+function, one branch's keys are credited to every sibling — so a verb that
+does not pass a flag looks wired because a neighbour passes it. Measured on
+this repo at the time: ``push_record`` was credited with ``BEACON_JSON`` that
+only the ``list`` branch passes, and ``doc_add`` / ``doc_update`` /
+``doc_show`` / ``doc_delete`` were all credited with ``BEACON_TREK_ID`` that
+only the ``list`` branch passes. Scoping resolution to the path that reaches
+the dispatch call surfaced 13 real pre-existing gaps (``skill_install`` x8,
+``task_cancel``, ``deploy_record``, ``doc_add --target``,
+``opportunity_add``, ``push_record``) — verified pre-existing by running the
+scoped version against an origin/main tree.
+
+So for any verb in a handler of that shape, **an OK from this checker is not
+evidence that its mapping is wired**; it only means nothing new was detected
+by a method that cannot see inside the branch. e-7079 saw this asymmetry
+directly: removing ``--trek`` from ``doc add`` on BOTH frontends was reported
+for bash (whose scan is per-file, not per-function) and stayed silent for
+Python. Fixing the scoping is follow-up work with its own review — a first
+attempt at it still leaked forward through source order, which is why it is
+not bolted onto an unrelated change. Patch kept at
+``.archive/cli-env-parity-branch-scoping-WIP.patch``.
+
 Plain script, no pytest import: scripts/ci-strict-drift-guards.sh calls it from
 jobs that have no pytest (ms-160 e-6349).
 """
@@ -92,6 +116,15 @@ AMBIENT_ENV = {
     # 別の欄に分かれて、次に読む人がどちらが正しいか分からなくなる。
     ("view", "BEACON_VIEW_SKIP_HANDSHAKE"),
     ("view", "BEACON_VIEW_SKIP_STALENESS_CHECK"),
+    # ms-185 e-7079: Trek を新しく書くための値。**どのフロントも渡さないのが
+    # 設計**で、未配線ではない。`doc add` / `doc update` の `--trek` は python
+    # (argparse) と bash (bin/lib/cmd_doc.sh) の両方から落としたが、
+    # lib/cmd_doc.py は BEACON_TREK_ID を読み続ける — argv より上の層
+    # (API / MCP) から来た書き込みを _refuse_trek_write で断るため。
+    # 読む側だけが残るのは、断る口を残すことの裏返し。
+    # 読み取り (`doc list --trek`) は別で、そちらは両フロントが今も渡す。
+    ("doc_add", "BEACON_TREK_ID"),
+    ("doc_update", "BEACON_TREK_ID"),
 }
 
 

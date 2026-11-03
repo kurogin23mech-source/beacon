@@ -7162,7 +7162,17 @@ async function switchTab(tab) {
 
 // ---- Treks (ms-69 / e-1659) ----
 
-// ms-86 / e-2250 — read ``?trek=<trek_id>`` from the URL. Trek detail is a
+// RETIRING (ms-185 e-7079) — unreachable, kept for a reviewable deletion.
+// Nothing calls getTrekIdFromUrl() any more: e-7079 deleted the init() read of
+// ``?trek=<id>``, which was its only call site, so the deep link no longer
+// opens anything. It is bannered rather than deleted here for the same reason
+// openTrek() is: the body goes in e-7070, as one reviewable change. An
+// independent maintainability review measured this file and found this
+// function was the one orphan the PR left unmarked while bannering every
+// other one — so a grep for RETIRING now finds all of them, not most.
+// Do not wire a new caller to this.
+//
+// Original contract: read ``?trek=<trek_id>`` from the URL. Trek detail is a
 // cross-project entity (= it can be shared across projects via DM / link)
 // and its URL must be project-agnostic so a shared "?trek=<id>" link doesn't
 // silently rebind the receiver's current project. Returns null when absent.

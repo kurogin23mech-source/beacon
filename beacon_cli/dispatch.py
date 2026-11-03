@@ -1201,15 +1201,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_add.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_add.add_argument("--ms", dest="doc_ms", default="")
     p_doc_add.add_argument("--op", dest="doc_op", default="")
-    # NO --trek here (ms-185 e-7079). The write side refuses a Trek tag in
-    # lib/cmd_doc.py (_refuse_trek_write), and bin/beacon never declared the
-    # flag on `doc add` at all — so this parser was the only way to reach that
-    # refusal, while advertising the flag as a normal accepted option. An
-    # independent maintainability review of PR #827 called that out: the parser
-    # is where an AI looks to learn what a verb accepts, so a flag whose
-    # behaviour is decided two modules away makes the parser lie. argparse now
-    # answers "unrecognized arguments: --trek", which is the same outcome the
-    # lib refusal produced, from the place that declares the contract.
+    # NO --trek here (ms-185 e-7079), and none in bin/lib/cmd_doc.sh either.
+    # The write side refuses a Trek tag in lib/cmd_doc.py
+    # (_refuse_trek_write), but a refusal two modules away is not a contract:
+    # the parser is where an AI looks to learn what a verb accepts, so a flag
+    # that parses fine and then dies later makes the parser lie. An
+    # independent maintainability review of PR #827 called that out for this
+    # parser; a later independent AX review measured that the fix had been
+    # applied to this frontend ONLY, while bash — the default frontend on
+    # macOS/Linux — still declared --trek on `doc add`/`doc update`, printed
+    # it in its Usage line and threaded it to BEACON_TREK_ID. The comment here
+    # asserted the opposite ("bin/beacon never declared the flag at all"),
+    # so the claim that this parser was the single reachable path was false on
+    # the author's own platform. Both frontends now reject the flag where they
+    # declare their flags: argparse answers "unrecognized arguments: --trek",
+    # bash answers "'--trek' is not a valid flag", both non-zero.
     # `doc list --trek` stays — reading existing records is deliberate
     # (ms-185 SPEC 方針5: records are never retroactively unreadable).
     p_doc_add.add_argument("--json", action="store_true")
@@ -1250,7 +1256,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_update.add_argument("--scope", "-s", dest="scope", default="")
     p_doc_update.add_argument("--ms", dest="doc_ms", default="")
     p_doc_update.add_argument("--op", dest="doc_op", default="")
-    # NO --trek here either, same reason as `doc add` above.
+    # NO --trek here either, same reason as `doc add` above (and it is gone
+    # from bin/lib/cmd_doc.sh's `update)` arm too, not just this parser).
     # ms-131 e-4497 — canonical --target linkage (previously bash-only). default
     # None distinguishes "absent" from "--target '' " (detach).
     p_doc_update.add_argument("--target", dest="doc_target", default=None)

@@ -109,3 +109,48 @@ def test_tagging_a_new_doc_to_a_trek_is_refused():
         assert exc.code == 2, f"expected exit 2, got {exc.code}"
     else:
         raise AssertionError("_refuse_trek_write did not exit")
+
+
+UI_COPIES = ("server/static/index.html", "desktop/dist/index.html")
+# The UI's only ways in were the two action-dispatcher arms and the markup that
+# fed them. ``?trek=<id>`` was the third, read at init; its call site is gone
+# (the init read was deleted with e-7079), so the deep link no longer opens
+# anything on its own.
+UI_ENTRANCES = (
+    "case 'open-trek'",
+    "case 'menu-open-trek'",
+    'data-action="open-trek"',
+    'data-action="menu-open-trek"',
+)
+
+
+def test_no_ui_entrance_in_either_copy():
+    """The screen must have no way to open a trek — in BOTH UI copies.
+
+    This is the fourth entrance, and it was the one entrance whose closing was
+    argued only in a comment (``openTrek()`` carries "Nothing calls openTrek()
+    any more... Do not wire a new caller to this"). An independent
+    maintainability review measured that claim by putting
+    ``case 'open-trek': openTrek(el.dataset.trekId); return true;`` back and
+    running the whole relevant suite — 113 passed, 0 failed. Nothing turned
+    red, including ``scripts/check-frontend-drift.py --strict``, which compares
+    the two copies to each other and so stays green when an entrance comes
+    back in *both*.
+
+    So the comment was the only thing holding this shut, while the other three
+    entrances each had an executable absence test above. e-7070 will restore
+    from this feature's own history on purpose (in reverse), and a bad merge or
+    a copy-paste from that history is exactly how this arm comes back.
+
+    Both copies are checked because the parity guard cannot distinguish "absent
+    from both" from "present in both" — checking one copy only would leave the
+    desktop build able to carry the entrance alone.
+    """
+    for rel in UI_COPIES:
+        text = (REPO / rel).read_text(encoding="utf-8")
+        for needle in UI_ENTRANCES:
+            assert needle not in text, (
+                f"{rel}: {needle!r} is back — the screen can open a trek "
+                "again, so every 'nothing can create or open one' claim in "
+                "this repo is now false for the UI axis."
+            )
