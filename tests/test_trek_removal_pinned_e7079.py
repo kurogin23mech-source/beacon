@@ -31,24 +31,43 @@ sys.path.insert(0, str(REPO / "server"))
 
 
 def test_no_creation_route_on_the_server():
-    """POST /api/treks must not exist (it was the only creation entrance)."""
+    """POST /api/treks must not exist (it was the only creation entrance).
+
+    The path set comes from ``app.openapi()["paths"]``, not from walking
+    ``app.routes``. The trek endpoints live in ``server/routers_treks.py`` and
+    are mounted with ``include_router``, and across FastAPI versions an
+    included router surfaces in ``app.routes`` differently: the version pinned
+    locally (0.128) *flattens* the routes in, while the newer one CI installs
+    (0.141) keeps them nested inside an ``_IncludedRouter`` wrapper whose
+    entries have no uniform ``.path``. A flat walk therefore reads the same
+    repository two opposite ways — and it did, in both directions at once:
+
+      * the read-path assertion went red on CI only (the route is there; the
+        walk could not see it), which is how this was found;
+      * the POST assertion was *falsely green* on CI, and would have stayed
+        green if ``POST /api/treks`` came back inside the router — which is
+        the only place it ever lived. A guard that cannot fail is worse than
+        no guard, because the green is believed.
+
+    The OpenAPI path map is stable across both versions and carries the
+    methods, so it answers "is this routed" without depending on how routers
+    are represented. Same reasoning, and same idiom, as
+    ``tests/test_app_router_me_e4869.py::test_me_routes_are_mounted``.
+    """
     import app as app_module  # noqa: PLC0415
-    posts = {
-        r.path for r in app_module.app.routes
-        if getattr(r, "path", "") == "/api/treks"
-        and "POST" in (getattr(r, "methods", None) or set())
-    }
-    assert not posts, (
+    paths = app_module.app.openapi().get("paths", {})
+    methods = {m.lower() for m in paths.get("/api/treks", {})}
+    assert "post" not in methods, (
         "POST /api/treks is routed again — the creation entrance is back, so "
         "every 'nothing can create a trek any more' claim in this repo is now "
         "false (lib/cmd_pr.py, the CLI notice, the RETIRING banners)."
     )
     # The read path is deliberately still routed (SPEC 方針5).
-    assert any(getattr(r, "path", "") == "/api/treks/{trek_id}"
-               and "GET" in (getattr(r, "methods", None) or set())
-               for r in app_module.app.routes), (
+    read_methods = {m.lower() for m in paths.get("/api/treks/{trek_id}", {})}
+    assert "get" in read_methods, (
         "GET /api/treks/{trek_id} disappeared — existing records must stay "
-        "readable; removing the read path is e-7070's call, not a side effect."
+        "readable; removing the read path is e-7070's call, not a side effect. "
+        f"(routed methods: {sorted(read_methods)})"
     )
 
 
