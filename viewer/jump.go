@@ -753,7 +753,24 @@ func jumpToTerminalWith(run commandRunner, probe probeRunner,
 	// プローブは **専用の継ぎ目** で呼ぶ。`run` (osascript / tty 用) を渡すと型が
 	// 合わないので、一覧経路とジャンプ経路で上限の有無が割れることが起きない
 	// (e-7266 — それが実際に起きていた)。
-	harness, _ = resolveHarnessWith(probe, pid, harness)
+	harness, probeRes := resolveHarnessWith(probe, pid, harness)
+
+	// **プローブの結果を捨てない** (e-7267)。
+	//
+	// 一覧の判定には process-unreadable を足したのに、押したときのこの経路では
+	// `harness, _ =` と結果を投げ捨てていた。その結果、プロセスが読めなかった
+	// (たとえば押す直前にそのセッションが閉じられた) ときにも
+	// 「この端末 () への前面化は未対応です」という **端末種別の話** が返っていた。
+	//
+	// 実測 (2026-11-03): 一覧に居た pid がその後終了していて、押したらこの文が
+	// 出た。一覧側で分けた区別が、人が実際に操作する経路で使われていない
+	// —— 「1 経路だけ塞いで構造を閉じたと言う」の、同じ日に 4 度目の再発。
+	if probeRes == probeUnreadable && !jumpableHarness(harness) {
+		return &jumpFailure{http.StatusNotFound, fmt.Sprintf(
+			"プロセス %d を読めませんでした (すでに終了した / 権限が無い / "+
+				"確認が時間内に終わらなかった)。少し待って一覧を読み直すと"+
+				"変わることがあります", pid)}
+	}
 	// 未対応端末は環境起因 = 501。
 	build, err := jumpScriptBuilder(harness)
 	if err != nil {

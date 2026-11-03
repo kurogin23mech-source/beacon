@@ -301,3 +301,62 @@ func TestApplyJumpVerdictsPassesKind(t *testing.T) {
 		t.Error("interactive の行まで落ちている")
 	}
 }
+
+// 押したときの経路でも「読めなかった」を端末種別の話にしないこと (e-7267)。
+//
+// 一覧の判定には process-unreadable を足したのに、jumpToTerminalWith は
+// `harness, _ =` でプローブの結果を捨てていた。実測で、一覧に居た pid がその後
+// 終了していて押したら「この端末 () への前面化は未対応です」が返った
+// —— 一覧側で分けた区別が、人が実際に操作する経路で使われていなかった。
+func TestJumpSaysTheProcessWasUnreadable(t *testing.T) {
+	run := func(name string, args ...string) ([]byte, error) {
+		return nil, errForTest("should not reach tty/osascript")
+	}
+	// プローブが失敗する (= プロセスが読めない)。
+	dead := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return nil, errForTest("no such process")
+	}
+	err := jumpToTerminalWith(run, dead, "darwin", 4242, "")
+	if err == nil {
+		t.Fatal("読めないプロセスで成功を返した")
+	}
+	jf, ok := err.(*jumpFailure)
+	if !ok {
+		t.Fatalf("jumpFailure でない: %v", err)
+	}
+	if jf.Status != 404 {
+		t.Errorf("status=%d (実体不在なので 404 のはず)", jf.Status)
+	}
+	if strings.Contains(jf.Msg, "未対応") {
+		t.Errorf("端末種別の話にしている: %q — 読めなかったのと未対応端末は"+
+			"対処が真逆 (待てば変わる / 何をしても変わらない)", jf.Msg)
+	}
+	if !strings.Contains(jf.Msg, "読めませんでした") {
+		t.Errorf("読めなかったことを言っていない: %q", jf.Msg)
+	}
+}
+
+// 名乗りで解決するなら、プローブが失敗しても飛べること (読めなかったことを
+// 問題にしない)。一覧側の判定と同じ規則。
+func TestJumpStillWorksWhenDeclarationSuffices(t *testing.T) {
+	var script string
+	run := func(name string, args ...string) ([]byte, error) {
+		switch name {
+		case "ps":
+			return []byte("ttys007\n"), nil
+		case "osascript":
+			script = args[len(args)-1]
+			return []byte("true\n"), nil
+		}
+		return nil, errForTest("unexpected " + name)
+	}
+	dead := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return nil, errForTest("no such process")
+	}
+	if err := jumpToTerminalWith(run, dead, "darwin", 4242, "iterm2"); err != nil {
+		t.Fatalf("名乗りが特定済みなのに飛べなかった: %v", err)
+	}
+	if !strings.Contains(script, `application "iTerm2"`) {
+		t.Errorf("iTerm2 を狙っていない: %.60s", script)
+	}
+}
