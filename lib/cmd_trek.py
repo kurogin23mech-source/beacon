@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """cmd_trek.py — the `beacon trek *` command family (ms-127 e-4820).
 
+ORPHANED (ms-185 e-7069) — read this before trusting anything below.
+Nothing imports this module any more. e-7069 removed the `beacon trek` CLI from
+both frontends and deleted the four Trek Skills, and e-7079 removed the last
+creation path (POST /api/treks) plus every screen entry point. commands.py no
+longer re-exports a single name from here, so the paragraph below describing
+that re-export is historical, not current. The module is kept only so the
+deletion of the body stays a separate, reviewable change: that is e-7070.
+
 Extracted verbatim from commands.py (god-module split). Depends only on
 commands_shared (upward) + leaf domain modules (core / store / work_model),
 never on commands.py — acyclic (SPEC 方針4). commands.py re-imports the PUBLIC

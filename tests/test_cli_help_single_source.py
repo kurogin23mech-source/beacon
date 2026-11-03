@@ -254,7 +254,6 @@ def _run(proj, *args):
     [
         (["task", "update", "--help"], "Usage: beacon task update"),
         (["milestone", "start", "--help"], "Usage: beacon milestone start"),
-        (["trek", "list", "--help"], "Usage: beacon trek list"),
         (["status", "-h"], "Usage: beacon status"),
     ],
 )

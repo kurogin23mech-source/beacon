@@ -1569,7 +1569,7 @@ def require_envelope_for_action(action_name: str):
 # ms-88 / e-2089 — fresh session take-over (= dead leader_session_id 引き継ぎ)
 
 
-# ms-88 / e-2106 — pulse-ack body (= /beacon-trek-pulse Skill self-report).
+# ms-88 / e-2106 — pulse-ack body (= beacon-trek-pulse Skill self-report).
 # ms-92 / e-2165 — structured payload fields added so the leader-digest
 # (e-2164) can mechanically aggregate "stuck=N idle=M" counts without
 # parsing natural-language notes. All structured fields are optional and
@@ -1577,7 +1577,7 @@ def require_envelope_for_action(action_name: str):
 # only set picked_choice + note) keep working.
 
 
-# ms-88 / e-2138 — kickoff completion body (= /beacon-trek-pulse Step 0 が呼ぶ)
+# ms-88 / e-2138 — kickoff completion body (= beacon-trek-pulse Step 0 が呼ぶ)
 
 
 # ms-97 / Phase 7-B / e-2684 — leader succession consent body (= candidate
@@ -3593,10 +3593,10 @@ def _run_trek_tick(body, now) -> dict:
                                 f"[Trek quiesced] trek_id={trek_id}\n"
                                 "Trek scope 内の全 slot が terminal state "
                                 "(= done / user_review) に到達しました "
-                                "(= AI 自律実行完了)。 leader review "
-                                "(= /beacon-trek-review) で archive 判断、 "
-                                "もしくは scope 追加 task の投入を "
-                                "決めてください。\n"
+                                "(= AI 自律実行完了)。 この作業空間の機能は "
+                                "畳まれており、対応する Skill は存在しません "
+                                "(ms-185 e-7069)。起動すべきコマンドは "
+                                "ありません。\n"
                                 f"reason: {quiesce_reason}"
                             ),
                         }
@@ -4528,11 +4528,10 @@ def _run_trek_tick(body, now) -> dict:
                         f"executor が working state のまま {silence} 分無活動。"
                         f" server-side TTL safety net (= e-2067 / ms-88 e-2107) "
                         f"が leader_review に降格しました。\n"
-                        f"次の action: /beacon-trek-review {trek_id} "
-                        f"{task_id} で done / user_review (forward) / "
-                        f"working (re-work + 方針 DM) を選んでください。 "
-                        f"false-positive なら leader_review → working に "
-                        f"re-stamp で復旧可能。"
+                        f"この作業空間の機能は畳まれており、対応する Skill は "
+                        f"存在しません (ms-185 e-7069)。起動すべきコマンドは "
+                        f"ありません。false-positive なら leader_review → "
+                        f"working に re-stamp で復旧可能。"
                     ),
                     "created_at": trek_mod.utcnow_iso(),
                 }

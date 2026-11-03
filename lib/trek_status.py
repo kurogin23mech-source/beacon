@@ -1,4 +1,21 @@
 """Session-start Trek status display helpers (ms-75 e-1813/e-1854/e-2047,
+
+RETIRING (ms-185 e-7079) — read this before trusting anything below.
+The feature this module implements has no entry point left: e-7069 removed the
+`beacon trek` CLI from both frontends and deleted the four Trek Skills, and
+e-7079 removed the last creation path (POST /api/treks) plus every screen entry
+point. Nothing can create a new one, so nothing new reaches this code. The body
+is kept only so deleting it stays a separate, reviewable change: that is e-7070.
+This module is a step further along than its siblings: its only caller,
+scripts/session-start-trek-status.py, was deleted by e-7079, so it has
+zero importers today. The docstring below still names that caller; it is
+historical. An independent maintainability review of PR #827 found this
+file was the one orphan the PR created without marking, while its
+sibling lib/cmd_trek.py did get a banner — the convention was applied
+unevenly, which is worse than not having one.
+
+Everything below describes how the feature worked while it was reachable. Treat
+it as a record, not as a live contract — and do not add features here.
 consolidated ms-85 e-3180).
 
 session-start shows two Trek things at start of session:

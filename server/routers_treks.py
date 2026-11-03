@@ -1,5 +1,18 @@
 """Trek ("/api/treks/*") router — collaborative "缶詰" work-room endpoints.
 
+RETIRING (ms-185 e-7079) — read this before trusting anything below.
+The feature this module implements has no entry point left: e-7069 removed the
+`beacon trek` CLI from both frontends and deleted the four Trek Skills, and
+e-7079 removed the last creation path (POST /api/treks) plus every screen entry
+point. Nothing can create a new one, so nothing new reaches this code. The body
+is kept only so deleting it stays a separate, reviewable change: that is e-7070.
+The 31 write endpoints below are unreachable for a NEW record (there is
+no creation path) but are still mounted, and the review endpoint still
+emits events until e-7070.
+
+Everything below describes how the feature worked while it was reachable. Treat
+it as a record, not as a live contract — and do not add features here.
+
 ms-127 e-4870 (B フェーズ): the trek endpoints extracted from the
 server/app.py god-module, following the make_router(require_auth, *,
 ...injected helpers) pattern established by routers_me / routers_orgs /
@@ -1145,30 +1158,11 @@ def make_router(
             include_archived=include_archived,
         )
 
-    @router.post("/api/treks")
-    def create_trek_endpoint(body: TrekCreate, user: dict = Depends(require_auth)):
-        """Create a new trek. Caller becomes the creator + initial leader member.
-
-        ``creator_session_id`` is recorded as ``leader_session_id`` (SPEC 設計方針 9).
-        """
-        if not body.creator_session_id:
-            raise HTTPException(status_code=400, detail="creator_session_id required")
-        try:
-            new_doc = trek_mod.new_trek(
-                title=body.title,
-                creator_user_id=user.get("sub", ""),
-                creator_email=user.get("email", ""),
-                creator_session_id=body.creator_session_id,
-                description=body.description,
-                type_=body.type,
-                cadence_minutes=body.cadence_minutes,
-                manager_agent_url=body.manager_agent_url or "",
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        db.save_trek(new_doc["trek_id"], new_doc)
-        return new_doc
-
+    # ms-185 e-7079: POST /api/treks (= the only creation path) was removed
+    # here. Everything below is read / mutate on treks that already exist, so
+    # no NEW trek can be made from any surface. Removing this router entirely
+    # is e-7070; until then these endpoints keep existing records reachable
+    # (ms-185 SPEC 方針5: do not make records silently unreadable).
     @router.get("/api/treks/{trek_id}")
     def get_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
         """Get a single trek by id. Caller must be creator or member."""

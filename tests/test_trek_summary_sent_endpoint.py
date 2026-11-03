@@ -147,15 +147,22 @@ def reset_store():
         _restore_db(prior)
 
 
+def _store_trek_doc(title: str, uid: str, email: str, sid: str) -> str:
+    """Arrange a bare trek in the store and return its trek_id.
+
+    ms-185 e-7079: the arrangement itself lives in tests/_trek_fixtures.py —
+    one place, carrying the "temporary until e-7070" note. This wrapper is
+    kept so the call sites below read unchanged.
+    """
+    from _trek_fixtures import seed_trek
+    return seed_trek(app_module, title=title, uid=uid, email=email, sid=sid)
+
+
 def _seed_phase_a_trek() -> str:
     """Trek with migration_phase=A, leader_session_id=sv-leader, member sv-member."""
     _impersonate(LEADER_UID, LEADER_EMAIL)
-    r = client.post("/api/treks", json={
-        "title": "Phase 7-A summary-sent test",
-        "creator_session_id": "sv-leader",
-    })
-    assert r.status_code == 200, r.text
-    trek_id = r.json()["trek_id"]
+    trek_id = _store_trek_doc("Phase 7-A summary-sent test", LEADER_UID,
+                              LEADER_EMAIL, "sv-leader")
     # Invite + join MEMBER so we have a non-leader role for the 403 test.
     r = client.post(f"/api/treks/{trek_id}/members",
                     json={"email": MEMBER_EMAIL})

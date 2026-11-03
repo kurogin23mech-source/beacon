@@ -116,6 +116,17 @@ LEADER_UID = "uid-leader"
 MEMBER_UID = "uid-member"
 
 
+def _store_trek_doc(title: str, uid: str, email: str, sid: str) -> str:
+    """Arrange a bare trek in the store and return its trek_id.
+
+    ms-185 e-7079: the arrangement itself lives in tests/_trek_fixtures.py —
+    one place, carrying the "temporary until e-7070" note. This wrapper is
+    kept so the call sites below read unchanged.
+    """
+    from _trek_fixtures import seed_trek
+    return seed_trek(app_module, title=title, uid=uid, email=email, sid=sid)
+
+
 def _impersonate(uid: str) -> None:
     def _fake_auth():
         return {"sub": uid, "email": f"{uid}@x"}
@@ -152,11 +163,8 @@ def _create_trek_with_member_and_scope() -> str:
     GET /api/treks/{id}) is unchanged; only the setup steps grew.
     """
     _impersonate(LEADER_UID)
-    r = client.post("/api/treks", json={
-        "title": "Contract pin trek",
-        "creator_session_id": "sv-leader",
-    })
-    trek_id = r.json()["trek_id"]
+    trek_id = _store_trek_doc("Contract pin trek", LEADER_UID,
+                              "leader@x", "sv-leader")
     # invite MEMBER + have them join
     client.post(f"/api/treks/{trek_id}/members", json={"email": "member@x"})
     _impersonate(MEMBER_UID)

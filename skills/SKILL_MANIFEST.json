@@ -3,7 +3,7 @@
   "generated_at": "2026-07-05T22:20:00Z",
   "generator": "manual + beacon-cli (ms-93 / e-2558)",
   "source_dir": "skills/",
-  "total_skills": 39,
+  "total_skills": 36,
   "spec_reference": "doc_id 6aK8fr1OjsO3hJNHb7hA (= ms-93 §3-B canonical Skill schema)",
   "cohort_summary": {
     "bus-dm": 5,
@@ -13,8 +13,7 @@
     "onboarding": 4,
     "operation": 3,
     "review-spec": 5,
-    "session": 4,
-    "trek": 3
+    "session": 4
   },
   "skills": [
     {
@@ -661,66 +660,6 @@
       "size_chars": 6241,
       "content_hash": "bf97652b51ac",
       "migration_cohort": "core-workflow",
-      "migration_status": "todo"
-    },
-    {
-      "skill_name": "beacon-trek-execute",
-      "current_location": "skills/beacon-trek-execute.md",
-      "frontmatter": {
-        "name": "beacon-trek-execute",
-        "description": "Trek (= 缶詰の徹夜作業部屋 / 事前承認スコープ) を AI が自律実行する Skill。Trek scope 内の MS / task / Operation について user 確認なしで計画・議論・実装・中間 commit を進める。デプロイ / リリースのみ user 介入境界として escalate する。trek-trigger event (delivery=auto-execute) 由来でも user 引数 `/beacon-trek-execute <trek-id>` 由来でも起動する。",
-        "version": "0.1.0",
-        "triggers": ""
-      },
-      "claude_only_fields": [
-        "version",
-        "triggers"
-      ],
-      "has_sub_resources": false,
-      "codex_portability_status": "unported",
-      "size_chars": 20593,
-      "content_hash": "d63654c3cdfc",
-      "migration_cohort": "trek",
-      "migration_status": "todo"
-    },
-    {
-      "skill_name": "beacon-trek-finalize",
-      "current_location": "skills/beacon-trek-finalize.md",
-      "frontmatter": {
-        "name": "beacon-trek-finalize",
-        "description": "Trek (= 缶詰の徹夜作業部屋、 事前承認スコープを持つ自律実行の作業空間) を終結する Skill。 含まれる全 PR の構造化 summary を user に提示し、 1 confirm で 全 PR 一括 merge + Trek archive まで完遂する。 「approve = AI / merge = Trek 単位 user / release = user」 の 3 段境界 (= ms-92 / e-2169 + CORE doc pr-review-autonomy-boundary) を 1 動線で具現化する。",
-        "version": "0.1.0",
-        "triggers": ""
-      },
-      "claude_only_fields": [
-        "version",
-        "triggers"
-      ],
-      "has_sub_resources": false,
-      "codex_portability_status": "unported",
-      "size_chars": 7421,
-      "content_hash": "0bd1692fcc07",
-      "migration_cohort": "trek",
-      "migration_status": "todo"
-    },
-    {
-      "skill_name": "beacon-trek-pulse",
-      "current_location": "skills/beacon-trek-pulse.md",
-      "frontmatter": {
-        "name": "beacon-trek-pulse",
-        "description": "Trek autonomous loop の 1 tick に対する executor の自己申告 + 5 択 picker (terminal / continue / dm-leader / dm-peer / no-op)。/beacon-trek-execute と並列に存在する短時間 Skill で、 server に「Skill が実際 invoke された」 ground truth を渡す (= Layer 2 observability)。 trek-progress-check event 由来 でも user 引数 `/beacon-trek-pulse <trek-id>` 由来でも起動する。 1 tick = 1 pulse の運用。",
-        "version": "0.1.0",
-        "triggers": ""
-      },
-      "claude_only_fields": [
-        "version",
-        "triggers"
-      ],
-      "has_sub_resources": false,
-      "codex_portability_status": "unported",
-      "size_chars": 16479,
-      "content_hash": "c12642f20862",
-      "migration_cohort": "trek",
       "migration_status": "todo"
     },
     {

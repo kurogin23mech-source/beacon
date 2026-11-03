@@ -500,7 +500,7 @@ def _fail_on_repo_beacon_write(request):
             "Fix it in the module that writes, one of two ways:\n"
             "  * point BEACON_PROJECT_FILE at tmp in an autouse fixture — one "
             "redirect moves every side-file the bus family resolves (worked "
-            "example: tests/test_trek_cli_cloud.py::_isolate_project_root);\n"
+            "example: the isolated_project fixture below in this file);\n"
             "  * or set the specific override, e.g. BEACON_BUS_BUDGET_PATH or "
             "BEACON_BUS_SENT_LOG_PATH.\n"
             "If the real directory genuinely is this test's subject, mark it "

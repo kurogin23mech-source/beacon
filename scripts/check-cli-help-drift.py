@@ -358,7 +358,7 @@ ALLOW_MISSING_FROM_README: set[str] = {
 # the checker reports only NEW drift. Shrinking them is the follow-up work:
 #   * profession-critical rows tagged (e-4643) are backfilled by that task;
 #   * cloud upload-initial / migrate-from-local -> e-4649 (install/cloud parity);
-#   * operation/trek/bus/channel/deploy/member/project/milestone/trigger rows are
+#   * operation/bus/channel/deploy/member/project/milestone/trigger rows are
 #     dev/ops verbs deliberately bash-only for now (方針3 — not on the hot
 #     Windows path), each removable when/if it grows Python parity.
 # Removing an entry after adding the matching Python subparser is the whole
@@ -411,8 +411,6 @@ ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
     "operation update",
     "project cleanup", "project export", "project import", "project orphans",
     "project rename",
-    "trek blanket-approve", "trek blanket-revoke", "trek block", "trek blockers",
-    "trek review-verdicts", "trek summary-sent", "trek task", "trek unblock",
     "trigger tick",
 }
 
@@ -1217,7 +1215,7 @@ def _case_flags(body: str) -> set[str]:
 def _bash_main_switch(bin_path: Path = BIN_BEACON) -> str:
     """The user-facing dispatcher switch in bin/beacon (column-0 ``case``).
 
-    Nouns with no ``cmd_<noun>()`` function (``trek``, ``stop``, ``resume``,
+    Nouns with no ``cmd_<noun>()`` function (``stop``, ``resume``,
     ``claim``, ``dm``) are handled inline here, so a path lookup has to be able
     to fall back to it.
 
