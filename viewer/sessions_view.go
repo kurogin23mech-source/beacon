@@ -139,11 +139,25 @@ type SessionOverview struct {
 	// する窓が無く、それは「この端末は未対応」とは別の話 (直せば飛べるのか、
 	// 原理的に飛べないのかが真逆になる)。空 = 素性が分からない道具。
 	Kind string `json:"kind,omitempty"`
-	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。値は jump.go の閉じた
-	// enum (exposed / unsupported-os / remote-machine / no-pid /
-	// unsupported-terminal) が唯一の正典。画面は unsupported-terminal のときだけ
-	// fallback (パスのコピー) を出す (他の値は非表示のみで描画分岐を持たない)。
-	// 別マシンと未対応端末を同じ false に潰さないための描き分け源 (e-6427)。
+	// HarnessProbe は端末の種類をプロセスに訊いた結果 (e-7265)。
+	//
+	// 空 = 読めた、または訊く必要が無かった (名乗りで足りていた)。
+	// "unreadable" = プロセスを読めなかった (権限不足 / 消失 / ps の失敗)。
+	//
+	// **飛べない理由を割るための項目。** 「読めなかった」を端末種別の話に潰すと、
+	// 一時的な問題に「対応端末を増やせ」という的外れな対処を促す。
+	HarnessProbe string `json:"harness_probe,omitempty"`
+	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。
+	//
+	// **値の一覧は jump.go の AllJumpBlockedReasons が唯一**。ここに書き写さない
+	// (e-7265): 以前はこのコメントに 5 値を並べていたため、6 値目 background-session
+	// を足したときに写し漏れ、JSON の受け手が参照する型コメントだけが古い enum を
+	// 宣言していた (独立保守性レビュー)。列挙を書く場所を増やすと、機械ガード
+	// (TestJumpBlockedLiteralMatchesPage) が見ない写しが必ず取り残される。
+	//
+	// 画面は unsupported-terminal のときだけ fallback (パスのコピー) を出す
+	// (他の値は非表示のみで描画分岐を持たない)。別マシンと未対応端末を同じ false に
+	// 潰さないための描き分け源 (e-6427)。
 	JumpBlocked string `json:"jump_blocked,omitempty"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
 	Machine string `json:"machine,omitempty"`

@@ -128,7 +128,7 @@ func TestJumpableHarness(t *testing.T) {
 			t.Errorf("jumpableHarness(%q) = true, want false", h)
 		}
 	}
-	// 生の形は rawNames との完全一致でだけ受ける。kinds の汎用別名 ("" / "terminal") や
+	// 生の形は rawNames との完全一致でだけ受ける。不明値 ("" / "terminal") や
 	// 短縮形 ("iterm")、正典名 ("iterm2") に生の形から落ちてはならない — 未知の端末が
 	// 偶然その名で名乗ると既知端末に化ける (PR#820 独立 AX レビュー)。
 	for _, h := range []string{"terminal:", "terminal:terminal", "terminal:Terminal", "terminal:iterm", "terminal:iterm2", "terminal:apple-terminal"} {
@@ -326,6 +326,7 @@ func TestJumpBlockedEnumClosed(t *testing.T) {
 		"exposed": true, "unsupported-os": true, "remote-machine": true,
 		"no-pid": true, "unsupported-terminal": true,
 		"background-session": true,
+		"process-unreadable":  true,
 	}
 	got := AllJumpBlockedReasons
 	if len(got) != len(want) {

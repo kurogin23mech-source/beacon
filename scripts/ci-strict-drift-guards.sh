@@ -170,4 +170,14 @@ echo "[ci-strict-drift-guards] Skill 名の解析が 1 箇所だけであるこ�
 # ガードが firing するか否かが決まってはならない。標準ライブラリのみ (pytest 非依存)。
 python3 "$ROOT/scripts/check-single-skill-parser.py" --quiet
 
+echo "[ci-strict-drift-guards] 盤の既定と文面が一致しているか (ms-173 e-7265)…"
+# `check-cli-help-drift.py` はサブコマンドと旗の **構造** だけを突き合わせ、説明文の
+# 内容は見ない。そのため e-7264 で盤の既定を反転したとき、Go の定数は直ったのに
+# `beacon help` と `viewer/README.md` が旧既定 (30 分で畳む) を宣言したまま残り、
+# 独立 AX レビューが実走して見つけた。help は文脈ゼロの AI が行動を決める一次情報な
+# ので、ここが嘘をつくと「放っておけば終わる」と誤認して後片付けを省く。
+# 真実源は Go の defaultIdleTimeout 1 つで、文面との食い違いだけを見る (経緯の記述は
+# 対象外 — history を書けなくしない)。標準ライブラリのみ (pytest 非依存)。
+python3 "$ROOT/scripts/check-idle-default-claims.py" --strict
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."
