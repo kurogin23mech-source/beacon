@@ -1,5 +1,15 @@
 """Trek slot inventory primitive (ms-99 / e-2832).
 
+RETIRING (ms-185 e-7079) — read this before trusting anything below.
+The feature this module implements has no entry point left: e-7069 removed the
+`beacon trek` CLI from both frontends and deleted the four Trek Skills, and
+e-7079 removed the last creation path (POST /api/treks) plus every screen entry
+point. Nothing can create a new one, so nothing new reaches this code. The body
+is kept only so deleting it stays a separate, reviewable change: that is e-7070.
+
+Everything below describes how the feature worked while it was reachable. Treat
+it as a record, not as a live contract — and do not add features here.
+
 ``materialize_slots(trek_doc, *, get_project)`` walks the scope entries
 of a trek and returns a list of ``Slot`` records — the single, tick-
 scoped source of truth the Phase 2 scheduler consumes to decide whether

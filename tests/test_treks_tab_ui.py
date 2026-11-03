@@ -1,18 +1,17 @@
-"""Web UI navigation tests for the v3 Trek refactor (ms-69 / e-1659 v3).
+"""Web UI navigation tests — the pieces that OUTLIVED the Trek entry points.
 
-Background — v1 (initial e-1659) added a "Treks" tab on the project page.
-v2 reshaped the trek detail view to mock-faithful sections but kept the
-tab. v3 (this version) realises the mock's actual navigation:
+History, because the filename no longer says what the file tests: v1 of
+ms-69 / e-1659 added a "Treks" tab to the project page, v2 reshaped the trek
+detail view, and v3 moved Treks into the sidebar. ms-185 then removed the
+feature's entry points entirely (e-7069 / e-7079) and the tests that pinned
+them went with it.
 
-  * Treks live in the **sidebar** (= MENU / PROJECTS / TREKS / ONLINE AGENTS),
-    not as a project-level tab.
-  * The header gets a **Settings button** and an **Avatar dropdown**.
-  * **Settings overlay** has two tabs: Projects & Members / Agents & Treks.
-  * Trek detail is opened from the sidebar and replaces the project view
-    full-page (not embedded in any tab).
-
-These tests pin the structural pieces so future "simplify" edits can't
-silently regress the mock navigation.
+What remains here are the structural pieces that were introduced alongside
+that navigation work and are still live: the header Settings button, the
+avatar dropdown, and the Settings overlay. They are pinned so a future
+"simplify" edit cannot silently regress them. There is no Treks tab and no
+sidebar Treks entry to test any more — do not add one back expecting this
+file to cover it.
 """
 
 from __future__ import annotations
@@ -136,10 +135,6 @@ class TestWebUI_Sidebar:
         # The existing "Projects" section is preserved.
         assert '>Projects<' in self.src
 
-    def test_sidebar_has_treks_section(self):
-        assert '>Treks<' in self.src
-        # Click a sidebar trek → menu-open-trek action.
-        assert "case 'menu-open-trek':" in self.src
 
     def test_sidebar_has_online_agents_section(self):
         assert '>Online Agents<' in self.src
@@ -586,75 +581,8 @@ class TestWebUI_TrekMembersTableSessionFullColumn:
 # ---------------------------------------------------------------------------
 
 
-class TestWebUI_TreksHamburgerSectionWired:
-    """ms-97 / e-2606 (AC3 / AC4): hamburger menu top-level に Treks セクション
-    が復活し、 各行 click で trek detail に直接遷移する経路が wire 済み。
-    """
-
-    def setup_method(self, _method):
-        self.src = _read(WEB_INDEX)
-
-    def test_hamburger_has_treks_section_title(self):
-        assert '<div class="menu-section-title">Treks</div>' in self.src, (
-            "hamburger menu must have a top-level Treks section "
-            "(ms-97 / e-2606 AC3)"
-        )
-
-    def test_hamburger_treks_list_container_present(self):
-        assert 'id="menu-treks-list"' in self.src, (
-            "hamburger Treks section must render into #menu-treks-list "
-            "for lazy fill (ms-97 / e-2606)"
-        )
-
-    def test_menu_open_trek_action_registered(self):
-        assert 'data-action="menu-open-trek"' in self.src, (
-            "hamburger Trek rows must wire data-action='menu-open-trek' "
-            "so click opens trek detail (ms-97 / e-2606)"
-        )
-        assert "case 'menu-open-trek':" in self.src
-
-    def test_open_trek_lazy_loads_treks_when_empty(self):
-        # openTrek() が直接呼ばれた経路 (= shared link / trek-jump-from-widget)
-        # で state.treks 未 load のままだと _renderTrekDetail が「Trek not found」
-        # を出してしまうため、 openTrek 自身が lazy load する。
-        idx = self.src.index("async function openTrek(")
-        end = self.src.index("\nfunction closeTrek(", idx)
-        block = self.src[idx:end]
-        assert "dataSource.loadTreks()" in block, (
-            "openTrek must lazy-load state.treks when empty so direct entries "
-            "(shared link / widget) don't show 'Trek not found' (ms-97 / e-2606)"
-        )
 
 
-class TestWebUI_TrekListCrossProject:
-    """ms-97 / e-2607 (AC2): hamburger Treks list が 「user が creator or
-    member の全 Trek」 を出す。 project context 切替で list 内容不変、
-    created_at 降順 sort を client 側でも defensive に固定。
-    """
-
-    def setup_method(self, _method):
-        self.src = _read(WEB_INDEX)
-
-    def test_no_project_filter_on_trek_list(self):
-        # hamburger Treks section の render 関数 (= renderMenu 内の closure)
-        # は state.projectId を参照しない。
-        idx = self.src.index("const renderTreksSection = () => {")
-        end = self.src.index("};", idx)
-        block = self.src[idx:end]
-        assert "state.projectId" not in block, (
-            "hamburger renderTreksSection must not filter by state.projectId "
-            "— Trek is project-independent (ms-97 / e-2607 AC2)"
-        )
-
-    def test_default_sort_is_created_at_desc(self):
-        # closure 内で sort 比較関数が created_at で並び替えていること。
-        idx = self.src.index("const renderTreksSection = () => {")
-        end = self.src.index("};", idx)
-        block = self.src[idx:end]
-        assert "created_at" in block and ".sort(" in block, (
-            "hamburger renderTreksSection must explicitly sort by created_at "
-            "for defensive client-side ordering (ms-97 / e-2607 AC2)"
-        )
 
 
 class TestWebUI_TrekDetailLeaderRow:

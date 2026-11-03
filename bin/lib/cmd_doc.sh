@@ -24,7 +24,6 @@ cmd_doc() {
             local json_flag=""
             local doc_ms=""
             local doc_op=""
-            local doc_trek=""
             local doc_account=""
             local doc_opportunity=""
             local doc_target=""
@@ -37,7 +36,6 @@ cmd_doc() {
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
                     -m|--ms)         doc_ms="${2:-}"; shift 2 ;;
                     --op)         doc_op="${2:-}"; shift 2 ;;
-                    --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
                     --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
                     --target)     doc_target="${2:-}"; shift 2 ;;
@@ -52,7 +50,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_title" ]; then
-                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--id slug] [--content text] [--force] [--json]"
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--account acc-id] [--opportunity opp-id] [--target id] [--id slug] [--content text] [--force] [--json]"
                 echo "  Content can also be piped via stdin."
                 echo "  --force: 同 title+scope の既存があっても重複作成する (既定は中止)"
                 exit 1
@@ -60,7 +58,6 @@ cmd_doc() {
             BEACON_TITLE="$doc_title" BEACON_DOC_ID="$doc_id" \
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
-                BEACON_TREK_ID="$doc_trek" \
                 BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
                 BEACON_TARGET="$doc_target" \
                 BEACON_JSON="$json_flag" \
@@ -113,7 +110,6 @@ cmd_doc() {
             local doc_scope=""
             local doc_ms=""
             local doc_op=""
-            local doc_trek=""
             local doc_account=""
             local doc_opportunity=""
             local doc_target=""
@@ -138,7 +134,6 @@ cmd_doc() {
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
                     -m|--ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
                     --op)         doc_op="${2:-}"; doc_op_set="1"; shift 2 ;;
-                    --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
                     --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
                     --target)     doc_target="${2:-}"; doc_target_set="1"; shift 2 ;;
@@ -151,7 +146,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_id" ]; then
-                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--content text] [--json]"
+                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--account acc-id] [--opportunity opp-id] [--target id] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 echo "  Note: --content は table-doc (format: table) では拒否されます。行の変更は 'beacon doc table' を使ってください (紐づけ/タイトル/スコープ変更は可)。"
                 exit 1
@@ -161,7 +156,6 @@ cmd_doc() {
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
                 BEACON_MS_SET="$doc_ms_set" BEACON_OP_SET="$doc_op_set" \
                 BEACON_TARGET_SET="$doc_target_set" \
-                BEACON_TREK_ID="$doc_trek" \
                 BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
                 BEACON_TARGET="$doc_target" \
                 BEACON_JSON="$json_flag" \

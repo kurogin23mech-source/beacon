@@ -45,7 +45,8 @@ CMD = _load_check_map_drift()
 def test_enumerate_cli_includes_known_leaves():
     cli = CMD.enumerate_cli()
     assert "task_done" in cli
-    assert "trek_create" in cli
+    # ms-185 e-7069: was trek_create until the Trek CLI was removed.
+    assert "milestone_add" in cli
     # shell-handled top-level commands are included (not in dispatch dict)
     assert "status" in cli
     # internal-only keys are excluded

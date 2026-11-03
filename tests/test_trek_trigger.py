@@ -103,27 +103,6 @@ def _install_stub(monkeypatch, stub):
 # On-disk: trek_id persists on the trigger file
 # ---------------------------------------------------------------------------
 
-def test_trek_fire_persists_trek_id_on_local_file(project_dir, monkeypatch):
-    """The local trigger json must carry trek_id so `beacon trigger check`
-    readers (= session-start, dispatch) can detect trek-scoped triggers
-    without re-querying the bus event."""
-    monkeypatch.setenv("BEACON_TRIGGER_NAME", "trek-start")
-    monkeypatch.setenv("BEACON_TRIGGER_MESSAGE", "begin partial-update work")
-    monkeypatch.setenv("BEACON_TRIGGER_TREK_ID", "tk-abc12345")
-    # No stub installed → bus mirror silently skips on missing auth, but
-    # the local write must still complete.
-    fake_auth = type(sys)("auth")
-    fake_auth.load_credentials = lambda: None
-    monkeypatch.setitem(sys.modules, "auth", fake_auth)
-
-    commands.cmd_trigger_fire()
-
-    path = project_dir / ".beacon" / "triggers" / "trek-start.json"
-    assert path.exists()
-    data = json.loads(path.read_text())
-    assert data["name"] == "trek-start"
-    assert data["message"] == "begin partial-update work"
-    assert data["trek_id"] == "tk-abc12345"
 
 
 def test_legacy_fire_omits_trek_id(project_dir, monkeypatch):
@@ -148,42 +127,6 @@ def test_legacy_fire_omits_trek_id(project_dir, monkeypatch):
 # Bus post: channel + delivery + payload shape
 # ---------------------------------------------------------------------------
 
-def test_trek_fire_posts_to_trek_trigger_channel(project_dir, monkeypatch):
-    """Trek-aware fire posts on the dedicated ``trek-trigger`` channel with
-    ``delivery=auto-execute`` and a T2 Trek-scope envelope. Twin of the
-    operation-trigger contract."""
-    stub = _StubApiClient()
-    _install_stub(monkeypatch, stub)
-
-    monkeypatch.setenv("BEACON_TRIGGER_NAME", "trek-start")
-    monkeypatch.setenv("BEACON_TRIGGER_MESSAGE", "begin partial-update work")
-    monkeypatch.setenv("BEACON_TRIGGER_TREK_ID", "tk-abc12345")
-
-    commands.cmd_trigger_fire()
-
-    assert len(stub.posts) == 1
-    post = stub.posts[0]
-    # Channel separation from operation-trigger lets receivers opt in
-    # per-scope.
-    assert post["channel"] == "trek-trigger"
-    # auto-execute is the autonomous path — Skill side honors the opt-in
-    # allowlist (default OFF) so this is safe.
-    assert post["delivery"] == "auto-execute"
-    # System events are sender-less.
-    assert post["sender_session_id"] == ""
-    # Payload carries trek_id so the inbox hook can lift it into the
-    # "TREK ACTION" block without inspecting the envelope.
-    assert post["payload"]["trek_id"] == "tk-abc12345"
-    assert post["payload"]["trigger_name"] == "trek-start"
-    assert post["payload"]["message"] == "begin partial-update work"
-    assert post["payload"]["created_at"]
-    # Envelope is T2 Trek-scope per SPEC e-1393 reasoning (server-side
-    # verify pipeline preserves auto-execute when envelope is present).
-    env = post["envelope"]
-    assert env is not None
-    assert env["tier"] == "T2"
-    assert env["scope"] == "trek:tk-abc12345"
-    assert env["actions_authorized"] == ["trek.trigger.fire"]
 
 
 def test_legacy_fire_still_uses_trigger_channel(project_dir, monkeypatch):
@@ -210,46 +153,8 @@ def test_legacy_fire_still_uses_trigger_channel(project_dir, monkeypatch):
 # Best-effort: failures don't break the local trigger file write
 # ---------------------------------------------------------------------------
 
-def test_trek_fire_survives_envelope_mint_failure(project_dir, monkeypatch):
-    """If the envelope mint raises, the bus post must still happen — the
-    server falls back to the legacy verify path (= delivery downgrade
-    handled there). The local trigger file is unaffected."""
-    stub = _StubApiClient(mint_raises=True)
-    _install_stub(monkeypatch, stub)
-    monkeypatch.setenv("BEACON_TRIGGER_NAME", "trek-resume")
-    monkeypatch.setenv("BEACON_TRIGGER_TREK_ID", "tk-fail0000")
-
-    commands.cmd_trigger_fire()
-
-    # Bus post still attempted, just without an envelope.
-    assert len(stub.posts) == 1
-    post = stub.posts[0]
-    assert post["channel"] == "trek-trigger"
-    assert post["envelope"] is None
-    # Local trigger file still written.
-    path = project_dir / ".beacon" / "triggers" / "trek-resume.json"
-    assert path.exists()
-    assert json.loads(path.read_text())["trek_id"] == "tk-fail0000"
 
 
-def test_trek_fire_in_local_mode_skips_bus_quietly(tmp_path, monkeypatch):
-    """Local-mode (= no cloud.json) projects must still write the trigger
-    file. The bus mirror silently no-ops since there's no project_id."""
-    beacon_dir = tmp_path / ".beacon"
-    beacon_dir.mkdir(parents=True)
-    (beacon_dir / "project.json").write_text(
-        json.dumps({"name": "local", "milestones": []}))
-    monkeypatch.setenv("BEACON_PROJECT_FILE",
-                       str(beacon_dir / "project.json"))
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("BEACON_TRIGGER_NAME", "trek-local")
-    monkeypatch.setenv("BEACON_TRIGGER_TREK_ID", "tk-local0000")
-
-    commands.cmd_trigger_fire()
-
-    path = beacon_dir / "triggers" / "trek-local.json"
-    assert path.exists()
-    assert json.loads(path.read_text())["trek_id"] == "tk-local0000"
 
 
 def test_trek_fire_idempotent_on_existing_file(project_dir, monkeypatch):

@@ -1,5 +1,17 @@
 """Local file-based trek storage (ms-69 / e-1653).
 
+RETIRING (ms-185 e-7079) — read this before trusting anything below.
+The feature this module implements has no entry point left: e-7069 removed the
+`beacon trek` CLI from both frontends and deleted the four Trek Skills, and
+e-7079 removed the last creation path (POST /api/treks) plus every screen entry
+point. Nothing can create a new one, so nothing new reaches this code. The body
+is kept only so deleting it stays a separate, reviewable change: that is e-7070.
+Reads stay live on purpose: existing records must remain readable
+(ms-185 SPEC 方針5 — records are never retroactively erased).
+
+Everything below describes how the feature worked while it was reachable. Treat
+it as a record, not as a live contract — and do not add features here.
+
 Trek is a top-level cross-project entity, so we don't store it inside any
 single ``project.json``. In **local mode** treks live as one JSON file per
 trek under ``~/.beacon/treks/<trek_id>.json``. In **cloud mode** the CLI

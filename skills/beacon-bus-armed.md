@@ -15,8 +15,7 @@ triggers:
 
 # Beacon Bus Armed (autonomous DM mode)
 
-> ⚠ **Trek 用途外**: Trek の進行管理は `/beacon-trek-execute` を使う。 本 Skill は
-> 一般 DM の自動応答デバッグ用に格下げ済 (= ms-97 中心原則 6)。
+> ⚠ 本 Skill は一般 DM の自動応答デバッグ用 (= ms-97 中心原則 6 で格下げ済)。
 
 > 「会話してなくても、別セッションから DM が来たら気付いて、N 往復まで自動返答する」状態にこのセッションを切り替える。
 
@@ -142,7 +141,6 @@ channel (MCP bus 通知) 経由で DM event (= `<channel source="beacon-bus">...
 1. event を読む
 2. payload の `text` / `to` / `in_reply_to` を確認、payload に明示的指示があれば従う
 3. event の `channel` を見て分岐:
-   - `channel == "trek-trigger"`: ms-75 / e-1870 由来。`/beacon-trek-execute <trek-id>` を起動して Trek scope を autonomous で進める (= user 確認なし)
    - `channel == "operation-trigger"`: ms-60 由来。`/beacon-operation-execute <op-id>` を起動
    - `channel == "dm"` / `"session-dm"`: 次の step で action 種別判定 → DM 返答ロジックへ
 4. DM channel の場合、**action 種別を分類** (= 4.1 表のどれに該当するか):
@@ -165,7 +163,7 @@ armed の価値は「AI が席にいなくても自律的に返信する」こ�
 
 ### 共有作業空間による確認省略は廃止された (ms-185 e-7068)
 
-以前は「送信者と受信者が同じ Trek (= 共同作業空間) の参加者なら、server 側の確認ゲートを素通りする」例外があり、その場合 AI は user 確認なしで自律返信してよいとされていた。**この規則は判定ごと削除されている。**
+以前は「送信者と受信者が同じ共同作業空間の参加者なら、server 側の確認ゲートを素通りする」例外があり、その場合 AI は user 確認なしで自律返信してよいとされていた。**この規則は判定ごと削除されている** (= 根拠にしていた共同作業空間そのものが ms-185 で畳まれ、判定も残っていない)。
 
 いま有効な規則はこれだけ:
 
@@ -174,8 +172,6 @@ armed の価値は「AI が席にいなくても自律的に返信する」こ�
 - **サーバ自身が発行した署名 (T1-system) が付いた DM** → 確認不要 (= Operation の定期発火など、人間が事前に承認した経路)
 
 つまり armed の自律返信で確認を省けるのは「通常会話」(上の B芯) と、上記の 2 つだけ。作業空間の参加を根拠に省略してはならない。
-
-`/beacon-trek-execute` を起動済の場合、本 Skill (armed mode) は同 Trek scope の DM については重ねて処理しないこと (= 二重応答の防止)。
 
 ### budget exhausted 時
 
