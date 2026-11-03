@@ -117,7 +117,11 @@ def default_idle() -> "tuple[bool | None, str]":
     # `30 * time.Minute` / `2 * time.Hour` のような素直な形だけ読む。
     mm = re.fullmatch(r"(\d+)\s*\*\s*time\.(Minute|Hour|Second)", expr)
     if mm:
-        return False, expr
+        # **0 * time.Minute は 0** (独立レビューが実測した偽の赤)。以前は
+        # 「N * time.X なら畳む」と見たので、0 を単位つきで書いただけで
+        # 「既定は『畳む』(0 * time.Minute) なのに文面がそれを述べていません」と
+        # 嘘の診断が出た。嘘の赤は、正しい書き方をした人に検査を迂回させる。
+        return int(mm.group(1)) == 0, expr
     return None, expr
 
 
@@ -137,16 +141,36 @@ def expected_tokens(expr: str):
 FLAG_EXAMPLE_RE = re.compile(r"--idle-timeout\s*[<(\[]|例\s*[`'\"]?\d+[mhs]")
 
 
+#: 畳む動作の語の **直前** にある否定。英語は活用が変わらないので
+#: (`does not close` の `close` は肯定形と同じ綴り)、語の前を見ないと
+#: **正しく否定した文が赤くなる**。日本語は活用で変わる (`畳みません` は
+#: `畳みます` に一致しない) ので、ここは英語のためにある。
+#:
+#: 否定を **文全体** で見てはならない。「the board does not close itself;
+#: by default it closes after 30m」のような自己矛盾文は、前半の否定で後半が
+#: 免除されると素通りする —— 偽の赤を偽の緑に取り替えることになる。だから
+#: 出現ごとに、その直前だけを見る (間に 3 語まで挟めるが、句読点は越えない)。
+NEG_BEFORE = re.compile(
+    r"(?:does\s+not|doesn'?t|do\s+not|don'?t|never|no\s+longer|without)"
+    r"\s+(?:\w+\s+){0,3}$", re.I)
+
+
 def _claims_it_closes(sentence: str) -> bool:
     """この文は「既定で畳む」と現在形で述べているか (純関数)。
 
     畳む動作の語と、既定/時間の語の **両方** が同じ文に在ることを条件にする。
     片方だけで拾うと「盤を終了するには Ctrl+C」のような操作説明まで赤くなる。
 
+    畳む動作の語は **否定されていない出現** だけを数える (NEG_BEFORE)。
+
     旗の値の例示は時間の語から除く (FLAG_EXAMPLE_RE)。`--idle-timeout <30m|2h|0>`
     は「30m で畳む」と言っているのではなく、受け付ける値を並べているだけ。
     """
-    closes = any(p.search(sentence) for p in CLOSE_VERBS)
+    closes = any(
+        not NEG_BEFORE.search(sentence[:m.start()])
+        for pattern in CLOSE_VERBS
+        for m in pattern.finditer(sentence)
+    )
     if not closes:
         return False
     cleaned = FLAG_EXAMPLE_RE.sub(" ", sentence)

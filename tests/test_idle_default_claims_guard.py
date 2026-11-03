@@ -49,6 +49,11 @@ G = _load()
     "手元で開いた盤は、誰も見に来なくなって 30 分で自ら畳みます",
     "a board opened locally closes after 30m with nobody watching",
     "盤は 2h で自動的に畳みます",
+    # 自己矛盾文。否定を**文全体**で見て免除すると、ここが素通りして偽の緑になる
+    # (偽赤を偽緑に取り替えることになる)。否定は畳む動作の語の **出現ごと** に
+    # 見るので、否定されていない後半が残れば拾う。
+    "the board does not close itself; by default it closes after 30m",
+    "盤は自ら畳みません。既定では 30 分で畳みます",
 ])
 def test_present_tense_claims_are_caught(sentence):
     assert G._claims_it_closes(sentence), (
@@ -64,6 +69,15 @@ def test_present_tense_claims_are_caught(sentence):
     ('"--idle-timeout <30m|2h|0>"', "旗の値の例示 — 散文ではない"),
     ("BEACON_VIEW_IDLE_TIMEOUT=<時間> … 畳むまでの時間 (例 2h)",
      "旗の値の例示 (例 2h) は既定の主張ではない"),
+    # 正しく否定した文。独立レビューが実測した偽赤 —— 既定を「畳まない」に反転した
+    # あと、文面を正しく書き換えた人が赤くなる。正しい書き換えで赤くなる検査は
+    # 迂回を訓練するので、偽の緑と同じくらい害がある。
+    ("by default the board does not close itself",
+     "既定を正しく述べた否定文 (畳むとは言っていない)"),
+    ("the board does not close itself — pass --idle-timeout to make it",
+     "いまの help の文面そのもの"),
+    ("never closes on its own", "否定 (never) で畳まないと述べている"),
+    ("the board no longer closes after 30m", "否定 (no longer)"),
 ])
 def test_non_claims_are_not_caught(sentence, why):
     assert not G._claims_it_closes(sentence), f"誤検知: {sentence!r} — {why}"
@@ -92,6 +106,11 @@ def test_truth_source_has_three_states(tmp_path, monkeypatch):
     """
     for expr, want_never in [
         ("0", True),
+        # 0 と等価な書き方。以前は「N * time.X なら畳む」と見て **偽の赤** を出し、
+        # 「既定は『畳む』(0 * time.Minute) なのに文面がそれを述べていません」と
+        # 嘘の診断をしていた (独立レビューが実測)。
+        ("0 * time.Minute", True),
+        ("0 * time.Second", True),
         ("30 * time.Minute", False),
         ("2 * time.Hour", False),
         ("time.Duration(0)", None),   # 読めない

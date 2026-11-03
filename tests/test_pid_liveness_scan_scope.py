@@ -338,6 +338,13 @@ def test_the_idle_default_is_declared_once_in_go_as_a_readable_literal():
     誰も気付かない。読めることを要求するのはこの試験の仕事で、読めた値と文面の
     一致はあちらの仕事 —— ここで値と文面の照合までやると、同じ規則が 2 箇所に
     分かれて片方だけ古くなる。
+
+    **値そのもの (0) を固定しているのはここではない**: viewer/idle_test.go が
+    `defaultIdleTimeout != 0` と `idleTimeoutFor(0, false) != 0` の両方を見ている。
+    独立レビューが「この試験だけ読むと 0 が here で守られていると信じうる」と
+    指摘したので、分担を明記する —— 形 (読めること) はこの試験、値は Go の単体
+    試験、値と文面の一致は check-idle-default-claims.py。3 つが揃って初めて
+    「既定が変わったのに文面が古い」を全方向で捕まえる。
     """
     idle = (ROOT / "viewer" / "idle.go").read_text(encoding="utf-8")
     assert idle.count("defaultIdleTimeout = ") == 1, (
