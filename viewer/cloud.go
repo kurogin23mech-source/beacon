@@ -157,7 +157,7 @@ func PollLogin(api, code string) (*Credentials, error) {
 
 // --- クラウドから読む ------------------------------------------------------
 
-// CloudSource はクラウド上のプロジェクト 1 件。“Store“ のクラウド側に当たる。
+// CloudSource はクラウド上のプロジェクト 1 件。`Store` のクラウド側に当たる。
 type CloudSource struct {
 	API       string
 	Token     string

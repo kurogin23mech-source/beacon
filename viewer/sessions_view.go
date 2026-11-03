@@ -146,7 +146,12 @@ type SessionOverview struct {
 	//
 	// **飛べない理由を割るための項目。** 「読めなかった」を端末種別の話に潰すと、
 	// 一時的な問題に「対応端末を増やせ」という的外れな対処を促す。
-	HarnessProbe string `json:"harness_probe,omitempty"`
+	// 画面には配らない (独立保守性レビュー): これは判定を作るための途中の
+	// 観測で、画面が読むのは確定後の jump_blocked だけ。実測で page.html に
+	// harness_probe の参照は 0 件。外に出したままだと、空 / "unreadable" /
+	// "unnamed" がどの表示に対応するのかの契約が無いまま API に見え、次に
+	// 読む人が画面へ出そうとして判定の実装から逆算する羽目になる。
+	HarnessProbe string `json:"-"`
 	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。
 	//
 	// **値の一覧は jump.go の AllJumpBlockedReasons が唯一**。ここに書き写さない
@@ -221,7 +226,7 @@ const (
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
 //
-// “named“ は Beacon に名乗っているセッションの名簿 (取れていれば渡す)。
+// `named` は Beacon に名乗っているセッションの名簿 (取れていれば渡す)。
 // 名簿と突き合わせて、確かな担当が分かるものはそちらを優先する。
 func AllSessions(since time.Duration, now time.Time,
 	named []SessionRow) SessionsView {
@@ -296,7 +301,7 @@ func indexNamedBySID(named []SessionRow) map[string]SessionRow {
 // セッションが名乗っているように見える (2026-09-11 に観測)。件数は、同一キーに複数の
 // live が畳まれた事実を開示する (CollapsedPeers) ために持ち帰る。
 //
-// “consumedSID“ は identity 突合 (sid) で既に持ち主が決まった名簿行 — fallback の
+// `consumedSID` は identity 突合 (sid) で既に持ち主が決まった名簿行 — fallback の
 // 取り合いから外す (identity で確定した行を推測突合が二重に配らない)。同一キーに
 // 複数残る場合は **最新の 1 行** を採る (last-write-wins だと入力順という無関係な
 // 偶然が持ち主を決め、幽霊行が勝ち得た — e-6563 で観測)。

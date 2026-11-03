@@ -256,12 +256,50 @@ func TestUnreadableProcessIsNotCalledAnUnsupportedTerminal(t *testing.T) {
 			"読めたのに表に無い → 端末種別の話"},
 		{"", "bg", harnessProbeUnreadable, false, JumpBlockedBackgroundSession,
 			"素性が分かっているならそちらが上位 (より確定した事実)"},
+		// 3 値目 (読めたが端末を名乗っていない)。独立レビュー 2 体が、導出は 3 値
+		// 持つのに行の印へ写すところで 1 値が消え、判定まで届いていないと実測した。
+		{"", "", harnessProbeUnnamed, false, JumpBlockedTerminalUnnamed,
+			"名乗りが無く名乗りでも解決しない → 端末種別の話にしない"},
+		{"terminal", "", harnessProbeUnnamed, false, JumpBlockedTerminalUnnamed,
+			"下限値 (= 分からない) のままなら同じ"},
+		{"iterm2", "", harnessProbeUnnamed, true, "",
+			"名乗りで解決するなら飛べる (名乗りが無かったことは問題にならない)"},
+		{"kitty", "", harnessProbeUnnamed, false, JumpBlockedTerminalUnnamed,
+			"未対応端末 + 名乗り無し: 名乗り無しが上位 (表に足しても直らない)"},
+		{"", "bg", harnessProbeUnnamed, false, JumpBlockedBackgroundSession,
+			"宣言された素性が、観測より上位"},
 	} {
 		ok, why := jumpVerdictKind("", false, 100, c.harness, c.kind, c.probe)
 		if ok != c.wantOK || why != c.wantWhy {
 			t.Errorf("probe=%q harness=%q kind=%q → (%v,%q), want (%v,%q) — %s",
 				c.probe, c.harness, c.kind, ok, why, c.wantOK, c.wantWhy, c.why)
 		}
+	}
+}
+
+// 導出の 3 値が行の印へ**別々に**写ること。
+//
+// ここが欠けていた穴そのもの: probeNoTerminal は定義も単体試験も在ったのに、
+// 行の印へ写すところで probeOK と同じ空文字に畳まれ、判定へ届いていなかった。
+// 単体で「3 値返る」ことを測っても、変換で消えれば意味が無い — 変換を直接固定する。
+func TestRowMarkKeepsTheThreeProbeStatesApart(t *testing.T) {
+	marks := map[probeResult]string{
+		probeOK:         "",
+		probeNoTerminal: harnessProbeUnnamed,
+		probeUnreadable: harnessProbeUnreadable,
+	}
+	seen := map[string]probeResult{}
+	for res, want := range marks {
+		got := res.rowMark()
+		if got != want {
+			t.Errorf("probeResult(%d).rowMark() = %q, want %q", res, got, want)
+		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("probeResult(%d) と probeResult(%d) が同じ印 %q に畳まれている "+
+				"— 対処が違う状態を 1 値に潰すと、画面が誤った回復手順を出す",
+				prev, res, got)
+		}
+		seen[got] = res
 	}
 }
 

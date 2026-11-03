@@ -331,6 +331,7 @@ func TestJumpBlockedEnumClosed(t *testing.T) {
 		"no-pid": true, "unsupported-terminal": true,
 		"background-session": true,
 		"process-unreadable": true,
+		"terminal-unnamed":   true,
 	}
 	got := AllJumpBlockedReasons
 	if len(got) != len(want) {

@@ -38,7 +38,7 @@ func isLoopback(host string) bool {
 
 // Server は盤を配る受け口。
 //
-// “src“ は途中で差し替わる。起動時にプロジェクトが見つからなくても受け口は立て、
+// `src` は途中で差し替わる。起動時にプロジェクトが見つからなくても受け口は立て、
 // 画面から場所を選んでもらって開き直せるようにするため (起動し直させない)。
 type Server struct {
 	src      *LocalSource
@@ -107,8 +107,8 @@ func (s *Server) probeCache() *harnessProbeCache {
 	return s.probes
 }
 
-// NewServer は受け口を立てる。“expose“ が無いまま外向きの host を指定されたら
-// 断る。“reuseKey“ はこの盤が占める席で、ここで決めて以後変わらない
+// NewServer は受け口を立てる。`expose` が無いまま外向きの host を指定されたら
+// 断る。`reuseKey` はこの盤が占める席で、ここで決めて以後変わらない
 // (上のフィールドの説明を参照)。
 func NewServer(src *LocalSource, host string, port int, expose bool,
 	reuseKey string) (*Server, error) {
@@ -724,7 +724,7 @@ func (s *Server) Close() error { return s.ln.Close() }
 //
 // **終わった子を回収する** (ms-170 e-7147): 以前は `Start()` だけで `Wait()` を
 // していなかった。`open` / `xdg-open` はすぐ終わるのに回収されないので、盤が
-// 動いている間ずっと “<defunct>“ が残る (2026-11-02 実測: 盤 1 本につき 1 件)。
+// 動いている間ずっと `<defunct>` が残る (2026-11-02 実測: 盤 1 本につき 1 件)。
 // 待つのは別の筋で行う —— ここで待つと、ブラウザが開くまで盤の起動が止まる。
 func OpenBrowser(url string) {
 	openWith(browserCommand(runtime.GOOS, url))

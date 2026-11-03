@@ -472,6 +472,22 @@ const (
 	// 直後に、同じ PR で新しい合流を作っていた (独立 AX レビューが ps を差し替えて
 	// 実測し指摘)。
 	JumpBlockedProcessUnreadable = "process-unreadable"
+	// JumpBlockedTerminalUnnamed はプロセスは読めたが、端末を名乗っていなかった
+	// (TERM_PROGRAM が無い)。**端末の種類の話でも、読めなかった話でもない。**
+	//
+	// 3 つ目の合流を切り出した理由 (独立レビュー AX / 保守性が 2 体とも同じ場所を
+	// 指した)。導出 (probeResult) は最初から 3 値 — 読めた / 読めたが端末の外 /
+	// 読めなかった —— を持っていたのに、行の印へ写すところで probeNoTerminal が
+	// 「読めた」と同じ空文字に畳まれ、判定まで届いていなかった。その結果この値は
+	// unsupported-terminal に落ち、画面は「この端末は前面化に未対応です」= 受け付け
+	// 表に足せば直る、と表示していた。足しても直らない (名乗る端末が居ない)。
+	//
+	// background-session にも畳まない: あちらは台帳が kind="bg" と **宣言している**
+	// 確定事実だが、こちらは「名乗りが無い」という観測で、端末の外に居るのか、
+	// 名乗りを渡さない起動の仕方なのかを区別できない。同じファイルの
+	// jumpVerdictKind が既に「『分からない』を bg 扱いにするのは、知らないことを
+	// 根拠に機能を止めることになる」と定めているので、その規則に従う。
+	JumpBlockedTerminalUnnamed = "terminal-unnamed"
 )
 
 // AllJumpBlockedReasons は飛べない理由の全値 (= 閉じた enum の唯一の一覧)。
@@ -487,6 +503,7 @@ var AllJumpBlockedReasons = []string{
 	JumpBlockedNoPID,
 	JumpBlockedBackgroundSession,
 	JumpBlockedProcessUnreadable,
+	JumpBlockedTerminalUnnamed,
 	JumpBlockedUnsupportedTerminal,
 }
 
@@ -494,8 +511,8 @@ var AllJumpBlockedReasons = []string{
 // (純関数)。判定の真実源はここ 1 つで、画面は結果を読むだけ。
 // envBlocked はこの盤の環境ブロック (jumpEnvBlocked の結果、空 = 環境は OK)。
 //
-// **理由は影響範囲の広い順に選ぶ。いまの順序は 6 段階** (e-7266 で表を現在の
-// switch に合わせた。以前は 4 段階のままで、新しい 2 理由をどこに挿すか読み手が
+// **理由は影響範囲の広い順に選ぶ。いまの順序は 7 段階** (e-7266 で表を現在の
+// switch に合わせた。以前は 4 段階のままで、新しい理由をどこに挿すか読み手が
 // switch の物理順を自分で読むしかなかった):
 //
 //  1. exposed / unsupported-os  … 盤全体の話 (この盤からはどこへも飛べない)
@@ -503,11 +520,24 @@ var AllJumpBlockedReasons = []string{
 //  3. no-pid                    … 端末を辿る起点が無い
 //  4. background-session        … 端末の中で動いていない (窓が原理的に無い)
 //  5. process-unreadable        … プロセスを読めなかった (待てば変わりうる)
-//  6. unsupported-terminal      … 読めたが受け付け表に無い端末
+//  6. terminal-unnamed          … 読めたが端末を名乗っていない
+//  7. unsupported-terminal      … 読めて名乗ったが受け付け表に無い端末
 //
-// 4 が 5 より先なのは、素性が分かっているほうが確定した事実だから。5 が 6 より先
-// なのは、読めていないのに「端末種別の話」と言うと対処を誤らせるから。
+// 4 が 5 より先なのは、素性が分かっているほうが確定した事実だから。5 と 6 が 7 より
+// 先なのは、どちらも「端末種別の話」ではないのに、そう言うと対処を誤らせるから
+// (受け付け表に足しても直らない)。5 が 6 より先なのは、読めていないほうが分かって
+// いることが少ないから。
 // **AllJumpBlockedReasons の並びもこの順序**にしてある。
+//
+// この順序契約は switch を持つ jumpVerdictKind の契約でもある (jumpVerdict は
+// kind / probe を空で渡す薄い委譲)。7 つ目を足したときは、こちらと
+// jumpVerdictKind の両方を読むこと — 独立保守性レビューが「契約の本文が switch を
+// 持たない関数の上に在る」と指摘した箇所。
+// **本番からの呼び出しは無い** (受け口は applyJumpVerdicts 経由で
+// jumpVerdictKind を直接呼ぶ)。これは kind / probe を空で渡す旧署名の試験用の
+// 包み。独立保守性レビューが「順序契約の本文が、switch を持たないこの関数の上に
+// 在る」と指摘したので、契約の読み先を上のコメント末尾で jumpVerdictKind に
+// 向けてある。順序を変えるときに直すのは jumpVerdictKind の switch。
 func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool, string) {
 	return jumpVerdictKind(envBlocked, remote, pid, harness, "", "")
 }
@@ -536,6 +566,10 @@ func jumpVerdictKind(envBlocked string, remote bool, pid int,
 		// 読めなかった **かつ** 名乗りでも解決しない。名乗りで解決するなら
 		// 読めなかったことは問題にならないので、そちらを優先する。
 		return false, JumpBlockedProcessUnreadable
+	case probe == harnessProbeUnnamed && !jumpableHarness(harness):
+		// 読めたが端末を名乗っていない。上と同じ形: 名乗りで解決するならそちらが
+		// 優先。表に足しても直らないので unsupported-terminal には落とさない。
+		return false, JumpBlockedTerminalUnnamed
 	case !jumpableHarness(harness):
 		return false, JumpBlockedUnsupportedTerminal
 	}
@@ -567,19 +601,38 @@ func resolveHarnessesWith(run probeRunner, sessions []SessionOverview) {
 }
 
 // harnessProbeUnreadable は「プロセスを読めなかった」を表す行の印 (e-7265)。
-// 空 = 読めた、または訊く必要が無かった。
 const harnessProbeUnreadable = "unreadable"
+
+// harnessProbeUnnamed は「読めたが端末を名乗っていなかった」を表す行の印。
+// unreadable と別の印にしてある: 対処が違う (あちらは待てば変わりうる、こちらは
+// 起動の仕方か、端末の外に居る)。空 = 読めて名乗った、または訊く必要が無かった。
+const harnessProbeUnnamed = "unnamed"
 
 // rowMark は導出結果を行の印に写す (e-7266)。
 //
 // int enum (probeResult) と行の印 (string) の変換が 2 つのループに手書きされて
 // いたので 1 箇所に寄せた。4 値目を足したとき、変換を直し忘れても型が通って
 // しまう形だった (独立保守性レビュー)。
+//
+// **3 値すべてに case を書く** (独立レビュー AX / 保守性が 2 体とも指摘)。以前は
+// probeUnreadable だけを見て、残り 2 値 (読めた / 読めたが端末の外) を同じ空文字に
+// 畳んでいた。probeNoTerminal は定義も試験も在ったのに、ここで消えるので判定には
+// 届かず、画面は「この端末は未対応」と誤診していた —— 畳んではならないと 3 箇所の
+// コメントで言いながら、変換の 1 箇所で畳んでいた。case を省略した値が黙って空に
+// なるのを防ぐため、既定は「新しい値は未配線」と名指しして落とす形にしてある。
 func (r probeResult) rowMark() string {
-	if r == probeUnreadable {
+	switch r {
+	case probeOK:
+		return ""
+	case probeNoTerminal:
+		return harnessProbeUnnamed
+	case probeUnreadable:
 		return harnessProbeUnreadable
 	}
-	return ""
+	// 4 値目を足して case を書き忘れたとき、空 (= 読めた) に化けるのが最も危ない
+	// (飛べるように見える)。印としては読めなかった側に倒す — 飛べないほうへ倒せば
+	// 誤って飛ぶことはなく、理由の文面で気付ける。
+	return harnessProbeUnreadable
 }
 
 // applyJumpVerdicts は一覧の全行に最終判定を書き込む。envBlocked はこの盤 (サーバ)
