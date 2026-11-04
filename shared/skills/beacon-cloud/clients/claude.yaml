@@ -1,6 +1,0 @@
-triggers:
-  - "/beacon-cloud"
-  - "cloud open"
-  - "cloud status"
-  - "cloud upload-initial"
-  - "cloud off"
