@@ -256,14 +256,31 @@ import subprocess  # noqa: E402
 _KNOWN_SHAPES = ("前セッションの引き継ぎ (", "引き継ぎがまだありません")
 
 
-def _run_frontend(argv):
+def _probe_project(tmp_path):
+    """最小の beacon プロジェクトを 1 つ作って、そのパスを返す。
+
+    **自分で前提を用意する** (ms-160 e-7314)。以前はこの試験をリポジトリ直下で
+    走らせていたので、**手元では両フロントが一致し、取り込み検査では割れた** ——
+    まっさらな checkout にはプロジェクトが無く、bash は「beacon プロジェクトでない」
+    で先に 1 を返し、Python は argparse が先に 2 を返す (検査の順序が違う)。
+    測りたいのは「この verb の配線が両フロントに在るか」なので、前提を揃えてから
+    測る。順序の差そのものは別の課題 (e-7317) で扱う。
+    """
+    proj = tmp_path / "probe"
+    (proj / ".beacon").mkdir(parents=True)
+    (proj / ".beacon" / "project.json").write_text(
+        '{"name": "probe", "milestones": []}', encoding="utf-8")
+    return proj
+
+
+def _run_frontend(argv, cwd):
     env = dict(**{k: v for k, v in __import__("os").environ.items()})
     env["BEACON_SKIP_AUTO_UPDATE"] = "1"
-    return subprocess.run(argv, cwd=REPO, capture_output=True, text=True,
+    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
                           env=env, timeout=180)
 
 
-def test_both_frontends_actually_serve_the_verb():
+def test_both_frontends_actually_serve_the_verb(tmp_path):
     """bash と Python のどちらから叩いても、同じ既知の形が返ること。
 
     引き継ぎが在る環境では本文つきの案内、無い環境 (= まっさらな取り込み検査) では
@@ -275,13 +292,15 @@ def test_both_frontends_actually_serve_the_verb():
     Python 側の配線を落としても緑のまま通ってしまう —— 反転で実測した
     (「両フロントを測っている」つもりで bash を 2 回測っていた)。
     """
+    proj = _probe_project(tmp_path)
     bash = _run_frontend(["bash", str(REPO / "bin" / "beacon"),
-                          "session", "log", "handoff"])
+                          "session", "log", "handoff"], proj)
     py = _run_frontend([sys.executable, "-c",
-                        "import sys, pathlib; "
+                        f"import sys, pathlib; sys.path.insert(0, {str(REPO)!r}); "
                         "from beacon_cli.dispatch import dispatch; "
-                        "sys.exit(dispatch(pathlib.Path('.'), "
-                        "['session', 'log', 'handoff']))"])
+                        "sys.exit(dispatch(pathlib.Path(REPO_STR), "
+                        "['session', 'log', 'handoff']))"
+                        .replace("REPO_STR", repr(str(REPO)))], proj)
     for label, r in (("bin/beacon", bash), ("beacon_cli", py)):
         out = r.stdout + r.stderr
         assert r.returncode == 0, f"{label}: 非ゼロで終了\n{out}"
@@ -294,7 +313,7 @@ def test_both_frontends_actually_serve_the_verb():
         f"bash={bash_shape!r} python={py_shape!r}")
 
 
-def test_both_frontends_refuse_a_stray_argument_the_same_way():
+def test_both_frontends_refuse_a_stray_argument_the_same_way(tmp_path):
     """**異常入力でも一致すること。**
 
     docstring が「両フロントで一致」と言うのに、測っていたのは正常系だけだった
@@ -302,13 +321,15 @@ def test_both_frontends_refuse_a_stray_argument_the_same_way():
     exit 0、Python 側 (argparse) は exit 2 で、同じ入力で結果が割れていた。
     緑のガードが「一致している」と誤認させる形だったので、検査範囲を主張に合わせる。
     """
+    proj = _probe_project(tmp_path)
     bash = _run_frontend(["bash", str(REPO / "bin" / "beacon"),
-                          "session", "log", "handoff", "garbage123"])
+                          "session", "log", "handoff", "garbage123"], proj)
     py = _run_frontend([sys.executable, "-c",
-                        "import sys, pathlib; "
+                        f"import sys, pathlib; sys.path.insert(0, {str(REPO)!r}); "
                         "from beacon_cli.dispatch import dispatch; "
-                        "sys.exit(dispatch(pathlib.Path('.'), "
-                        "['session', 'log', 'handoff', 'garbage123']))"])
+                        "sys.exit(dispatch(pathlib.Path(REPO_STR), "
+                        "['session', 'log', 'handoff', 'garbage123']))"
+                        .replace("REPO_STR", repr(str(REPO)))], proj)
     assert bash.returncode != 0, f"bash が余分な引数を黙って受けた\n{bash.stdout}"
     assert py.returncode != 0, f"python が余分な引数を黙って受けた\n{py.stdout}"
     assert bash.returncode == py.returncode, (
