@@ -2512,19 +2512,19 @@ async def post_bus_event(
     recipient_sid = ""
     if isinstance(body.payload, dict):
         recipient_sid = str(body.payload.get("recipient_session_id") or "")
-    # ms-83 / e-1995: pass tier+issuer so the gate can recognise
-    # T1-system server-mint envelopes as T1-equivalent (= bypass).
-    #
     # ms-185 e-7068: ここに「送信者と受信者が同じ Trek の参加者か」を引く
     # lookup の組み立てと、その結果を監査に刻む bypass / trek_id が在った。
     # 規則ごと削除したので、組み立ても刻みも消してある (= 常に空の field を
     # 残さない)。別人宛の action 付き DM は必ず人間の確認を要求する側に倒れる。
+    #
+    # ms-185 e-7078 / e-7323: 封筒の tier / issuer を渡していたのは規則 0
+    # (= T1-system なら確認を省く) のためだけだった。その規則を判定ごと落としたので
+    # 引数も渡さない (誰も読まない値を渡し続けると、ゲートが tier を見ていると
+    # 誤読させる)。判断記録 dec-4e7a66391176699a。
     should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
         sender_user_id=authoritative_sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
-        envelope_tier=env_tier,
-        envelope_issuer=env_issuer,
     )
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
@@ -2574,9 +2574,12 @@ async def post_bus_event(
         consent_is_reply = bool((body.envelope or {}).get("in_reply_to")) or (
             env_tier == envelope_mod.TIER_T3
         )
-        consent_operation_env = env_tier in (
-            envelope_mod.TIER_T1_SYSTEM, envelope_mod.TIER_T2,
-        )
+        # ms-185 e-7078 / e-7323: ここは T1-system と T2 の 2 つを「事前承認済みの
+        # 封筒」として扱っていた。T1-system を発行できるのは Trek 経路だけで、
+        # Trek を畳んだ時点で発行者が 0 になったので、判定から外した (満たし手の
+        # 無い値を列挙に残すと、その経路が生きていると誤読させる)。Operation の
+        # 発火が運ぶのは人間が承認した T2 封筒なので、carve-out は T2 で足りる。
+        consent_operation_env = env_tier == envelope_mod.TIER_T2
         # Cheap classification first (no backend calls). Carve-outs (same-user /
         # unresolved / reply / Trek-channel / Operation / non-dm) return "not
         # required" and short-circuit — no claim check, no Trek lookup.
@@ -2875,8 +2878,9 @@ class SystemTickRequest(BaseModel):
     why the warning above matters: the class name still says "system", and the
     one thing it drives now is production autonomy.
 
-    Authentication: ``X-Beacon-Scheduler-Key`` header (same key as
-    T1-system mint endpoint — they share a trust boundary).
+    Authentication: ``X-Beacon-Scheduler-Key`` header. ms-185 e-7078 removed the
+    T1-system mint endpoint that used to share this key, so this tick is now the
+    only surface it guards (the key stays — deleting it stops production ticks).
 
     Body is empty, and that is not "nothing fires" — the target-agnostic half
     (Operation firing + deadline reminders) always runs over every project.
@@ -4032,8 +4036,10 @@ async def _verify_scheduler_key_configured():
 
     Twin guard to ``_verify_envelope_secret_configured`` for the *other*
     internal secret. ``BEACON_SCHEDULER_INTERNAL_KEY`` gates
-    ``POST /api/system/tick`` (which drives Operation / Trek
-    autonomy) and the T1-system envelope mint path. Its dev fallback
+    ``POST /api/system/tick``, which drives Operation autonomy (ms-185 e-7070
+    deleted the Trek half, and e-7078 deleted the T1-system mint path, so the
+    tick endpoint is now the ONLY surface this key guards — hence the key
+    itself stays). Its dev fallback
     (``server/envelope.py:_DEV_FALLBACK_SCHEDULER_KEY``) is visible in the
     public repo, so booting production with the key unset would let anyone who
     reads the source drive the tick / mint endpoints. Fail fast at boot (which

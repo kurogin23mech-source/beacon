@@ -39,10 +39,11 @@ beyond that opt-in check.
 **The required proof is NOT uniform across channels** (ms-185 e-7078). It is
 whatever that channel's ``bus_delivery.PROVENANCE_REQUIREMENTS`` entry demands:
 ``operation-trigger`` wants the T2 envelope a human minted at ``beacon operation
-approve`` for that very op_id; the ``trek-*`` family wants the server-minted
-T1-system one. Do not read "system" anywhere below as "a server signature is
-required" — that was true before the gate was re-pointed, and is now false for
-``operation-trigger``.
+approve`` for that very op_id. (The ``trek-*`` family used to want a
+server-minted ``T1-system`` envelope; ms-185 retired those channels and e-7078
+removed that tier, so no channel demands a server signature any more.) Do not
+read "system" anywhere below as "a server signature is required" — that was true
+before the gate was re-pointed, and is now false everywhere.
 """
 
 from __future__ import annotations
@@ -86,8 +87,10 @@ def _is_kept_authorized_imperative(ev: dict) -> bool:
 
       * ``operation-trigger`` → the T2 envelope a human minted at
         ``beacon operation approve``, whose scope names the op_id being fired.
-      * ``trek-*`` → the server-minted T1-system envelope (Trek is its only
-        issuer, so these entries retire with Trek).
+
+    (``trek-*`` used to map to a server-minted T1-system envelope. ms-185
+    retired those channels and e-7078 removed the tier, the mint path and the
+    predicate together, so that entry is gone rather than always-failing.)
 
     This function was called ``_is_kept_system_imperative`` and its docs said a
     "server-minted T1-system envelope" was required. ms-185 e-7078 re-pointed

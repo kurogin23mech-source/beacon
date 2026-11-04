@@ -16,9 +16,16 @@
   2. かつて bypass していた組み合わせが、いま **gate される**こと。削除の向きが
      fail-closed であることの証拠。
 
-T1-system 署名による bypass (= ms-83 / e-1995、サーバ自身が発行した署名) は
-**別の権限**で、こちらは生きている。混同しないことも併せて測る (その去就は
-e-7078 で決める)。
+T1-system 署名による bypass (= ms-83 / e-1995、サーバ自身が発行した署名 = 規則 0)
+は **別の権限**で、この file が書かれた時点では生きていた。その去就を e-7078 で
+決め、**消す**ことにした (発行側が Trek の active を要求していたため発行者が
+恒久に 0 になり、迂回する側の分岐だけが残っていた / 本番の自律発火は人間が
+承認した T2 封筒を使うので規則 0 に依存していない)。
+
+いまこの file が測るのは **2 つの退役がどちらも空振りでないこと**:
+共有 Trek 規則 (e-7068) と 規則 0 (e-7078) の両方について、理由コードも
+駆動する引数も残っておらず、かつて省略されていた組み合わせが gate される。
+判断記録 dec-4e7a66391176699a。
 """
 from __future__ import annotations
 
@@ -33,15 +40,17 @@ import dm_gate  # noqa: E402
 APP_PY = os.path.join(os.path.dirname(__file__), "..", "server", "app.py")
 
 
-def _audit_dm_gate_field(sender_uid, receiver_uid, actions,
-                         tier="", issuer=""):
-    """``server/app.py`` の ``audit_record["dm_gate"]`` 組み立てを再現する。"""
+def _audit_dm_gate_field(sender_uid, receiver_uid, actions):
+    """``server/app.py`` の ``audit_record["dm_gate"]`` 組み立てを再現する。
+
+    ms-185 e-7078 / e-7323: 以前はここに ``tier`` / ``issuer`` を渡す口が在った
+    (= 規則 0 を駆動するため)。規則 0 ごと落としたので、本番の呼び出しと同じく
+    3 つの事実だけを渡す。
+    """
     should_gate, gate_reason = dm_gate.should_gate_dm_action(
         sender_user_id=sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=actions,
-        envelope_tier=tier,
-        envelope_issuer=issuer,
     )
     return {
         "should_gate": should_gate,
@@ -89,13 +98,41 @@ def test_the_pair_that_used_to_bypass_is_now_gated():
     assert audit["reason"] == dm_gate.GATE_REASON_CROSS_USER_ACTION
 
 
-def test_t1_system_authority_is_untouched():
-    """サーバ自身が発行した署名による bypass は別の権限で、生きている。
+def test_the_t1_system_bypass_is_retired_not_vacuous():
+    """規則 0 (= サーバ署名による確認の省略) が **判定ごと** 無いことを測る。
 
-    こちらを一緒に消すと本番の自律発火が止まる。去就は e-7078 で決める。
+    **この試験が置き換えたもの**: ここには ``test_t1_system_authority_is_untouched``
+    が在り、「サーバ自身が発行した署名による bypass は生きている / こちらを一緒に
+    消すと本番の自律発火が止まる / 去就は e-7078 で決める」と書いていた。
+
+    **その前提は #812 以後は誤り**だった。実測 (e-7078): 本番の Operation 発火
+    ``_fire_operation`` は ``beacon operation approve`` で人間が発行した **T2** 封筒を
+    再利用しており、T1-system を発行しない。送受信は同一ユーザーなので規則 1
+    (same_user) で通る。つまり規則 0 を落としても本番の自律発火は止まらない。
+    一方で発行側は Trek が active であることを要求していたので、Trek を畳んだ
+    時点で発行者が恒久に 0 になり、**迂回する側の分岐だけが残っていた**。
+
+    **だから「残す」ではなく「消す」を選び、pin を空振りにせず裏返した。**
+    対象を消して古い pin をそのまま緑で通すのは e-7320 で踏んだ型 (= 自分の
+    コメントで pin が素通りする偽の緑) なので、同じ轍は踏まない。
+    判断記録 dec-4e7a66391176699a。
+
+    測るのは 3 つ: 理由コードが無い / 判定を駆動する引数が無い / 同じ組み合わせが
+    いま gate される (= 削除の向きが fail-closed)。
     """
+    assert not hasattr(dm_gate, "GATE_REASON_T1_SYSTEM"), (
+        "規則 0 の理由コードが残っている — 誰も返さない理由コードは、"
+        "読み手に「その経路が在る」と誤読させる")
+
+    import inspect
+    params = set(inspect.signature(dm_gate.should_gate_dm_action).parameters)
+    assert "envelope_tier" not in params, (
+        "規則 0 が唯一の読み手だった引数が残っている (誰も使わない引数を作らない)")
+    assert "envelope_issuer" not in params
+
+    # かつて迂回していた組み合わせ (別人 + action 付き + サーバ署名を名乗る) が、
+    # いまは通常の cross-user 判定に落ちる。
     audit = _audit_dm_gate_field(
-        "uid-system", "uid-alice", ["operation.check"],
-        tier="T1-system", issuer="beacon-system")
-    assert audit["should_gate"] is False
-    assert audit["reason"] == dm_gate.GATE_REASON_T1_SYSTEM
+        "uid-system", "uid-alice", ["operation.check"])
+    assert audit["should_gate"] is True
+    assert audit["reason"] == dm_gate.GATE_REASON_CROSS_USER_ACTION

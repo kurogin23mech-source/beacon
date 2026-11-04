@@ -65,18 +65,12 @@ from typing import Iterable
 GATE_REASON_SAME_USER = "same_user"
 GATE_REASON_NO_ACTIONS = "no_actions_authorized"
 GATE_REASON_CROSS_USER_ACTION = "cross_user_action_pending_approval"
-# ms-83 / e-1995: T1-system envelopes minted by the Beacon server itself
-# bypass the cross-user human gate. The server-signed envelope IS the
-# structural re-issuance of the user's "Trek で進めて" pre-approval.
-GATE_REASON_T1_SYSTEM = "t1_system_envelope"
 
 
 def should_gate_dm_action(
     sender_user_id: str,
     receiver_user_id: str,
     actions_authorized: Iterable[str] | None,
-    envelope_tier: str = "",
-    envelope_issuer: str = "",
 ) -> tuple[bool, str]:
     """Return (should_gate, reason) for one bus envelope.
 
@@ -108,15 +102,6 @@ def should_gate_dm_action(
         dispatcher records it in the audit log so post-hoc analysis
         can answer "why did this envelope skip the gate?".
     """
-    # Rule 0 (ms-83 / e-1995): T1-system envelope signed by beacon-system
-    # bypasses the gate. The server-mint authority is the structural
-    # re-execution of the user's "Trek で進めて" pre-approval — the
-    # receiver has already consented at trek-activation time. The verify
-    # pipeline (envelope.verify) is what proves the signature + scope /
-    # tier rules; this gate just defers to that result.
-    if envelope_tier == "T1-system" and envelope_issuer == "beacon-system":
-        return (False, GATE_REASON_T1_SYSTEM)
-
     # Rule 1: same user → always skip. A single human's sessions talking
     # to themselves never need cross-human approval, even when the DM
     # carries action implication.
@@ -136,4 +121,14 @@ def should_gate_dm_action(
     # 判定を残していない** — 誰もセットしない判定が残ると、配線は在るのに動かない
     # 機能を 1 つ作ることになる。削除の向きは fail-closed (= 必ず人間の確認を
     # 要求する側) なので、残骸より安全。
+    #
+    # ms-185 e-7078 / e-7323: 規則 0 (= サーバ自身が署名した T1-system 封筒なら
+    # 確認を省く) も同じ理由で判定ごと削除した。発行側は Trek が active であることを
+    # 要求していたので、Trek を畳んだ時点で発行者が恒久に 0 になり、迂回する側の
+    # 分岐だけが残る形になっていた。本番の自律発火はこの規則に依存していない
+    # (Operation の発火は人間が beacon operation approve で発行した T2 封筒を
+    # 再利用する / server/app.py の _fire_operation、送受信は同一ユーザーなので
+    # 規則 1 で通る)。引数 envelope_tier / envelope_issuer も一緒に落とした —
+    # 規則 0 が唯一の読み手だったので、残すと「誰も使わない引数」になる。
+    # 判断記録 dec-4e7a66391176699a。
     return (True, GATE_REASON_CROSS_USER_ACTION)

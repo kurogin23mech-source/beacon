@@ -621,30 +621,19 @@ class CheckTaskAddRequest(BaseModel):
     The endpoint runs the regular 9-step envelope verify pipeline first.
     If verify passes, it then evaluates the action × tier matrix for
     ``task.add`` against the target MS. T1 always permits. T2 permits
-    when the Operation scope enumerates the MS. T1-system permits when
-    the Trek scope (= server-side trek doc) includes the MS. Anything
-    else degrades to propose-to-ai.
+    when the Operation scope enumerates the MS. Anything else degrades to
+    propose-to-ai. (ms-185 e-7078: the T1-system branch, which walked a Trek
+    scope to find the MS, is gone along with the tier itself.)
     """
     envelope: dict
     target_ms: str
     payload: dict = {}
 
 
-class T1SystemEnvelopeRequest(BaseModel):
-    """Body for POST /api/projects/{project_id}/bus/envelope/t1-system/issue.
-
-    ms-83 / e-1995. Used by the server-side scheduler (= the periodic loop
-    that fires "next, please" progress-check DMs into a Trek's claim
-    session) to mint a T1-equivalent envelope for an active Trek scope.
-    The caller must present the shared scheduler key in the
-    ``X-Beacon-Scheduler-Key`` header so a user account cannot pose as
-    the server.
-    """
-    trek_id: str
-    actions_authorized: list[str] = []
-    data_class: str = "free"
-    ttl_seconds: int = 3600
-    conversation_id: Optional[str] = None
+# ms-185 e-7078 / e-7323: ここに T1SystemEnvelopeRequest (= T1-system 発行口の
+# リクエスト本体) が在った。発行口ごと落としたので、本体の型も残していない
+# (呼ばれない口のために型だけ残すと、口が在ると誤読させる)。
+# 判断記録 dec-4e7a66391176699a。
 
 
 class DMRespondBody(BaseModel):
@@ -3660,97 +3649,27 @@ def make_bus_gate_router(
                 "permit": "propose",
                 "reason": "t2_scope_mismatch_propose_to_ai",
             }
-        if tier == envelope_mod.TIER_T1_SYSTEM:
-            # T1-system requires a Trek scope walk because the envelope only
-            # carries trek:<id>, not the MS list directly.
-            scope = body.envelope.get("scope", "") or ""
-            if not scope.startswith("trek:"):
-                return {
-                    "permit": "reject",
-                    "reason": "t1_system_scope_malformed",
-                }
-            trek_id = scope[len("trek:"):]
-            trek_doc = db.get_trek(trek_id)
-            if trek_doc is None:
-                return {
-                    "permit": "reject",
-                    "reason": "t1_system_trek_not_found",
-                }
-            if trek_doc.get("status") != "active":
-                return {
-                    "permit": "reject",
-                    "reason": "t1_system_trek_not_active",
-                }
-            if envelope_mod.trek_scope_includes_ms(trek_doc, body.target_ms):
-                return {"permit": "auto", "reason": "t1_system_trek_scope_match"}
-            return {
-                "permit": "propose",
-                "reason": "t1_system_trek_scope_mismatch_propose_to_ai",
-            }
+        # ms-185 e-7078 / e-7323: ここに T1-system の分岐が在った。Trek の scope を
+        # 歩いて対象 MS が含まれるかを見る形で、発行できるのは Trek 経路だけだった。
+        # Trek を畳んだ時点で T1-system を発行できる者が 0 になったので、分岐ごと
+        # 落とした (満たし手の無い tier を列挙に残すと、その経路が生きていると
+        # 誤読させる)。落ちた先は下の propose = fail-closed 側。
+        # 判断記録 dec-4e7a66391176699a。
+        #
         # T3 / T5 / unknown → never auto.
         return {"permit": "propose", "reason": "tier_not_eligible_for_auto"}
 
 
-    @router.post("/api/projects/{project_id}/bus/envelope/t1-system/issue")
-    def issue_t1_system_bus_envelope(
-        project_id: str,
-        body: T1SystemEnvelopeRequest,
-        request: Request,
-    ):
-        """Issue a T1-system bus envelope (ms-83 / e-1995).
-
-        Authorization: the request MUST present a matching
-        ``X-Beacon-Scheduler-Key`` header. This endpoint is the only path
-        that mints ``tier=T1-system`` envelopes; receiver-side verify
-        cross-checks that ``issuer=beacon-system`` and ``scope=trek:<id>``.
-
-        Validation:
-          * The trek must exist and be ``active``. ``planning`` / ``archived``
-            Treks cannot have server-mint authority.
-          * ``actions_authorized`` is validated by the envelope module
-            (strict enumeration, no wildcards).
-        """
-        # Internal-only authorization. The shared secret is rotated out of
-        # band in production; the dev fallback lets the test suite run.
-        provided = request.headers.get("X-Beacon-Scheduler-Key", "")
-        expected = envelope_mod.scheduler_internal_key()
-        if not provided or provided != expected:
-            raise HTTPException(
-                status_code=403,
-                detail="T1-system mint requires X-Beacon-Scheduler-Key",
-            )
-        # Trek validity gate. The mint is bounded to active Treks so a
-        # planning Trek can't accidentally receive auto-execute DMs.
-        trek_doc = db.get_trek(body.trek_id)
-        if trek_doc is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Trek {body.trek_id!r} not found",
-            )
-        if trek_doc.get("status") != "active":
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Trek {body.trek_id!r} is not active "
-                    f"(status={trek_doc.get('status')!r})"
-                ),
-            )
-        try:
-            env = envelope_mod.issue_t1_system_envelope(
-                project_id=project_id,
-                trek_id=body.trek_id,
-                actions_authorized=body.actions_authorized,
-                data_class=body.data_class,
-                ttl_seconds=body.ttl_seconds,
-                conversation_id=body.conversation_id,
-            )
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"T1-system envelope issuance rejected: {e}",
-            )
-        return env
-
+    # ms-185 e-7078 / e-7323: ここに T1-system 発行口
+    # (POST /api/projects/{project_id}/bus/envelope/t1-system/issue) が在った。
+    # 発行には status=="active" の Trek が必要で、Trek の作成経路を e-7070 で
+    # 落とした時点で **構造的に 404/400 しか返さない口** になっていた。発行口を
+    # 残したまま消費側 (lib/bus_delivery.has_server_minted_envelope) と規則 0
+    # (server/dm_gate) を落とすと、SPEC 受入条件7 が禁じた「片方だけ残して
+    # 動かない判定」になるので、4 面を同じ変更で落としている。
+    # 鍵 (X-Beacon-Scheduler-Key / scheduler_internal_key) は残す —
+    # POST /api/system/tick が同じ鍵で守られており、本番のティック駆動
+    # (scripts/vps-tick.sh) がそれを使っている。判断記録 dec-4e7a66391176699a。
 
     @router.post("/api/projects/{project_id}/bus/envelope/issue")
     def issue_bus_envelope(

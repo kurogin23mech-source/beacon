@@ -12,7 +12,9 @@ SAME safety decision for ``auto-execute`` events:
      downgraded — otherwise a project editor could forge a
      ``/beacon-… <attacker-id>`` imperative. The proof differs per channel
      (``PROVENANCE_REQUIREMENTS``): operation-trigger wants the T2 envelope the
-     human approved for that op_id, trek-* want the server-minted T1-system one.
+     human approved for that op_id. (``trek-*`` used to want a server-minted
+     ``T1-system`` envelope; ms-185 retired those channels and e-7078 removed
+     that tier, so operation-trigger is the only gated channel left.)
   3. A surviving opted-in ``operation-trigger`` event is rendered as a structured
      "AUTONOMOUS ACTION" block that tells the AI to run
      ``/beacon-operation-execute <op-id>`` without asking first.
@@ -46,10 +48,12 @@ OPERATION_TRIGGER_CHANNEL = "operation-trigger"
 # naming a predicate that something can actually satisfy (ms-185 e-7078).
 #
 # History (why the name says "system"): the gate used to demand one single proof,
-# a server-minted ``T1-system`` envelope. That envelope is structurally bound to
-# Trek — ``issue_t1_system_envelope`` refuses to mint without a ``trek_id`` and
-# forces ``scope="trek:<id>"`` — so retiring Trek left the gate with ZERO possible
-# issuers. Measured on 2026-10-20: ``operation-trigger`` sat in this set while
+# a server-minted ``T1-system`` envelope. That envelope was structurally bound to
+# Trek — ``issue_t1_system_envelope`` refused to mint without a ``trek_id`` and
+# forced ``scope="trek:<id>"`` — so retiring Trek left the gate with ZERO possible
+# issuers. (ms-185 e-7078 then removed the tier, the mint path and the predicate
+# together, so none of it is reachable any more.)
+# Measured on 2026-10-20: ``operation-trigger`` sat in this set while
 # ``_fire_operation`` attaches the envelope the human minted at
 # ``beacon operation approve`` (``tier="T2"``, ``issuer=<their email>``), so
 # ``classify_auto_execute`` downgraded EVERY operation trigger with
@@ -101,9 +105,11 @@ SYSTEM_PROVENANCE_CHANNELS = frozenset({
 #
 # ms-185 e-7071: the ``trek-*`` family moved here. The condition the e-7078 note
 # named has now happened — e-7070 deleted the Trek scheduler, which was the sole
-# issuer of the T1-system envelope these four channels demand. With no issuer the
-# gate is no longer satisfiable, so leaving them in the live set would mean
+# issuer of the T1-system envelope these four channels demanded. With no issuer
+# the gate was no longer satisfiable, so leaving them in the live set would mean
 # declaring a judgment nobody can pass (the very shape this milestone is folding).
+# e-7078 then removed that tier outright, so the proof they demanded no longer
+# exists even as a shape — which is why they stay retired rather than returning.
 #
 # Being retired rather than deleted is what keeps stale data fail-closed: a
 # project whose ``bus_auto_execute_channels`` still carries ``trek-*`` (written
@@ -121,13 +127,11 @@ RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset({
 # with ``tier=T2``, ``scope=<op_id>``). This is the proof operation-trigger demands.
 OPERATION_ENVELOPE_TIER = "T2"
 
-# The server-minted tier. Still the proof the ``trek-*`` channels demand (see
-# PROVENANCE_REQUIREMENTS), and its sole issuer is Trek — so these constants, the
-# ``has_server_minted_envelope`` predicate, and the trek-* requirement entries all
-# retire together with Trek (e-7070 / e-7080). ``operation-trigger`` no longer
-# accepts this proof (ms-185 e-7078).
-T1_SYSTEM_TIER = "T1-system"
-T1_SYSTEM_ISSUER = "beacon-system"
+# ms-185 e-7078 / e-7323: ここに ``T1_SYSTEM_TIER`` / ``T1_SYSTEM_ISSUER`` が在った。
+# この 2 つが指していた tier は server/envelope.py から削除済み (発行できる者が
+# Trek と一緒に 0 になったため)。定数だけ残すと「この tier を名乗る封筒が有り得る」
+# と読ませるので、述語 ``has_server_minted_envelope`` と同じ変更で落としている。
+# 判断記録 dec-4e7a66391176699a。
 
 # Downgrade reason tags (surfaced in the audit frame / inject note).
 # e-5803 review (AX-8/AX-9): the allowlist-miss sentinel MUST stay the empty
@@ -198,23 +202,13 @@ def has_approved_operation_envelope(ev: dict) -> bool:
     return bool(scope) and bool(op_id) and scope == op_id
 
 
-def has_server_minted_envelope(ev: dict) -> bool:
-    """True when the event carries a persisted T1-system envelope.
-
-    The proof the Trek channels demand: the Beacon server signed the envelope on
-    behalf of the human who activated the Trek. ``issue_t1_system_envelope`` is its
-    only issuer, and it refuses to mint without a ``trek_id`` — so this predicate
-    dies with Trek. It is listed per-channel (rather than being THE gate) exactly so
-    that removing Trek removes its entries and this function together, instead of
-    leaving a demand no issuer can meet (ms-185 e-7078 / e-7080).
-    """
-    env = ev.get("envelope")
-    if not isinstance(env, dict):
-        return False
-    return (
-        env.get("tier") == T1_SYSTEM_TIER
-        and env.get("issuer") == T1_SYSTEM_ISSUER
-    )
+# ms-185 e-7078 / e-7323: ここに ``has_server_minted_envelope`` (= サーバ署名の
+# T1-system 封筒が付いているか、を見る述語) が在った。この関数の docstring は
+# 「Trek と一緒に退役する」と書いており、実際そのとおりになった — e-7071 が
+# PROVENANCE_REQUIREMENTS から trek-* の 4 件を外した時点で **本番の呼び出し元が
+# 0** になっていた。関数だけ残すと「誰も呼ばない判定」が残るので、発行側 (tier /
+# 発行口 / 署名関数) と規則 0 と同じ変更で落としている (SPEC 受入条件7 =
+# 片方だけ残して動かない判定を作らない)。判断記録 dec-4e7a66391176699a。
 
 
 # What each gated channel accepts as proof of human authority. A channel may only
@@ -391,11 +385,12 @@ def classify_auto_execute(
         Checked BEFORE the provenance gate and regardless of the allowlist,
         because a retired channel's opt-in is exactly the stale state we must
         not trust (ms-185 e-7077 — see RETIRED_PROVENANCE_CHANNELS).
-      * auto-execute, channel is a provenance channel without a T1-system
-        envelope → ``("propose-to-ai", "auto-execute", "non-system-envelope")``.
-      * auto-execute, opted-in and (if provenance-gated) system-minted → kept:
-        ``("auto-execute", "", "")``. The caller routes a kept event by channel
-        (operation-trigger → imperative block, trek-* → their blocks).
+      * auto-execute, channel is a provenance channel whose per-channel proof
+        (``PROVENANCE_REQUIREMENTS``) is absent →
+        ``("propose-to-ai", "auto-execute", "non-system-envelope")``.
+      * auto-execute, opted-in and (if provenance-gated) carrying that proof →
+        kept: ``("auto-execute", "", "")``. The caller routes a kept event by
+        channel (operation-trigger → imperative block).
 
     This is the exact decision the Claude hook's main loop used inline; both hooks
     now share it so a downgrade rule can't drift between them.
@@ -475,14 +470,11 @@ __all__ = [
     "NOTIFY_USER_ONLY",
     "OPERATION_TRIGGER_CHANNEL",
     "SYSTEM_PROVENANCE_CHANNELS",
-    "T1_SYSTEM_TIER",
-    "T1_SYSTEM_ISSUER",
     "DOWNGRADE_NON_SYSTEM_ENVELOPE",
     "OPERATION_ENVELOPE_TIER",
     "PROVENANCE_REQUIREMENTS",
     "ProvenanceRequirement",
     "downgrade_advice",
-    "has_server_minted_envelope",
     "sanitize_id",
     "has_approved_operation_envelope",
     "has_required_provenance",
