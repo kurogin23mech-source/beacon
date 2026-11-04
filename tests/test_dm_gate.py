@@ -314,3 +314,23 @@ def test_dispatcher_skips_sidecar_when_no_actions(monkeypatch):
         fake_put_bus_event_approval()
 
     assert call_count["n"] == 0
+
+
+# ms-185 e-7070: 下の 1 件は tests/test_dm_gate_session_grain.py から移設した。
+# あのファイルの他の 9 件は ``lib/trek.build_shared_trek_lookup_from_lists``
+# (= 在籍判定の正本) を駆動していた。その関数の本番呼び出し元は
+# ``/api/system/trek-internal-send`` 1 箇所だけで、e-7070 がその経路ごと落とした
+# ので、正本も呼び出し元ゼロになり本体と一緒に消えた。
+# この 1 件だけは ``dm_gate`` そのものの不在検査 (= trek に依存しない) なので、
+# e-7068 の兄弟ガード (test_shared_trek_no_longer_bypasses_the_gate /
+# test_the_judge_has_no_trek_shaped_input_or_output) と同じ場所へ寄せた。
+def test_the_convenience_probe_is_gone_with_its_rule():
+    """``dm_gate.shared_trek_member`` は規則と一緒に消えた (ms-185 e-7068)。
+
+    AC18 当時この helper は「2 つの session_id が同じ active phase A+ trek に
+    居るか」を 1 行で問うための便利関数で、**呼び出し元はテストだけ**だった
+    (本番コードからの参照ゼロを実測して消した)。規則を消すときに helper だけ
+    残すと、誰も呼ばない判定が 1 つ生き続ける。判定本体は ``lib/trek`` 側に
+    移してあり、そちらは実際の呼び出し元 (予算の最適化) と一緒に生きている。
+    """
+    assert not hasattr(dm_gate, "shared_trek_member")

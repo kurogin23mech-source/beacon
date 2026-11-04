@@ -157,7 +157,17 @@ def test_the_audited_population_is_derived_not_hand_listed():
     見えるが実は 1 件も測っていない。
     """
     kinds = _kinds_under_audit()
-    assert len(kinds) >= 10, f"母集団が小さすぎる (導出が壊れている?): {kinds}"
+    assert kinds, "母集団が空 (導出が壊れている) — 以下の往復は 1 件も測っていない"
+    # ms-185 e-7070: 床を手書きの 10 から**ハーネスが実際に要る数**へ変えた。
+    # 10 は当時の件数より少し下に置いた目安で、種別が正当に引退する (= 判断の
+    # 継ぎ目ごと消える) たびに編集が要り、編集のついでに下げれば床は意味を失う。
+    # 本当に防ぎたいのは「導出が壊れて往復が空振りすること」で、そのために要る
+    # のは ``_pad_kind_for`` が成立する最小 = 読みに載る種別が 2 つ以上。
+    # これなら引退のたびに編集する必要が無く、壊れたときだけ落ちる。
+    visible = _visible_kinds()
+    assert len(visible) >= 2, (
+        f"読みに載る種別が {len(visible)} 個しか無い — 背景を積めないので窓が "
+        f"一度も働かず、往復テストが緑のまま何も測らない状態になる: {kinds}")
     # 台帳側 / 語彙側のどちらにしか無い種別も拾っていること (和集合である証拠)。
     assert set(cl.DECISION_CAPTURE_PRODUCERS) <= set(kinds)
     assert set(decision_event.KNOWN_DECISION_KINDS) <= set(kinds)

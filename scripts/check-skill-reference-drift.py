@@ -140,27 +140,12 @@ EXCLUDE_NAMES = {"CHANGELOG.md", "check-skill-reference-drift.py"}
 # so — which is the breadcrumb an independent reviewer of PR #827 asked for
 # (a chain reachable from the files a maintainer actually opens first).
 KNOWN_PROSE_REFERENCES = {
-    # --- Trek body, pending removal in e-7070 -----------------------------
-    ("lib/trek.py", "beacon-trek-execute"):
-        "pending e-7070: Trek body still describes the Skill it used to launch",
-    ("lib/trek.py", "beacon-trek-pulse"):
-        "pending e-7070: Trek body still describes the Skill it used to launch",
-    ("lib/cmd_trek.py", "beacon-trek-execute"):
-        "pending e-7070: Trek CLI handlers, orphaned by e-7069, not yet deleted",
-    ("lib/cmd_trek.py", "beacon-trek-pulse"):
-        "pending e-7070: Trek CLI handlers, orphaned by e-7069, not yet deleted",
-    ("lib/cmd_trek.py", "beacon-trek-review"):
-        "pending e-7070: Trek CLI handlers, orphaned by e-7069, not yet deleted",
-    ("lib/trek_scheduler.py", "beacon-trek-execute"):
-        "pending e-7070: scheduler text; the producer itself is stopped in e-7070",
-    ("lib/trek_scheduler.py", "beacon-trek-review"):
-        "pending e-7070: scheduler text; the producer itself is stopped in e-7070",
-    ("server/routers_treks.py", "beacon-trek-execute"):
-        "pending e-7070: Trek router, unreachable for creation since e-7079",
-    ("server/routers_treks.py", "beacon-trek-pulse"):
-        "pending e-7070: Trek router, unreachable for creation since e-7079",
-    ("server/routers_treks.py", "beacon-trek-review"):
-        "pending e-7070: Trek router, unreachable for creation since e-7079",
+    # --- Trek body: 10 rows removed in e-7070 ------------------------------
+    # 全 10 行が「e-7070 で消す予定」として置かれていた免除で、その e-7070 が
+    # 実際に本体を落としたので対象を失った。この checker は一致しなくなった行を
+    # stale として赤くする (= 次の 1 件を黙って免除してしまうため)。消えたのは
+    # lib/trek.py / lib/cmd_trek.py / lib/trek_scheduler.py (本体ごと .trash/ へ)
+    # と server/routers_treks.py (読み取り 3 ルートだけに縮小、Skill への言及なし)。
 
     # --- Skill prose, found when the scan widened to the Skill dirs -------
     # Two kinds, both genuinely prose rather than an instruction. Listed per

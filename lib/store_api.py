@@ -512,21 +512,11 @@ class StoreApi:
             all_actors=all_actors,
         )
 
-    def get_trek(self, trek_id: str) -> dict:
-        """Match LocalStore.get_trek shape, sourced from the cloud API.
-
-        Maps HTTP 404 → ``ValueError`` so callers can present the same
-        ``trek '<id>' not found`` message regardless of backend.
-        Auth / 403 / transport errors propagate as RuntimeError, matching
-        the legacy cloud branch behavior (= cmd_trek_show sys.exit(1) で
-        Error: <msg> を出す経路に乗せたまま)。
-        """
-        try:
-            return self._client.get_trek(trek_id)
-        except RuntimeError as e:
-            if "404" in str(e):
-                raise ValueError(f"trek '{trek_id}' not found") from e
-            raise
+    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
+    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
+    # which went with the CLI in e-7069. ``list_treks`` stays because
+    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
+    # bypass is removed in e-7080, and this passthrough goes with it.
 
     # ms-118 / e-4231 — Organizations (cloud API, /api/orgs)
 

@@ -72,7 +72,7 @@ _WORK_ITEM_RESERVED_KWARGS = frozenset(
 import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
 import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
-import trek as trek_mod
+
 import envelope as envelope_mod
 import work_model
 import deliverable_capture  # ms-161 e-5823: capture produced value on milestone 完遂
@@ -341,74 +341,6 @@ def _link_body_accounts_to_master(body: dict) -> None:
     except Exception as exc:  # linking must never break the project write
         logging.getLogger(__name__).warning("master linking failed: %s", exc)
 
-def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
-    """ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= mirror sync).
-
-    task pool 側で task が ``done`` に成った瞬間に、 active な Trek の
-    ``task_states[<entry_id>]`` が ``working`` / ``todo`` で stamp 済 なら
-    自動で ``done`` に mirror する。 「task pool で done だが Trek stamp は
-    working で残ってる」 stuck 状態 (= 2026-06-19 dogfood の e-2045 14h
-    放置事例) を構造的に排除する。
-
-    ms-97 P5 (= review Trek-H3): ``leader_review`` は除外する。 これは
-    executor が忘れた stuck stamp ではなく leader の forced review を待つ
-    意図的な状態なので、 pool done で ``done`` に上書きすると leader review
-    を bypass してしまう (= endpoint 側の P5 gate と同じ穴)。
-
-    state transition validation は bypass する (= 直接書き換え)。 これは
-    server-forced reconciliation であり、 「executor / leader / user が
-    意図的に state を進める」 normal transition とは性質が違う。
-
-    Returns trek_ids that were touched.
-    """
-    touched: list[str] = []
-    try:
-        all_treks = db.list_treks(actor_id=None)
-    except Exception:
-        return touched
-    for t in all_treks:
-        if t.get("status") != "active":
-            continue
-        states = t.get("task_states") or {}
-        existing = states.get(entry_id)
-        if not existing:
-            continue
-        try:
-            current_state = trek_mod.get_task_state(t, entry_id)
-        except Exception:
-            current_state = (existing or {}).get("state") or ""
-        if current_state in trek_mod.TERMINAL_TASK_STATES:
-            continue
-        # ms-97 P5 (= review finding Trek-H3): never auto-mirror a task that
-        # is awaiting the leader's forced review. ``leader_review`` is a
-        # deliberate "human judgment pending" state, not a stuck stamp the
-        # executor forgot to advance — overwriting it to ``done`` on pool sync
-        # bypasses the leader review the same way an executor self-approve
-        # would. The mirror only exists to unstick ``working`` / ``todo``
-        # stamps left behind when the pool moved on; leave the review gate to
-        # the leader (via beacon-trek-review + the endpoint's P5 gate above).
-        if current_state == "leader_review":
-            continue
-        # Direct mirror write (= bypass transition validation).
-        now_iso = trek_mod.utcnow_iso()
-        states[entry_id] = {
-            **existing,
-            "state": "done",
-            "updated_at": now_iso,
-            "last_activity_at": now_iso,
-            "updated_by_session_id": "task-pool-mirror",
-            "note": (
-                "task pool で done 化、 mirror 同期 (= ms-88 / e-2167)"
-            ),
-        }
-        t["task_states"] = states
-        t["updated_at"] = now_iso
-        try:
-            db.save_trek(t.get("trek_id", ""), t)
-            touched.append(t.get("trek_id", ""))
-        except Exception:
-            continue
-    return touched
 
 def _require_decided_by(value: str) -> str:
     """Validate a caller-supplied ``decided_by`` against the decision-arm enum.
@@ -1667,12 +1599,9 @@ def make_router(
         result = _apply_op_and_broadcast(
             project_id, op, op_name="entry.done", actor=user.get("sub", ""),
         )
-        # ms-88 / e-2167 — mirror task pool done into Trek task_states.
-        # Best-effort: failure does not block the task done response.
-        try:
-            _mirror_task_done_to_treks(entry_id)
-        except Exception:
-            pass
+        # ms-185 e-7070: the mirror that stamped Trek ``task_states`` when a
+        # pool task went done is gone with the Trek body. It was the last
+        # ``save_trek`` writer reachable from a live (non-Trek) endpoint.
         # ms-95 / e-2726 — phantom-done evidence gate. Flag only, no reject.
         # Failure is silently swallowed inside the helper; we surface the
         # assessment in the response so the CLI can echo the warning to the

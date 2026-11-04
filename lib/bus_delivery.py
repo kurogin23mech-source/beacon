@@ -69,10 +69,6 @@ OPERATION_TRIGGER_CHANNEL = "operation-trigger"
 # in one and not the other — a structural check instead of fragile init order.
 SYSTEM_PROVENANCE_CHANNELS = frozenset({
     "operation-trigger",
-    "trek-trigger",
-    "trek-progress-check",
-    "trek-task-review",
-    "trek-leader-digest",
 })
 
 # Channels that USED to be server-minted and no longer are (ms-185 e-7077).
@@ -103,13 +99,23 @@ SYSTEM_PROVENANCE_CHANNELS = frozenset({
 # ``tests/test_retired_provenance_channels_e7077.py`` fails if a known
 # server-minted channel family member is in neither set.
 #
-# ms-185 e-7078 note: the ``trek-*`` family stays LIVE here for now. Their proof
-# (the T1-system envelope the Trek scheduler mints) still has its issuer, so the
-# gate is still satisfiable and nothing is left unsatisfiable. They move into this
-# set together with the removal of Trek's bus surface (e-7080 / e-7070), which is
-# also where their tests are retired — moving them earlier would churn tests that
-# are about to be deleted, and would stop Trek autonomy before its code is gone.
-RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset()
+# ms-185 e-7071: the ``trek-*`` family moved here. The condition the e-7078 note
+# named has now happened — e-7070 deleted the Trek scheduler, which was the sole
+# issuer of the T1-system envelope these four channels demand. With no issuer the
+# gate is no longer satisfiable, so leaving them in the live set would mean
+# declaring a judgment nobody can pass (the very shape this milestone is folding).
+#
+# Being retired rather than deleted is what keeps stale data fail-closed: a
+# project whose ``bus_auto_execute_channels`` still carries ``trek-*`` (written
+# there by Trek-join at the time) gets the event downgraded with a reason that
+# says what to do (remove the stale opt-in), instead of the opt-in silently
+# becoming sufficient on its own.
+RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset({
+    "trek-trigger",
+    "trek-progress-check",
+    "trek-task-review",
+    "trek-leader-digest",
+})
 
 # The envelope tier a human mints at ``beacon operation approve`` (server mints it
 # with ``tier=T2``, ``scope=<op_id>``). This is the proof operation-trigger demands.
@@ -258,27 +264,19 @@ _OPERATION_ADVICE = (
     "`beacon operation approve <op-id>` で承認すると直ります"
 )
 
-# trek-* の証拠はサーバ署名で、発行者は Trek スケジューラだけ。operator の手で
-# 用意できる封筒ではないので、回復手段は「opt-in のやり直し」ではない。この一群は
-# Trek の bus 面の削除 (e-7080 / e-7070) と一緒に退役する。
-_TREK_ADVICE = (
-    "channel は許可リスト済だが、サーバ署名 "
-    f"(tier={T1_SYSTEM_TIER}) の封筒が付いていません。これは Trek の "
-    "スケジューラだけが発行するもので、operator が用意して直せるものでは "
-    "ありません (許可リストに入れ直しても直りません)"
-)
+# ms-185 e-7071: _TREK_ADVICE を落とした。trek-* が引退済みの集合へ移ったので、
+# 降格の理由は引退を指すもの (DOWNGRADE_RETIRED_CHANNEL) に切り替わり、この助言文を
+# 読む経路が無くなった。引退済み channel の助言は「古い opt-in を外す」であり、
+# ここに在った「サーバ署名が付いていない」とは operator の取るべき行動が違う。
 
 PROVENANCE_REQUIREMENTS = {
     OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(
         has_approved_operation_envelope, _OPERATION_ADVICE),
-    "trek-trigger": ProvenanceRequirement(
-        has_server_minted_envelope, _TREK_ADVICE),
-    "trek-progress-check": ProvenanceRequirement(
-        has_server_minted_envelope, _TREK_ADVICE),
-    "trek-task-review": ProvenanceRequirement(
-        has_server_minted_envelope, _TREK_ADVICE),
-    "trek-leader-digest": ProvenanceRequirement(
-        has_server_minted_envelope, _TREK_ADVICE),
+    # ms-185 e-7071: the four trek-* entries moved out with the family (they are
+    # in RETIRED_PROVENANCE_CHANNELS now). A retired channel is downgraded before
+    # a requirement is ever consulted, so an entry here would never be read —
+    # and an unread requirement is exactly the kind of judgment-that-cannot-run
+    # this milestone removes.
 }
 
 

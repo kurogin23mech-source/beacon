@@ -7,16 +7,30 @@ point left, while **nothing turns red if one comes back**. The deleted tests
 than inverted, so restoring `routers_treks.py` from history during e-7070 work,
 or dropping the `trek)` arm from a frontend, would pass CI silently.
 
-These three tests invert them. Each asserts the ABSENCE of an entrance, which
+These four tests invert them. Each asserts the ABSENCE of an entrance, which
 is the contract the PR actually claims:
 
-  1. no creation route on the server
+  1. no creation route on the server (and the READ route is still there)
   2. the verb is gone from both CLI frontends, with a reason, non-zero
   3. tagging a NEW doc to a trek is refused
+  4. no UI entrance in either copy of the screen
 
-They are expected to be deleted together with the body in e-7070 — at which
-point the endpoints and the notice go too, and an absence test for something
-that no longer exists in any form has nothing left to say.
+**ms-185 e-7070 — これらは本体と一緒に外さなかった。** 冒頭の見積り (「e-7070 で
+一緒に消す」) は実際の削除の形と合わなかった。4 本それぞれが、本体削除のあとも
+在り続ける面を守っている:
+
+  1. 読み取り口は**残す**判断になった (e-7081、SPEC 方針5)。だからこのテストは
+     「POST が戻っていない」かつ「GET は在る」の両方を測る面として生き続ける。
+     テスト自身の中にそう書いてある (「removing the read path is e-7070's call,
+     not a side effect」)。
+  2. CLI の削除告知は残る (両フロントで byte 等価、別のテストが等価を固定)。
+  3. doc の書き込み拒否 (lib/cmd_doc._refuse_trek_write) は残る。
+  4. 画面の入口は e-7079 で閉じたが、画面側の到達不能な本体は e-7070 では触って
+     いない (e-7071 の担当)。戻ってくる経路はまだ在るので、見張りを外す理由が無い。
+
+とくに 4 は、独立保守性レビューが「コメントだけが閉じていた」と実測で見つけた arm
+であり、そのテスト自身が「e-7070 は履歴から逆向きに復元する作業で、まさにそれが
+入口が戻る経路」と書いている。**削除作業の最中が最も価値が高い。**
 """
 from __future__ import annotations
 

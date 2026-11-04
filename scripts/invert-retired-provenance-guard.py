@@ -59,12 +59,21 @@ def drop_from_both_sets(src: str) -> str:
     assert anchor in src, "anchor not found (drop_from_both_sets)"
     return src.replace(anchor, '    "trek-progress-check",', 1)
 def retire_without_removing(src: str) -> str:
-    """現役と引退済みの両方に入れる (= 判定の順序に依存する曖昧な状態)。"""
-    anchor = "RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset()"
+    """現役と引退済みの両方に入れる (= 判定の順序に依存する曖昧な状態)。
+
+    ms-185 e-7071: 当て先を直した。以前は引退済みの集合が空だったので、そこへ
+    1 件足せば重複が作れた。いまは逆 (引退済みに trek-* の 4 件、現役に
+    operation-trigger のみ) なので、**現役の側を引退済みにも入れて**同じ曖昧な
+    状態を作る。測る性質は同じ — どちらか一方にしか居られないこと。
+    """
+    anchor = ('RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset({\n'
+              '    "trek-trigger",')
     assert anchor in src, "anchor not found (retire_without_removing)"
     return src.replace(
         anchor,
-        'RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset({"trek-trigger"})', 1)
+        'RETIRED_PROVENANCE_CHANNELS: frozenset = frozenset({\n'
+        '    "operation-trigger",\n'
+        '    "trek-trigger",', 1)
 
 
 def remove_the_retired_check(src: str) -> str:
@@ -245,16 +254,18 @@ def make_a_gated_channel_unsatisfiable(src: str) -> str:
     いるか」と「advice が空でないか」しか測っていなかったので、
     ``predicate=lambda ev: False`` + ``advice="x"`` の channel を足しても全件緑だった。
     """
-    tail = ('    "trek-leader-digest": ProvenanceRequirement(\n'
-            '        has_server_minted_envelope, _TREK_ADVICE),\n}')
+    # ms-185 e-7071: 当て先を直した。以前は trek-leader-digest のエントリを目印に
+    # していたが、trek-* の一群は引退済みの集合へ移り要求の表から消えた。目印を
+    # 残った operation-trigger のエントリに移す (足す変異の中身は同じ)。
+    tail = ('    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n'
+            '        has_approved_operation_envelope, _OPERATION_ADVICE),')
     head = ('SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",')
     assert tail in src and head in src, \
         "anchor not found (make_a_gated_channel_unsatisfiable)"
     return src.replace(
         tail,
-        '    "trek-leader-digest": ProvenanceRequirement(\n'
-        '        has_server_minted_envelope, _TREK_ADVICE),\n'
-        '    "nobody-can-satisfy-me": ProvenanceRequirement(lambda ev: False, "x"),\n}',
+        tail + '\n'
+        '    "nobody-can-satisfy-me": ProvenanceRequirement(lambda ev: False, "x"),',
         1).replace(
         head,
         'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n'
@@ -262,19 +273,24 @@ def make_a_gated_channel_unsatisfiable(src: str) -> str:
 
 
 def point_a_channel_at_the_wrong_predicate(src: str) -> str:
-    """trek-trigger の述語を operation 用に差し替える (分岐の形は残る)。
+    """宣言した channel の述語を別物に差し替える (分岐の形は残る)。
 
-    **独立 AX レビュー (high) が実証した変異**。本物のサーバ署名イベントが永久に
-    降格されるのに、kept 経路を測るテストが trek-trigger に無かったため全件緑だった
+    **独立 AX レビュー (high) が実証した変異**。本物の封筒が付いたイベントが永久に
+    降格されるのに、kept 経路を測るテストが当該 channel に無かったため全件緑だった
     (照合したら 5 channel 中 3 つにしか kept テストが無かった)。
+
+    ms-185 e-7071: 当て先を trek-trigger から operation-trigger へ移した。trek-* は
+    引退済みの集合へ移って要求の表から消え、宣言が残っているのは operation-trigger
+    だけになった。**測る性質は同じ** — 宣言した channel すべてに kept 経路のテストが
+    在ること。述語をサーバ署名の方へ向けると、人間が承認した T2 の封筒が拒否される。
     """
-    anchor = ('    "trek-trigger": ProvenanceRequirement(\n'
-              '        has_server_minted_envelope, _TREK_ADVICE),')
+    anchor = ('    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n'
+              '        has_approved_operation_envelope, _OPERATION_ADVICE),')
     assert anchor in src, "anchor not found (point_a_channel_at_the_wrong_predicate)"
     return src.replace(
         anchor,
-        '    "trek-trigger": ProvenanceRequirement(\n'
-        '        has_approved_operation_envelope, _TREK_ADVICE),', 1)
+        '    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n'
+        '        has_server_minted_envelope, _OPERATION_ADVICE),', 1)
 
 
 # --- scripts/codex-inbox-hook.py への追加の壊し方 ---------------------------

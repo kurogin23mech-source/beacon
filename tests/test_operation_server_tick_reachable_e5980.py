@@ -188,21 +188,36 @@ def test_a_positive_cadence_is_accepted(tmp_path):
 def test_the_rule_for_cadence_lives_in_one_place():
     """cadence の規則が 1 箇所であること。
 
-    同じ 1 つのフィールドについて trek 側が独自の検証を持ち、Operation 側はそれを
-    知らずに素通りさせていた = 兄弟機能が同じフィールドで別々の規則を持つと、片方
-    だけ緩いまま残る。読み取り側と同じ module に寄せ、trek もそこを呼ぶ。
+    元の障害: 同じ 1 つのフィールドについて trek 側が独自の検証を持ち、Operation
+    側はそれを知らずに素通りさせていた = 兄弟機能が同じフィールドで別々の規則を
+    持つと、片方だけ緩いまま残る。対処は読み取り側と同じ module に寄せること。
+
+    ms-185 e-7070 で trek 側の複製は本体ごと消えたので、「trek がそこを呼ぶ」の
+    確認は対象を失った。だが**守りたい性質は消えていない** — 規則の持ち主は
+    ``tick_scheduler`` 1 つであり、別の module が自前の cadence 検証を生やしたら
+    同じ穴が開く。そこで主題を「trek が呼ぶか」から「複製が無いか」へ移す
+    (= 兄弟が増えても効く形)。消えた片方を名指しするより広く、かつ厳しい。
     """
-    import ast as _ast
-    import inspect
+    import pathlib as _pl
+    import re as _re
     import tick_scheduler
-    import trek
-    assert hasattr(tick_scheduler, "validate_cadence_minutes")
-    tree = _ast.parse(inspect.getsource(trek._validate_cadence_minutes))
-    calls = {(getattr(c.func, "id", None) or getattr(c.func, "attr", ""))
-             for c in _ast.walk(tree) if isinstance(c, _ast.Call)}
-    assert "validate_cadence_minutes" in calls, (
-        "trek が自前の規則を持ったまま (= 同じフィールドで規則が 2 つ): "
-        + repr(sorted(calls)))
+    assert hasattr(tick_scheduler, "validate_cadence_minutes"), (
+        "cadence の規則の持ち主 (tick_scheduler.validate_cadence_minutes) が無い")
+
+    # ``tick_scheduler`` 以外で cadence の範囲そのものを判定している module を探す。
+    # 呼ぶ (= validate_cadence_minutes を通す) のは正。自前で境界値を書くのが誤。
+    owner = "tick_scheduler.py"
+    bound = _re.compile(r"cadence_minutes\s*[<>]=?\s*\d|\d+\s*[<>]=?\s*cadence_minutes")
+    offenders = []
+    for f in sorted(_pl.Path(__file__).resolve().parents[1].joinpath("lib").glob("*.py")):
+        if f.name == owner:
+            continue
+        if bound.search(f.read_text(encoding="utf-8")):
+            offenders.append(f.name)
+    assert not offenders, (
+        "cadence の境界判定を自前で持つ module が在る (= 同じフィールドで規則が 2 つ、"
+        f"片方だけ緩いまま残る): {offenders}。"
+        f"tick_scheduler.validate_cadence_minutes を呼ぶ形に寄せること")
 
 
 def test_the_firing_preconditions_live_in_one_place():

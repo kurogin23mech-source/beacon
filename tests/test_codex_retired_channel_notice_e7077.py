@@ -153,9 +153,13 @@ class TestClaudeHookRendersPerReasonAdvice:
     見逃した (AX レビューが misleading として指摘)。
     """
 
-    def _render(self, claude, reason: str) -> str:
+    def _render(self, claude, reason: str, channel: str = "trek-trigger") -> str:
+        # ms-185 e-7071: channel を引数にした。既定は trek-trigger のままなので
+        # 引退理由のテストはそのまま (trek-* は今まさに引退済みの実例)。署名欠落
+        # (PROVENANCE) の理由は**現役のゲート channel でしか起きない**ので、
+        # そちらは operation-trigger を渡す。
         ev = {
-            "event_id": "ev-1", "channel": "trek-trigger",
+            "event_id": "ev-1", "channel": channel,
             "delivery": "propose-to-ai", "sender_session_id": "sv-x",
             "created_at": "2026-10-19T00:00:00Z", "payload": {"text": "x"},
             "_downgraded_from": "auto-execute", "_downgrade_reason": reason,
@@ -174,8 +178,10 @@ class TestClaudeHookRendersPerReasonAdvice:
         )
 
     def test_provenance_output_says_it_cannot_be_fixed_by_opting_in(self, claude):
-        out = self._render(claude, PROVENANCE)
-        assert "T1-system" in out
+        # ms-185 e-7071: 現役のゲート channel (operation-trigger) で測る。
+        # trek-* は引退したので、この理由でここに来ることはもう無い。
+        out = self._render(claude, PROVENANCE, channel="operation-trigger")
+        assert "operation approve" in out
         assert "not in bus_auto_execute_channels" not in out, (
             "署名欠落の降格で「許可リストに無い」と案内しています = 事実と逆 "
             "(channel は許可リストに在る)。"
@@ -261,22 +267,24 @@ class TestProvenanceAdviceIsChannelAware:
             "回復手段が実在するのに「直らない」と断定しています。"
         )
 
-    def test_trek_channel_says_the_operator_cannot_fix_it(self):
-        out = bd.downgrade_advice(PROVENANCE, "trek-trigger")
-        assert "T1-system" in out, "trek-* が要求するサーバ署名を説明していません。"
-        assert "直りません" in out, (
-            "trek-* の証拠は Trek スケジューラだけが発行するので、operator には "
-            "直せない旨を伝える必要があります。"
-        )
-        assert "operation approve" not in out, (
-            "trek-* に operation の回復手段を案内しています = 誤案内。"
-        )
-
-    def test_the_two_families_get_different_advice(self):
-        assert (bd.downgrade_advice(PROVENANCE, bd.OPERATION_TRIGGER_CHANNEL)
-                != bd.downgrade_advice(PROVENANCE, "trek-trigger")), (
-            "同じ理由タグでも channel で要求が違うのに、同じ案内を返しています。"
-        )
+    # ms-185 e-7071: test_trek_channel_says_the_operator_cannot_fix_it と
+    # test_the_two_families_get_different_advice を落とした。
+    #
+    # どちらも「同じ理由タグが 2 つの別世界を指す」ことを、trek-* という
+    # **operator には直せない側の実例**で測っていた。その一群は引退済みの集合へ
+    # 移り (発行者が e-7070 で消えたため)、署名欠落の理由でここに来ることはもう
+    # 無い。宣言が残っているのは operation-trigger だけなので、2 つを比べる形は
+    # 成立しない。
+    #
+    # **守りたい契約は消えていない** — 助言は理由タグだけでなく channel から
+    # 導かれなければならない (タグだけで分岐すると、片方の文言がもう片方にも出る)。
+    # それを測るのは下の 2 件:
+    #   * test_every_gated_channel_declares_a_recovery — 宣言した channel は
+    #     述語と回復手段の両方を持ち、助言がその宣言と一致する
+    #   * test_undeclared_channel_does_not_claim_a_recovery — 宣言の無い channel が
+    #     宣言済みの回復手段を**受け継がない** (= タグだけで分岐していたら、ここで
+    #     operation-trigger の文言が出てしまい赤くなる)
+    # 宣言が 1 つに減っても、後者が「タグだけ分岐」を捕まえ続ける。
 
     def test_every_gated_channel_declares_a_recovery(self):
         """ゲートした channel は、述語と**回復手段の説明**の両方を必ず持つ。

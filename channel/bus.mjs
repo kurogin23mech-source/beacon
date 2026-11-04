@@ -1038,18 +1038,25 @@ async function apiPut(p, body) {
 // returns not-internal so the budget gate stays in force (never a silent
 // relaxation). BEACON_TREK_BYPASS_OFF=1 is an explicit escape hatch (mirrors
 // BEACON_QUALGATE_OFF / BEACON_BUS_NO_LIVE_CHECK).
-async function checkTrekInternalReply(recipientProjectId, recipientSessionId) {
-  if (process.env.BEACON_TREK_BYPASS_OFF === '1') return { trek_internal: false }
-  if (!PROJECT_ID || !SESSION_ID || !recipientSessionId) {
-    return { trek_internal: false }
-  }
-  const qs = new URLSearchParams({
-    sender_project_id: PROJECT_ID,
-    sender_session_id: SESSION_ID,
-    recipient_session_id: recipientSessionId,
-    recipient_project_id: recipientProjectId || '',
-  })
-  return await apiGet(`/api/system/trek-internal-send?${qs.toString()}`)
+// ms-185 e-7070 — **the server side of this is gone.** The route this asked
+// (`GET /api/system/trek-internal-send`) was deleted together with the Trek
+// body, so every call 404'd, got caught by the try/catch at the call site, and
+// fell back to not-internal. The result was already permanently `false`; the
+// only thing the request still did was spend a network round-trip on the hot
+// path (every armed / --in-reply-to send) and write a misleading log line.
+//
+// So this now returns the same answer **without asking**. Behaviour is
+// unchanged by construction (the answer was already always not-internal); what
+// changes is that the comments above stop describing a live mechanism and the
+// dead round-trip disappears.
+//
+// Removing this function, `BEACON_TREK_BYPASS_OFF`, the `BEACON_TREK_RATE_*`
+// brake and the call-site branch outright is **e-7080**, which carries the
+// acceptance condition that DM receive is verified on a real session afterwards
+// (this file is the receive path for every session, so that removal is not
+// something to fold into a deletion commit that cannot run it).
+async function checkTrekInternalReply(_recipientProjectId, _recipientSessionId) {
+  return { trek_internal: false }
 }
 
 // e-1667: per-iteration watchdog wrapper. Caps any awaited promise at

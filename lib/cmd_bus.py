@@ -176,6 +176,38 @@ def _bus_budget_refund_one() -> bool:
     return True
 
 
+# ms-185 e-7070 — ``members[]`` の粒度判定。元は ``lib/trek.py`` の
+# ``is_session_id_keyed`` / ``get_migration_phase`` で、e-7070 が本体 (5,146 行)
+# を落としたのでここへ写した。送信予算の迂回判定だけがこれを要るので、
+# 5,146 行を残すより写す方が畳む目的に沿う。
+#
+# なぜ粒度が 2 つあるか: phase A 以降の trek は ``members[]`` が session_id
+# keyed で、pre-A の trek は user_id keyed のまま残っている。1 user が N
+# session を持つので user_id は phase A 以降では曖昧であり、session_id が
+# member identity の真値。両方の世代の記録が現に在るため判定が要る。
+#
+# この迂回自体の撤去は e-7080 (= 認可の第 3 の迂回路)。そのときこの helper も
+# 一緒に落ちる。
+_TREK_SESSION_KEYED_PHASES = ("A", "B", "C")
+_TREK_DEFAULT_MIGRATION_PHASE = "pre-A"
+_TREK_VALID_MIGRATION_PHASES = ("pre-A", "A", "B", "C")
+
+
+def _is_session_id_keyed(trek_doc: dict) -> bool:
+    """True if this trek's ``members[]`` is session_id keyed (phase A/B/C).
+
+    ``trek.meta.migration_phase`` が無い / 未知の値なら migration 未着手として
+    扱う (= 旧 user_id keyed)。原典は例外を上げずこの既定に落ちる形だったので、
+    呼び出し側に在った ``try/except`` は要らなくなった (= 本体を消したあと
+    黙って ``False`` 固定になる劣化を作らない)。
+    """
+    meta = trek_doc.get("meta") or {}
+    phase = meta.get("migration_phase") or _TREK_DEFAULT_MIGRATION_PHASE
+    if phase not in _TREK_VALID_MIGRATION_PHASES:
+        phase = _TREK_DEFAULT_MIGRATION_PHASE
+    return phase in _TREK_SESSION_KEYED_PHASES
+
+
 def _record_bus_budget_trek_bypass(trek_id: str) -> None:
     """Bump the per-Trek bypass counter on the budget file (ms-75 / e-2044).
 
@@ -311,11 +343,7 @@ def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
             # per-member) is what lets a phase-A invite placeholder — no
             # session_id — be correctly excluded instead of falling through to
             # a legacy user match.
-            try:
-                import trek as _trek_mod
-                phase_a = _trek_mod.is_session_id_keyed(trek)
-            except Exception:
-                phase_a = False
+            phase_a = _is_session_id_keyed(trek)
             am_member = _trek_has_joined_member(
                 members, phase_a=phase_a,
                 session_id=my_session_id, user_id=my_user_id,

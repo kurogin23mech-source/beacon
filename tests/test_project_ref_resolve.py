@@ -127,40 +127,15 @@ class TestTryResolveProjectRef:
         """Server fanout must not abort the loop on one ambiguous slug."""
         out = try_resolve_project_ref("demo", db_or_lister=PROJECTS_AMBIGUOUS)
         assert out == "demo"
-
-
 # ---------------------------------------------------------------------------
-# Integration with normalize_scope_entry — opt-in resolve kwarg
+# ms-185 e-7070: TestNormalizeScopeEntryResolveKwarg (3 件) を落とした。
+#
+# 何を測っていたか: ``lib/trek.normalize_scope_entry`` が ``resolve=True`` の
+# ときだけ短い名前を展開し、既定 (resolve 無し) では展開しないこと。
+# その関数は共同作業空間の scope 項目を正規化するもので、本体ごと消えた。
+#
+# **解決器そのものの振る舞いはこのファイルの残り 10 件が測り続ける** ——
+# 短い名前の一致 / 曖昧なときに ValueError を上げる / 行が無ければ素通り、という
+# 契約は Trek とは無関係で、呼び出し元が変わっても要る。落としたのは「Trek の
+# scope 項目に適用したとき」という適用側の 3 件だけで、解決器の被覆は減っていない。
 # ---------------------------------------------------------------------------
-
-
-class TestNormalizeScopeEntryResolveKwarg:
-    """``normalize_scope_entry(resolve=True, db_or_lister=...)`` expands
-    short names without breaking the default no-resolve contract that
-    every existing AC7 test relies on."""
-
-    def test_resolve_false_default_keeps_short_name(self):
-        from lib import trek
-        out = trek.normalize_scope_entry(
-            {"project": "life-plan-simulator", "milestone": "ms-3"},
-        )
-        assert out["project"] == "life-plan-simulator"
-
-    def test_resolve_true_expands_short_name(self):
-        from lib import trek
-        out = trek.normalize_scope_entry(
-            {"project": "life-plan-simulator", "milestone": "ms-3"},
-            resolve=True,
-            db_or_lister=PROJECTS_TWO_DISTINCT,
-        )
-        assert out["project"] == "life-plan-simulator-68c5df"
-        assert out["milestone"] == "ms-3"
-
-    def test_resolve_true_with_no_lister_passthrough(self):
-        """resolve=True but no rows available → input unchanged."""
-        from lib import trek
-        out = trek.normalize_scope_entry(
-            {"project": "life-plan-simulator", "milestone": "ms-3"},
-            resolve=True,
-        )
-        assert out["project"] == "life-plan-simulator"
