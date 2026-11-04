@@ -1670,13 +1670,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_session_log = session_sub.add_parser("log", add_help=False)
     p_session_log_sub = p_session_log.add_subparsers(
-        dest="session_log_cmd", metavar="<list|show>"
+        dest="session_log_cmd", metavar="<list|handoff|show>"
     )
     p_session_log_list = p_session_log_sub.add_parser(
         "list", aliases=["ls"], add_help=False
     )
     p_session_log_list.add_argument("--limit", default="0")
     p_session_log_list.add_argument("--json", action="store_true")
+    # ms-160 e-7314: 最新の引き継ぎの「次セッション最優先」節だけを本文のまま出す。
+    p_session_log_handoff = p_session_log_sub.add_parser(
+        "handoff", add_help=False)
+    p_session_log_handoff.add_argument("--json", action="store_true")
     p_session_log_show = p_session_log_sub.add_parser(
         "show", aliases=["get"], add_help=False
     )
@@ -5266,6 +5270,9 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_JSON": "1" if getattr(args, "json", False) else "",
             }
             return _run_commands_py(root, "session_log_list", env)
+        if log_sub == "handoff":
+            env = {"BEACON_JSON": "1" if getattr(args, "json", False) else ""}
+            return _run_commands_py(root, "session_log_handoff", env)
         if log_sub in ("show", "get"):
             sid = (getattr(args, "session_id", "") or "").strip()
             if not sid:
