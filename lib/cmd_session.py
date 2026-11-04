@@ -428,25 +428,11 @@ def cmd_session_log_list():
     except ValueError:
         limit = 0
 
-    # ms-84 Phase 2 (e-2036): Store.list_session_logs returns the cloud
-    # rows in cloud mode or [] in local mode, so the fallback to walking
-    # ``.beacon/session_logs/`` directly only fires when the Store could
-    # not supply anything.
-    entries: list[dict] = get_store().list_session_logs(limit=limit)
-    if not entries:
-        # Local cache fallback
-        d = _session_logs_dir()
-        if os.path.isdir(d):
-            for name in os.listdir(d):
-                if name.endswith(".json"):
-                    try:
-                        with open(os.path.join(d, name), "r", encoding="utf-8") as f:
-                            entries.append(json.load(f))
-                    except (OSError, json.JSONDecodeError):
-                        continue
-            entries.sort(key=lambda e: e.get("last_aggregated_at", ""), reverse=True)
-            if limit:
-                entries = entries[:limit]
+    # ms-84 Phase 2 (e-2036): Store.list_session_logs returns the cloud rows in
+    # cloud mode or [] in local mode, so the fallback to walking
+    # ``.beacon/session_logs/`` only fires when the Store supplied nothing.
+    # 手順は _list_session_logs_with_fallback が 1 箇所で持つ。
+    entries = _list_session_logs_with_fallback(limit)
 
     if json_mode:
         print(json.dumps(entries, ensure_ascii=False))
@@ -491,7 +477,34 @@ def cmd_session_log_show():
             print("(recovered)")
 
 
-def cmd_session_log_next():
+def _list_session_logs_with_fallback(limit: int) -> "list[dict]":
+    """session log を新しい順に返す。Store が空ならローカルの控えを歩く。
+
+    **1 箇所に寄せてある** (独立保守性レビュー): 以前は list と handoff が同じ手順
+    (Store → 控えの列挙 → 壊れた JSON を飛ばす → last_aggregated_at の降順 → 先頭 N)
+    をそれぞれ持っていた。この手順自体が 1 つの規則なので、2 箇所に実体があると
+    片方だけ直して黙って食い違う (壊れた JSON の扱い / 並べ替えの鍵 /
+    last_aggregated_at が無いエントリの扱いを変えるときに起きる)。
+    """
+    entries: list[dict] = get_store().list_session_logs(limit=limit)
+    if entries:
+        return entries
+    d = _session_logs_dir()
+    if not os.path.isdir(d):
+        return []
+    for name in os.listdir(d):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                entries.append(json.load(f))
+        except (OSError, json.JSONDecodeError):
+            continue
+    entries.sort(key=lambda e: e.get("last_aggregated_at", ""), reverse=True)
+    return entries[:limit] if limit else entries
+
+
+def cmd_session_log_handoff():
     """前セッションの引き継ぎの「次セッション最優先」節を、本文のまま出す。
 
     ms-160 e-7314: ``session_log_list`` は **全セッション分** を返すので、読む側は
@@ -506,21 +519,8 @@ def cmd_session_log_next():
 
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
-    # 最新 1 件。list と同じ経路 (Store → ローカルの控え) を使うが、limit=1 で
-    # 絞るので全件は流れない。
-    entries: list[dict] = get_store().list_session_logs(limit=1)
-    if not entries:
-        d = _session_logs_dir()
-        if os.path.isdir(d):
-            for name in os.listdir(d):
-                if name.endswith(".json"):
-                    try:
-                        with open(os.path.join(d, name), "r", encoding="utf-8") as f:
-                            entries.append(json.load(f))
-                    except (OSError, json.JSONDecodeError):
-                        continue
-            entries.sort(key=lambda e: e.get("last_aggregated_at", ""), reverse=True)
-            entries = entries[:1]
+    # 最新 1 件だけ。全件は流れない (流れると読む側が切り出す羽目になる)。
+    entries = _list_session_logs_with_fallback(1)
 
     if not entries:
         if json_mode:

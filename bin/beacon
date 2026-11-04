@@ -1426,7 +1426,7 @@ except ValueError as e:
                         BEACON_LIMIT="$_sl_limit" BEACON_JSON="$_sl_json" \
                             python3 "$COMMANDS_PY" session_log_list
                         ;;
-                    next)
+                    handoff)
                         # ms-160 e-7314: 最新の引き継ぎの「次セッション最優先」節
                         # だけを本文のまま出す。list は全セッション分を返すので、
                         # 読む側が切り出す最中に要約へ化けていた。
@@ -1436,11 +1436,16 @@ except ValueError as e:
                             case "$1" in
                                 --json) _sn_json="1"; shift ;;
                                 -?*) _guard_flag "$1" ;;
-                                *) shift ;;
+                                # この verb は位置引数を取らない。黙って捨てると
+                                # Python 側 (argparse) は exit 2 で断るので、同じ
+                                # 入力で結果が割れる (独立 AX レビューが実測)。
+                                *) echo "Error: 'beacon session log handoff' takes no arguments (got '$1')." >&2
+                                   echo "Usage: beacon session log handoff [--json]" >&2
+                                   exit 2 ;;
                             esac
                         done
                         BEACON_JSON="$_sn_json" \
-                            python3 "$COMMANDS_PY" session_log_next
+                            python3 "$COMMANDS_PY" session_log_handoff
                         ;;
                     show|get)
                         shift 3
@@ -1457,7 +1462,7 @@ except ValueError as e:
                             python3 "$COMMANDS_PY" session_log_show
                         ;;
                     *)
-                        echo "Usage: beacon session log [list|next|show]"
+                        echo "Usage: beacon session log [list|handoff|show]"
                         ;;
                 esac
                 ;;
@@ -1608,7 +1613,7 @@ except ValueError as e:
                 echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json] [--bus-origin]"
                 echo "       beacon session rescue [--json]"
                 echo "       beacon session log list [--limit N] [--json]"
-                echo "       beacon session log next [--json]"
+                echo "       beacon session log handoff [--json]"
                 echo "       beacon session log show <session-id> [--json]"
                 echo "       beacon session id"
                 echo "       beacon session focus \"<text>\" | --clear | --show [--json]"

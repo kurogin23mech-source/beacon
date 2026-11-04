@@ -525,7 +525,7 @@ beacon morning --no-doc --json --since-hours 24 2>/dev/null
 
 Bash ツールで実行:
 ```bash
-beacon session log next
+beacon session log handoff
 ```
 
 **出力をそのまま Step 3 の出力に貼る。要約・言い換え・括弧内への圧縮をしてはならない。**

@@ -446,7 +446,7 @@ VERB_LEDGER = {
     "session_fork_cleanup": {"cls": "C", "secondary": ["B"], "note": "[post-memo/ms-178] fork worktree の物理削除=局所破壊(C)、退避と生存判定のゲートが機構(B)。退避が取れなければ削除しない"},
     "session_id": {"cls": "Q", "secondary": [], "note": ""},
     "session_log_list": {"cls": "Q", "secondary": [], "note": ""},
-    "session_log_next": {"cls": "Q", "secondary": [], "note": ""},
+    "session_log_handoff": {"cls": "Q", "secondary": [], "note": ""},
     "session_log_show": {"cls": "Q", "secondary": [], "note": ""},
     "session_rescue": {"cls": "C", "secondary": ["B"], "note": ""},
 

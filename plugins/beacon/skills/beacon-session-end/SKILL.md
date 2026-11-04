@@ -164,7 +164,7 @@ session log を以下の summary で永続化します:
 このまま記録しますか? (= OK / 書き直し)
 ```
 
-`beacon summary "<text>"` は ms-57 e-1040 で **廃止** (CLI が ignored を返す)。後継は `beacon session end --summary "<text>"`。これは session log を upsert し、`summary` フィールドに引き継ぎ narrative を書き込む。次回の `/beacon-session-start` Step 1j が `beacon session log next` でこの引き継ぎの節を**本文のまま**読む経路。
+`beacon summary "<text>"` は ms-57 e-1040 で **廃止** (CLI が ignored を返す)。後継は `beacon session end --summary "<text>"`。これは session log を upsert し、`summary` フィールドに引き継ぎ narrative を書き込む。次回の `/beacon-session-start` Step 1j が `beacon session log handoff` でこの引き継ぎの節を**本文のまま**読む経路。
 
 Bash ツールで実行:
 ```bash
@@ -179,7 +179,7 @@ beacon session end --summary "<Step3のテキスト>"
 
 **重要**: Step 3 で生成したサマリーには、見出し **`## 次セッション最優先`** を必ず含めること。任意で **`## 次にやること`** を添えてよい。
 
-**見出しは揺らしてはならない** (ms-160 e-7314)。読み口 (`beacon session log next`) はこの綴りでしか節を見つけられず、見つからなければ次のセッションには「節がありません」とだけ届く。以前は「top of queue」等の言い換えを許していたが、**書き口と読み口が同じ語に縛られていないと、揺れた瞬間に黙って拾えなくなる**。見出しの定義は`lib/session_handoff.py` の `REQUIRED_HEADING` / `OPTIONAL_HEADINGS` が唯一の真実源で、この Skill の文面がそれと食い違っていないことは `tests/test_session_handoff.py` が機械で突き合わせる。
+**見出しは揺らしてはならない** (ms-160 e-7314)。読み口 (`beacon session log handoff`) はこの綴りでしか節を見つけられず、見つからなければ次のセッションには「節がありません」とだけ届く。以前は「top of queue」等の言い換えを許していたが、**書き口と読み口が同じ語に縛られていないと、揺れた瞬間に黙って拾えなくなる**。見出しの定義は`lib/session_handoff.py` の `REQUIRED_HEADING` / `OPTIONAL_HEADINGS` が唯一の真実源で、この Skill の文面がそれと食い違っていないことは `tests/test_session_handoff.py` が機械で突き合わせる。
 
 ## Step 4.5: セッションメモのレビューと統合昇格
 

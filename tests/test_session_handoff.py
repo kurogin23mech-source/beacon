@@ -109,6 +109,74 @@ def test_format_shows_the_body_and_names_a_missing_section():
     assert sh.REQUIRED_HEADING in missing and "ありません" in missing
 
 
+def test_a_heading_with_a_parenthetical_is_still_the_section():
+    """注記つきの書式を受けること。**これを厳密一致にしていて 82% を落としていた。**
+
+    独立 AX レビューが本番の引き継ぎ 111 件に通して実測: 拾えたのは 20 件で、
+    うち 39 件は旧 Skill が推奨していた書式そのもの (`(top of queue)` 併記) だった。
+    しかも拾えなかったものを「書き残していない」と断定して表示していた。
+    下の綴りは実コーパスから採ってある。
+    """
+    for variant in (
+        f"{sh.REQUIRED_HEADING} (top of queue)",
+        f"{sh.REQUIRED_HEADING} / top of queue",
+        f"{sh.REQUIRED_HEADING} (= top of queue)",
+        f"{sh.REQUIRED_HEADING} / 次にやること",
+        f"{sh.REQUIRED_HEADING} (top of queue) — CLEAN セッションで updated main から",
+    ):
+        got = sh.extract_handoff(f"## {variant}\n\n本文\n")
+        assert got["required"] is not None, f"拾えていない: {variant!r}"
+        assert got["required"]["body"] == "本文"
+
+
+def test_a_different_word_that_merely_starts_the_same_is_not_the_section():
+    """前方一致を緩めすぎていないこと (別の語を拾ったら、別の節を最優先と誤読する)。"""
+    got = sh.extract_handoff(f"## {sh.REQUIRED_HEADING}事項\n\n本文\n")
+    assert got["required"] is None
+
+
+def test_a_comment_inside_a_code_fence_does_not_cut_the_body():
+    """**コードブロックの中は見出しとして読まない。**
+
+    引き継ぎにコマンド例を書くのは日常的で、その中の `# コメント` が見出し
+    (level 1) と判定されると、節がそこで打ち切られて以降が黙って消える。
+    この module が防ぐはずの「引き継ぎが黙って失われる」を別の扉から
+    再導入していた (独立保守性レビューが実測)。
+    """
+    s = (f"## {sh.REQUIRED_HEADING}\n\n1. 盤を建て直す:\n\n"
+         "```bash\n# 動いている盤を閉じてから\nbash viewer/build.sh darwin\n```\n\n"
+         "2. そのあと PR を出す。\n\n## 次にやること\n- 別の作業\n")
+    got = sh.extract_handoff(s)
+    body = got["required"]["body"]
+    assert "2. そのあと PR を出す。" in body, f"フェンスで本文が切れている: {body!r}"
+    assert "# 動いている盤を閉じてから" in body, "本文のコメント行が落ちている"
+    assert "別の作業" not in body, "隣の節を巻き込んでいる"
+
+
+def test_a_heading_appearing_twice_keeps_both_bodies():
+    """後勝ちで前を捨てない (捨てると引き継ぎが黙って失われる)。"""
+    got = sh.extract_handoff(
+        f"## {sh.REQUIRED_HEADING}\n\n1 回目\n\n"
+        f"## {sh.REQUIRED_HEADING}\n\n2 回目\n")
+    body = got["required"]["body"]
+    assert "1 回目" in body and "2 回目" in body, body
+    assert got["required"]["occurrences"] == 2
+
+
+def test_an_unreadable_heading_is_not_called_absent():
+    """語は在るのに読めなかったときは「無い」と断定しない。
+
+    「書き残していない」と「読めなかった」を同じ文面に畳むと、読み手は前セッションが
+    手を抜いたと誤解して読むのをやめる。
+    """
+    got = sh.extract_handoff(f"## {sh.REQUIRED_HEADING}事項 (別の語)\n\n本文\n")
+    assert got["required"] is None
+    assert got["near_miss"], "near_miss を立てていない"
+    out = sh.format_handoff({"session_id": "sv-x"}, got)
+    assert "読めませんでした" in out
+    assert "書き残していない" not in out
+
+
 # --- 2. 見出しの単一真実源 (書き口が読み口と同じ綴りを指しているか) ----------
 
 _END_SKILLS = (
@@ -145,8 +213,8 @@ _START_SKILLS = (
 @pytest.mark.parametrize("rel", _START_SKILLS)
 def test_the_read_side_uses_the_narrow_command(rel):
     text = (REPO / rel).read_text(encoding="utf-8")
-    assert "beacon session log next" in text, (
-        f"{rel}: Step 1j が狭い口 (`beacon session log next`) を指していない")
+    assert "beacon session log handoff" in text, (
+        f"{rel}: Step 1j が狭い口 (`beacon session log handoff`) を指していない")
 
 
 @pytest.mark.parametrize("rel", _START_SKILLS)
@@ -178,7 +246,7 @@ def test_the_read_side_does_not_ask_the_ai_to_extract_again(rel):
 
 # --- 4. 口が両フロントで **実際に動く** こと -------------------------------
 #
-# 最初はここを `"session_log_next" in dispatch.py` の部分一致で書いた。反転で
+# 最初はここを `"session_log_handoff" in dispatch.py` の部分一致で書いた。反転で
 # 「Python フロントの配線だけ落とす」を当てたら **緑のまま通った** —— 名前は
 # parser 定義の行に残るので、呼び出しを消しても部分一致は満たされる。名前の存在は
 # 配線の証拠にならないので、両フロントを**実際に走らせて**出力を突き合わせる。
@@ -208,12 +276,12 @@ def test_both_frontends_actually_serve_the_verb():
     (「両フロントを測っている」つもりで bash を 2 回測っていた)。
     """
     bash = _run_frontend(["bash", str(REPO / "bin" / "beacon"),
-                          "session", "log", "next"])
+                          "session", "log", "handoff"])
     py = _run_frontend([sys.executable, "-c",
                         "import sys, pathlib; "
                         "from beacon_cli.dispatch import dispatch; "
                         "sys.exit(dispatch(pathlib.Path('.'), "
-                        "['session', 'log', 'next']))"])
+                        "['session', 'log', 'handoff']))"])
     for label, r in (("bin/beacon", bash), ("beacon_cli", py)):
         out = r.stdout + r.stderr
         assert r.returncode == 0, f"{label}: 非ゼロで終了\n{out}"
@@ -226,9 +294,30 @@ def test_both_frontends_actually_serve_the_verb():
         f"bash={bash_shape!r} python={py_shape!r}")
 
 
+def test_both_frontends_refuse_a_stray_argument_the_same_way():
+    """**異常入力でも一致すること。**
+
+    docstring が「両フロントで一致」と言うのに、測っていたのは正常系だけだった
+    (独立 AX レビューが実測して指摘)。当時 bash 側は余分な位置引数を黙って捨てて
+    exit 0、Python 側 (argparse) は exit 2 で、同じ入力で結果が割れていた。
+    緑のガードが「一致している」と誤認させる形だったので、検査範囲を主張に合わせる。
+    """
+    bash = _run_frontend(["bash", str(REPO / "bin" / "beacon"),
+                          "session", "log", "handoff", "garbage123"])
+    py = _run_frontend([sys.executable, "-c",
+                        "import sys, pathlib; "
+                        "from beacon_cli.dispatch import dispatch; "
+                        "sys.exit(dispatch(pathlib.Path('.'), "
+                        "['session', 'log', 'handoff', 'garbage123']))"])
+    assert bash.returncode != 0, f"bash が余分な引数を黙って受けた\n{bash.stdout}"
+    assert py.returncode != 0, f"python が余分な引数を黙って受けた\n{py.stdout}"
+    assert bash.returncode == py.returncode, (
+        f"終了コードが割れている: bash={bash.returncode} python={py.returncode}")
+
+
 def test_the_verb_is_registered_in_the_ledger():
     """台帳にも載っていること (載せ忘れると drift 検査の対象から漏れる)。"""
     sys.path.insert(0, str(REPO / "lib"))
     import verb_ledger_data  # noqa: PLC0415
-    assert "session_log_next" in verb_ledger_data.VERB_LEDGER, (
-        "verb 台帳に session_log_next が無い")
+    assert "session_log_handoff" in verb_ledger_data.VERB_LEDGER, (
+        "verb 台帳に session_log_handoff が無い")
