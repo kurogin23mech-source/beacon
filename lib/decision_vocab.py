@@ -36,8 +36,16 @@ DECIDED_BY: frozenset[str] = frozenset(
 # 文書化する。ms-90 の 5 経路 + ms-154 decision arm の捕獲対象。
 KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
     {
-        # ms-90 Trek 由来の 4(+1) 経路
-        "dm-send", "trek-review", "scope-approval", "halt", "resume",
+        # ms-90 Trek 由来の経路。ms-185 e-7070 で "trek-review" / "halt" /
+        # "resume" の 3 つを外した: 判断の継ぎ目 (leader のレビュー / 綱を引く /
+        # 戻す) と builder ごと消えたので、**産出できない種別**になった。
+        # この集合は拒否の許可リストではなく「見覚えのある種別」の台帳であり、
+        # 捕獲被覆の検査 (= 既知の種別すべてに producer が在るか) の母集団でもある。
+        # 産出者の無い種別を残すと、その検査が永久に赤くなる。
+        # 読み出しへの影響なし: 種別は開いた語彙 (任意の文字列を書ける) で、
+        # 一覧も絞り込みもこの集合で検証していない。本番の判断記録 1,000 件を
+        # 実測して 3 種別とも 0 件であることも確認済み (e-7070)。
+        "dm-send", "scope-approval",
         # ms-154 decision arm の捕獲対象 (e-5592 / e-5593 / e-5594)
         "task-done", "completion-verdict", "review-adjudication", "log-backstop",
         # ms-166 e-6599: 判断 (gate judgement) = 対象を次のどの状態へ倒すか の決定。

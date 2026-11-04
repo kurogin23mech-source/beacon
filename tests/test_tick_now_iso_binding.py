@@ -88,37 +88,8 @@ def test_now_iso_bound_unconditionally_before_fire_due_scheduled():
     )
 
 
-def test_trek_tick_cannot_leak_its_now_iso_into_scheduled_firing():
-    """ms-185 e-7065 — Trek の集約から ``_fire_due_scheduled`` を呼んではいけない。
-
-    呼べる位置にあると、Trek が quiesce 分岐で ``now_iso`` を実時計に再束縛した値が
-    ターゲット非依存の発火に渡る (= 分離前に実際そうなっていた)。構造で閉じたことを
-    固定する。
-    """
-    trek_fn = _fn(TREK_TICK_FN)
-    leak_line = _fire_due_scheduled_call_lineno(trek_fn)
-    assert leak_line is None, (
-        f"_fire_due_scheduled must NOT be called from {TREK_TICK_FN} "
-        f"(found at line {leak_line}). Trek の集約はローカルの now_iso を quiesce "
-        "分岐で実時計に再束縛するので、同じ関数からターゲット非依存の発火を呼ぶと "
-        "その実時計が漏れる (ms-128 AC12 が quiesce が走った tick だけ破れる)。"
-        f"発火は {SYSTEM_TICK_FN} から呼ぶこと。"
-    )
 
 
-def test_trek_tick_binds_its_own_now_iso_unconditionally():
-    """ms-185 e-7065 — Trek 側も自分の ``now_iso`` を関数本体の直下で束縛する。
-
-    分離前は呼び出し元の同名変数がこの役を担っていた。分離で呼び出し元の変数は
-    見えなくなるので、quiesce 分岐を通らない経路から ``now_iso`` を読む箇所
-    (quiesce 通知の後段) が UnboundLocalError になりうる。無条件束縛で閉じる。
-    """
-    trek_fn = _fn(TREK_TICK_FN)
-    assert _toplevel_now_iso_lineno(trek_fn) is not None, (
-        f"now_iso must be assigned at the TOP LEVEL of {TREK_TICK_FN}. "
-        "分離前は呼び出し元の変数に依存していたので、ここで束縛しないと quiesce "
-        "分岐を通らない経路で UnboundLocalError になる (ms-66 と同じ型の穴)。"
-    )
 
 
 def test_scheduled_fire_error_is_not_silently_swallowed():
@@ -155,3 +126,14 @@ def test_scheduled_firing_entrypoint_is_trek_neutral():
         "(本番 VPS の systemd timer) の設定を更新し終えるまでは転送として残すこと "
         "(撤去は新入口経由の発火を本番で実測したあと)。"
     )
+
+
+# ms-185 e-7070: 2 つのテストが ``_run_trek_tick`` を主題にしていたので落とした
+# (漏れない / 自前で束縛する)。その関数ごと消えたので、漏れる余地も無い。
+#
+# **残した 3 つがこのファイルの本体**であり、守っている実障害は消えていない:
+# ``now_iso`` は ``_fire_due_scheduled`` の呼び出しより前に**無条件で**束縛されて
+# いなければならない (= test_now_iso_bound_unconditionally_before_fire_due_scheduled)。
+# 条件分岐の中だけで代入すると、その分岐が走らない tick で UnboundLocalError に
+# なり、bare except に飲まれて Operation 発火が無音で死ぬ (ms-66 / 804dfa16)。
+# 漏れの原因だった同居は構造的に無くなったが、無条件束縛そのものは今も必要。

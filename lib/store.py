@@ -174,10 +174,10 @@ class Store(Protocol):
         """
         ...
 
-    # ms-84 Phase 2 — trek read passthrough.
-    # cmd_trek_show / cmd_trek_timeline / cmd_trek_aggregate 等が
-    # ``_is_cloud_mode()`` で client.get_trek / trek_store.load_trek を
-    # 切り替えている。Store に集約することで CLI から分岐を消す。
+    # ms-84 Phase 2 — trek read passthrough (ms-185 e-7070 で縮小)。
+    # 元は cmd_trek_show / timeline / aggregate が ``_is_cloud_mode()`` で
+    # 分岐していたのを Store に集約したもの。その CLI は e-7069 で落ちたので、
+    # 残る読み手は ``lib/cmd_bus.py`` の送信予算の迂回判定だけ (e-7080 で消える)。
 
     def list_treks(self, *, actor_id: str | None = None,
                    status: str = "", include_archived: bool = False,
@@ -193,17 +193,11 @@ class Store(Protocol):
         """
         ...
 
-    def get_trek(self, trek_id: str) -> dict:
-        """Fetch a single trek doc by id.
-
-        Both backends return the trek dict (members / scope / halt /
-        leader_session_id 等を含む完全な doc)。Raises ``ValueError`` when the
-        trek is unknown so CLI sites can show a uniform ``trek 'X' not
-        found`` message regardless of backend (= LocalStore: ファイル不在、
-        StoreApi: API 404)。Other transport / auth errors propagate as
-        ``RuntimeError`` (= 既存の cloud path の挙動と一致)。
-        """
-        ...
+    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
+    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
+    # which went with the CLI in e-7069. ``list_treks`` stays because
+    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
+    # bypass is removed in e-7080, and this passthrough goes with it.
 
     # ------------------------------------------------------------------
     # Organizations (ms-118 / e-4231) — top-level tenancy entity.

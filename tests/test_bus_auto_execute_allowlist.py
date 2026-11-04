@@ -36,7 +36,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
-import cmd_trek  # noqa: E402  (ms-127 e-4820: trek handlers live here)
 import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
@@ -531,143 +530,9 @@ def test_client_and_server_agree_on_corrupt_field(hook_module, tmp_path):
     assert server_view == [] == client_view
 
 
-def test_client_and_server_agree_after_trek_auto_arm_local_write(
-        hook_module, tmp_path, monkeypatch):
-    """End-to-end shape of the 2026-06-29 dogfood failure mode:
-
-    1. trek auto-arm writes 4 trek channels into local project.json
-       (= the CLI `_arm_trek_channels_and_budget` path, whose local write now
-       goes through local_writer.write_mirror_if_changed).
-    2. Inbox hook reads the local file.
-    3. The hook MUST see all 4 channels — otherwise the trek-progress-check /
-       trek-leader-digest events get downgraded to propose-to-ai and the
-       autonomous loop breaks.
-
-    This test exercises the **post-state**: the trek-arm helper has written
-    the local file, and the hook reads it from the same path. If anyone
-    ever changes the local write target (or the hook's read target) without
-    keeping them aligned, this test fails.
-    """
-    root = tmp_path / "proj"
-    (root / ".beacon").mkdir(parents=True)
-    (root / ".beacon" / "project.json").write_text(json.dumps(
-        {"name": "t", "milestones": []}))
-    monkeypatch.setenv(
-        "BEACON_PROJECT_FILE",
-        str(root / ".beacon" / "project.json"),
-    )
-    monkeypatch.chdir(root)
-
-    # Write through the ONE mirror writer every store uses (ms-166 e-6937 —
-    # the bespoke per-field helper this used to call was removed; its reason
-    # for existing had lapsed and it wrote non-atomically to a cwd-relative
-    # path).
-    import local_writer
-    trek_channels = list(cmd_trek.TREK_AUTO_ARM_CHANNELS)
-    local_writer.write_mirror_if_changed(
-        str(root / ".beacon" / "project.json"),
-        {"name": "t", "milestones": [],
-         "bus_auto_execute_channels": trek_channels})
-
-    # Now ask both readers what they see.
-    server_view = hook_module._read_auto_execute_channels(root)
-    data = json.loads(
-        (root / ".beacon" / "project.json").read_text())
-    client_view = cmd_bus._bus_auto_execute_channels(data)
-
-    assert server_view == client_view == trek_channels, (
-        f"post-trek-arm divergence: client={client_view!r} "
-        f"server={server_view!r} expected={trek_channels!r}. "
-        f"This is the exact 2026-06-29 LPS dogfood signature — CLI says "
-        f"'already covers trek channels' while hook downgrades every event."
-    )
-
-
-def test_arm_for_trek_writes_local_mirror_visible_to_hook(
-        hook_module, project_dir, monkeypatch):
-    """Direct call into the trek auto-arm helper MUST leave the local
-    project.json with all 4 trek channels, and the inbox hook's reader MUST
-    see exactly that. This pins the
-    `_arm_for_trek → save_project → ミラー → hook reads local` chain end-to-end without spinning up the CLI subprocess (= test
-    runs in-process, no `_run` overhead, no fixture mocking around bin/beacon).
-    """
-    _clear_ae_env(monkeypatch)
-    # _arm_for_trek calls load_project + save_project. In this local-store
-    # fixture (no cloud.json) save_project writes SQLite AND refreshes the
-    # project.json mirror the hook reads, so the contract is end-to-end
-    # visible WITHOUT the bespoke per-field helper that used to sit here
-    # (removed in ms-166 e-6937 — this test is now its replacement guard).
-    result = cmd_trek._arm_for_trek("trek-test-arm")
-
-    expected = set(cmd_trek.TREK_AUTO_ARM_CHANNELS)
-    assert set(result["channels_added"]) == expected
-    assert expected.issubset(set(result["channels"]))
-
-    # Local project.json reflects the write (= what `cmd_bus_auto_execute_list`
-    # would print AND what the hook reads).
-    local = json.loads(
-        (project_dir / ".beacon" / "project.json").read_text())
-    assert expected.issubset(set(local.get("bus_auto_execute_channels", [])))
-
-    # Hook's reader sees the same set — the structural symmetry that breaks
-    # the 2026-06-29 dogfood signature.
-    hook_view = set(hook_module._read_auto_execute_channels(project_dir))
-    assert expected.issubset(hook_view), (
-        f"_arm_for_trek wrote {expected} but hook sees {hook_view}. "
-        f"Either the mirror is not landing in the path the hook walks up to, "
-        f"or the hook is reading a different key.")
-
-
-def test_inbox_hook_does_not_downgrade_trek_channels_after_auto_arm(
-        hook_module, fake_project, monkeypatch, capsys):
-    """Integration: after trek auto-arm writes the 4 channels to local
-    project.json, an inbound auto-execute event on trek-progress-check /
-    trek-leader-digest MUST pass through (no downgrade, no
-    `[auto-execute downgraded ...]` marker on that event).
-
-    Regression guard for the 2026-06-29 dogfood failure: this test is what
-    would have caught the "auto-arm reports covered, hook reports not in
-    allowlist" symptom before it shipped."""
-    # Use the existing fake_project (= has .beacon/{project,session,cloud}.json
-    # plus credentials) and seed it through the ONE mirror writer every store
-    # uses, so we exercise the real write code, not a hand-crafted JSON
-    # (ms-166 e-6937: the bespoke per-field helper this used to call was
-    # removed — see test_local_mirror_write_failure_does_not_raise).
-    import local_writer
-    monkeypatch.chdir(fake_project.root)
-    monkeypatch.setenv(
-        "BEACON_PROJECT_FILE",
-        str(fake_project.root / ".beacon" / "project.json"),
-    )
-    _pj = fake_project.root / ".beacon" / "project.json"
-    _doc = json.loads(_pj.read_text())
-    _doc["bus_auto_execute_channels"] = list(cmd_trek.TREK_AUTO_ARM_CHANNELS)
-    local_writer.write_mirror_if_changed(str(_pj), _doc)
-
-    events = [
-        _make_event("ev-progress", channel="trek-progress-check",
-                     delivery="auto-execute", envelope=_T1_SYSTEM_ENV),
-        _make_event("ev-digest", channel="trek-leader-digest",
-                     delivery="auto-execute", envelope=_T1_SYSTEM_ENV,
-                     created_at="2026-06-29T21:44:00.000000Z"),
-    ]
-    out = _run_hook(hook_module, fake_project, events, monkeypatch, capsys)
-    ctx = json.loads(out.out)["hookSpecificOutput"]["additionalContext"]
-
-    # Per-event blocks must NOT carry the downgrade marker.
-    progress_block = ctx.split("ev-progress", 1)[1].split("ev-digest")[0]
-    digest_block = ctx.split("ev-digest", 1)[1].split(
-        "--- 取り扱いガイド ---")[0] if "--- 取り扱いガイド ---" in ctx \
-        else ctx.split("ev-digest", 1)[1]
-    assert "auto-execute downgraded" not in progress_block, (
-        "trek-progress-check event was downgraded after auto-arm — same "
-        "symptom as 2026-06-29 LPS dogfood. Check that "
-        "_read_auto_execute_channels (server side) and "
-        "_bus_auto_execute_channels (client side) read the same project.json "
-        "key and apply identical type coercion.")
-    assert "auto-execute downgraded" not in digest_block, (
-        "trek-leader-digest event was downgraded after auto-arm — same "
-        "symptom as 2026-06-29 LPS dogfood (= leader-digest mechanical-ack "
-        "pathology upstream).")
-    # And the summary count line must not appear.
-    assert "件 — channel が" not in ctx
+# ms-185 e-7070: three tests that drove the allowlist through Trek's auto-arm
+# (``cmd_trek.TREK_AUTO_ARM_CHANNELS`` / ``cmd_trek._arm_for_trek``) are gone with
+# the Trek body. What they actually protected — that the CLI writer and the inbox
+# hook reader agree on the same ``project.json`` key — is covered without Trek by
+# ``test_client_and_server_read_same_project_json_key`` and its empty / corrupt
+# siblings above, which exercise the same two readers through ``bus auto-execute``.

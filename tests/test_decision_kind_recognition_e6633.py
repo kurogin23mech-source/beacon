@@ -86,7 +86,13 @@ def test_unrecognized_kind_with_zero_rows_says_the_query_may_be_off(monkeypatch,
 def test_recognized_kind_with_zero_rows_does_not_warn(monkeypatch, capsys):
     # 既知の種別で 0 件なら「その種別の判断が無い」が正しい答え。警告を出すと
     # 常に出る警告になり、読み手が見なくなる。
-    _env(monkeypatch, kind="halt")
+    #
+    # ms-185 e-7070: 例を "halt" から "scope-approval" に替えた。halt は共同作業
+    # 空間と一緒に引退して「見覚えのある種別」から外れたので、例に使うと**この
+    # 試験が測りたいのと逆の分岐** (= 未知の種別だから警告する) を通ってしまう。
+    # 測っているのは「既知かつ 0 件なら黙る」ことなので、例は常に既知側の種別で
+    # なければならない。
+    _env(monkeypatch, kind="scope-approval")
     _cloud(monkeypatch, rows=[])
     cmd_decision.cmd_decision_list()
     out = capsys.readouterr().out

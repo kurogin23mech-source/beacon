@@ -206,9 +206,13 @@ MUTATIONS = [
     ),
     # 2. The same defect inside a file that IS allowlisted — the allowlist is
     #    keyed by (file, skill), so it must not blanket-excuse the file.
+    # ms-185 e-7070: 当て先を lib/trek.py から移した (本体ごと消えたため)。
+    # 必要なのは「免除行を持つファイル」であって trek であることではないので、
+    # 生き残っている免除行の file (= beacon_cli/skills_helpers/dm_reply.py、
+    # beacon-dm-reply で免除されている) に同じ形の欠陥を注いで測る。
     Mutation(
         "an allowlisted file names a DIFFERENT non-existent Skill",
-        REPO / "lib" / "trek.py",
+        REPO / "beacon_cli" / "skills_helpers" / "dm_reply.py",
         '"""',
         '"""See ' + MISSING_B + ' for details.\n\n',
         MISSING_B.lstrip("/"),
@@ -219,8 +223,8 @@ MUTATIONS = [
     Mutation(
         "an allowlist row no longer matches anything (stale exemption)",
         GUARD,
-        '("lib/trek.py", "beacon-trek-pulse"):',
-        '("lib/trek.py", "beacon-trek-pulse-renamed-away"):',
+        '("beacon_cli/skills_helpers/dm_reply.py", "beacon-dm-reply"):',
+        '("beacon_cli/skills_helpers/dm_reply.py", "beacon-dm-reply-renamed-away"):',
         "no longer match anything",
     ),
     # 5. The scan reaching the Skill dirs. A Skill telling an AI to run a

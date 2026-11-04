@@ -264,18 +264,11 @@ class LocalStore:
             include_archived=include_archived,
         )
 
-    def get_trek(self, trek_id: str) -> dict:
-        """Load a trek doc from the local trek_store directory.
-
-        Raises ``ValueError`` when the trek is unknown so the CLI side
-        can show the same ``trek '<id>' not found`` message regardless
-        of backend (= matches StoreApi.get_trek contract)。
-        """
-        import trek_store
-        doc = trek_store.load_trek(trek_id)
-        if doc is None:
-            raise ValueError(f"trek '{trek_id}' not found")
-        return doc
+    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
+    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
+    # which went with the CLI in e-7069. ``list_treks`` stays because
+    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
+    # bypass is removed in e-7080, and this passthrough goes with it.
 
     # ms-118 / e-4231 — Organizations (local file store, ~/.beacon/orgs/)
 
@@ -518,13 +511,11 @@ class LocalStore:
 
     # ms-84 Phase 2 — trek read passthrough.
 
-    def get_trek(self, trek_id: str) -> dict:
-        """Match StoreApi.get_trek shape, sourced from the local trek store."""
-        import trek_store
-        t = trek_store.load_trek(trek_id)
-        if t is None:
-            raise ValueError(f"trek '{trek_id}' not found")
-        return t
+    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
+    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
+    # which went with the CLI in e-7069. ``list_treks`` stays because
+    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
+    # bypass is removed in e-7080, and this passthrough goes with it.
 
     def _file_hash(self) -> str | None:
         try:

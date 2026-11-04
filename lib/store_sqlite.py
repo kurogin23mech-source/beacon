@@ -126,8 +126,11 @@ class SqliteStore:
     def list_treks(self, **kwargs):
         return self._files.list_treks(**kwargs)
 
-    def get_trek(self, trek_id: str) -> dict:
-        return self._files.get_trek(trek_id)
+    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
+    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
+    # which went with the CLI in e-7069. ``list_treks`` stays because
+    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
+    # bypass is removed in e-7080, and this passthrough goes with it.
 
     def create_org(self, **kwargs) -> dict:
         return self._files.create_org(**kwargs)

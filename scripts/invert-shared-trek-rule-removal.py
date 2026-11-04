@@ -29,10 +29,14 @@ GATE = ROOT / "server" / "dm_gate.py"
 APP = ROOT / "server" / "app.py"
 CONSENT = ROOT / "lib" / "dm_consent.py"
 # e-7069 (独立保守性レビューの medium): 同じ「共有作業部屋の参加者か」判定が
-# 正本 (lib/trek.py) と CLI 側の独自実装 (lib/cmd_bus.py) の 2 箇所にある。
-# 突き合わせる検査を足したので、**両方の側を別々に壊して**赤くなるか測る。
-# 片側だけ壊して測ると、もう一方が無防備なまま「全件 OK」になる。
-TREK = ROOT / "lib" / "trek.py"
+# 正本 (lib/trek.py) と CLI 側 (lib/cmd_bus.py) の 2 箇所にあり、突き合わせる
+# 検査を足して両側を別々に壊して測っていた。
+#
+# ms-185 e-7070: 正本が消えて**実装が 1 本になった**ので、突き合わせる相手が
+# 無い。正本の本番呼び出し元は ``/api/system/trek-internal-send`` 1 箇所だけで、
+# その経路ごと落ちたため正本は呼び出し元ゼロになった。残る CLI 側は送信予算の
+# 迂回判定がまだ使っているので、**そちら単独を壊す測定は続ける** (下の 2 件)。
+# ズレの測定ではなく「CLI 側が緩む方へ転ばないか」の測定に意味が移った。
 CMD_BUS = ROOT / "lib" / "cmd_bus.py"
 
 GATE_TEST = "tests/test_dm_gate.py"
@@ -40,10 +44,17 @@ AUDIT_TEST = "tests/test_audit_log_no_trek_bypass_e7068.py"
 CONSENT_TEST = "tests/test_dm_consent.py"
 BACKSTOP_TEST = "tests/test_sender_consent_backstop.py"
 ALIGN_TEST = "tests/test_dm_consent_skill_alignment_e6349.py"
-GRAIN_TEST = "tests/test_dm_gate_session_grain.py"
-PARITY_TEST = "tests/test_trek_member_rule_parity_e7069.py"
+# ms-185 e-7070: 旧 GRAIN_TEST (tests/test_dm_gate_session_grain.py) と
+# 旧 PARITY_TEST (tests/test_trek_member_rule_parity_e7069.py) は、どちらも
+# 消えた正本 (lib/trek.py の在籍判定) を駆動していたので本体と一緒に落ちた。
+# 「在籍が証明できても判定器に届かない」という e-7068 の主張は GATE_TEST 側の
+# 2 件 (test_shared_trek_no_longer_bypasses_the_gate /
+# test_the_judge_has_no_trek_shaped_input_or_output) が被覆しており、
+# dm_gate の不在検査 1 件は tests/test_dm_gate.py へ移設してある。
+# CLI 側を壊す 2 件は、緩む方へ転んだことを CLI 側自身の試験で受ける。
+CMD_BUS_TEST = "tests/test_bus_budget.py"
 BASELINE = [GATE_TEST, AUDIT_TEST, CONSENT_TEST, BACKSTOP_TEST, ALIGN_TEST,
-            GRAIN_TEST, PARITY_TEST]
+            CMD_BUS_TEST]
 
 
 # --- 戻す方向 (= 規則の復活) ------------------------------------------------
@@ -213,14 +224,8 @@ def cmd_bus_pre_a_matches_anything(src: str) -> str:
     return src.replace(anchor, "    return True  # MUTANT", 1)
 
 
-def trek_phase_a_needs_only_the_sender(src: str) -> str:
-    """正本の phase-A 判定から受け手の在籍要求を落とす (= 正本側のズレ)。"""
-    anchor = "                if sender_in and receiver_in:\n                    return (True, trek_id)"
-    assert anchor in src, "anchor not found (trek_phase_a_needs_only_the_sender)"
-    return src.replace(
-        anchor,
-        "                if sender_in:  # MUTANT\n                    return (True, trek_id)",
-        1)
+# ms-185 e-7070: trek_phase_a_needs_only_the_sender を落とした。正本
+# (lib/trek.py の在籍判定) を壊す変異で、その正本ごと消えた。
 
 
 CASES = [
@@ -234,7 +239,7 @@ CASES = [
      GATE_TEST + "::test_shared_trek_no_longer_bypasses_the_gate"),
     ("確認省略を既定にする (在籍と確認省略の切り離し)", GATE,
      gate_bypasses_cross_user_unconditionally,
-     GRAIN_TEST + "::test_phase_a_membership_no_longer_reaches_the_judge"),
+     GATE_TEST + "::test_shared_trek_no_longer_bypasses_the_gate"),
     ("拒否する前の最後の救済を戻す (HTTP 経路)", APP,
      app_restores_the_last_resort_rescue,
      BACKSTOP_TEST + "::test_shared_trek_cross_user_is_now_rejected_without_claim"),
@@ -256,14 +261,14 @@ CASES = [
     ("同一ユーザーの規則を一緒に消す", GATE, gate_drops_the_same_user_rule,
      GATE_TEST + "::test_gate_skip_when_sender_equals_receiver"),
     # 2 実装のズレ (e-7069) — 正本側と CLI 側を別々に壊す
+    # ms-185 e-7070: 当て先は CLI 側だけになった (正本が消えて実装が 1 本)。
+    # 受け手も「正本より緩くないか」の相対比較から、粒度そのものを測る絶対の
+    # 試験へ移設してある (tests/test_bus_budget.py の末尾)。
     ("CLI 側が session 粒度を緩める", CMD_BUS, cmd_bus_loosens_the_session_grain,
-     PARITY_TEST + "::test_phase_a_rule_is_identical_in_both_implementations"),
-    ("CLI 側の pre-A が何でも一致する (正本より緩い)", CMD_BUS,
+     CMD_BUS_TEST + "::test_phase_a_matches_on_session_id_not_user_id"),
+    ("CLI 側の pre-A が何でも一致する", CMD_BUS,
      cmd_bus_pre_a_matches_anything,
-     PARITY_TEST + "::test_pre_a_cli_is_never_looser_than_the_canonical_rule"),
-    ("正本の phase-A が受け手の在籍を要求しない", TREK,
-     trek_phase_a_needs_only_the_sender,
-     PARITY_TEST + "::test_phase_a_rule_is_identical_in_both_implementations"),
+     CMD_BUS_TEST + "::test_pre_a_with_a_blank_user_id_never_matches"),
 ]
 
 # 赤いこと自体はガードが効いた証拠にならない (変異が構文を壊しても赤くなる)。
@@ -274,7 +279,7 @@ def run_one(target: str):
 
 def main() -> int:
     originals = {p: p.read_text(encoding="utf-8")
-                 for p in (GATE, APP, CONSENT, TREK, CMD_BUS)}
+                 for p in (GATE, APP, CONSENT, CMD_BUS)}
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 

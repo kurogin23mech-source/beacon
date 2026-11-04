@@ -833,3 +833,79 @@ def test_is_trek_internal_send_fails_safe_when_api_throws(project_dir, monkeypat
     monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
     bypass, _ = cmd_bus._is_trek_internal_send("sv-r")
     assert bypass is False
+
+
+# ---------------------------------------------------------------------------
+# ms-185 e-7070 — 送信予算の迂回判定の「粒度」を直接測る。
+#
+# この 5 件は移設である。e-7069 は同じ「共有作業部屋の参加者か」判定が正本
+# (lib/trek.py) と CLI 側 (lib/cmd_bus.py) の 2 箇所にあることを問題にし、
+# tests/test_trek_member_rule_parity_e7069.py で**両者が一致すること**と
+# **CLI が正本より緩くないこと**を固定していた。
+#
+# e-7070 で正本が消えた (本番呼び出し元は /api/system/trek-internal-send 1 箇所
+# だけで、その経路ごと落ちた)。突き合わせる相手が無くなったので、守りたい性質を
+# 相対 (「正本より緩くない」) から絶対 (「この粒度で一致する / 一致しない」) へ
+# 書き直してここに置く。この迂回自体の撤去は e-7080 で、その時この 5 件も一緒に
+# 落ちる。
+#
+# 落とした側: 一致そのものを測る 2 件は、比較対象が無いので意味を失った。
+# 残す理由: 既存の test_record_trek_bypass_* は迂回の**カウンタ**だけを測って
+# いて粒度は見ていない。これを足さないと、正本の消滅と同時に CLI 側の粒度が
+# 無防備になる (= 緩む方へ転んでも誰も赤くならない)。
+# ---------------------------------------------------------------------------
+
+_PHASE_A_MEMBERS = [
+    {"user_id": "uid-alice", "session_id": "sv-a", "role": "leader"},
+    {"user_id": "uid-bob", "session_id": "sv-b", "role": "executor"},
+    # 招待の置き場: session_id を持たない (= まだ参加していない)
+    {"user_id": "uid-carol", "role": "executor"},
+]
+_PRE_A_MEMBERS = [
+    {"user_id": "uid-alice", "role": "leader"},
+    {"user_id": "uid-bob", "role": "executor"},
+]
+
+
+def test_phase_a_matches_on_session_id_not_user_id():
+    """phase A+ は session 粒度。user_id が在籍していても session が違えば不一致。
+
+    1 user が N session を持つので、phase A 以降は user_id では本人性を決められ
+    ない (fork / 別 worktree の別 session が同じ user_id を名乗る)。
+    """
+    assert cmd_bus._trek_has_joined_member(
+        _PHASE_A_MEMBERS, phase_a=True, session_id="sv-a", user_id="uid-alice")
+    assert not cmd_bus._trek_has_joined_member(
+        _PHASE_A_MEMBERS, phase_a=True, session_id="sv-other",
+        user_id="uid-alice"), (
+        "user_id が在籍していれば通る形に緩んでいる (= session 粒度が崩れた)")
+
+
+def test_phase_a_without_a_session_id_never_matches():
+    """phase A+ で caller の session_id が空なら不一致 (= user 粒度へ落ちない)。"""
+    assert not cmd_bus._trek_has_joined_member(
+        _PHASE_A_MEMBERS, phase_a=True, session_id="", user_id="uid-alice")
+
+
+def test_phase_a_invite_placeholder_is_not_a_joined_member():
+    """session_id を持たない招待の置き場は、誰の session にも一致しない。
+
+    参加と招待の区別は ``joined_at`` の別検査ではなく**構造**で付いている:
+    参加時に session_id と joined_at が一緒に書かれ、招待の置き場はどちらも
+    持たない。だから session_id を持つ member は参加済みであり、置き場は
+    実在の session id に一致しようがない。
+    """
+    assert not cmd_bus._trek_has_joined_member(
+        _PHASE_A_MEMBERS, phase_a=True, session_id="", user_id="uid-carol")
+
+
+def test_pre_a_matches_on_user_id():
+    """pre-A (旧世代の記録) は user 粒度のまま。既存の記録を落とさないため。"""
+    assert cmd_bus._trek_has_joined_member(
+        _PRE_A_MEMBERS, phase_a=False, session_id="", user_id="uid-bob")
+
+
+def test_pre_a_with_a_blank_user_id_never_matches():
+    """pre-A で user_id が空なら不一致 (= 何にでも一致する形へ転ばない)。"""
+    assert not cmd_bus._trek_has_joined_member(
+        _PRE_A_MEMBERS, phase_a=False, session_id="sv-a", user_id="")

@@ -42,32 +42,30 @@ BASELINE = [AST_TEST, WIRE_TEST, SOURCE_TEST]
 
 
 def mutate_now_iso_into_branch(src: str) -> str:
-    """_run_system_tick の無条件 now_iso 束縛を条件分岐の中へ押し込む (= ms-66 の穴)。"""
-    anchor = ("    now_iso = now.strftime(\"%Y-%m-%dT%H:%M:%S.%fZ\")\n"
-              "    trek = _run_trek_tick(body, now)")
+    """_run_system_tick の無条件 now_iso 束縛を条件分岐の中へ押し込む (= ms-66 の穴)。
+
+    ms-185 e-7070: 当て先を直した。以前は直後の ``trek = _run_trek_tick(...)`` を
+    目印にしていたが、その行ごと消えた (= anchor not found で SKIP に落ちていた。
+    SKIP は緑と同じ害なので、壊し方を実装に合わせる)。
+
+    包む条件は ``now is not None`` (= 実行時は必ず真) にしてある。守っているのが
+    **構文木**のテスト (束縛が無条件かを見る) なので、真偽ではなく「分岐の中に
+    入ったこと」が赤の根拠になる。実行時に偽になる条件を使うと、変異が
+    UnboundLocalError を起こして別の理由で赤くなり、何を測ったのか曖昧になる。
+    """
+    anchor = '    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")\n'
     assert anchor in src, "anchor not found (mutate_now_iso_into_branch)"
-    return src.replace(anchor,
-                       "    if body.trek_ids:\n"
-                       "        now_iso = now.strftime(\"%Y-%m-%dT%H:%M:%S.%fZ\")\n"
-                       "    trek = _run_trek_tick(body, now)")
+    return src.replace(
+        anchor,
+        "    if now is not None:\n"
+        '        now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")\n',
+        1)
 
 
-def mutate_leak_fire_into_trek(src: str) -> str:
-    """_run_trek_tick の中から _fire_due_scheduled を呼ぶ (= 実時計が漏れる形に戻す)。"""
-    anchor = "    import copy\n"
-    i = src.index("def _run_trek_tick(")
-    j = src.index(anchor, i) + len(anchor)
-    return src[:j] + "    _fire_due_scheduled(now_iso)  # MUTANT\n" + src[j:]
-
-
-def mutate_drop_trek_now_iso(src: str) -> str:
-    """_run_trek_tick の無条件 now_iso 束縛を削る。"""
-    i = src.index("def _run_trek_tick(")
-    j = src.index("def _run_system_tick(")
-    body = src[i:j]
-    target = "    now_iso = now.strftime(\"%Y-%m-%dT%H:%M:%S.%fZ\")\n"
-    assert target in body, "anchor not found (mutate_drop_trek_now_iso)"
-    return src[:i] + body.replace(target, "", 1) + src[j:]
+# ms-185 e-7070: mutate_leak_fire_into_trek / mutate_drop_trek_now_iso を落とした。
+# どちらも ``_run_trek_tick`` を壊す変異で、その関数ごと消えた。漏れる側が無く
+# なったので「漏れないこと」を壊すことはできない (= 測る対象の消滅であって、
+# ガードが緩んだのではない)。対になる 2 つのテストも同じ変更で落としてある。
 
 
 def mutate_drop_logger(src: str) -> str:
@@ -251,10 +249,6 @@ def mutate_monitor_drops_the_breakdown(src: str) -> str:
 CASES = [
     ("now_iso を条件分岐の中へ (ms-66 の穴)", mutate_now_iso_into_branch,
      "test_now_iso_bound_unconditionally_before_fire_due_scheduled"),
-    ("Trek の集約から発火を呼ぶ (実時計の漏れ)", mutate_leak_fire_into_trek,
-     "test_trek_tick_cannot_leak_its_now_iso_into_scheduled_firing"),
-    ("Trek 側の now_iso 束縛を削る", mutate_drop_trek_now_iso,
-     "test_trek_tick_binds_its_own_now_iso_unconditionally"),
     ("except のログ出力を外す (無音で飲む)", mutate_drop_logger,
      "test_scheduled_fire_error_is_not_silently_swallowed"),
     ("Trek 非依存の新入口を消す", mutate_drop_new_entrypoint,

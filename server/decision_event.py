@@ -5,6 +5,13 @@ trek-review / scope 承認 / halt-resume の 4 経路が散在して記録して
 1 本の append-only ストリーム (= backend の ``decision_events`` collection) に
 統一形で束ねてきた。将来ローカル LLM で PM 専用 AI を訓練する材料にする。
 
+ms-185 e-7070: 生まれの動機だった 4 経路のうち 3 つ (trek-review / halt / resume) は
+共同作業空間ごと畳まれ、builder と種別の宣言を落とした。**残った仕組みは縮んで
+いない** — この統一形はその後 ms-154 で decision arm へ一級化され、いまの主な
+書き手は task-done / completion-verdict / review-adjudication / disposition /
+gate-judgement で、本番の記録 1,000 件はすべてそちら側。生まれの経緯として
+上の段落を残すが、現在の読み手は下の段落から読むこと。
+
 ms-154 (SPEC ``0iYyU79MEsxN4wGY7ADk``) でこの現物を **decision arm** へ一級化する。
 AI 駆動開発では in-flight (= 実装中) の決定の多数派が AI 判断 (却下 / 先送り /
 done 判定 / findings 採否) であり、これを「誰が (decided_by) / なにを (what) /
@@ -445,62 +452,13 @@ def trek_review_decision_from_state(target_state: str) -> str:
     return "re-work"
 
 
-def decision_event_from_trek_review(
-    *,
-    decision: str,
-    trek_id: str = "",
-    task_id: str = "",
-    decider_session_id: str = "",
-    decider_user_id: str = "",
-    context: str = "",
-    rationale: str | None = None,
-    agent: str | None = None,
-) -> dict:
-    """Trek タスクのリーダー review (approve / re-work / forward-to-user) の
-    decision-event。判断したリーダーを who に、対象の trek / task を related に置く。
-    """
-    return build_decision_event(
-        kind="trek-review",
-        decision=decision,
-        context=context,
-        who={
-            "session_id": decider_session_id,
-            "user_id": decider_user_id,
-            "agent": agent,
-        },
-        rationale=rationale,
-        related={"trek_id": trek_id, "task_id": task_id},
-    )
+# ms-185 e-7070: decision_event_from_trek_review / decision_event_from_halt を
+# 落とした。どちらも共同作業空間の判断の継ぎ目から呼ばれる builder で、呼び出し元
+# (routers_treks の leader review / halt / resume) ごと消えた。種別の宣言も
+# lib/capability_ledger.py の DECISION_CAPTURE_PRODUCERS から同じ変更で外してある
+# (片方だけ残すと checker が永久に赤くなる)。
 
 
-def decision_event_from_halt(
-    *,
-    resumed: bool = False,
-    trek_id: str = "",
-    issuer_session_id: str = "",
-    issuer_user_id: str = "",
-    context: str = "",
-    rationale: str | None = None,
-    agent: str | None = None,
-) -> dict:
-    """Trek の中断 (halt) / 再開 (resume) の decision-event。
-
-    ``resumed=False`` なら kind=halt / decision=halt、``resumed=True`` なら
-    kind=resume / decision=resume。halt の理由 (= 直面した問題) は context に置く。
-    """
-    kind = "resume" if resumed else "halt"
-    return build_decision_event(
-        kind=kind,
-        decision=kind,
-        context=context,
-        who={
-            "session_id": issuer_session_id,
-            "user_id": issuer_user_id,
-            "agent": agent,
-        },
-        rationale=rationale,
-        related={"trek_id": trek_id},
-    )
 
 
 def maybe_dm_send_record(

@@ -1,25 +1,33 @@
-"""Local file-based trek storage (ms-69 / e-1653).
+"""Trek のローカル記録を**読む**だけのモジュール (ms-185 e-7070)。
 
-RETIRING (ms-185 e-7079) — read this before trusting anything below.
-The feature this module implements has no entry point left: e-7069 removed the
-`beacon trek` CLI from both frontends and deleted the four Trek Skills, and
-e-7079 removed the last creation path (POST /api/treks) plus every screen entry
-point. Nothing can create a new one, so nothing new reaches this code. The body
-is kept only so deleting it stays a separate, reviewable change: that is e-7070.
-Reads stay live on purpose: existing records must remain readable
-(ms-185 SPEC 方針5 — records are never retroactively erased).
+この機能は畳まれた。e-7069 が両フロントの `beacon trek` と Skill 4 本を落とし、
+e-7079 が作成経路と画面の入口を落とし、e-7070 が本体 (``lib/trek.py`` /
+``lib/cmd_trek.py`` / ``lib/trek_scheduler.py`` / ``trek_slots.py`` /
+``trek_status.py`` / サーバの定期集約) を落とした。
 
-Everything below describes how the feature worked while it was reachable. Treat
-it as a record, not as a live contract — and do not add features here.
+**残っているのは ``list_treks`` だけで、呼び出し元は 1 つしか無い** ——
+``lib/cmd_bus.py`` の送信予算の迂回判定 (= 同じ Trek に参加している相手への DM は
+予算の上限を使わない) が ``store.list_treks()`` 経由でここに来る。その迂回の撤去は
+**e-7080** の仕事として割り当てられている (``cmd_bus.py`` の当該コメント参照)。
+e-7080 が済めばこのモジュールは呼び出し元ゼロになるので、そこで丸ごと落とす。
 
-Trek is a top-level cross-project entity, so we don't store it inside any
-single ``project.json``. In **local mode** treks live as one JSON file per
-trek under ``~/.beacon/treks/<trek_id>.json``. In **cloud mode** the CLI
-talks to the server-side HTTP API (added in e-1656) which fans out to
-``server/store_router`` (= firestore_client / dynamodb_client).
+落としたもの (cmd_trek の消滅で呼び出し元ゼロになった):
+  * ``load_trek`` / ``save_trek`` / ``update_trek`` — 単体読み書き。読み手は
+    ``beacon trek show`` だけで、それは e-7069 で落ちた。``save`` / ``update`` は
+    新しい記録が生まれない以上、誰も呼ばない。
+  * ``session_history`` の遅延 hydration — ``load_trek`` の中で
+    ``trek.backfill_session_history`` を呼んでいた。画面の MEMBERS & AGENTS を
+    描くためのもので、画面も ``lib/trek.py`` も無くなった。
 
-This module covers the local mode only. Cloud mode is intentionally
-deferred so e-1653 can ship a self-contained CLI without a running server.
+**ローカルの記録ファイル (``~/.beacon/treks/*.json``) は消していない。** 素の JSON
+として残るので、手で開けば読める。製品面として pin されている読み出しは**クラウド側**
+—— HTTP の ``GET /api/treks`` / ``GET /api/treks/{id}`` /
+``GET /api/treks/{id}/logs.jsonl`` と、両 backend (firestore_client /
+dynamodb_client) の ``get_trek`` / ``list_treks`` / ``list_trek_logs`` ——
+であり、``tests/test_trek_record_read_surface_e7081.py`` が 1 つずつ固定している
+(ms-185 SPEC 方針5 = 記録を後から読めなくしない)。
+
+**ここに書き込みを戻さないこと。** 作成経路が無いので新しい記録は生まれない。
 
 Test override: set ``BEACON_TREKS_DIR`` to point at a tmp dir.
 """
@@ -27,65 +35,17 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Iterable
 
 
 def get_trek_dir() -> str:
     """Return the directory holding trek JSON files.
 
     Default: ``~/.beacon/treks/``. Tests override with ``BEACON_TREKS_DIR``.
-    The directory is created lazily on first save.
     """
     custom = os.environ.get("BEACON_TREKS_DIR")
     if custom:
         return os.path.expanduser(custom)
     return os.path.expanduser("~/.beacon/treks")
-
-
-def _path_for(trek_id: str) -> str:
-    return os.path.join(get_trek_dir(), f"{trek_id}.json")
-
-
-def load_trek(trek_id: str) -> dict | None:
-    """Load a trek doc by id. Returns None if not found.
-
-    ms-86 / e-2225 — also lazy-hydrates ``session_history`` from the
-    pre-existing session_id locations (= ``leader_session_id`` /
-    ``halt.issued_by_session_id`` / ``task_states[].updated_by_session_id``)
-    when the field is absent. The hydration is read-only here (= we do
-    not write the doc back); the next write path (= ``save_trek``) will
-    persist the hydrated history automatically. This keeps the read path
-    side-effect-free for callers that only want a view.
-    """
-    path = _path_for(trek_id)
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        doc = json.load(f)
-    # Lazy hydration: existing Treks predate session_history and need to be
-    # backfilled from the three legacy session_id locations so the UI can
-    # render MEMBERS & AGENTS without depending on a one-shot migration.
-    if "session_history" not in doc or not doc.get("session_history"):
-        try:
-            # Local import to avoid trek_store importing trek at module load
-            # (= keeps the import graph: trek_store ← commands ← trek).
-            from . import trek as _trek_mod  # type: ignore
-        except ImportError:
-            import trek as _trek_mod  # type: ignore
-        doc.setdefault("session_history", [])
-        _trek_mod.backfill_session_history(doc)
-    return doc
-
-
-def save_trek(trek: dict) -> None:
-    """Persist a trek doc. ``trek["trek_id"]`` is the file key (authoritative)."""
-    trek_id = trek.get("trek_id")
-    if not trek_id:
-        raise ValueError("trek doc missing trek_id")
-    os.makedirs(get_trek_dir(), exist_ok=True)
-    with open(_path_for(trek_id), "w", encoding="utf-8") as f:
-        json.dump(trek, f, indent=2, ensure_ascii=False)
-        f.write("\n")
 
 
 def list_treks(*, actor_id: str | None = None,
@@ -123,13 +83,3 @@ def list_treks(*, actor_id: str | None = None,
     out.sort(key=lambda x: (x.get("created_at", ""), x.get("trek_id", "")),
              reverse=True)
     return out
-
-
-def update_trek(trek_id: str, *, updates: dict) -> dict | None:
-    """Read-modify-write helper. Returns the updated trek or None if missing."""
-    trek = load_trek(trek_id)
-    if trek is None:
-        return None
-    trek.update(updates)
-    save_trek(trek)
-    return trek

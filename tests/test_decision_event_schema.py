@@ -34,9 +34,11 @@ import decision_event as de  # noqa: E402
 def test_known_kinds_documented_but_vocabulary_open():
     # ms-154 §設計方針1「語彙開放」: 閉語彙 hard gate を廃止し、KNOWN_* は参照用の
     # 文書化リストに降格。ms-90 の 5 経路 + ms-154 decision arm の捕獲対象を含む。
-    assert de.KNOWN_DECISION_KINDS >= frozenset(
-        {"dm-send", "trek-review", "scope-approval", "halt", "resume"}
-    )
+    assert de.KNOWN_DECISION_KINDS >= frozenset({"dm-send", "scope-approval"})
+    # ms-185 e-7070: "trek-review" / "halt" / "resume" は**外れていること**を固定
+    # する。この集合は捕獲被覆の検査の母集団なので、産出者の無い種別が混ざると
+    # その検査が永久に赤くなる。戻すなら producer を一緒に戻すこと。
+    assert not ({"trek-review", "halt", "resume"} & de.KNOWN_DECISION_KINDS)
     assert {"task-done", "completion-verdict", "review-adjudication",
             "log-backstop"} <= de.KNOWN_DECISION_KINDS
     # 後方互換 alias が同じ集合を指す (= ms-90 期の import 名を壊さない)。
@@ -361,31 +363,8 @@ def test_trek_review_decision_from_state_mapping():
     assert de.trek_review_decision_from_state("todo") == "re-work"
 
 
-def test_trek_review_record():
-    e = de.decision_event_from_trek_review(
-        decision="approve", trek_id="tk-1", task_id="T-2",
-        decider_session_id="sv-leader", decider_user_id="u1",
-        context="AC を満たしていた",
-    )
-    assert e["kind"] == "trek-review"
-    assert e["decision"] == "approve"
-    assert e["related"]["trek_id"] == "tk-1"
-    assert e["related"]["task_id"] == "T-2"
-    assert e["who"]["session_id"] == "sv-leader"
 
 
-def test_halt_and_resume_records():
-    h = de.decision_event_from_halt(
-        resumed=False, trek_id="tk-1", issuer_session_id="sv-x",
-        context="本番が壊れたので止めた",
-    )
-    assert h["kind"] == "halt" and h["decision"] == "halt"
-    assert h["context"] == "本番が壊れたので止めた"
-    assert h["related"]["trek_id"] == "tk-1"
-
-    r = de.decision_event_from_halt(resumed=True, trek_id="tk-1")
-    assert r["kind"] == "resume" and r["decision"] == "resume"
-    assert r["context"] == ""
 
 
 def test_rationale_flows_through_every_path_helper():
@@ -393,13 +372,10 @@ def test_rationale_flows_through_every_path_helper():
     dm = de.decision_event_from_dm_send(event_id="e", rationale="速い方が良い")
     sc = de.decision_event_from_scope_approval(decision="deny",
                                                rationale="権限外だから")
-    tr = de.decision_event_from_trek_review(decision="re-work",
-                                            rationale="AC 未達で差し戻し")
-    ht = de.decision_event_from_halt(resumed=False, rationale="影響が広い")
+    # ms-185 e-7070: trek-review / halt の 2 経路は builder ごと消えた。
+    # 「どの経路でも『なぜ』を運べる」という契約は残った経路で測り続ける。
     assert dm["rationale"] == "速い方が良い"
     assert sc["rationale"] == "権限外だから"
-    assert tr["rationale"] == "AC 未達で差し戻し"
-    assert ht["rationale"] == "影響が広い"
 
 
 # ---------------------------------------------------------------------------
@@ -485,14 +461,22 @@ def test_task_done_and_completion_verdict_persist_roundtrip():
 
 
 def test_all_four_kinds_reachable_via_helpers():
-    # 4 経路すべてが helper 経由で閉じた語彙のどれかを出す (= AC4 の構造確認)。
+    """ms-90 期の経路が helper 経由で閉じた語彙のどれかを出す (= AC4 の構造確認)。
+
+    ms-185 e-7070: 5 つあった経路のうち 3 つ (trek-review / halt / resume) は
+    builder ごと消えた。**測る形は変えていない** — 残った経路が語彙の中の種別を
+    出すこと、という契約はそのまま。新しい経路を足して語彙に載せ忘れたら、ここが
+    落ちる (関数名の「four」は ms-90 当時の件数で、歴史的な名前として残してある)。
+    """
     kinds = {
         de.decision_event_from_dm_send(event_id="e")["kind"],
         de.decision_event_from_scope_approval(decision="approve")["kind"],
-        de.decision_event_from_trek_review(decision="approve")["kind"],
-        de.decision_event_from_halt(resumed=False)["kind"],
-        de.decision_event_from_halt(resumed=True)["kind"],
     }
-    assert kinds == {"dm-send", "scope-approval", "trek-review", "halt",
-                     "resume"}
+    assert kinds == {"dm-send", "scope-approval"}
     assert kinds <= de.DECISION_KINDS
+
+
+# ms-185 e-7070: test_trek_review_record / test_halt_and_resume_records を落とした。
+# どちらも消えた builder の出力形を測るテストで、主題ごと無くなった。
+# 横断の契約 (語彙に載っていること / rationale を運べること / agent 引数を持つこと)
+# は上の 3 件が残った経路で測り続ける。

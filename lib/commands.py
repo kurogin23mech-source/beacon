@@ -520,9 +520,11 @@ from commands_shared import (  # noqa: F401
     _spec_updated_at_for_target,
 )
 
-# ms-185 e-7069: the `from cmd_trek import (...)` re-export that used to sit
-# here is gone — the Trek CLI was removed from both frontends. lib/cmd_trek.py
-# still exists but has no production importer; deleting the body is e-7070.
+# ms-185 e-7069 / e-7070: the `from cmd_trek import (...)` re-export that used to
+# sit here is gone — the Trek CLI was removed from both frontends (e-7069) and
+# lib/cmd_trek.py itself was moved to .trash/ with the rest of the body (e-7070).
+# Do not re-add it: the verb is refused with a reason on both frontends, and
+# tests/test_trek_removal_pinned_e7079.py holds that shut.
 # ms-127 e-4820: docs/frontmatter/project-id leaf helpers + DEFAULT_SCOPE live in
 # commands_shared. Re-export the 4 helpers + DEFAULT_SCOPE so the many commands.py
 # callers (cmd_doc_* / _auto_fire_operation_triggers / account / table-doc) keep
