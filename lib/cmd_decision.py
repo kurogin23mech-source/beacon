@@ -27,6 +27,12 @@ from decision_vocab import DECIDED_BY as _DECIDED_BY  # noqa: F401
 # ms-166 e-6633: 種別の既知集合も同じ単一ソースから引く (server/ は CLI の import
 # 経路に無いので、e-6633 で lib/decision_vocab.py へ移設した)。
 from decision_vocab import KNOWN_DECISION_KINDS as _KNOWN_KINDS
+# ms-185 e-7320: 産出を止めた種別 (= 引退) は KNOWN から外すのが正しい (捕獲被覆の
+# 検査の母集団なので、産出者の無い種別を残すと永久に赤くなる)。ただし外した種別を
+# 読み手が引いたときに「綴り違い」と言ってはいけない — 綴りは正しい。読む側だけの
+# 辞書を 4 本目のソースとして足す。
+from decision_vocab import (RETIRED_DECISION_KINDS as _RETIRED_KINDS,
+                            explain_retired_decision_kind as _explain_retired)
 
 
 def _split_evidence(raw: str) -> list:
@@ -284,16 +290,24 @@ def _recognized_decision_kinds() -> frozenset:
       導出される種別 (pr-intent = PR の意図から導出)。
     * ``capability_ledger.DECISION_CAPTURE_ADHOC_KINDS`` — 実行時に名付けられた
       種別 (triage = ``beacon decision record`` で人や AI が名付けて書いたもの)。
+    * ``decision_vocab.RETIRED_DECISION_KINDS`` — かつて産出していた種別
+      (trek-review / halt / resume = ms-185 で継ぎ目ごと消えた)。
 
-    後ろ 2 つを足すのが要点。忘れると、本番に実在する pr-intent / triage を
-    「知らない種別」と言ってしまい、**警告そのものが嘘になる**。e-6756 で台帳に
-    載せた事実をここで消費する形。
+    語彙以外の 3 つを足すのが要点。忘れると、本番に実在する pr-intent / triage や、
+    過去の記録に残る引退種別を「知らない種別」と言ってしまい、**警告そのものが嘘に
+    なる**。e-6756 で台帳に載せた事実と、e-7320 で引退辞書に移した事実をここで
+    消費する形。
+
+    引退種別をここに含めるのは「綴り違い」と誤って言わないため。0 件の理由が
+    「もう産出されていない」ことは :func:`_explain_retired` で別に開示する
+    (= 生きている種別と引退種別を同じ沈黙に潰さない)。
     """
     from capability_ledger import (DECISION_CAPTURE_DERIVED_KINDS,
                                    DECISION_CAPTURE_ADHOC_KINDS)
     return frozenset(set(_KNOWN_KINDS)
                      | set(DECISION_CAPTURE_DERIVED_KINDS)
-                     | set(DECISION_CAPTURE_ADHOC_KINDS))
+                     | set(DECISION_CAPTURE_ADHOC_KINDS)
+                     | set(_RETIRED_KINDS))
 
 
 def cmd_decision_list():
@@ -362,6 +376,10 @@ def cmd_decision_list():
     _known = _recognized_decision_kinds() if kind else frozenset()
     _in_vocab = (kind in _known) if kind else None
     _suspect = bool(kind) and not _in_vocab and not rows
+    # ms-185 e-7320: 引退した種別は「宣言に在る」(= 綴りは正しい) が「もう産出され
+    # ない」。_suspect と混ぜると 0 件の理由を取り違える (綴りを疑わせてしまう) ので
+    # 別の事実として 1 箇所で作り、text と --json の両面に同じものを流す。
+    _retired = _explain_retired(kind) if kind else ""
     if json_mode:
         # text と json で同じ情報を出す (e-6603 独立レビュー AX-2): --json は自動化
         # 経路の正規手段なので、人間向け文言にだけ開示を書くと機械の読み手から消える。
@@ -371,6 +389,9 @@ def cmd_decision_list():
             # 生の事実と、行動につながる信号を別の名前で出す。
             out["kind_in_known_vocabulary"] = _in_vocab
             out["kind_filter_suspect"] = _suspect
+            # 引退した種別か (= 過去の記録にしか現れない)。0 件でも綴り違いではない。
+            out["kind_retired"] = bool(_retired)
+            out["kind_retired_explanation"] = _retired
             out["recognized_kinds"] = sorted(_known)
         print(json.dumps(out, ensure_ascii=False))
         return
@@ -392,6 +413,10 @@ def cmd_decision_list():
                   f"(綴り違いの可能性)。0 件は「この種別の判断が無い」ではなく "
                   f"「問い合わせが的を外している」かもしれません。")
             print(f"  見覚えのある種別: {', '.join(sorted(_recognized_decision_kinds()))}")
+        if _retired:
+            # 0 件の理由を言い分ける: 綴りが的を外しているのではなく、この種別は
+            # もう産出されていない (継ぎ目が消えた)。過去の記録が在れば引ける。
+            print(f"  ℹ {_retired}")
         if _ex_note:
             print(_ex_note)
         return
@@ -406,6 +431,9 @@ def cmd_decision_list():
             print(f"      なぜ: {r['rationale']}")
         if ev:
             print(f"      根拠: {', '.join(ev)}")
+    if _retired:
+        # 件数が在っても引退は開示する (= まだ生きている種別だと読ませない)。
+        print(f"  ℹ {_retired}")
     if _ex_note:
         print(_ex_note)
 

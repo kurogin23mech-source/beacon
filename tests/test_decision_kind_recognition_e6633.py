@@ -224,17 +224,23 @@ def test_every_kind_written_in_code_is_recognized():
 
 
 def test_recognized_set_consumes_the_ledger_not_only_the_vocabulary():
-    # test-the-test 相当: 台帳の 2 セットを足している結合が load-bearing であることを
-    # 示す。語彙だけで集合を作っていたら pr-intent / triage が落ちる。
+    # test-the-test 相当: 語彙 **以外** のソースを足している結合が load-bearing で
+    # あることを示す。語彙だけで集合を作っていたら pr-intent / triage / 引退種別が
+    # 落ちる。ms-185 e-7320 で 4 本目 (引退辞書) が入ったので、ここの列挙も揃える
+    # ——「結合が効いているか」を測る唯一の場所がソースを数え落としていると、
+    # 5 本目を足す人がここを見て『2 つだけ』と読む。
     recognized = cmd_decision._recognized_decision_kinds()
     vocabulary_only = set(dv.KNOWN_DECISION_KINDS)
     from_ledger = sorted(set(cl.DECISION_CAPTURE_DERIVED_KINDS)
                          | set(cl.DECISION_CAPTURE_ADHOC_KINDS))
     assert from_ledger, "台帳側の宣言セットが空 — この結合を検査できていません"
-    for k in from_ledger:
+    retired = sorted(dv.RETIRED_DECISION_KINDS)
+    assert retired, "引退辞書が空 — この結合を検査できていません"
+    for k in from_ledger + retired:
         assert k in recognized, k
         assert k not in vocabulary_only, (
-            f"{k} が語彙に昇格しました — 台帳側の宣言から外してください (宣言が腐ります)")
+            f"{k} が語彙に昇格しました — 台帳側 / 引退辞書の宣言から外してください "
+            f"(宣言が腐ります)")
 
 
 # ---------------------------------------------------------------------------

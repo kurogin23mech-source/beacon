@@ -18,6 +18,12 @@
 
 書き込み面 (作成 / 参加 / スコープ承認 / halt / 発火) はこのファイルの対象外 —
 落ちるのが正しいので、ここで固定してはならない。
+
+判断記録の種別についての固定は、一度 **偽の緑** だった (e-7320): ソース文字列の
+包含で測っていたため、集合から外して「外した」とコメントに書くだけで緑になった。
+いまは実体 (引退辞書の membership) を見る。壊したら本当に赤くなるか、そして
+**コメントだけ消しても緑のままか** は
+``scripts/invert-decision-vocab-retirement-e7320.py`` が実測する。
 """
 
 from __future__ import annotations
@@ -84,16 +90,62 @@ def test_the_search_path_can_still_include_trek_records():
         "人は引けない)")
 
 
-def test_the_decision_vocabulary_keeps_the_trek_kinds():
-    """判断記録の種別 (trek-review / scope-approval / halt / resume) が残っている。
+# 引退した種別。産出する継ぎ目は ms-185 で消えたが、過去の記録を引いた読み手が
+# 種別を解決できなければならない (= e-7067 の作法)。
+RETIRED_KINDS = ("trek-review", "halt", "resume")
 
-    過去の判断記録はこの語彙で保存されている。語彙から消すと、記録を読んだ側が
-    種別を解決できない (= e-7067 で引退語彙を別辞書に残したのと同じ理由)。
+
+def test_the_decision_vocabulary_keeps_the_trek_kinds():
+    """引退した種別を読み手が解決できる (ms-185 e-7081、測り方は e-7320 で修正)。
+
+    **初版はコメントで素通りしていた** (e-7320): ``kind in src`` でソース文字列の
+    包含を見ていたので、集合から外して「外した」とコメントに書くだけで緑になった。
+    実際 e-7071 で 3 種別は集合から落ちており、緑はコメントが支えていた。
+    緑は信頼されるので、偽の緑は無検査より悪い。ここは **実体 (membership)** を見る。
+
+    判断の分界 (e-7320):
+    * ``KNOWN_DECISION_KINDS`` = いま継ぎ目が産出する種別。捕獲被覆の検査の母集団
+      なので、産出者の無い種別を入れてはいけない (永久に赤くなる)。
+    * ``RETIRED_DECISION_KINDS`` = かつて産出していた種別。読み手だけのための辞書で、
+      産出者を要求しない。
+    だから引退種別は「KNOWN に在る」のではなく「RETIRED に在り KNOWN に無い」が正。
+    この 2 つを同時に固定するので、``test_decision_event_schema`` の
+    「trek 3 種は KNOWN から外れていること」と矛盾しない (初版は矛盾していて、
+    弱い測り方のせいで両方緑だった)。
     """
     import sys
     sys.path.insert(0, str(REPO / "lib"))
     import decision_vocab
-    src = (REPO / "lib" / "decision_vocab.py").read_text(encoding="utf-8")
-    for kind in ("trek-review", "scope-approval", "halt", "resume"):
-        assert kind in src, f"判断記録の種別 {kind!r} が語彙から消えています"
-    assert hasattr(decision_vocab, "__file__")
+
+    for kind in RETIRED_KINDS:
+        assert kind in decision_vocab.RETIRED_DECISION_KINDS, (
+            f"引退した種別 {kind!r} が読み手用の辞書から消えています。過去の判断記録を"
+            f"この種別で引いた人に『綴り違いの可能性』と偽の警告が出ます (e-7320)")
+        assert decision_vocab.explain_retired_decision_kind(kind), (
+            f"{kind!r} の説明文が空です (読み手が種別の意味を解決できません)")
+        assert kind not in decision_vocab.KNOWN_DECISION_KINDS, (
+            f"{kind!r} が産出者台帳の母集団 (KNOWN_DECISION_KINDS) に戻っています。"
+            f"産出する継ぎ目が無いので捕獲被覆の検査が永久に赤くなります。"
+            f"本当に戻すなら producer を一緒に戻すこと")
+
+    # 生きている種別は KNOWN 側に在る (= 引退辞書へ誤って移していない)。
+    assert "scope-approval" in decision_vocab.KNOWN_DECISION_KINDS
+    assert "scope-approval" not in decision_vocab.RETIRED_DECISION_KINDS
+
+
+def test_retired_kinds_do_not_trigger_the_typo_warning():
+    """引退種別を ``--kind`` で引いても「綴り違い」と言われない (e-7320)。
+
+    これが e-7081 の判断が守りたかった実害そのもの。語彙から外した結果、
+    ``beacon decision list --kind trek-review`` が 0 件に添えて「綴り違いの可能性」と
+    警告していた —— 綴りは正しいので、開示が嘘になっていた。
+    """
+    import sys
+    sys.path.insert(0, str(REPO / "lib"))
+    import cmd_decision
+
+    recognized = cmd_decision._recognized_decision_kinds()
+    for kind in RETIRED_KINDS:
+        assert kind in recognized, (
+            f"{kind!r} が『見覚えのある種別』に入っていません。0 件のときに綴り違いを"
+            f"疑わせる偽の警告が出ます (e-7320)")
