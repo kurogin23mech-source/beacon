@@ -122,6 +122,67 @@ def drop_retired_from_the_recognized_set(src: str) -> str:
     return src.replace(anchor, "                     )", 1)
 
 
+# --- lib/cmd_decision.py への壊し方: 開示そのものを消す (F1) ---
+#
+# **ここが初版の穴だった。** 初版は辞書の membership と認識集合 (= データ層) だけを
+# 壊していて、その事実が **利用者に届く出力** を 1 度も壊していなかった。独立レビュー
+# 2 体が同じ穴を別々に指摘し、実測で裏付けられた: 下の 4 箇所を丸ごと消しても関連
+# テスト 75 件は緑のまま、このハーネスも「8 件すべて期待どおり」を返した。つまり
+# 修正の目的そのものが消えても気づけない状態を、ハーネス自身が緑で保証していた。
+# データ層と消費層は別の防御対象なので、両方を壊して両方で赤くなることを測る。
+
+def drop_the_json_disclosure(src: str) -> str:
+    """読み出しの --json から引退の開示 2 field を消す。"""
+    anchor = ('            out["kind_retired"] = bool(_retired)\n'
+              '            out["kind_retired_explanation"] = _retired\n')
+    assert anchor in src, "anchor not found (drop_the_json_disclosure)"
+    return src.replace(anchor, "", 1)
+
+
+def drop_the_retired_kinds_field(src: str) -> str:
+    """候補一覧の「どれが引退か」を --json から消す (= 機械の読み手が区別を失う)。"""
+    anchor = '            out["retired_kinds"] = sorted(set(_RETIRED_KINDS) & set(_known))\n'
+    assert anchor in src, "anchor not found (drop_the_retired_kinds_field)"
+    return src.replace(anchor, "", 1)
+
+
+def drop_the_text_disclosure_when_empty(src: str) -> str:
+    """0 件のときの text 開示を消す (= 綴り違いと引退が同じ沈黙に潰れる)。"""
+    anchor = ('        if _retired:\n'
+              '            # 0 件の理由を言い分ける: 綴りが的を外しているのではなく、この種別は\n'
+              '            # もう産出されていない (継ぎ目が消えた)。過去の記録が在れば引ける。\n'
+              '            print(f"  \u2139 {_retired}")\n')
+    assert anchor in src, "anchor not found (drop_the_text_disclosure_when_empty)"
+    return src.replace(anchor, "", 1)
+
+
+def drop_the_text_disclosure_when_rows(src: str) -> str:
+    """件数が在るときの text 開示だけを消す (= 片方の枝だけ直す誤りの再現)。
+
+    枝が 2 つあるので、片方だけ壊しても赤くなることを測る。1 ケースにまとめると
+    「どちらかが生きていれば緑」になり、片方を落とす事故を捕まえられない。
+    """
+    anchor = ('    if _retired:\n'
+              '        # 件数が在っても引退は開示する (= まだ生きている種別だと読ませない)。\n'
+              '        print(f"  \u2139 {_retired}")\n')
+    assert anchor in src, "anchor not found (drop_the_text_disclosure_when_rows)"
+    return src.replace(anchor, "", 1)
+
+
+def drop_the_retired_mark_in_the_list(src: str) -> str:
+    """候補一覧の引退の印を外す (= 死んだ候補が現役と無差別に並ぶ)。"""
+    anchor = '        out.append(f"{k} (\u5f15\u9000)" if k in _RETIRED_KINDS else k)'
+    assert anchor in src, "anchor not found (drop_the_retired_mark_in_the_list)"
+    return src.replace(anchor, "        out.append(k)", 1)
+
+
+def drop_the_write_side_disclosure(src: str) -> str:
+    """書き込み側の開示を消す (= 読み側の印だけでは書き込みは止まらない)。"""
+    anchor = '        if _explain_retired(kind):'
+    assert anchor in src, "anchor not found (drop_the_write_side_disclosure)"
+    return src.replace(anchor, "        if False:", 1)
+
+
 EXPECT_RED = [
     # (ラベル, 対象ファイル, 壊し方, 赤くなるべきテスト)
     ("引退辞書から項目を落とす (コメントは残す = e-7320 の事故そのもの)",
@@ -141,6 +202,20 @@ EXPECT_RED = [
     ("読み側の結合から引退辞書を外す → コードが書く種別の被覆も赤くなる",
      CLI, drop_retired_from_the_recognized_set,
      RECOGNITION_TEST + "::test_recognized_set_consumes_the_ledger_not_only_the_vocabulary"),
+    # --- 消費層 (= 利用者に届く出力) を壊す。初版に無く、独立レビュー 2 体が指摘した穴 ---
+    ("読み出しの --json から引退の開示 2 field を消す", CLI, drop_the_json_disclosure,
+     RECOGNITION_TEST + "::test_json_and_text_never_disagree"),
+    ("候補一覧の『どれが引退か』を --json から消す", CLI, drop_the_retired_kinds_field,
+     RECOGNITION_TEST + "::test_the_candidate_list_marks_which_kinds_are_retired"),
+    ("0 件のときの text 開示を消す", CLI, drop_the_text_disclosure_when_empty,
+     RECOGNITION_TEST + "::test_json_and_text_never_disagree"),
+    ("件数が在るときの text 開示だけを消す (片方の枝)", CLI,
+     drop_the_text_disclosure_when_rows,
+     RECOGNITION_TEST + "::test_json_and_text_never_disagree"),
+    ("候補一覧の引退の印を外す", CLI, drop_the_retired_mark_in_the_list,
+     RECOGNITION_TEST + "::test_the_candidate_list_marks_which_kinds_are_retired"),
+    ("書き込み側の開示を消す", CLI, drop_the_write_side_disclosure,
+     RECOGNITION_TEST + "::test_recording_a_retired_kind_is_disclosed_on_both_faces"),
 ]
 
 EXPECT_GREEN = [

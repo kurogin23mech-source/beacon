@@ -201,6 +201,13 @@ def cmd_decision_record():
         out = dict(result) if isinstance(result, dict) else {"result": result}
         out["decided_by"] = decided_by
         out["decided_by_source"] = "explicit" if explicit_decided_by else "session-kind"
+        # ms-185 e-7320 (F2 の書き込み側): 引退した種別で **新しい** 判断を書こうと
+        # している。語彙は意図的に開いているので拒否はしない (誰かが新しい種別を
+        # 書き始めた直後を塞がないため / e-6633 の「拒否ではなく開示」) が、黙って
+        # 通すと産出する継ぎ目の無い種別に判断が積まれる。読み側の印だけでは
+        # 書き込みは止まらない — 開示は両方の面に置く。
+        out["kind_retired"] = bool(_explain_retired(kind))
+        out["kind_retired_explanation"] = _explain_retired(kind)
         out["target_id"] = resolved_target or None
         out["target_id_source"] = ("explicit" if related_target
                                    else "related-task-parent" if task_parent_target
@@ -226,6 +233,10 @@ def cmd_decision_record():
         else:
             print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
         print(f"  帰属: {decided_by} ({_attr_source})")
+        if _explain_retired(kind):
+            # text と --json で同じ情報を出す (= 片方だけに開示を書かない)。
+            print(f"  ⚠ 種別 '{kind}' は引退しています — {_explain_retired(kind)} "
+                  f"新しい判断をこの種別に積むと、産出者の無い種別に記録が増えます。")
         if resolved_target:
             print(f"  対象: {resolved_target} ({_target_source})")
         if _task_lookup_error:
@@ -308,6 +319,22 @@ def _recognized_decision_kinds() -> frozenset:
                      | set(DECISION_CAPTURE_DERIVED_KINDS)
                      | set(DECISION_CAPTURE_ADHOC_KINDS)
                      | set(_RETIRED_KINDS))
+
+
+def _format_recognized_kinds() -> str:
+    """候補一覧を、引退済に印を付けた 1 行にする (ms-185 e-7320 / F2)。
+
+    この一覧は綴り違いを疑ったときに出すので、読み手には **書いてよい候補** に見える。
+    印が無いと、産出する継ぎ目がもう無い種別 (trek-review / halt / resume) を拾って
+    新しい判断をそこに書いてしまう。無印で平らに並べない。
+
+    一覧から外す形は採らない: 引退した種別は **過去の記録を引くための正しい綴り**
+    なので、綴りを直したい人の候補として必要 (外すと読む側の回復手段が消える)。
+    """
+    out = []
+    for k in sorted(_recognized_decision_kinds()):
+        out.append(f"{k} (引退)" if k in _RETIRED_KINDS else k)
+    return ", ".join(out)
 
 
 def cmd_decision_list():
@@ -393,6 +420,12 @@ def cmd_decision_list():
             out["kind_retired"] = bool(_retired)
             out["kind_retired_explanation"] = _retired
             out["recognized_kinds"] = sorted(_known)
+            # ms-185 e-7320 (F2): recognized_kinds は「見覚えがある」という生の事実
+            # だが、綴りを直す人には **書いてよい候補** にも見える。そのうちどれが
+            # 引退済か (= 産出する継ぎ目が無い) を別の名前で出す。既存の配列の形は
+            # 変えない — 要素を dict に変えると既存の読み手が壊れるので、2 つの事実を
+            # 1 つの名前に混ぜず 2 本目の名前で運ぶ (e-6603 AX-1 と同じ作法)。
+            out["retired_kinds"] = sorted(set(_RETIRED_KINDS) & set(_known))
         print(json.dumps(out, ensure_ascii=False))
         return
     # 既定で外した kind (独立レビュー AX-1): この開示は **0 件のときこそ要る**。
@@ -412,7 +445,7 @@ def cmd_decision_list():
             print(f"  ⚠ 種別 '{kind}' は見覚えのある種別に含まれていません "
                   f"(綴り違いの可能性)。0 件は「この種別の判断が無い」ではなく "
                   f"「問い合わせが的を外している」かもしれません。")
-            print(f"  見覚えのある種別: {', '.join(sorted(_recognized_decision_kinds()))}")
+            print(f"  見覚えのある種別: {_format_recognized_kinds()}")
         if _retired:
             # 0 件の理由を言い分ける: 綴りが的を外しているのではなく、この種別は
             # もう産出されていない (継ぎ目が消えた)。過去の記録が在れば引ける。
