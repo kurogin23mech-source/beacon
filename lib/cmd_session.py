@@ -491,6 +491,64 @@ def cmd_session_log_show():
             print("(recovered)")
 
 
+def cmd_session_log_next():
+    """前セッションの引き継ぎの「次セッション最優先」節を、本文のまま出す。
+
+    ms-160 e-7314: ``session_log_list`` は **全セッション分** を返すので、読む側は
+    必ず切り出す羽目になり、その最中に肝心の数百字が要約に化けていた。この口は
+    **最新 1 件の、必要な節だけ** を返す。切り出す必要が無い大きさで返るので、
+    言い換えが起きる余地が無い。
+
+    節が無いときは「無い」と言う (空を返して「無かった」と「拾えなかった」を同じ
+    形に畳まない)。
+    """
+    import session_handoff  # noqa: PLC0415
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # 最新 1 件。list と同じ経路 (Store → ローカルの控え) を使うが、limit=1 で
+    # 絞るので全件は流れない。
+    entries: list[dict] = get_store().list_session_logs(limit=1)
+    if not entries:
+        d = _session_logs_dir()
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                if name.endswith(".json"):
+                    try:
+                        with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                            entries.append(json.load(f))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+            entries.sort(key=lambda e: e.get("last_aggregated_at", ""), reverse=True)
+            entries = entries[:1]
+
+    if not entries:
+        if json_mode:
+            print(json.dumps({"session_id": None, "last_aggregated_at": None,
+                              "required": None, "optional": [],
+                              "missing": [session_handoff.REQUIRED_HEADING],
+                              "note": "no session logs"}, ensure_ascii=False))
+        else:
+            print("引き継ぎがまだありません (session log が 1 件も無い"
+                  " — 新しいプロジェクト、または前セッションが"
+                  " /beacon-session-end を通っていない)。")
+        return
+
+    entry = entries[0]
+    extracted = session_handoff.extract_handoff(entry.get("summary") or "")
+    if json_mode:
+        out = {
+            "session_id": entry.get("session_id"),
+            "last_aggregated_at": entry.get("last_aggregated_at"),
+            "required": extracted["required"],
+            "optional": extracted["optional"],
+            "missing": extracted["missing"],
+        }
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    print(session_handoff.format_handoff(entry, extracted))
+
+
 def cmd_session_id():
     """Print the current session_id — pure getter, no heartbeat (ms-54 e-1319).
 

@@ -164,7 +164,7 @@ session log を以下の summary で永続化します:
 このまま記録しますか? (= OK / 書き直し)
 ```
 
-`beacon summary "<text>"` は ms-57 e-1040 で **廃止** (CLI が ignored を返す)。後継は `beacon session end --summary "<text>"`。これは session log を upsert し、`summary` フィールドに引き継ぎ narrative を書き込む。次回の `/beacon-session-start` Step 1j がこの session log を読み「次セッション最優先 / top of queue / 次にやること」セクションを抽出する経路。
+`beacon summary "<text>"` は ms-57 e-1040 で **廃止** (CLI が ignored を返す)。後継は `beacon session end --summary "<text>"`。これは session log を upsert し、`summary` フィールドに引き継ぎ narrative を書き込む。次回の `/beacon-session-start` Step 1j が `beacon session log next` でこの引き継ぎの節を**本文のまま**読む経路。
 
 Bash ツールで実行:
 ```bash
@@ -177,7 +177,9 @@ beacon session end --summary "<Step3のテキスト>"
 
 > **帰属の realize 方法 (スコープ境界)**: 現時点では「まとめ本文の保存先そのもの (= `session_logs` サブコレクション) を作業 target のレコード配下へ物理移動する」ことはしていない。保存先の移動は schema 移行に当たるため、代わりに session log レコードに `target_ids` / `target_source` を付けて「どの target 群を進めた session か」を構造的に辿れるようにしている。`read=root / write=作業 target` の非対称のうち write 側は「作業 target 群への帰属付け」まで realize 済み (本文の物理再配置と read 側の対称移行は後続スライス)。
 
-**重要**: Step 3 で生成したサマリーには、引き継ぎを次セッションが拾えるよう **「次セッション最優先」「次にやること」「top of queue」等の見出し** を含めること (session-start Step 1j の抽出ロジックがこのキーワードでセクションを切り出す)。
+**重要**: Step 3 で生成したサマリーには、見出し **`## 次セッション最優先`** を必ず含めること。任意で **`## 次にやること`** を添えてよい。
+
+**見出しは揺らしてはならない** (ms-160 e-7314)。読み口 (`beacon session log next`) はこの綴りでしか節を見つけられず、見つからなければ次のセッションには「節がありません」とだけ届く。以前は「top of queue」等の言い換えを許していたが、**書き口と読み口が同じ語に縛られていないと、揺れた瞬間に黙って拾えなくなる**。見出しの定義は`lib/session_handoff.py` の `REQUIRED_HEADING` / `OPTIONAL_HEADINGS` が唯一の真実源で、この Skill の文面がそれと食い違っていないことは `tests/test_session_handoff.py` が機械で突き合わせる。
 
 ## Step 4.5: セッションメモのレビューと統合昇格
 
