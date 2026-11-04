@@ -47,9 +47,6 @@ from datetime import datetime, timezone
 DEFAULT_ALLOWED_CHANNELS = (
     "dm",
     "operation-trigger",
-    "trek-progress-check",
-    "trek-trigger",
-    "trek-task-review",
 )
 
 # ms-160 e-5800: the remote-STOP kill-switch channel. It is deliberately NOT in

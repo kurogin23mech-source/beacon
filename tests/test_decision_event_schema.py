@@ -355,12 +355,10 @@ def test_scope_approval_record(decision):
     assert "outcome" not in e
 
 
-def test_trek_review_decision_from_state_mapping():
-    # leader_review からの遷移先 → 判断語 (閉じた mapping)。
-    assert de.trek_review_decision_from_state("done") == "approve"
-    assert de.trek_review_decision_from_state("user_review") == "forward-to-user"
-    assert de.trek_review_decision_from_state("working") == "re-work"
-    assert de.trek_review_decision_from_state("todo") == "re-work"
+# ms-185 e-7071: test_trek_review_decision_from_state_mapping を落とした。
+# 測っていた mapping 関数ごと消えた (唯一の呼び出し元が e-7070 で落ちたため)。
+# この試験だけが残っていたので、関数は「自分のテストからしか届かない」状態だった。
+
 
 
 

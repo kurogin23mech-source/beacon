@@ -430,26 +430,13 @@ def decision_event_from_completion_verdict(
         evidence=ev,
         related={"target_id": target_id},
     )
-
-
-# review 採否 (approve / re-work / reject) は CLI 側 (cmd_pr) の判断で、専用の
-# server route を持たない。汎用 decisions 書き込み口 (POST /api/projects/{id}/decisions,
-# kind="review-adjudication") を通り build_decision_event で検証される。ゆえに専用 builder
-# は置かない (= server 側に呼び出し元が無い vestigial 関数を作らない / ms-154 e-5593)。
-
-
-# leader_review からの遷移先 → review 判断の対応 (= 閉じた mapping)。
-def trek_review_decision_from_state(target_state: str) -> str:
-    """leader_review 状態からの遷移先を review 判断語に写す。
-
-    done → 承認 (approve)、user_review → user へ転送 (forward-to-user)、
-    それ以外 (= working / todo へ差し戻し) → 再作業 (re-work)。
-    """
-    if target_state == "done":
-        return "approve"
-    if target_state == "user_review":
-        return "forward-to-user"
-    return "re-work"
+# ms-185 e-7071: trek_review_decision_from_state を落とした。leader_review からの
+# 遷移先を review 判断語に写す純粋な mapping で、唯一の呼び出し元
+# (decision_event_from_trek_review) は e-7070 で消えた。
+#
+# 上のコメントがこのファイルの規範を述べている — 「server 側に呼び出し元が無い
+# vestigial 関数を作らない」。呼び出し元が消えた時点でこの関数はその規範に反する
+# 状態になっていた (独立保守性レビューの指摘)。専用テストも一緒に落とした。
 
 
 # ms-185 e-7070: decision_event_from_trek_review / decision_event_from_halt を
