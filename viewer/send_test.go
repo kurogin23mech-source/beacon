@@ -68,10 +68,10 @@ func TestSendPromptPayloadShape(t *testing.T) {
 // (2026-09-10 に実際に起きた)。
 func TestCheckReceiptStages(t *testing.T) {
 	cases := []struct {
-		body                      string
-		sent, delivered, opened   bool
-		wantNote                  bool
-		why                       string
+		body                    string
+		sent, delivered, opened bool
+		wantNote                bool
+		why                     string
 	}{
 		{`{"created_at":"t"}`, true, false, false, true, "送っただけ"},
 		{`{"created_at":"t","delivered_at":"t"}`, true, true, false, true, "届いたが未読"},

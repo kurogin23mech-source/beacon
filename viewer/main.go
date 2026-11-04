@@ -29,7 +29,7 @@ func main() {
 	noReuse := flag.Bool("no-reuse", false,
 		"既に動いている同じプロジェクトの盤を使わず、必ず新しく立てる")
 	idleTimeout := flag.Duration("idle-timeout", defaultIdleTimeout,
-		"この時間だけ誰も見に来なければ盤を畳む (0 で畳まない)")
+		"この時間だけ誰も見に来なければ盤を畳む (既定 0 = 畳まない)")
 	showVersion := flag.Bool("version", false, "版を出して終わる (beacon 側の委譲前の版握手用)")
 	flag.Parse()
 
@@ -213,13 +213,14 @@ func main() {
 		OpenBrowser(srv.URL)
 	}
 
-	// 既定はモードで変える (サーバに置いた盤は畳まない)。渡された値はどの
-	// モードでも尊重する。理由は idleTimeoutFor (idle.go)。
+	// 既定を決めるのは idleTimeoutFor (idle.go) の 1 箇所。ここでは理由を書かない
+	// —— 同じ事実を 2 箇所に書くと、片方だけ古くなる (e-7265: このコメントは
+	// 「既定はモードで変える」と言ったまま残り、独立レビュー 2 体に指摘された)。
 	idleRequested := flagWasSet(flag.Visit, "idle-timeout")
-	effectiveIdle := idleTimeoutFor(*expose, *idleTimeout, idleRequested)
+	effectiveIdle := idleTimeoutFor(*idleTimeout, idleRequested)
 	// **必ず 1 行名乗る** (AX review medium)。出すかどうかを「モードが上書きしたか」
 	// で決めていたため、`--idle-timeout 0` を明示したときだけ無言だった。
-	fmt.Println(idleAnnouncement(effectiveIdle, *expose, idleRequested))
+	fmt.Println(idleAnnouncement(effectiveIdle, idleRequested))
 	if err := srv.ServeWithIdleTimeout(effectiveIdle); err != nil {
 		fail(err)
 	}

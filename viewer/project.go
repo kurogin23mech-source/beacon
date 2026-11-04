@@ -77,12 +77,12 @@ type Deployment struct {
 
 // Milestone は開発職種の対象 1 件。
 type Milestone struct {
-	ID         string  `json:"id"`
-	Label      string  `json:"label"`
-	Title      string  `json:"title"` // 旧い呼び名 (label が無いとき使う)
-	Name       string  `json:"name"`  // さらに旧い呼び名
-	Status     string  `json:"status"`
-	Progress   int     `json:"progress"`
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Title    string `json:"title"` // 旧い呼び名 (label が無いとき使う)
+	Name     string `json:"name"`  // さらに旧い呼び名
+	Status   string `json:"status"`
+	Progress int    `json:"progress"`
 	// 元データには target_date が null の対象がある。空文字に丸めると Python 側の
 	// 出力 (null のまま) と食い違うため、有無を保てる形で持つ。
 	TargetDate *string `json:"target_date"`
@@ -350,7 +350,6 @@ func loadFromSqlite(dbPath string) (*Project, error) {
 	}
 	return &p, nil
 }
-
 
 var msIDPattern = regexp.MustCompile(`^ms-(\d+)$`)
 

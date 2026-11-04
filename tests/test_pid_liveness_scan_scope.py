@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import re
 import importlib.util
 import os
 import pathlib
@@ -326,31 +327,66 @@ def _help_view_description():
     return r.stdout + r.stderr
 
 
-def test_the_idle_default_is_declared_once_in_go():
-    """既定値の持ち主は Go の 1 箇所。"""
+def test_the_idle_default_is_declared_once_in_go_as_a_readable_literal():
+    """既定値の持ち主は Go の 1 箇所で、**リテラルとして読める**こと。
+
+    1 箇所であることは昔から要求していた (写しが増えると片方だけ直る)。
+    リテラルであることを足したのは、文面との突き合わせ
+    (scripts/check-idle-default-claims.py) が **定数を読めないときは「判定不能」で
+    中立に終わる** 設計だから。`time.Duration(0)` のような等価な書き換えをすると、
+    あの検査は赤くならずに黙って無効化され、文面が旧既定を宣言したまま残っても
+    誰も気付かない。読めることを要求するのはこの試験の仕事で、読めた値と文面の
+    一致はあちらの仕事 —— ここで値と文面の照合までやると、同じ規則が 2 箇所に
+    分かれて片方だけ古くなる。
+
+    **値そのもの (0) を固定しているのはここではない**: viewer/idle_test.go が
+    `defaultIdleTimeout != 0` と `idleTimeoutFor(0, false) != 0` の両方を見ている。
+    独立レビューが「この試験だけ読むと 0 が here で守られていると信じうる」と
+    指摘したので、分担を明記する —— 形 (読めること) はこの試験、値は Go の単体
+    試験、値と文面の一致は check-idle-default-claims.py。3 つが揃って初めて
+    「既定が変わったのに文面が古い」を全方向で捕まえる。
+    """
     idle = (ROOT / "viewer" / "idle.go").read_text(encoding="utf-8")
     assert idle.count("defaultIdleTimeout = ") == 1, (
         "既定値の宣言が 1 箇所でない (写しが増えると片方だけ直る)")
-    assert "30 * time.Minute" in idle
+    m = re.search(r"const defaultIdleTimeout = (.+)", idle)
+    assert m, "既定値が `const defaultIdleTimeout = <literal>` の形で宣言されていない"
+    literal = m.group(1).split("//")[0].strip()
+    assert re.fullmatch(r"0|\d+ \* time\.(Minute|Second|Hour)", literal), (
+        f"既定値が機械で読めない形になっている: {literal!r} —— "
+        "文面との突き合わせ (check-idle-default-claims.py) は読めないと中立で "
+        "終わるので、この形が崩れると検査が黙って無効になる")
 
 
-def test_every_copy_says_the_default_depends_on_the_mode():
-    """**3 箇所すべて**がモード依存を述べている。
+def test_no_copy_says_the_default_depends_on_the_mode():
+    """**3 箇所すべて**が「既定では畳まない」と述べ、モード依存を述べないこと。
 
-    help 台帳だけが取り残されていたのが実際の drift。1 箇所でも「無条件に畳む」
-    と読める状態だと、それを読んだ人が誤った前提で動く。
+    e-7264 で既定を反転した (手元で開いた盤を 30 分で畳む → 畳まない) とき、
+    **モードという入力そのものが要らなくなった** —— idleTimeoutFor は引数から
+    `exposed` を落としてある。以前この試験は逆に「3 箇所すべてがモード依存を
+    述べていること」を要求していた (旧世界では手元だけ畳んだため)。反転の際に
+    直し忘れ、取り込み検査で初めて落ちた。
+
+    いま守りたいのは「どこか 1 箇所に旧世界が残っていないか」。1 箇所でも
+    「既定で畳む」「モードによって違う」と読める状態だと、それを読んだ人が
+    畳まれる前提で後片付けを省く / 既定と同じ値の旗を「畳まれないように」と称して
+    付ける、といった誤りをする。
     """
     help_text = _help_view_description()
     readme = (ROOT / "viewer" / "README.md").read_text(encoding="utf-8")
     idle = (ROOT / "viewer" / "idle.go").read_text(encoding="utf-8")
 
-    # help: --expose では畳まないことに触れている
-    assert "--expose" in help_text and "never does" in help_text, (
-        f"help 台帳がモード依存を述べていない:\n{help_text}")
-    # README: 設置した盤は畳まないと書いてある
-    assert "自ら畳みません" in readme, "README がモード依存を述べていない"
-    # 実装: 理由がコードのそばに在る
-    assert "サーバに置いた盤は畳まない" in idle, "実装側に理由が無い"
+    # help: 自分では畳まないこと + 畳ませる口が在ることの両方を述べている
+    assert "does not close itself" in help_text, (
+        f"help 台帳が「既定では畳まない」と述べていない:\n{help_text}")
+    assert "--idle-timeout" in help_text, (
+        f"help 台帳に畳ませる口が出ていない (閉じ方が分からない):\n{help_text}")
+    # README: 手元も設置済みも同じ既定 (= モードで変わらない) と書いてある
+    assert "盤は自ら畳みません" in readme, "README が「既定では畳まない」と述べていない"
+    assert "設置した盤も自ら畳みません" in readme, (
+        "README がモード依存の消滅を述べていない (設置側だけ別扱いに読める)")
+    # 実装: 反転の理由がコードのそばに在る
+    assert "モードに依らず畳まない" in idle, "実装側に反転の理由が無い"
 
 
 def test_the_help_text_does_not_claim_an_unconditional_close():

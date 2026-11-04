@@ -49,13 +49,13 @@ type Attribution struct {
 
 // SessionOverview は一覧の 1 行。
 type SessionOverview struct {
-	Tool       string       `json:"tool"`
-	Name       string       `json:"name"`
-	State      string       `json:"state"`
-	Title      string       `json:"title"`
-	Directory  string       `json:"directory"`
-	Branch     string       `json:"branch"`
-	LastActive string       `json:"last_active"`
+	Tool       string `json:"tool"`
+	Name       string `json:"name"`
+	State      string `json:"state"`
+	Title      string `json:"title"`
+	Directory  string `json:"directory"`
+	Branch     string `json:"branch"`
+	LastActive string `json:"last_active"`
 	// Running は **手元で観測したプロセス生存** (processAlive)。出自はローカル観測に
 	// 限る (e-6454 で TransportLive と分離。以前は名乗りの主で上書きしていたが、
 	// 「running=ローカルにプロセスがある」の意味を潰さないよう合成をやめた)。
@@ -65,10 +65,10 @@ type SessionOverview struct {
 	// ws_live OR poll_health.healthy)。名乗りの主 (claimer) の行にだけ立つ。
 	// 「生きているか」の表示・停止隠しの判定は Running か TransportLive の **合成**
 	// (どちらかが真なら生存) で行う — 出自 (ローカル観測 / サーバ判定) を潰さない。
-	TransportLive bool `json:"transport_live"`
-	Project    *ProjectRef  `json:"project,omitempty"`
-	Target     *Attribution `json:"target,omitempty"`
-	Task       *Attribution `json:"task,omitempty"`
+	TransportLive bool         `json:"transport_live"`
+	Project       *ProjectRef  `json:"project,omitempty"`
+	Target        *Attribution `json:"target,omitempty"`
+	Task          *Attribution `json:"task,omitempty"`
 	// TargetSource は担当 (working_target) がどう決まったか。サーバが解決した値
 	// (declared=宣言 / fork / branch / cwd 等) をそのまま運ぶ。運用室のカード木は
 	// これが "fork" の行を子として字下げする (e-6549 — 親子はエッジで示す)。
@@ -133,11 +133,36 @@ type SessionOverview struct {
 	// jump_available && pid && jumpable の 3 値 AND で再構成していた — 判定の正典が
 	// Go という宣言が最後の AND で破れていた (#744 独立レビュー)。
 	Jumpable bool `json:"jumpable"`
-	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。値は jump.go の閉じた
-	// enum (exposed / unsupported-os / remote-machine / no-pid /
-	// unsupported-terminal) が唯一の正典。画面は unsupported-terminal のときだけ
-	// fallback (パスのコピー) を出す (他の値は非表示のみで描画分岐を持たない)。
-	// 別マシンと未対応端末を同じ false に潰さないための描き分け源 (e-6427)。
+	// Kind はセッションの素性 (interactive / bg、手元の台帳由来)。
+	//
+	// **飛べない理由を割るための項目。** bg は端末の中で動いていないので前面化
+	// する窓が無く、それは「この端末は未対応」とは別の話 (直せば飛べるのか、
+	// 原理的に飛べないのかが真逆になる)。空 = 素性が分からない道具。
+	Kind string `json:"kind,omitempty"`
+	// HarnessProbe は端末の種類をプロセスに訊いた結果 (e-7265)。
+	//
+	// 空 = 読めた、または訊く必要が無かった (名乗りで足りていた)。
+	// "unreadable" = プロセスを読めなかった (権限不足 / 消失 / ps の失敗)。
+	//
+	// **飛べない理由を割るための項目。** 「読めなかった」を端末種別の話に潰すと、
+	// 一時的な問題に「対応端末を増やせ」という的外れな対処を促す。
+	// 画面には配らない (独立保守性レビュー): これは判定を作るための途中の
+	// 観測で、画面が読むのは確定後の jump_blocked だけ。実測で page.html に
+	// harness_probe の参照は 0 件。外に出したままだと、空 / "unreadable" /
+	// "unnamed" がどの表示に対応するのかの契約が無いまま API に見え、次に
+	// 読む人が画面へ出そうとして判定の実装から逆算する羽目になる。
+	HarnessProbe string `json:"-"`
+	// JumpBlocked は飛べない理由 (Jumpable=false のとき)。
+	//
+	// **値の一覧は jump.go の AllJumpBlockedReasons が唯一**。ここに書き写さない
+	// (e-7265): 以前はこのコメントに 5 値を並べていたため、6 値目 background-session
+	// を足したときに写し漏れ、JSON の受け手が参照する型コメントだけが古い enum を
+	// 宣言していた (独立保守性レビュー)。列挙を書く場所を増やすと、機械ガード
+	// (TestJumpBlockedLiteralMatchesPage) が見ない写しが必ず取り残される。
+	//
+	// 画面は unsupported-terminal のときだけ fallback (パスのコピー) を出す
+	// (他の値は非表示のみで描画分岐を持たない)。別マシンと未対応端末を同じ false に
+	// 潰さないための描き分け源 (e-6427)。
 	JumpBlocked string `json:"jump_blocked,omitempty"`
 	// Machine は動いている機械 (名乗っているセッションのみ分かる)。
 	Machine string `json:"machine,omitempty"`
@@ -201,7 +226,7 @@ const (
 
 // AllSessions は、このマシンで動いている作業セッションを全部集めて紐づける。
 //
-// ``named`` は Beacon に名乗っているセッションの名簿 (取れていれば渡す)。
+// `named` は Beacon に名乗っているセッションの名簿 (取れていれば渡す)。
 // 名簿と突き合わせて、確かな担当が分かるものはそちらを優先する。
 func AllSessions(since time.Duration, now time.Time,
 	named []SessionRow) SessionsView {
@@ -276,7 +301,7 @@ func indexNamedBySID(named []SessionRow) map[string]SessionRow {
 // セッションが名乗っているように見える (2026-09-11 に観測)。件数は、同一キーに複数の
 // live が畳まれた事実を開示する (CollapsedPeers) ために持ち帰る。
 //
-// ``consumedSID`` は identity 突合 (sid) で既に持ち主が決まった名簿行 — fallback の
+// `consumedSID` は identity 突合 (sid) で既に持ち主が決まった名簿行 — fallback の
 // 取り合いから外す (identity で確定した行を推測突合が二重に配らない)。同一キーに
 // 複数残る場合は **最新の 1 行** を採る (last-write-wins だと入力順という無関係な
 // 偶然が持ち主を決め、幽霊行が勝ち得た — e-6563 で観測)。
@@ -387,7 +412,8 @@ func assembleSessions(rows []LocalSessionRow, named []SessionRow,
 			Directory: r.Directory, LastActive: r.LastActive,
 			Running: r.Running, ToolRunning: r.ToolRunning,
 			Branch: gitBranch(r.Directory),
-			PID:    r.PID, // 手元で拾ったセッションのプロセス番号 (端末へ飛ぶ起点)
+			PID:    r.PID,  // 手元で拾ったセッションのプロセス番号 (端末へ飛ぶ起点)
+			Kind:   r.Kind, // 素性 (interactive / bg) — 飛べない理由を割る源 (e-7263)
 		}
 
 		proj := lookup.forDir(r.Directory)

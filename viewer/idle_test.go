@@ -104,33 +104,37 @@ func TestWatchIdleClosesWithAReason(t *testing.T) {
 	}
 }
 
-// --- 起動モードごとの既定 (ms-170 思想 review medium) ------------------------
+// --- 既定 (モード非依存、e-7264) ------------------------
 
-func TestServerDeployedBoardsNeverSelfClose(t *testing.T) {
-	// サーバに置いた盤を畳むと「しばらく放っておくと盤が死んでいる」状態になる。
-	// 畳む理由 (手元で開くたびに積み上がる) が設置物には無い。
-	if got := idleTimeoutFor(true, 0, false); got != 0 {
-		t.Fatalf("サーバ設置の既定が畳む側になっている: %v", got)
+func TestNoBoardSelfClosesByDefault(t *testing.T) {
+	// e-7264: どちらのモードでも既定では畳まない。
+	//
+	// 以前は「設置した盤は畳まない / 手元の盤は 30 分で畳む」と分けていた。
+	// 手元を畳む理由は積み上がりだが、それは席 (reuse_key) による再利用で
+	// 閉じている。一方で畳むことの害は実地で重く、席を離れて戻ると盤が死んで
+	// おり、開いたままのタブは無言で繋がらなくなっていた (2026-11-02 に
+	// 「運用室が全然動かない」として報告された)。
+	//
+	// e-7265: モードという入力自体が無くなった (引数から exposed を落とした)。
+	// 「モードで既定が変わる」考え方が消えたことを、引数が無いことで言い切る。
+	if got := idleTimeoutFor(0, false); got != 0 {
+		t.Errorf("既定が畳む側になっている: %v "+
+			"(畳むのは --idle-timeout を明示したときだけ)", got)
+	}
+	if defaultIdleTimeout != 0 {
+		t.Errorf("既定の定数が 0 でない: %v", defaultIdleTimeout)
 	}
 }
 
-func TestLocalBoardsCloseByDefault(t *testing.T) {
-	if got := idleTimeoutFor(false, 0, false); got != defaultIdleTimeout {
-		t.Fatalf("手元の既定が %v (期待 %v)", got, defaultIdleTimeout)
+func TestAnExplicitTimeoutIsRespected(t *testing.T) {
+	// 渡された値は必ず尊重する。既定で上書きすると、指定したのに効かない旗になる。
+	if got := idleTimeoutFor(90*time.Second, true); got != 90*time.Second {
+		t.Errorf("指定値が尊重されていない: %v", got)
 	}
-}
-
-func TestAnExplicitTimeoutWinsInEitherMode(t *testing.T) {
-	// 渡された値はモードに関係なく尊重する。モードで上書きすると、
-	// 指定したのに効かない旗になる。
-	for _, exposed := range []bool{true, false} {
-		if got := idleTimeoutFor(exposed, 90*time.Second, true); got != 90*time.Second {
-			t.Errorf("exposed=%v で指定値が尊重されていない: %v", exposed, got)
-		}
-		// 0 の明示 (= 畳まない) も指定として尊重する
-		if got := idleTimeoutFor(exposed, 0, true); got != 0 {
-			t.Errorf("exposed=%v で 0 の明示が尊重されていない: %v", exposed, got)
-		}
+	// 0 の明示 (= 畳まない) も指定として尊重する。既定と同じ値だが、
+	// 「指定した」事実は案内の文面に出る (下の表で区別している)。
+	if got := idleTimeoutFor(0, true); got != 0 {
+		t.Errorf("0 の明示が尊重されていない: %v", got)
 	}
 }
 
@@ -158,28 +162,33 @@ func TestIdleAnnouncementAlwaysSaysSomething(t *testing.T) {
 	// **3 通りの「畳まない」すべてで名乗る**。以前は --idle-timeout 0 を
 	// 明示したときだけ無言で、意思を持って指定した場合こそ確かめたいのに
 	// そこが名乗らない形だった。
+	// **期待値は完全一致** (e-7265)。以前は部分一致で、既定のケースの期待が
+	// 「しません」だけだった。3 通りの「畳まない」はすべて「しません」を含むので、
+	// 既定の分岐が消えて別の文面が返っても緑のまま通った —— 守ると称する性質
+	// (どの理由で畳まないのか) を識別できていなかった (独立保守性レビュー)。
 	cases := []struct {
-		name       string
-		effective  time.Duration
-		exposed    bool
-		requested  bool
-		wantSubstr string
+		name      string
+		effective time.Duration
+		requested bool
+		want      string
 	}{
-		{"手元の既定", 30 * time.Minute, false, false, "30m0s 誰も見に来なければ"},
-		{"0 を明示", 0, false, true, "しません (指定により)"},
-		{"負を明示", -5 * time.Minute, false, true, "しません (指定により)"},
-		{"設置モード", 0, true, false, "しません (サーバ設置のため)"},
-		{"設置で明示", 0, true, true, "しません (指定により)"},
-		{"指定された値", 2 * time.Hour, false, true, "2h0m0s 誰も見に来なければ"},
+		{"30 分を明示", 30 * time.Minute, true,
+			"  無操作での終了: 30m0s 誰も見に来なければ畳みます"},
+		{"既定 (畳まない)", 0, false, "  無操作での終了: しません (既定)"},
+		{"0 を明示", 0, true, "  無操作での終了: しません (指定により)"},
+		{"負を明示", -5 * time.Minute, true,
+			"  無操作での終了: しません (指定により)"},
+		{"指定された値", 2 * time.Hour, true,
+			"  無操作での終了: 2h0m0s 誰も見に来なければ畳みます"},
 	}
 	for _, c := range cases {
-		got := idleAnnouncement(c.effective, c.exposed, c.requested)
+		got := idleAnnouncement(c.effective, c.requested)
 		if got == "" {
 			t.Errorf("%s: 何も名乗らなかった", c.name)
 			continue
 		}
-		if !strings.Contains(got, c.wantSubstr) {
-			t.Errorf("%s: %q に %q が無い", c.name, got, c.wantSubstr)
+		if got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
 		if !strings.Contains(got, "無操作での終了") {
 			t.Errorf("%s: 見出しが無い: %q", c.name, got)

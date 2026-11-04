@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // commandRunner はコマンド実行を差し替え可能にする継ぎ目 (テストで stub するため)。
@@ -32,6 +34,47 @@ type commandRunner func(name string, args ...string) ([]byte, error)
 // defaultRunner は実プロセスを起動する既定の実行器。
 func defaultRunner(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).Output()
+}
+
+// psProbeTimeout は導出で叩く ps 1 件あたりの待ち時間の上限 (e-7265)。
+//
+// 名前が `probeTimeout` でないのは、portfile.go が控えへの HTTP 問い合わせ用に
+// その名前を既に使っているから。別の外部依存の別の上限なので、同じ名前にすると
+// 「どちらの待ち時間か」が読めなくなる。
+//
+// **上限を置く理由**: `/api/sessions` は画面が 5 秒ごとに叩く道で、その中で
+// 名乗りが無い行ぶんだけ ps を直列に起動する。ps が返らない状況 (NFS 上の
+// ホーム、別プロセスの異常に巻き込まれる等) は実在し、上限が無いと 1 行の
+// 停止が一覧全体を無期限に止める。このリポジトリは「本番が生きているのに
+// 応答しない。真因は外部依存にタイムアウトが無かったこと」を既に一度払って
+// いるので、新しい外部プロセス呼び出しに同じ穴を開けない。
+//
+// 値は「導出できないより遅いほうがまし」ではなく逆向きに選ぶ: 導出は
+// 補助であって、失敗しても飛べない理由を正直に出せば済む。だから短い。
+const psProbeTimeout = 2 * time.Second
+
+// probeRunner は **ps へのプローブ専用** の継ぎ目 (e-7266)。
+//
+// commandRunner と形が違う (context を受け取る) のは、**上限を呼び出し元の選択に
+// しないため**。
+//
+// 最初の版は「上限つきの実行器」と「上限無しの実行器」を 2 本用意し、
+// 呼ぶ側がプローブには上限つきを渡す約束にしていた。両方が同じ型 `commandRunner`
+// だったので、渡し間違えてもコンパイルもテストも赤くならない —— そして **実際に
+// 間違えていた**: 一覧経路 (`/api/sessions`) は上限つきを渡していたが、単発ジャンプ
+// 経路 (`jumpToTerminal`) は既定の実行器を渡しており、同じ `ps -E` が無期限に走った。
+// 人が押して待っている側にだけ上限が無い、という最悪の割れ方で、独立レビュー 2 体が
+// 別々に実測して指摘した。
+//
+// いまは **上限を termProgramForPIDWith が自分で張る**。どの経路から呼ばれても、
+// どの実行器を渡されても、プローブは psProbeTimeout で諦める。前面化そのもの
+// (osascript) は人が待っている操作なので、そちらは従来どおり commandRunner のまま
+// —— 型が違うので、取り違えると**コンパイルが通らない**。
+type probeRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+// execProbeRunner は実プロセスを context 付きで起動する既定のプローブ実行器。
+func execProbeRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
 }
 
 // jumpEnvBlocked は「端末へ飛ぶ」が環境ごと使えない理由を **1 か所** で判定する
@@ -173,7 +216,7 @@ type terminalDriver struct {
 	kinds []string
 	// rawNames は、名乗り側が正規化表を持たなかった頃 (または直す前の bridge) が
 	// `terminal:<TERM_PROGRAM>` の生の形で送ってくる TERM_PROGRAM の値 (小文字)。
-	// 生の形は **この rawNames との完全一致でだけ** 受ける — kinds の汎用別名
+	// 生の形は **この rawNames との完全一致でだけ** 受ける — 不明値 (unknownHarnessKinds)
 	// ("" / "terminal") や短縮形 ("iterm") には落とさない。未知の端末が偶然
 	// `terminal:Terminal` と名乗ったとき、既知端末に化けて前面化を試み、的外れな
 	// 回復ヒントを出す経路を閉じるため (PR#820 独立 AX レビュー)。
@@ -184,9 +227,16 @@ type terminalDriver struct {
 	appName string
 }
 
-// terminalDrivers は対応端末の一覧 (= 受け付け側の唯一の正典)。空文字 "" は種類不明で、
-// macOS の既定端末 Terminal.app とみなす。ここに無い端末 (kitty / VS Code / tmux 等) は
-// 前面化に未対応で、画面では fallback (パスのコピー) に回す。
+// terminalDrivers は対応端末の一覧 (= 受け付け側の唯一の正典)。ここに無い端末
+// (kitty / VS Code / tmux 等) は前面化に未対応で、画面では fallback (パスのコピー)
+// に回す。
+//
+// **「どの端末か分からない」はこの表で解決しない** (e-7261)。不明値の定義と理由は
+// unknownHarnessKinds の 1 箇所にある。以前この見出しは「空文字は種類不明で、macOS の
+// 既定端末 Terminal.app とみなす」と書いていた —— 既定で埋める挙動を外した後もその
+// まま残り、**表の中に書いた経緯と、表の外の見出しが逆のことを言う**状態になっていた
+// (独立保守性レビュー medium)。見出しは最初に読まれる位置なので、局所だけ読む人は
+// 旧契約を前提に変更を書いてしまう。
 //
 // **実機検証スクリプトは、このテーブルから自動化されていない** (独立保守性レビュー
 // 指摘、e-7219)。`scripts/verify-jump-terminal-reorder.sh` は対応端末を独自の
@@ -203,7 +253,24 @@ type terminalDriver struct {
 // が在って実機で一度も飛べなかった)。
 var terminalDrivers = []terminalDriver{
 	{
-		kinds:    []string{"", "apple-terminal", "terminal", "apple_terminal"},
+		// "" と "terminal" は**ここに置かない** (e-7261)。どちらも
+		// 「どの端末か分からない」であって「Apple Terminal である」ではない。
+		// 以前は両方を Apple Terminal の別名として登録し、不明なら Terminal.app
+		// を既定にして「飛べる」と答えていた (jump_test の
+		// 「harness 不明は Terminal.app 既定で飛べる」がその決定)。
+		//
+		// 実機で起きたこと (2026-11-02 実測): iTerm しか使っていない機械で、
+		// 名乗りが届いていない 3 セッションと、bridge が TERM_PROGRAM を継承でき
+		// ずに下限値 "terminal" を送った 1 セッションの計 4 行が、すべて
+		// 「飛べる」と表示されたまま Terminal.app 用のスクリプトを iTerm の tty に
+		// 投げていた。AppleScript は対象を見つけられないので**何も起きない**。
+		// 利用者には「運用室が全然 iTerm に遷移しない」としか見えない。
+		//
+		// 既定で埋めるのをやめ、代わりに **プロセスに訊く** (resolveHarnessWith)。
+		// 端末の種類はプロセスの性質であり、同じ機械に居る盤は pid を持っている
+		// ので、名乗りが無くても確かめられる。既定値は推測で、推測が外れたとき
+		// 「飛べる」と嘘をつく側に倒れていた。
+		kinds:    []string{"apple-terminal", "apple_terminal"},
 		rawNames: []string{"apple_terminal"},
 		script:   appleTerminalJumpScript,
 		appName:  "Terminal.app",
@@ -237,10 +304,105 @@ func splitHarnessKind(harness string) (raw bool, key string) {
 	return false, k
 }
 
+// unknownHarnessKinds は「どの端末か分からない」を意味する名乗り (e-7261)。
+//
+// ふたつとも端末の種類ではなく **情報の欠如** を表す:
+//
+//	""         … 名乗りが届いていない (名簿に居ない / 古い bridge)。名乗り側
+//	             (channel/bus-harness-kind.mjs) はこの値を返さない — 下限は
+//	             "terminal" なので、空は「送られてこなかった」でしかない。
+//	"terminal" … 名乗り側の下限値 = TERM_PROGRAM が **bridge の環境に** 無かった。
+//	             bridge は MCP ホストが起こすので端末の環境を継承しないことが
+//	             あり、端末の中で動いている claude 本体には TERM_PROGRAM が
+//	             在るのにこちらだけ空、という形が実機で起きる。
+//
+// どちらも Apple Terminal と同じ扱いにしてはならない。混ぜると「分からない」が
+// 「Terminal.app である」に化け、別の端末を使っている人に対して黙って外れる。
+var unknownHarnessKinds = map[string]bool{"": true, "terminal": true}
+
+// unknownHarness は名乗りが端末の種類を特定していないか (純関数)。
+func unknownHarness(harness string) bool {
+	_, k := splitHarnessKind(harness)
+	return unknownHarnessKinds[k]
+}
+
+// termProgramPrefix は ps が返す環境の中で端末アプリが立てる変数。
+const termProgramPrefix = "TERM_PROGRAM="
+
+// probeResult は導出の結果を 3 通りに分ける (e-7265)。
+//
+// **「読めなかった」と「読めたが端末ではなかった」を同じ値に畳まない。** 前者は
+// 権限不足・プロセスの消失・ps の失敗で、待てば変わる / 別の原因を調べる話。後者は
+// 端末の外で動いているという確定した事実。対処が真逆なので、同じ「不明」にすると
+// 読み手が誤った方向に動く。e-7263 で `background-session` を
+// `unsupported-terminal` から切り出したのと同じ理由だが、**導出を入れた時点で私は
+// 同じ合流を新しく作っていた** (独立 AX レビューが実測して指摘)。
+type probeResult int
+
+const (
+	// probeOK はプロセスから端末の種類が読めた。
+	probeOK probeResult = iota
+	// probeNoTerminal はプロセスは読めたが TERM_PROGRAM が無かった
+	// (= 端末の外で動いている)。
+	probeNoTerminal
+	// probeUnreadable はプロセスを読めなかった (権限不足 / 消失 / ps の失敗)。
+	probeUnreadable
+)
+
+// termProgramForPIDWith は pid のプロセス環境から TERM_PROGRAM を読む。
+//
+// macOS の ps は -E で環境を command の後ろに連ねて出す。環境変数の値に空白は
+// 入り得るが、ここで要るのは TERM_PROGRAM の値だけで、端末アプリ名に空白は
+// 入らない (Apple_Terminal / iTerm.app)。空白区切りの最初の一致を取る。
+func termProgramForPIDWith(run probeRunner, pid int) (string, probeResult) {
+	if pid <= 0 {
+		return "", probeUnreadable
+	}
+	// **上限はここで張る** (e-7266)。呼び出し元に選ばせない — 詳細は probeRunner。
+	ctx, cancel := context.WithTimeout(context.Background(), psProbeTimeout)
+	defer cancel()
+	out, err := run(ctx, "ps", "-E", "-o", "command=", "-p", strconv.Itoa(pid))
+	if err != nil {
+		return "", probeUnreadable
+	}
+	for _, field := range strings.Fields(string(out)) {
+		if strings.HasPrefix(field, termProgramPrefix) {
+			v := strings.TrimSpace(strings.TrimPrefix(field, termProgramPrefix))
+			if v == "" {
+				// 変数は在るが空 = 端末の名乗りが無いのと同じ。
+				return "", probeNoTerminal
+			}
+			return v, probeOK
+		}
+	}
+	return "", probeNoTerminal
+}
+
+// resolveHarnessWith は「飛ぶ先を決めるための端末の種類」を確定する (e-7261)。
+//
+// 名乗りが端末を特定していれば **それを信じる** (別マシンのセッションや、
+// プロセスを覗けない場合でも効く唯一の材料)。特定していないときだけ、pid の
+// プロセス環境に訊いて `terminal:<TERM_PROGRAM>` の生の形を組む。生の形の解決は
+// 既存の rawNames 経路がそのまま受けるので、**語彙は 1 つも増えない**
+// (TERM_PROGRAM を小文字にした綴りが rawNames そのもの: apple_terminal /
+// iterm.app)。導出もできなければ名乗りをそのまま返す = 不明のまま、
+// jumpVerdict が unsupported-terminal として正直に落とす。
+func resolveHarnessWith(run probeRunner, pid int, declared string) (string, probeResult) {
+	if !unknownHarness(declared) {
+		// 名乗りで足りているので訊いていない。「読めた」とは言わない。
+		return declared, probeOK
+	}
+	tp, res := termProgramForPIDWith(run, pid)
+	if res == probeOK {
+		return rawTerminalPrefix + tp, probeOK
+	}
+	return declared, res
+}
+
 // driverForHarness は harness に対応する driver を返す (無ければ nil)。
 //
 // 生の形は rawNames との完全一致でだけ受け、kinds の別名には当てない (逆も同じ)。
-// 2 つの照合面を混ぜると、未知の端末の生の名乗りが汎用別名 ("" / "terminal") に
+// 2 つの照合面を混ぜると、未知の端末の生の名乗りが不明値 ("" / "terminal") に
 // 吸着して既知端末に化ける (PR#820 独立 AX レビューが実測した破れ)。
 func driverForHarness(harness string) *terminalDriver {
 	raw, k := splitHarnessKind(harness)
@@ -287,13 +449,110 @@ const (
 	// JumpBlockedUnsupportedTerminal は前面化に未対応の端末 (kitty / VS Code 等)。
 	// 画面はこの値のときだけ fallback (パスのコピー) を出す。
 	JumpBlockedUnsupportedTerminal = "unsupported-terminal"
+	// JumpBlockedBackgroundSession は端末の中で動いていないセッション
+	// (Claude Code の台帳で kind="bg")。前面化する窓が **原理的に存在しない**。
+	//
+	// unsupported-terminal と分ける理由 (e-7263): 両者は対処が真逆になる。未対応
+	// 端末は「受け付け表に足せば飛べる」が、バックグラウンド実行は何を足しても
+	// 飛べない。潰すと読み手は「kitty でも使っているのか」「対応を増やせばいいのか」
+	// と受け取り、延々と直らないものを直そうとする。JumpBlockedUnsupportedOS を
+	// exposed から分離したのと同じ理由 (#756 独立 AX レビュー)。
+	//
+	// 実測 (2026-11-02): 台帳は kind を区別して持っているのに viewer が読んで
+	// 捨てていたため、バックグラウンドのセッション 1 件が「この端末は前面化に
+	// 未対応です」と表示されていた。
+	JumpBlockedBackgroundSession = "background-session"
+	// JumpBlockedProcessUnreadable はプロセスを読めなかった (権限不足 / 呼び出しの
+	// 間に終了 / ps の失敗・タイムアウト)。**端末の種類の話ではない。**
+	//
+	// unsupported-terminal と分ける理由 (e-7265): 対処が真逆になる。未対応端末は
+	// 「受け付け表に足せば飛べる」が、読めないのは待てば変わる / 別の原因を調べる
+	// 話で、表に足しても何も起きない。e-7261 で導出を入れたとき、私は ps の失敗を
+	// unsupported-terminal に合流させていた —— e-7263 でまさにその型を切り出した
+	// 直後に、同じ PR で新しい合流を作っていた (独立 AX レビューが ps を差し替えて
+	// 実測し指摘)。
+	JumpBlockedProcessUnreadable = "process-unreadable"
+	// JumpBlockedTerminalUnnamed はプロセスは読めたが、端末を名乗っていなかった
+	// (TERM_PROGRAM が無い)。**端末の種類の話でも、読めなかった話でもない。**
+	//
+	// 3 つ目の合流を切り出した理由 (独立レビュー AX / 保守性が 2 体とも同じ場所を
+	// 指した)。導出 (probeResult) は最初から 3 値 — 読めた / 読めたが端末の外 /
+	// 読めなかった —— を持っていたのに、行の印へ写すところで probeNoTerminal が
+	// 「読めた」と同じ空文字に畳まれ、判定まで届いていなかった。その結果この値は
+	// unsupported-terminal に落ち、画面は「この端末は前面化に未対応です」= 受け付け
+	// 表に足せば直る、と表示していた。足しても直らない (名乗る端末が居ない)。
+	//
+	// background-session にも畳まない: あちらは台帳が kind="bg" と **宣言している**
+	// 確定事実だが、こちらは「名乗りが無い」という観測で、端末の外に居るのか、
+	// 名乗りを渡さない起動の仕方なのかを区別できない。同じファイルの
+	// jumpVerdictKind が既に「『分からない』を bg 扱いにするのは、知らないことを
+	// 根拠に機能を止めることになる」と定めているので、その規則に従う。
+	JumpBlockedTerminalUnnamed = "terminal-unnamed"
 )
+
+// AllJumpBlockedReasons は飛べない理由の全値 (= 閉じた enum の唯一の一覧)。
+//
+// 試験と画面の突合がここを回すので、理由を足したら**手写しの列挙を直す必要が無い**
+// — 逆に、足したのに画面の対応表 (JUMP_BLOCKED_REASON) に無ければ
+// TestJumpBlockedLiteralMatchesPage が赤くなる。以前は試験側に 5 値を手で並べて
+// いたため、6 値目を足しても試験が気付かない形だった (e-7263 で気付いて直した)。
+var AllJumpBlockedReasons = []string{
+	JumpBlockedExposed,
+	JumpBlockedUnsupportedOS,
+	JumpBlockedRemoteMachine,
+	JumpBlockedNoPID,
+	JumpBlockedBackgroundSession,
+	JumpBlockedProcessUnreadable,
+	JumpBlockedTerminalUnnamed,
+	JumpBlockedUnsupportedTerminal,
+}
 
 // jumpVerdict は「このセッションへ飛べるか」の最終 1 値と、飛べない理由を返す
 // (純関数)。判定の真実源はここ 1 つで、画面は結果を読むだけ。
 // envBlocked はこの盤の環境ブロック (jumpEnvBlocked の結果、空 = 環境は OK)。
-// 理由は影響範囲の広い順に選ぶ: 環境 (盤全体) → マシン → プロセス → 端末種別。
+//
+// **理由は影響範囲の広い順に選ぶ。いまの順序は 7 段階** (e-7266 で表を現在の
+// switch に合わせた。以前は 4 段階のままで、新しい理由をどこに挿すか読み手が
+// switch の物理順を自分で読むしかなかった):
+//
+//  1. exposed / unsupported-os  … 盤全体の話 (この盤からはどこへも飛べない)
+//  2. remote-machine            … そのマシンの端末はこの盤から前面化できない
+//  3. no-pid                    … 端末を辿る起点が無い
+//  4. background-session        … 端末の中で動いていない (窓が原理的に無い)
+//  5. process-unreadable        … プロセスを読めなかった (待てば変わりうる)
+//  6. terminal-unnamed          … 読めたが端末を名乗っていない
+//  7. unsupported-terminal      … 読めて名乗ったが受け付け表に無い端末
+//
+// 4 が 5 より先なのは、素性が分かっているほうが確定した事実だから。5 と 6 が 7 より
+// 先なのは、どちらも「端末種別の話」ではないのに、そう言うと対処を誤らせるから
+// (受け付け表に足しても直らない)。5 が 6 より先なのは、読めていないほうが分かって
+// いることが少ないから。
+// **AllJumpBlockedReasons の並びもこの順序**にしてある。
+//
+// この順序契約は switch を持つ jumpVerdictKind の契約でもある (jumpVerdict は
+// kind / probe を空で渡す薄い委譲)。7 つ目を足したときは、こちらと
+// jumpVerdictKind の両方を読むこと — 独立保守性レビューが「契約の本文が switch を
+// 持たない関数の上に在る」と指摘した箇所。
+// **本番からの呼び出しは無い** (受け口は applyJumpVerdicts 経由で
+// jumpVerdictKind を直接呼ぶ)。これは kind / probe を空で渡す旧署名の試験用の
+// 包み。独立保守性レビューが「順序契約の本文が、switch を持たないこの関数の上に
+// 在る」と指摘したので、契約の読み先を上のコメント末尾で jumpVerdictKind に
+// 向けてある。順序を変えるときに直すのは jumpVerdictKind の switch。
 func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool, string) {
+	return jumpVerdictKind(envBlocked, remote, pid, harness, "", "")
+}
+
+// jumpVerdictKind は素性 (interactive / bg) も見る版 (e-7263)。
+//
+// 素性は端末種別より **前** に見る: バックグラウンド実行は端末を持たないので、
+// 端末種別が何であろうと飛べない。順序を逆にすると、bg のセッションに
+// 「この端末は未対応」という直せそうな理由が付き、対処を誤らせる。
+//
+// kind が空 (= 素性が分からない道具) のときは従来どおり端末種別だけで判定する。
+// 「分からない」を bg 扱いにして飛べなくするのは、知らないことを根拠に機能を
+// 止めることになる。
+func jumpVerdictKind(envBlocked string, remote bool, pid int,
+	harness, kind, probe string) (bool, string) {
 	switch {
 	case envBlocked != "":
 		return false, envBlocked
@@ -301,10 +560,79 @@ func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool,
 		return false, JumpBlockedRemoteMachine
 	case pid <= 0:
 		return false, JumpBlockedNoPID
+	case kind == sessionKindBackground:
+		return false, JumpBlockedBackgroundSession
+	case probe == harnessProbeUnreadable && !jumpableHarness(harness):
+		// 読めなかった **かつ** 名乗りでも解決しない。名乗りで解決するなら
+		// 読めなかったことは問題にならないので、そちらを優先する。
+		return false, JumpBlockedProcessUnreadable
+	case probe == harnessProbeUnnamed && !jumpableHarness(harness):
+		// 読めたが端末を名乗っていない。上と同じ形: 名乗りで解決するならそちらが
+		// 優先。表に足しても直らないので unsupported-terminal には落とさない。
+		return false, JumpBlockedTerminalUnnamed
 	case !jumpableHarness(harness):
 		return false, JumpBlockedUnsupportedTerminal
 	}
 	return true, ""
+}
+
+// sessionKindBackground は Claude Code の台帳が「端末の中で動いていない」
+// セッションに付ける素性。綴りは台帳 (~/.claude/sessions/<pid>.json の kind) の
+// 値そのもの — tests/... ではなく viewer/local_sessions.go が読み元。
+const sessionKindBackground = "bg"
+
+// resolveHarnessesWith は一覧の各行の端末種別を、名乗りが特定していない行だけ
+// プロセスに訊いて埋める (e-7261)。**判定の前に走らせる**: jumpVerdict は
+// 「対応端末か」で最終 1 値を決めるので、埋める前に判定すると、名乗りが無い行が
+// 一律で落ちる (または以前のように既定値で嘘の true になる)。
+//
+// 訊くのは **別マシンでなく pid が在る行だけ**。別マシンのプロセスはこの機械の
+// ps で覗けないので、訊いても必ず空が返る = 無駄な ps を人数分走らせることになる。
+// 名乗りが特定済みの行も訊かない (resolveHarnessWith が先に返す)。実測では
+// 11 行中 4 行だけが対象。
+func resolveHarnessesWith(run probeRunner, sessions []SessionOverview) {
+	// **キャッシュ無しは、キャッシュ有りの薄い包み** (e-7266)。
+	//
+	// 以前は同じループ (別マシン / pid 無しを飛ばす選り分けと、読めなかった印の
+	// 付け方) が 2 箇所に在った。本番が呼ぶのは Cached 側だけで、試験は非本番側を
+	// 固定していたので、**選り分けを変えると本番の退行が試験に出ない**形だった
+	// (独立保守性レビュー)。resolve は c == nil を既に扱えるので、包みで足りる。
+	resolveHarnessesCached(run, nil, sessions)
+}
+
+// harnessProbeUnreadable は「プロセスを読めなかった」を表す行の印 (e-7265)。
+const harnessProbeUnreadable = "unreadable"
+
+// harnessProbeUnnamed は「読めたが端末を名乗っていなかった」を表す行の印。
+// unreadable と別の印にしてある: 対処が違う (あちらは待てば変わりうる、こちらは
+// 起動の仕方か、端末の外に居る)。空 = 読めて名乗った、または訊く必要が無かった。
+const harnessProbeUnnamed = "unnamed"
+
+// rowMark は導出結果を行の印に写す (e-7266)。
+//
+// int enum (probeResult) と行の印 (string) の変換が 2 つのループに手書きされて
+// いたので 1 箇所に寄せた。4 値目を足したとき、変換を直し忘れても型が通って
+// しまう形だった (独立保守性レビュー)。
+//
+// **3 値すべてに case を書く** (独立レビュー AX / 保守性が 2 体とも指摘)。以前は
+// probeUnreadable だけを見て、残り 2 値 (読めた / 読めたが端末の外) を同じ空文字に
+// 畳んでいた。probeNoTerminal は定義も試験も在ったのに、ここで消えるので判定には
+// 届かず、画面は「この端末は未対応」と誤診していた —— 畳んではならないと 3 箇所の
+// コメントで言いながら、変換の 1 箇所で畳んでいた。case を省略した値が黙って空に
+// なるのを防ぐため、既定は「新しい値は未配線」と名指しして落とす形にしてある。
+func (r probeResult) rowMark() string {
+	switch r {
+	case probeOK:
+		return ""
+	case probeNoTerminal:
+		return harnessProbeUnnamed
+	case probeUnreadable:
+		return harnessProbeUnreadable
+	}
+	// 4 値目を足して case を書き忘れたとき、空 (= 読めた) に化けるのが最も危ない
+	// (飛べるように見える)。印としては読めなかった側に倒す — 飛べないほうへ倒せば
+	// 誤って飛ぶことはなく、理由の文面で気付ける。
+	return harnessProbeUnreadable
 }
 
 // applyJumpVerdicts は一覧の全行に最終判定を書き込む。envBlocked はこの盤 (サーバ)
@@ -313,8 +641,9 @@ func jumpVerdict(envBlocked string, remote bool, pid int, harness string) (bool,
 // 受け口側がここで確定させる。
 func applyJumpVerdicts(sessions []SessionOverview, envBlocked string) {
 	for i := range sessions {
-		sessions[i].Jumpable, sessions[i].JumpBlocked = jumpVerdict(
-			envBlocked, sessions[i].Remote, sessions[i].PID, sessions[i].Harness)
+		sessions[i].Jumpable, sessions[i].JumpBlocked = jumpVerdictKind(
+			envBlocked, sessions[i].Remote, sessions[i].PID,
+			sessions[i].Harness, sessions[i].Kind, sessions[i].HarnessProbe)
 	}
 }
 
@@ -459,17 +788,43 @@ func (e *jumpFailure) Error() string { return e.Msg }
 //
 // harness は端末の種類。未対応の種類は **エラーで落とさず理由を返す** (SPEC 方針4)。
 func jumpToTerminal(pid int, harness string) error {
-	return jumpToTerminalWith(defaultRunner, runtime.GOOS, pid, harness)
+	return jumpToTerminalWith(defaultRunner, execProbeRunner, runtime.GOOS, pid, harness)
 }
 
 // jumpToTerminalWith は実行器と OS を差し替え可能にした本体 (テスト可能)。
 // 失敗はすべて *jumpFailure で返し、受け口が HTTP status に写せるようにする。
-func jumpToTerminalWith(run commandRunner, goos string, pid int, harness string) error {
+func jumpToTerminalWith(run commandRunner, probe probeRunner,
+	goos string, pid int, harness string) error {
 	if goos != "darwin" {
 		return &jumpFailure{http.StatusNotImplemented,
 			"端末の前面化はこの OS では未対応です (現状 macOS のみ)"}
 	}
-	// 端末種別で前面化スクリプトを選ぶ。未対応端末は環境起因 = 501。
+	// 端末種別を確定させてからスクリプトを選ぶ (e-7261)。画面は一覧で配った
+	// harness をそのまま送ってくるので、**一覧側で導出していても**ここで再確定
+	// する: 古いタブ / API を直接叩く呼び出し元という別の入口が残っており、
+	// 片方だけ塞ぐと「どの経路から来たか」で挙動が割れる。
+	// プローブは **専用の継ぎ目** で呼ぶ。`run` (osascript / tty 用) を渡すと型が
+	// 合わないので、一覧経路とジャンプ経路で上限の有無が割れることが起きない
+	// (e-7266 — それが実際に起きていた)。
+	harness, probeRes := resolveHarnessWith(probe, pid, harness)
+
+	// **プローブの結果を捨てない** (e-7267)。
+	//
+	// 一覧の判定には process-unreadable を足したのに、押したときのこの経路では
+	// `harness, _ =` と結果を投げ捨てていた。その結果、プロセスが読めなかった
+	// (たとえば押す直前にそのセッションが閉じられた) ときにも
+	// 「この端末 () への前面化は未対応です」という **端末種別の話** が返っていた。
+	//
+	// 実測 (2026-11-03): 一覧に居た pid がその後終了していて、押したらこの文が
+	// 出た。一覧側で分けた区別が、人が実際に操作する経路で使われていない
+	// —— 「1 経路だけ塞いで構造を閉じたと言う」の、同じ日に 4 度目の再発。
+	if probeRes == probeUnreadable && !jumpableHarness(harness) {
+		return &jumpFailure{http.StatusNotFound, fmt.Sprintf(
+			"プロセス %d を読めませんでした (すでに終了した / 権限が無い / "+
+				"確認が時間内に終わらなかった)。少し待って一覧を読み直すと"+
+				"変わることがあります", pid)}
+	}
+	// 未対応端末は環境起因 = 501。
 	build, err := jumpScriptBuilder(harness)
 	if err != nil {
 		return &jumpFailure{http.StatusNotImplemented, err.Error()}

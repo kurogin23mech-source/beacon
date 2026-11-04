@@ -179,4 +179,36 @@ echo "[ci-strict-drift-guards] Skill 名の解析が 1 箇所だけであるこ�
 # ガードが firing するか否かが決まってはならない。標準ライブラリのみ (pytest 非依存)。
 python3 "$ROOT/scripts/check-single-skill-parser.py" --quiet
 
+echo "[ci-strict-drift-guards] 盤の既定と文面が一致しているか (ms-173 e-7265)…"
+# 真実源は Go の defaultIdleTimeout 1 つ。経緯と限界は本体の docstring に 1 箇所
+# (e-7266: 同じ散文が 2 箇所に在ると、理由が変わったとき片方だけ古くなる)。
+python3 "$ROOT/scripts/check-idle-default-claims.py" --strict
+
+echo "[ci-strict-drift-guards] Go の doc comment に gofmt 由来の崩れた引用符が無いこと (ms-173)…"
+# **`` で囲むと gofmt が黙って書き換える。** Go 1.19 以降の gofmt は doc comment を
+# 正規化し、``X`` を “X“ (開きと閉じが同じ字形の壊れた引用) に変換する。実測:
+#   // ``root`` matches. `single` matches.   → gofmt → // “root“ matches. `single` matches.
+# 書いた本人は ``X`` と打ったので気付かず、`X` で grep する次の人はその識別子に
+# 辿り着けない。独立保守性レビューが 4 ファイル 9 箇所を見つけ、履歴から ``X`` に
+# 戻したら gofmt が即座に戻した (= 履歴の形は安定しない) ところまで実測した。
+# 安定する形は 1 つだけ: 単一バックチック `X`。
+# 字形は**リテラルで埋める**。$'\u201c\|\u201d' と書くと、$'...' の中の \| が
+# 壊れてパターンが実質 "“|”" (BRE では縦棒そのもの) になり、**何にも一致せず緑のまま
+# 通る**。反転ハーネスで実測して気付いた (2026-11-03)。
+#
+# **他の worktree を見ない**。.worktrees/ には別ブランチの checkout が居るので、
+# 走査に入れると「今の木」でない字形で赤くなる (最初の版で実際に起きた)。
+_BAD_QUOTES=$(grep -rln '“\|”' --include='*.go' \
+  --exclude-dir='.git' --exclude-dir='.worktrees' --exclude-dir='node_modules' \
+  "$ROOT" 2>/dev/null || true)
+if [ -n "$_BAD_QUOTES" ]; then
+  echo "[go-doc-quotes] NG: Go の doc comment に “ / ” が在ります:" >&2
+  echo "$_BAD_QUOTES" | sed 's/^/  /' >&2
+  echo "  原因: ``X`` と書くと gofmt が “X“ に変換します (Go 1.19+ の doc comment 正規化)。" >&2
+  echo "  直し方: 単一バックチック \`X\` にしてください (gofmt はこの形を変えません)。" >&2
+  echo "  履歴の ``X`` に戻しても gofmt が再変換するので、戻すのではなく 1 本にします。" >&2
+  exit 1
+fi
+echo "[go-doc-quotes] OK: 崩れた引用符はありません (この緑は散文の正しさを主張しません — 字形だけを見ています)。"
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."

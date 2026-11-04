@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -43,11 +44,14 @@ func TestAppleTerminalJumpScript(t *testing.T) {
 	}
 }
 
-// 端末の種類の判定: 空 (不明) と Terminal 系は Terminal.app、他は未対応 (fallback)。
+// **表示名の fallback であって、判定ではない** (e-7266 でコメントを現契約に直した)。
+// terminalAppName は「見つかりませんでした」のメッセージに出す名前を返すだけで、
+// 飛べるかどうかは driverForHarness / jumpVerdict が決める。空 harness が
+// Terminal.app に **解決される** という意味ではない (e-7261 でその既定は外した)。
 // 端末種別テーブルが表示名を正しく引き、大文字/前後空白も吸収すること。
 func TestTerminalAppName(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"", "Terminal.app"},               // 不明は macOS 既定端末
+		{"", "Terminal.app"},               // 不明でも表示名は出す (解決はしない)
 		{"apple-terminal", "Terminal.app"}, // サーバの harness.kind 表記
 		{" Apple_Terminal ", "Terminal.app"},
 		{"iterm2", "iTerm2"},
@@ -73,10 +77,14 @@ func TestJumpScriptBuilder(t *testing.T) {
 	if err != nil || !strings.Contains(b("ttys000"), `application "iTerm2"`) {
 		t.Errorf("iterm2 が iTerm2 を狙っていない (err=%v)", err)
 	}
-	// 空 (種類不明) → 既定の Terminal.app。
-	b, err = jumpScriptBuilder("")
-	if err != nil || !strings.Contains(b("ttys000"), `application "Terminal"`) {
-		t.Errorf("空 harness が Terminal.app 既定になっていない (err=%v)", err)
+	// 空 / "terminal" (= どちらも「どの端末か分からない」) → 既定で埋めず断る
+	// (e-7261)。以前は Terminal.app を既定にしていたので、iTerm しか使っていない
+	// 機械で黙って外れ、「何も起きない」としか見えなかった。導出は
+	// resolveHarnessWith の仕事で、builder は与えられた種類だけを見る。
+	for _, unknown := range []string{"", "terminal"} {
+		if b, err := jumpScriptBuilder(unknown); err == nil || b != nil {
+			t.Errorf("harness %q を既定の端末で埋めている (不明は断ること)", unknown)
+		}
 	}
 	// 未対応 (kitty 等) → エラー (落とさず fallback の理由)。builder は nil。
 	if b, err := jumpScriptBuilder("kitty"); err == nil || b != nil {
@@ -124,7 +132,7 @@ func TestJumpableHarness(t *testing.T) {
 			t.Errorf("jumpableHarness(%q) = true, want false", h)
 		}
 	}
-	// 生の形は rawNames との完全一致でだけ受ける。kinds の汎用別名 ("" / "terminal") や
+	// 生の形は rawNames との完全一致でだけ受ける。不明値 ("" / "terminal") や
 	// 短縮形 ("iterm")、正典名 ("iterm2") に生の形から落ちてはならない — 未知の端末が
 	// 偶然その名で名乗ると既知端末に化ける (PR#820 独立 AX レビュー)。
 	for _, h := range []string{"terminal:", "terminal:terminal", "terminal:Terminal", "terminal:iterm", "terminal:iterm2", "terminal:apple-terminal"} {
@@ -266,7 +274,10 @@ func TestJumpVerdict(t *testing.T) {
 		why        string
 	}{
 		{"", false, 100, "apple-terminal", true, "", "このマシン・対応端末は飛べる"},
-		{"", false, 100, "", true, "", "harness 不明は Terminal.app 既定で飛べる"},
+		{"", false, 100, "", false, JumpBlockedUnsupportedTerminal,
+			"harness 不明は既定で埋めず unsupported-terminal (e-7261)"},
+		{"", false, 100, "terminal", false, JumpBlockedUnsupportedTerminal,
+			"名乗り側の下限値 terminal も「分からない」なので同じ扱い (e-7261)"},
 		{JumpBlockedExposed, false, 100, "apple-terminal", false, JumpBlockedExposed,
 			"環境 (公開中/非loopback) が最優先で塞ぐ"},
 		{JumpBlockedUnsupportedOS, true, 0, "kitty", false, JumpBlockedUnsupportedOS,
@@ -318,11 +329,14 @@ func TestJumpBlockedEnumClosed(t *testing.T) {
 	want := map[string]bool{
 		"exposed": true, "unsupported-os": true, "remote-machine": true,
 		"no-pid": true, "unsupported-terminal": true,
+		"background-session": true,
+		"process-unreadable": true,
+		"terminal-unnamed":   true,
 	}
-	got := []string{JumpBlockedExposed, JumpBlockedUnsupportedOS,
-		JumpBlockedRemoteMachine, JumpBlockedNoPID, JumpBlockedUnsupportedTerminal}
+	got := AllJumpBlockedReasons
 	if len(got) != len(want) {
-		t.Fatalf("enum の数が合わない: %d / %d", len(got), len(want))
+		t.Fatalf("enum の数が合わない: %d / %d — 理由を足したら "+
+			"AllJumpBlockedReasons と この表の両方に入れること", len(got), len(want))
 	}
 	for _, v := range got {
 		if !want[v] {
@@ -340,8 +354,7 @@ func TestJumpBlockedLiteralMatchesPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("page.html が読めない: %v", err)
 	}
-	for _, v := range []string{JumpBlockedExposed, JumpBlockedUnsupportedOS,
-		JumpBlockedRemoteMachine, JumpBlockedNoPID, JumpBlockedUnsupportedTerminal} {
+	for _, v := range AllJumpBlockedReasons {
 		needle := `"` + v + `"`
 		if !strings.Contains(string(page), needle) {
 			t.Errorf("page.html に %s が無い — Go 定数と画面の理由対応表"+
@@ -378,6 +391,18 @@ func TestApplyJumpVerdicts(t *testing.T) {
 
 // 失敗理由ごとに HTTP status が「入力を直しても無駄か」を伝えること。
 // 501 = 環境 (OS / 端末種別)、400 = 入力 (pid)、404 = 実体不在、500 = 実行失敗。
+// noProbe は「プローブは走らないはず」を表す実行器 (e-7266)。
+//
+// 下のケースはすべて harness を特定して渡すので、resolveHarnessWith は名乗りを
+// そのまま返してプローブに降りない。走ったら設計が変わった合図なので落とす。
+func noProbe(t *testing.T) probeRunner {
+	t.Helper()
+	return func(_ context.Context, name string, args ...string) ([]byte, error) {
+		t.Errorf("名乗りが特定済みなのにプローブが走った: %s %v", name, args)
+		return nil, errForTest("probe should not run")
+	}
+}
+
 func TestJumpToTerminalWithStatuses(t *testing.T) {
 	// 実行器 stub: ps は tty を返し、osascript は指定の結果を返す。
 	runner := func(psOut string, psErr error, osaOut string, osaErr error) commandRunner {
@@ -396,37 +421,37 @@ func TestJumpToTerminalWithStatuses(t *testing.T) {
 		return jf.Status
 	}
 	// 非 macOS は 501 (環境起因)。
-	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil),
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil), noProbe(t),
 		"linux", 100, "apple-terminal"); status(err) != 501 {
 		t.Errorf("非 macOS が 501 でない: %v", err)
 	}
 	// 未対応端末は 501 (環境起因)。
-	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil),
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil), noProbe(t),
 		"darwin", 100, "kitty"); status(err) != 501 {
 		t.Errorf("未対応端末が 501 でない: %v", err)
 	}
 	// pid 無効は 400 (入力起因)。
-	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil),
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true", nil), noProbe(t),
 		"darwin", 0, "apple-terminal"); status(err) != 400 {
 		t.Errorf("pid 無効が 400 でない: %v", err)
 	}
 	// プロセスが消えている (ps 失敗) は 404 (実体不在)。
-	if err := jumpToTerminalWith(runner("", errForTest("gone"), "true", nil),
+	if err := jumpToTerminalWith(runner("", errForTest("gone"), "true", nil), noProbe(t),
 		"darwin", 100, "apple-terminal"); status(err) != 404 {
 		t.Errorf("プロセス不在が 404 でない: %v", err)
 	}
 	// タブが見つからない (osascript が false) も 404。
-	if err := jumpToTerminalWith(runner("ttys000", nil, "false", nil),
+	if err := jumpToTerminalWith(runner("ttys000", nil, "false", nil), noProbe(t),
 		"darwin", 100, "apple-terminal"); status(err) != 404 {
 		t.Errorf("タブ不在が 404 でない: %v", err)
 	}
 	// osascript 実行失敗は 500。
-	if err := jumpToTerminalWith(runner("ttys000", nil, "", errForTest("boom")),
+	if err := jumpToTerminalWith(runner("ttys000", nil, "", errForTest("boom")), noProbe(t),
 		"darwin", 100, "apple-terminal"); status(err) != 500 {
 		t.Errorf("osascript 失敗が 500 でない: %v", err)
 	}
 	// 正常系はエラー無し。
-	if err := jumpToTerminalWith(runner("ttys000", nil, "true\n", nil),
+	if err := jumpToTerminalWith(runner("ttys000", nil, "true\n", nil), noProbe(t),
 		"darwin", 100, "apple-terminal"); err != nil {
 		t.Errorf("正常系でエラー: %v", err)
 	}
