@@ -189,36 +189,61 @@ def test_plain_dm_has_no_imperative_or_downgrade(tmp_path):
 
 
 def test_mixed_provenance_batch_names_each_channels_own_recovery(tmp_path):
-    """同じ理由で降格した 2 つの channel に、**それぞれの**直し方を出す。
+    """降格した 2 つの channel に、**それぞれの**直し方を出す。
 
     ms-185 / #812 レビュー。Codex 側の通知は理由ごとの **件数** で束ねる形なので、
-    以前は「署名欠落 N 件」に対して trek の世界観の固定文を 1 つ出すだけだった。
-    operation-trigger と trek-trigger が同じ受信に混ざると、**片方は必ず誤案内**
-    になる (operation 側には回復手段が在るのに「直りません」と言う)。
+    以前は「署名欠落 N 件」に対して 1 つの固定文を出すだけだった。回復手段が違う
+    channel が同じ受信に混ざると、**片方は必ず誤案内**になる (回復手段が在る側に
+    「直りません」と言う)。この状況は以前の実装では表現そのものが不可能だった =
+    回帰テストが置けない形だったので、channel を集めて 1 行ずつ案内する形に変えた。
 
-    この状況は以前の実装では表現そのものが不可能だった = 回帰テストが置けない形
-    だったので、channel を集めて 1 行ずつ案内する形に変えた。
+    ms-185 e-7071 で測り方を実態に合わせた。trek-* が引退済みの集合へ移った
+    (発行者が e-7070 で消えたため) ので、この 2 件は**同じ理由タグでは無くなった**
+    — operation-trigger は署名欠落、trek-trigger は引退済み。理由が違えば塊も
+    別々になるので、以前の「2 件を 1 つの塊で数える」は成立しない。
+
+    **守る契約は変わっていない**: 2 つの channel が同じ受信に混ざったとき、
+    それぞれが名指しされ、それぞれの回復手段が出ること (= 片方の文言がもう片方に
+    適用されないこと)。理由が分かれた今はむしろ誤案内の危険が高い (「古い opt-in を
+    外せ」と「承認の封筒を付けろ」は operator の取る行動が正反対) ので、
+    1 行ずつ出ていることをここで固定し続ける。
     """
     cwd = _setup(tmp_path,
                  auto_execute_channels=["operation-trigger", "trek-trigger"])
     _seed(cwd, _op_trigger_event(envelope=None))          # 承認の封筒が無い
-    _seed(cwd, _trek_trigger_event(envelope=None))        # サーバ署名が無い
+    _seed(cwd, _trek_trigger_event(envelope=None))        # 引退済み channel
     ctx = _run(cwd)
 
-    assert "安全側降格" in ctx
-    # 2 件とも降格している
-    assert "2 件" in ctx, "2 件の降格を 1 つの塊で数えていません。"
-    # それぞれの channel が名指しされ、その channel の回復手段が出ている
-    assert "channel=operation-trigger" in ctx
-    assert "channel=trek-trigger" in ctx
-    assert "beacon operation approve" in ctx, (
-        "operation-trigger 側の回復手段が出ていません = 片方が誤案内。"
+    # 理由が違うので塊も 2 つに分かれる (= 1 件 + 1 件)。
+    blocks = [b for b in ctx.split("⚠ 安全側降格:") if b.strip()][1:] \
+        if ctx.count("⚠ 安全側降格:") == 0 else \
+        ["⚠ 安全側降格:" + b for b in ctx.split("⚠ 安全側降格:")[1:]]
+    assert len(blocks) == 2, (
+        f"降格の塊が 2 つありません (理由ごとに分けていない): {len(blocks)}"
     )
-    assert "T1-system" in ctx, (
-        "trek-trigger 側がサーバ署名を要求している説明が出ていません。"
+    op_block = [b for b in blocks if "operation-trigger" in b]
+    retired_block = [b for b in blocks if "auto-execute remove" in b]
+    assert len(op_block) == 1, f"署名欠落の塊が 1 つではない: {blocks}"
+    assert len(retired_block) == 1, f"引退済みの塊が 1 つではない: {blocks}"
+
+    # それぞれの塊が、その channel の回復手段だけを出している
+    # (= 片方の文言がもう片方に適用されていない)。行動が正反対なので、
+    # 混ざると operator は必ず間違う。
+    assert "beacon operation approve" in op_block[0], (
+        "署名欠落の塊に回復手段 (承認の封筒を付ける) が出ていません。"
     )
-    # 案内は 2 行に分かれている (= 1 つの固定文に畳んでいない)
-    advice_lines = [ln for ln in ctx.splitlines() if ln.strip().startswith("- channel=")]
-    assert len(advice_lines) == 2, (
-        f"channel ごとの案内行が 2 行ありません: {advice_lines}"
+    assert "auto-execute remove" not in op_block[0], (
+        "署名欠落の塊に「古い opt-in を外せ」と案内しています = 誤案内。"
+        "この channel は現役なので、opt-in を外すのは直し方ではない。"
+    )
+    assert "operation approve" not in retired_block[0], (
+        "引退済みの塊に「承認すれば直る」と案内しています = 誤案内。"
+        "引退は operator の承認では直らない (発行者そのものが居ない)。"
+    )
+    # 署名欠落の側は channel を名指しする行で出る (回復手段が channel ごとに
+    # 違うため)。引退済みの側は全 channel で同じ助言なので固定文で足りる。
+    op_lines = [ln for ln in op_block[0].splitlines()
+                if ln.strip().startswith("- channel=")]
+    assert len(op_lines) == 1 and "operation-trigger" in op_lines[0], (
+        f"署名欠落の案内が channel を名指ししていません: {op_lines}"
     )

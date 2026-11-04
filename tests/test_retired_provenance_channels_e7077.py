@@ -262,10 +262,10 @@ class TestReasonTagIsConsumable:
 # **3 つだけ** で、``trek-trigger`` と ``trek-task-review`` は素通りだった。
 SATISFYING_ENVELOPES = {
     "operation-trigger": _OP,      # 人間が beacon operation approve で承認した T2
-    "trek-trigger": _T1,           # Trek スケジューラが発行したサーバ署名
-    "trek-progress-check": _T1,
-    "trek-task-review": _T1,
-    "trek-leader-digest": _T1,
+    # ms-185 e-7071: trek-* の 4 件を外した。発行者 (Trek スケジューラ) が e-7070 で
+    # 消えたので「満たせる封筒の見本」を書けなくなり、引退済みの集合へ移した。
+    # この表は現役のゲート集合と一致していなければならない (下のテストがそれを
+    # 測る) ので、片方だけ直すと赤くなる = 引退の片側忘れを捕まえる歯止め。
 }
 
 
