@@ -201,6 +201,12 @@ def login_web():
 
     # Step 3: Poll for approval
     print("Waiting for approval", end="", flush=True)
+    # 404 を返した回数と、一度でも「承認待ち」が返ったか。両方を持つのは、
+    # 締め切り後の報告で「どのインスタンスも知らなかった (= 本当に無効)」と
+    # 「知っている側は居たが承認が来なかった (= 人が承認していない)」を
+    # 区別するため。片方だけだと、同じ沈黙に 2 つの原因が畳まれる。
+    unknown_polls = 0
+    seen_pending = False
     deadline = time.time() + 300
     while time.time() < deadline:
         time.sleep(3)
@@ -211,6 +217,8 @@ def login_web():
                 poll_url, timeout=10, context=_get_ssl_context()
             ) as resp:
                 result = json.loads(resp.read())
+            if result.get("status") == "pending":
+                seen_pending = True
             if result.get("status") == "approved":
                 print(" approved!")
                 # Save id_token (and refresh_token if provided by the server)
@@ -241,11 +249,43 @@ def login_web():
                 print("\nCode expired. Run 'beacon auth login' again.")
                 sys.exit(1)
             if e.code == 404:
-                print("\nInvalid code.")
-                sys.exit(1)
+                # **404 は致命的ではない。** サーバの pairing コード表
+                # (routers_auth の _cli_pending) はプロセス内メモリで、しかも
+                # router インスタンスごとのローカル辞書。コードを発行した
+                # インスタンスと、この問い合わせに答えたインスタンスが違えば、
+                # 答えた側はコードを知らないので 404 を返す —— それは
+                # 「コードが無効」ではなく「相手が知らない」。
+                #
+                # 以前はここで即 exit していたため、**承認する時間が構造的に
+                # 無かった**: 問い合わせは 3 秒間隔で、数回のうちに必ず別
+                # インスタンスへ振られるので、ブラウザでサインインを終える前に
+                # 「Invalid code.」で死ぬ。2026-11-04 に 3 回連続で再現し、
+                # 利用者の操作では回避できないと実測した (1 回目の問い合わせは
+                # 通り、2 回目で 404 = 振り分けと一致)。
+                #
+                # 締め切りまで問い合わせ続け、承認を受け取ったインスタンスに
+                # 当たった時点で成立させる。本当に無効なコードはここを
+                # 抜けて下の「一度も見つからなかった」で報告する (黙って
+                # タイムアウトさせない —— 原因が分からないまま待たされるのが
+                # 一番たちが悪い)。
+                #
+                # 本来の直しはサーバ側でコード表を共有ストアに置くこと。
+                # ここは、それが入るまで利用者がログインできる状態を保つための
+                # 受け皿。
+                unknown_polls += 1
+                continue
         except Exception:
             pass
 
+    if unknown_polls and not seen_pending:
+        print("\nInvalid code (a server instance never recognised it).")
+        print("  発行したコードを、どのインスタンスも知らないまま締め切りを"
+              "迎えました。")
+        print("  `beacon auth login` をやり直してください。続くなら、"
+              "pairing コード表が")
+        print("  インスタンス間で共有されていない疑いがあります "
+              "(server/routers_auth.py の _cli_pending)。")
+        sys.exit(1)
     print("\nTimeout. Run 'beacon auth login' again.")
     sys.exit(1)
 
