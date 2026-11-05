@@ -641,8 +641,13 @@ def test_empty_round_stays_silent(hook_module, tmp_path, monkeypatch, capsys):
 # autonomously without asking the user first" — for Skills that e-7069
 # deleted. Two independent reviewers of PR #827 raised that as the same high
 # finding, so the behaviour was replaced, not merely deleted: the event is
-# still disclosed (the producers are live until e-7070), but no command is
-# named and no autonomy is claimed.
+# still disclosed, but no command is named and no autonomy is claimed.
+#
+# ms-185 e-7071: when these tests were written the producers were live, and the
+# note above said "until e-7070". e-7070 has since deleted them, so what the
+# block now covers is data written before the fold that is still in flight, or
+# a writer outside this repository using the channel name. The disclosure is
+# kept for exactly that — see ``_format_trek_retired_block``.
 #
 # The invariants the old tests were right about are kept below (empty input →
 # empty block, every event surfaces, the id is sanitised, the block sits above
@@ -650,7 +655,7 @@ def test_empty_round_stays_silent(hook_module, tmp_path, monkeypatch, capsys):
 
 
 def test_retired_block_discloses_the_event(hook_module):
-    """The event is still surfaced — silence would hide that producers run."""
+    """The event is still surfaced — a silent drop would hide its arrival."""
     out = hook_module._format_trek_retired_block(
         [_trek_progress_check_event()])
     assert "引退した作業空間" in out

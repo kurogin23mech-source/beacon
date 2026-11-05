@@ -858,10 +858,23 @@ def _format_trek_retired_block(events: list[dict]) -> str:
     ended in a launch line naming one of the four Trek Skills, plus the line
     "Run this autonomously without asking the user first". Those Skills no
     longer exist: e-7069 deleted all four of them from every place they were
-    installed. The producers, however, are still live — the server
-    tick calls ``_run_trek_tick`` unconditionally (server/app.py) and the
-    review endpoint still emits ``trek-task-review`` — so events on these
-    channels can still arrive until the body is removed in e-7070.
+    installed.
+
+    **ms-185 e-7071 — there is no producer left.** When this was written the
+    producers were live and the note said so. They are not any more: e-7070
+    deleted the server-side aggregation (``_run_trek_tick`` no longer exists as
+    a function anywhere) and nothing in this repository writes the four channel
+    names (measured — the only occurrences are this retirement set and
+    ``lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS``). An event can therefore
+    reach this block only as (a) data written before the fold that is still
+    in flight on some project's bus, or (b) a writer outside this repository
+    using the channel name.
+
+    That is why the block stays rather than being deleted with its producers:
+    data outlives code, and the allowlists that let such an event through live
+    in every project's own record, which we cannot reach. Same reasoning as
+    ``RETIRED_PROVENANCE_CHANNELS`` — retire the channel, keep the net, so
+    stale data stays fail-closed instead of silently becoming sufficient.
 
     An inject that commands a command that cannot resolve is worse than no
     inject: the receiving session was being told to act autonomously, without
@@ -887,9 +900,10 @@ def _format_trek_retired_block(events: list[dict]) -> str:
         "存在しません** (ms-185 e-7069)。起動すべきコマンドはありません。"
     )
     lines.append(
-        "自律実行してはいけません。この通知は「まだ産出側が動いている」 "
-        "ことを隠さないために出しているだけで、受け手に求める action は "
-        "ありません (産出側の停止は e-7070)。"
+        "自律実行してはいけません。産出側は既に止まっています "
+        "(ms-185 e-7070 で削除)。この通知は、畳んだ後に届いた event を "
+        "隠さないために出しているだけで、受け手に求める action は "
+        "ありません。"
     )
     lines.append("")
     for ev in events:
@@ -902,8 +916,10 @@ def _format_trek_retired_block(events: list[dict]) -> str:
         lines.append(f"  - trek_id: {trek_id}")
     lines.append("")
     lines.append(
-        "この通知が続く場合は、産出側 (server の定期発火と review endpoint) が "
-        "まだ event を出しています。止めるのは e-7070 の範囲です。"
+        "この通知が続く場合、出所はこのリポジトリの中ではありません "
+        "(産出側は削除済み)。畳む前に書かれて滞留している event か、"
+        "外部の書き手が同じ channel 名を使っています。前者は滞留が尽きれば "
+        "止まり、後者は送信元を調べてください。"
     )
     lines.append("")
     return "\n".join(lines)

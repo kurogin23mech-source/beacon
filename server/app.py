@@ -2856,14 +2856,19 @@ class SystemTickRequest(BaseModel):
 
     **Not trek-only — do not delete this with Trek (ms-185 e-7065 review,
     raised independently by both the AX and the maintainability judge).**
-    This model is the body of the one entry point that drives three things:
+    This model is the body of the one entry point that drives production
+    autonomy. Today that is two things, both target-agnostic:
 
       1. **Operation firing** (= recurring operational work) and
       2. **deadline reminders** (ms-139 e-4953) — both via the
          target-agnostic ``lib/tick_scheduler`` seam, which has nothing to
-         do with Trek and must survive ms-185, and
-      3. the **Trek aggregation** (``_run_trek_tick``) — the part ms-185
-         folds away.
+         do with Trek and must survive ms-185.
+
+    A third item used to sit here — the Trek aggregation (``_run_trek_tick``) —
+    and ms-185 e-7070 deleted it. It is named in the past tense on purpose: an
+    enumeration written in the present tense is read as the current contents
+    even when a correction follows further down, which is how a folded
+    mechanism keeps being described as live.
 
     The previous name said "trek" while the endpoint had already been
     re-addressed to the trek-neutral path, so an AI folding Trek could grep
@@ -2962,16 +2967,16 @@ def _require_scheduler_key(request) -> None:
 def _run_system_tick(body) -> dict:
     """定期発火を 1 回走らせる (ms-185 e-7065)。
 
-    この関数が**本番の自律の全駆動**である。中身は 2 つ:
+    この関数が**本番の自律の全駆動**である。中身は 1 つ:
 
-      1. **Trek の集約** (``_run_trek_tick``) — 畳む対象 (ms-185)。
-      2. **ターゲットに依存しない定期発火** (``_fire_due_scheduled``) —
-         Operation の発火と締切リマインド。``lib/tick_scheduler`` の
-         「対象を問わない周期発火」の部品に載っており、Trek とは無関係に残る。
+      **ターゲットに依存しない定期発火** (``_fire_due_scheduled``) —
+      Operation の発火と締切リマインド。``lib/tick_scheduler`` の
+      「対象を問わない周期発火」の部品に載っており、Trek とは無関係に残る。
 
-    2 を 1 の中から取り出したのがこの分離の目的。Trek を畳むときに 2 を一緒に
-    落とさないよう、住所を Trek 非依存にしてある (入口も
-    ``POST /api/system/tick``)。
+    かつてはここに **Trek の集約** (``_run_trek_tick``) が同居しており、上の 1 つを
+    その中から取り出したのがこの分離の目的だった。ms-185 e-7070 で Trek の集約は
+    削除済みで、残っているのは取り出した側だけである。住所も Trek 非依存にしてある
+    (入口は ``POST /api/system/tick``)。
     """
     now = _scheduler_now()
     # ms-66 fix: bind now_iso UNCONDITIONALLY here. It is read below by
