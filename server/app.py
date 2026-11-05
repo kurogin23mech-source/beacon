@@ -1552,7 +1552,8 @@ def require_envelope_for_action(action_name: str):
 # ms-109 e-3699 (fable B-2): opportunity/account narrow a sales Trek scope, the
 # same way milestone/operation/task narrow a dev one. Both models carry the full
 # occupation-agnostic vocabulary; the endpoints copy whichever keys are present
-# via trek_mod.NARROWING_KEYS rather than naming them one by one.
+# via trek_mod.NARROWING_KEYS rather than naming them one by one (trek_mod was
+# removed in ms-185 e-7070; this note records how the body used to resolve them).
 
 
 # ms-99 / e-2830 — Trek slot schema v2 body models. Slot-specific verbs

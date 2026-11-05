@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# e-1391 (ms-66) — 本番の定期ティック駆動 (Trek/Operation 自律発火のドライバ)。
+# e-1391 (ms-66) — 本番の定期ティック駆動 (Operation の発火と締切リマインドの
+# ドライバ。Trek の集約も駆動していたが ms-185 e-7070 で削除済み)。
 #
 # Cloud Run 廃止 → VPS 移行 (ms-102/ms-96) の際、Cloud Scheduler が叩いていた
 # tick endpoint を叩く駆動が消失し、Operation/Trek の server-side 自律が本番で
@@ -9,7 +10,8 @@
 # ローカルの uvicorn (127.0.0.1:8000) の tick endpoint を 1 回叩く。
 #
 # tick endpoint は lib/tick_scheduler 経由で due な Operation と締切リマインドを
-# 発火し、あわせて Trek の集約も走らせる (= 単一 endpoint が server-side 自律の
+# 発火する (かつては同じ endpoint が Trek の集約も走らせていた。= 単一 endpoint が
+# server-side 自律の
 # 全駆動)。したがってこの 1 本の timer ですべてが駆動される。
 #
 # ms-185 e-7065 — 既定の入口を `POST /api/system/tick` に変えた。以前は
