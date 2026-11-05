@@ -78,23 +78,91 @@ def test_ci_flip_is_noop_by_default(monkeypatch):
     assert called["n"] == 0
 
 
-def test_ci_flip_attempts_gh_when_enabled(monkeypatch):
-    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+SHA = "abc123sha"
+
+
+def _stub_subprocess(monkeypatch, local_head=SHA):
+    """``git rev-parse HEAD`` を決め打ちし、呼ばれた argv を集める。"""
     calls = []
 
     class R:
-        stdout = "abc123sha\n"
         returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout=""):
+            self.stdout = stdout
 
     def rec(argv, *a, **k):
         calls.append(argv)
-        return R()
+        if "rev-parse" in argv:
+            return R(local_head + "\n")
+        return R("")
 
     monkeypatch.setattr(commands.subprocess, "run", rec)
-    commands._ci_flip_review_gate_success("42")
-    # first call resolves the head sha, second invokes the gate script set.
-    assert any("headRefOid" in " ".join(c) for c in calls)
-    assert any("review-gate-ci.py" in " ".join(c) and "success" in c for c in calls)
+    return calls
+
+
+def _all_types_done_at(monkeypatch, sha):
+    """「全必須種別が この sha に対して実施済み」を導出側に見せる。
+
+    台帳ファイルを置くのではなく **導出の口** を差し替える。印を押す条件が
+    「その sha に対して全必須種別が充足している」であることを測りたいので、
+    台帳の読み方ではなく条件そのものに焦点を合わせる (ms-119 e-6859)。
+    """
+    import review_spine
+    types = review_spine.required_pr_open_review_types()
+
+    def fake(pr_number, pr_repo="", *, head_sha=None):
+        owed = [] if head_sha == sha else list(types)
+        return {"owed": owed, "satisfied": types if not owed else [],
+                "legacy_no_sha": [], "unpinned": [], "stale": [], "skipped": [],
+                "head_sha": head_sha or "", "head_known": bool(head_sha),
+                "resolved": bool(head_sha), "provenance": [], "required": types}
+
+    monkeypatch.setattr(commands, "pr_review_obligations", fake)
+
+
+def test_ci_flip_pushes_the_mark_to_the_reviewed_sha(monkeypatch):
+    """印は **レビューした差分** に押す (ms-119 e-6859)。
+
+    以前は「いまの PR head」に押していたので、別種別が古い sha しか見ていなくても
+    1 つの ``review done`` が今の head を緑にできた (PR #785 の事故)。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    _all_types_done_at(monkeypatch, SHA)
+    calls = _stub_subprocess(monkeypatch)
+    commands._ci_flip_review_gate_success("42", "o/r", SHA)
+    pushes = [c for c in calls
+              if "review-gate-ci.py" in " ".join(c) and "success" in c]
+    assert pushes, f"印を押していない: {calls}"
+    assert SHA in pushes[0], f"レビューした sha に押していない: {pushes[0]}"
+
+
+def test_ci_flip_refuses_without_a_reviewed_sha(monkeypatch, capsys):
+    """どの差分に対する実施か pin できていないなら押さない。
+
+    押すと「judge が見ていない差分」を緑にする。印は sha 単位なので、
+    pin できない状態の success は構造的に嘘になる。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    calls = _stub_subprocess(monkeypatch)
+    commands._ci_flip_review_gate_success("42", "o/r", "")
+    assert not any("review-gate-ci.py" in " ".join(c) for c in calls), calls
+    assert "pin できていません" in capsys.readouterr().err
+
+
+def test_ci_flip_refuses_while_another_type_is_still_owed(monkeypatch, capsys):
+    """**全必須種別が同じ差分に対して** 実施されるまで緑にしない。
+
+    1 種別の実施で緑を押せてしまう形が PR #785 の事故だった (AX が古い sha しか
+    見ていないのに、保守性の ``review done`` が今の head を success にした)。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    _all_types_done_at(monkeypatch, "some-other-sha")   # この sha では未充足
+    calls = _stub_subprocess(monkeypatch)
+    commands._ci_flip_review_gate_success("42", "o/r", SHA)
+    assert not any("review-gate-ci.py" in " ".join(c) for c in calls), calls
+    assert "未実施です" in capsys.readouterr().err
 
 
 # --- activation plan builders (ms-160 e-5805) ------------------------------

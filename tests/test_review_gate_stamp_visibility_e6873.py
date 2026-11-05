@@ -29,6 +29,26 @@ commit があるとそれは古い sha なので、印はそこに付く。commi
 ----------------------
 押す / 押さない のどの経路でも **必ず何か言う**こと。とくに手元の HEAD が push されて
 いないときは **押さずに断る** こと (古い sha に印を付ける方が、押さないより始末が悪い)。
+
+ms-119 e-6859 で **どこが言うか** が変わった (言う義務は変わらない)
+-------------------------------------------------------------------
+関門が「現在の差分に対して全種別が実施済みか」を問うようになったので、
+「この PR のいまの head sha」を聞く場所が ``_ci_flip_review_gate_success`` の中から
+``cmd_review_done`` の先頭 (= 何も書く前、``resolve_pr_head`` 経由) へ上がった。
+印を押す側は **レビューした sha を受け取る** 形になった。
+
+そのため e-6873 の 6 つの保証は 2 箇所に分かれて住む。**どれも消していない**:
+
+  1. 押せた sha を言う                    → flip (受け取った sha)
+  2. 未 push の HEAD は押さずに断る        → flip (手元 HEAD と照合)
+  3. env が無いときも黙らない              → flip
+  4. script が失敗したら回復手順を出す      → flip
+  5. head が取れないことを言う              → ``cmd_review_done`` (pin できなかったと言う)
+                                            + flip (pin 無しでは押さないと言う)
+  6. sha の問い合わせが落ちたことを言う     → 同上 (5 と同じ経路)
+
+5 / 6 がこの file で **両方の口を測る** のが要点 —— 上流が黙れば利用者は印が
+押されていないことに気づけず、下流が黙れば「なぜ押されなかったか」が分からない。
 """
 
 from __future__ import annotations
@@ -43,20 +63,42 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
 
 
+def _all_types_done_at(monkeypatch, sha):
+    """「全必須種別が この sha に対して実施済み」を導出側に見せる (ms-119 e-6859)。
+
+    印を押す条件に「その sha に対して全種別が充足している」が加わったので、
+    この file の主題 (= 押す / 断るときに何を言うか) に到達させるために必要。
+    """
+    import review_spine
+    types_ = review_spine.required_pr_open_review_types()
+
+    def fake(pr_number, pr_repo="", *, head_sha=None):
+        owed = [] if head_sha == sha else list(types_)
+        return {"owed": owed, "satisfied": [] if owed else types_,
+                "legacy_no_sha": [], "unpinned": [], "stale": [], "skipped": [],
+                "head_sha": head_sha or "", "head_known": bool(head_sha),
+                "resolved": bool(head_sha), "provenance": [], "required": types_}
+
+    monkeypatch.setattr(commands, "pr_review_obligations", fake)
+
+
 def _run_flip(monkeypatch, capsys, *, env_on=True, remote_sha="aaaa111",
               local_sha="aaaa111", script_rc=0, raise_on=None):
     """``_ci_flip_review_gate_success`` を、外部コマンドを差し替えて走らせる。
 
-    実際に gh / git / GitHub を叩かずに 4 経路を作れるようにする (この試験の対象は
+    実際に gh / git / GitHub を叩かずに各経路を作れるようにする (この試験の対象は
     「何を出力するか」であって、外部コマンドの挙動ではない)。
+
+    ms-119 e-6859: ``remote_sha`` は **レビューした sha として渡される** 値。
+    以前は flip 自身が ``gh pr view`` で取っていたが、いまは ``cmd_review_done``
+    が先に解決して渡す (``remote_sha=""`` で「pin できなかった」経路になる)。
     """
     monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1" if env_on else "0")
+    _all_types_done_at(monkeypatch, remote_sha)
 
     def fake_run(argv, **kw):
         if raise_on and raise_on in " ".join(argv):
             raise OSError("boom")
-        if argv[:2] == ["gh", "pr"]:
-            return types.SimpleNamespace(stdout=remote_sha, stderr="", returncode=0)
         if argv[:2] == ["git", "rev-parse"]:
             return types.SimpleNamespace(stdout=local_sha, stderr="", returncode=0)
         # scripts/review-gate-ci.py
@@ -65,7 +107,39 @@ def _run_flip(monkeypatch, capsys, *, env_on=True, remote_sha="aaaa111",
             returncode=script_rc)
 
     monkeypatch.setattr(commands.subprocess, "run", fake_run)
-    commands._ci_flip_review_gate_success("786")
+    commands._ci_flip_review_gate_success("786", "o/r", remote_sha)
+    cap = capsys.readouterr()
+    return cap.out + cap.err
+
+
+def _run_done_with_unresolvable_head(monkeypatch, capsys, *, gh_error):
+    """``cmd_review_done`` を、head を解決できない状態で走らせる (ms-119 e-6859)。
+
+    5 / 6 の保証 (head が取れない / 問い合わせが落ちた) はここが上流の口。
+    """
+    import commands_shared as cs
+    monkeypatch.setattr(cs, "resolve_pr_head",
+                        lambda pr, repo="": ("", "", gh_error))
+    monkeypatch.setattr(commands, "resolve_pr_head",
+                        lambda pr, repo="": ("", "", gh_error))
+    monkeypatch.setattr(commands, "_pending_review_types_for_pr",
+                        lambda pr, repo="": ["ax"])
+    monkeypatch.setattr(commands, "_clear_review_due_for_pr",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "_record_review_adjudication_decision",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "record_review_done_across_worktrees",
+                        lambda *a, **k: cs.RECORDED_SHARED)
+    monkeypatch.setattr(commands, "_read_review_done_ledger", lambda: {})
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "786")
+    monkeypatch.setenv("BEACON_PR_REPO", "o/r")
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
+    monkeypatch.delenv("BEACON_REVIEWED_SHA", raising=False)
+    try:
+        commands.cmd_review_done()
+    except SystemExit:
+        pass
     cap = capsys.readouterr()
     return cap.out + cap.err
 
@@ -110,15 +184,38 @@ def test_a_failing_stamp_script_is_reported_with_a_recovery_command(monkeypatch,
     assert "--sha aaaa111" in out, "手で押すコマンドを出していない:\n" + out
 
 
-def test_a_missing_remote_head_is_reported(monkeypatch, capsys):
+def test_a_missing_remote_head_is_reported_upstream(monkeypatch, capsys):
+    """head が取れないことを **上流 (review done)** が言うこと (保証 5)。
+
+    ms-119 e-6859 で問い合わせの場所が上がったので、口もそこに移った。
+    上流が黙ると、利用者は印が押されていないことに気づけない。
+    """
+    out = _run_done_with_unresolvable_head(
+        monkeypatch, capsys, gh_error="gh の応答に headRefOid がありません")
+    assert "pin できませんでした" in out, out
+    assert "headRefOid" in out, "取れなかった理由を伝えていない:\n" + out
+    assert "--reviewed-sha" in out, "回復の手段を出していない:\n" + out
+
+
+def test_the_sha_lookup_blowing_up_is_reported_upstream(monkeypatch, capsys):
+    """sha の問い合わせが落ちたことを言うこと (保証 6)。"""
+    out = _run_done_with_unresolvable_head(
+        monkeypatch, capsys, gh_error="OSError: boom")
+    assert "pin できませんでした" in out and "boom" in out, out
+
+
+def test_the_stamp_refuses_and_says_so_when_no_sha_was_pinned(monkeypatch, capsys):
+    """下流 (印を押す側) も、pin が無いときは押さない旨を言うこと (保証 5 の下流)。
+
+    上流と下流で片方しか言わないと、「押されていない」か「なぜ押されていないか」の
+    どちらかが欠ける。
+    """
     out = _run_flip(monkeypatch, capsys, remote_sha="")
-    assert "押せませんでした" in out and "head" in out, out
-
-
-def test_the_sha_lookup_blowing_up_is_reported(monkeypatch, capsys):
-    out = _run_flip(monkeypatch, capsys, raise_on="gh pr")
-    assert "押せませんでした" in out, out
-    assert "review-gate-ci.py" in out, "回復経路を出していない:\n" + out
+    assert "押していません" in out and "pin できていません" in out, out
+    # 下流も **自分の口で** 出口を言うこと。ここで `review-gate-ci.py --sha ...` を
+    # 案内しても sha が無いので押せない (= 嘘の回復経路)。正しい出口は
+    # 「head を確かめられる環境で打ち直す」か `--reviewed-sha` の明示。
+    assert "--reviewed-sha" in out, "回復経路を出していない:\n" + out
 
 
 def test_no_path_through_the_stamp_is_silent(monkeypatch, capsys):

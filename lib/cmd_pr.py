@@ -67,7 +67,12 @@ from commands_shared import (  # noqa: F401
     _check_ms_status_for_write,
     _clear_pr_open_review_triggers,
     _fire_pr_open_review_triggers,
+    # ms-119 e-6859: 関門は `pr_review_obligations` (導出) を読む。
+    # `_pending_review_types_for_pr` はナッジ表示の面なので関門では使わない
+    # (その docstring がどちらの面か名乗っている)。
     _pending_review_types_for_pr,
+    pr_review_obligations,
+    format_pr_review_obligation_disclosure,
     _resolve_session_id,
     load_project,
     save_project,
@@ -84,32 +89,109 @@ def _pr_number_from_url(url: str) -> str:
 
 def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> None:
     """Refuse ``action`` (approve / merge) while independent reviews are still
-    owed for this PR, unless BEACON_PR_REVIEW_OVERRIDE=1 (which proceeds but
-    prints an audit line). Exits 2 on block. ms-119 e-4060.
+    owed for **the current diff** of this PR, unless BEACON_PR_REVIEW_OVERRIDE=1
+    (which proceeds but prints an audit line). Exits 2 on block. ms-119 e-4060.
+
+    ms-119 e-6859 — 判定を **導出** に替えた。以前はレビュー未実施トリガーの
+    ファイルが在るかで判定していたので、``beacon review done`` が消した後は
+    どれだけコミットを積んでも「実施済み」のままだった (= 削除と復活の状態遷移で
+    義務を表していた。復活させる経路が無かった)。実測 PR #785 / #834 / #835 /
+    #836 で、judge が一度も見ていない差分に対して関門が緑になり、#835 では
+    **AX の findings を直したコミット自身が未レビュー** のまま帳簿上レビュー済み
+    だった。いまは:
+
+        owed = registry の pr-open 必須種別
+             − 「いまの head sha に対する実施記録」
+             − 「理由付きの免除 (review-skips.jsonl)」
+
+    なので head が動いた瞬間に全種別が owed に戻る (忘れる経路が構造的に無い)。
+
+    **head を確かめられなければ関門は閉じたまま** (2026-11-05 user 決定)。
+    「現在の差分に対して実施済み」と言えない状態で通すと偽の緑になり、緑の
+    ガードは信頼されるので無ガードより悪い。offline / gh 不在のときは merge に
+    一手 (override か skip) 増えるが、それは意図した代償。
 
     ``pr_repo`` (ms-166 e-6971): which repository this number belongs to, so a
     review recorded for a DIFFERENT repository's PR#N does not lift this PR's
     gate. Pass it from the entry being gated (``_recorded_pr_repo(entry)``) —
     the gate reads the same identity the record carries.
     """
-    pending = _pending_review_types_for_pr(pr_number, pr_repo)
-    if not pending:
+    ob = pr_review_obligations(pr_number, pr_repo)
+
+    # merge / close 済みの PR に、これから課す義務は無い。open でない PR の
+    # approve/merge を独立レビューの名前で止めると、本当の理由 (もう解決済み) を
+    # 隠すことになる。
+    if ob.get("pr_state") in ("MERGED", "CLOSED"):
         return
-    if os.environ.get("BEACON_PR_REVIEW_OVERRIDE") == "1":
+
+    disclosure = format_pr_review_obligation_disclosure(ob)
+    override = os.environ.get("BEACON_PR_REVIEW_OVERRIDE") == "1"
+
+    if not ob.get("resolved"):
+        # head が不明 = 「現在の差分に対して実施済み」と言えない。止める側に倒す。
+        msg = (
+            f"Error: PR #{pr_number} の head を確かめられないため {action} "
+            f"できません ({ob.get('head_error') or '理由不明'})。\n"
+            f"  ms-119 e-6859: 独立レビューの関門は「**現在の差分** に対して全種別が"
+            f"実施済みか」を問います。head が分からないと、台帳に在る実施記録が"
+            f"いまの差分に対するものか判定できません —— 判定できないまま通すと"
+            f"「レビュー済み」と表示しながら judge が見ていない差分を取り込む"
+            f"ことになります (PR #785 で実際に起きた形)。\n"
+            f"  復帰: gh の認証とリポジトリ指定を確認してください "
+            f"(`gh pr view {pr_number}" + (f" --repo {pr_repo}" if pr_repo else "") + "`)。\n"
+            f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
+            f"(監査痕跡が残ります)。"
+        )
+        if override:
+            print(f"⚠ PR #{pr_number} の head を確かめられないまま {action} します "
+                  f"({ob.get('head_error') or '理由不明'}) — この {action} は "
+                  f"override であり監査対象です。現在の差分がレビュー済みである"
+                  f"保証はありません。", file=sys.stderr)
+            return
+        print(msg, file=sys.stderr)
+        sys.exit(2)
+
+    pending = ob.get("owed") or []
+    if not pending:
+        # 通すが、**何を根拠に差し引いたか** は必ず言う。台帳はローカルのファイルで
+        # 手で書けるので、防げるのは「黙って外れること」だけ (ms-166 e-6899)。
+        if disclosure:
+            print(f"ℹ PR #{pr_number} の独立レビューは現在の head "
+                  f"({(ob.get('head_sha') or '')[:12]}) に対して充足しています:",
+                  file=sys.stderr)
+            for line in disclosure:
+                print(line, file=sys.stderr)
+        return
+
+    if override:
         print(f"⚠ 独立レビュー未実施のまま PR #{pr_number} を {action} します "
               f"(未実施: {', '.join(pending)}) — この {action} は override であり "
               f"監査対象です。", file=sys.stderr)
+        for line in disclosure:
+            print(line, file=sys.stderr)
         return
+
     runs = "\n".join(
         f"    /beacon-review-run --type {t} --pr {pr_number}" for t in pending)
+    stale = ob.get("stale") or []
+    why = ""
+    if stale:
+        # 「一度やったのにまた赤い」の理由を先に言う (= 利用者が壊れたと誤解しない)。
+        why = (f"\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"
+               f"積まれた** ため再度要ります (実施はいまの head "
+               f"{(ob.get('head_sha') or '')[:12]} ではなく別の sha に対するもの)。"
+               f"修正コミットこそ欠陥を作ることが実測されているので、ここは"
+               f"省けません (ms-119 e-6859)。")
     print(
         f"Error: PR #{pr_number} は独立レビューが未実施のため {action} できません "
-        f"(未実施: {', '.join(pending)})。\n"
-        f"  ms-119 e-4060: レビューは PR-open の節目で発火し、実行するまで "
-        f"approve/merge を構造的に塞ぎます (発火だけで消費されない穴の是正)。\n"
+        f"(未実施: {', '.join(pending)})。{why}\n"
+        f"  ms-119 e-4060 / e-6859: レビューは PR-open の節目で発火し、"
+        f"**現在の差分に対して** 実施するまで approve/merge を構造的に塞ぎます。\n"
         f"  文脈ゼロの独立 judge に原典+差分を渡して実行:\n{runs}\n"
         f"  実行後は `beacon review done --type <type> --pr {pr_number}` で解消 "
         f"(/beacon-review-run が最後に自動で叩きます)。\n"
+        f"  不要と判断したなら理由付きで免除: "
+        f"`beacon review skip --type <type> --pr {pr_number} --reason \"...\"`。\n"
         f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
         f"(監査痕跡が残ります)。",
         file=sys.stderr)

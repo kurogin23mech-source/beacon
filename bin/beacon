@@ -498,7 +498,7 @@ case "${1:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind="" _rd_sha=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
@@ -519,6 +519,12 @@ case "${1:-}" in
                         # 「書き忘れた」が記録上まったく同じだった。省略を許さず、
                         # 0 件ならそう宣言してもらう (値を取らない旗)。
                         --no-findings)          _rd_nofind="1";                                shift ;;
+                        # ms-119 e-6859: **どの差分に対する実施か** を明示する。
+                        # 既定は gh に聞いた「いまの PR head」。judge に渡した
+                        # bundle が古い head のものだったときに、正直にその sha を
+                        # 記録できるようにするための上書き口 (関門はこの sha と
+                        # いまの head を突き合わせるので、嘘を書くと通らない)。
+                        --reviewed-sha)         _need_flag_value "$#" "$1"; _rd_sha="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
                         # ms-166 e-6918: 位置引数を黙って捨てない。done だけ
                         # `*) shift ;;` で捨てており `beacon review done ms-166` が
@@ -539,6 +545,7 @@ case "${1:-}" in
                     BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
                     BEACON_REVIEW_NO_FINDINGS="$_rd_nofind" \
+                    BEACON_REVIEWED_SHA="$_rd_sha" \
                     python3 "$COMMANDS_PY" review_done ;;
             skip)
                 shift 2

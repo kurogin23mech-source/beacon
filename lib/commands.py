@@ -495,6 +495,14 @@ from commands_shared import (  # noqa: F401
     _clear_pr_open_review_triggers,
     _pending_review_types_for_pr,
     _pr_open_reviewed_marker_path,
+    # ms-119 e-6859: 関門は導出 (必須種別 − 現 head の実施 − 理由付き免除) を読む。
+    # 免除ログの住所 (_review_skips_log_path) は書き手 (review skip) と
+    # 読み手 (read_pr_review_skips) の両方が参照するので commands_shared が持つ。
+    _review_skips_log_path,
+    pr_review_obligations,
+    read_pr_review_skips,
+    resolve_pr_head,
+    format_pr_review_obligation_disclosure,
     RECORDED_CWD_ONLY,
     RECORDED_SHARED,
     REF_KIND_PR,
@@ -3654,15 +3662,6 @@ def cmd_save():
 # resolve via commands.py's cmd_trigger re-import at top.
 # ---------------------------------------------------------------------------
 
-def _review_skips_log_path() -> str:
-    """Durable append-only audit of human-intended review skips (ms-119 e-4124).
-
-    Lives in .beacon/ (not the ephemeral triggers/ dir) so a waiver survives the
-    trigger that it cleared — the skip decision is a permanent governance record,
-    the trigger is a transient 'still owed' marker."""
-    return os.path.join(os.path.dirname(get_project_file()), "review-skips.jsonl")
-
-
 def _review_skip_gate_record() -> dict:
     """Capture HOW a review skip passed the human-intent guard (ms-119 e-4124).
 
@@ -3783,8 +3782,10 @@ def _remove_binding_from_target_review_due(target_id: str, review_type: str) -> 
     return True
 
 
-def _ci_flip_review_gate_success(pr_number: str) -> None:
-    """``beacon-review-gate`` の印を PR head に success で押す (ms-119 e-4073)。
+def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
+                                 reviewed_sha: str = "") -> None:
+    """``beacon-review-gate`` の印を **レビューした sha に** success で押す
+    (ms-119 e-4073 / e-6859)。
 
     **押せたか押せなかったかを必ず出力する** (ms-166 e-6873)。旧実装は
     「best-effort、never raises」で 3 つの経路すべてが無言だった:
@@ -3809,6 +3810,16 @@ def _ci_flip_review_gate_success(pr_number: str) -> None:
     そこで **押す前に「GitHub が知っている head」と「手元の HEAD」を照合する**。
     食い違っていたら押さずに断り、先に push することを促す (印を古い sha に付けて
     しまう方が、押さないより始末が悪い)。
+
+    ms-119 e-6859 で **2 つ変えた**:
+
+    1. 押す先は ``reviewed_sha`` (= この実施が pin した差分) にする。以前は
+       「いまの PR head」に押していたので、別種別が古い sha しか見ていなくても、
+       1 つの ``review done`` が今の head を緑にできた (PR #785 の事故)。
+    2. 押す条件は「トリガーファイルが残っていない」ではなく
+       **「その sha に対して全必須種別が充足している」** にする。前者は
+       削除の有無しか見ないので、「この差分をまだ誰も見ていない」状態と区別が
+       付かなかった。
     """
     if os.environ.get("BEACON_REVIEW_GATE_CI", "") != "1":
         print("  (ゲートの印は触っていません: BEACON_REVIEW_GATE_CI=1 が無いため。"
@@ -3818,31 +3829,36 @@ def _ci_flip_review_gate_success(pr_number: str) -> None:
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "scripts", "review-gate-ci.py")
+
+    reviewed_sha = str(reviewed_sha or "").strip()
+    if not reviewed_sha:
+        print(f"  ⚠ ゲートの印は押していません — この実施がどの差分に対するものか "
+              f"pin できていません (head を確かめられなかった)。印は sha 単位なので、"
+              f"pin できない状態で押すと「judge が見ていない差分」を緑にします "
+              f"(ms-119 e-6859)。出口は 2 つ: head を確かめられる環境で "
+              f"`beacon review done` を打ち直すか、`--reviewed-sha <sha>` で"
+              f"レビューした差分を明示してください "
+              f"(sha が無いままこの印を手で押す経路は **ありません** —— "
+              f"印は sha 単位なので、押す先が決まらないからです)。",
+              file=sys.stderr)
+        return
+
     try:
-        remote_sha = subprocess.run(
-            ["gh", "pr", "view", pr_number, "--json", "headRefOid",
-             "--jq", ".headRefOid"],
-            capture_output=True, text=True, timeout=30).stdout.strip()
         local_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=30).stdout.strip()
     except (OSError, subprocess.SubprocessError) as e:
-        print(f"  ⚠ ゲートの印を押せませんでした (sha を取得できない: {e})。"
-              f"手で押す: python3 {script} set --state success "
-              f"--sha <push 済の head> --pr {pr_number}", file=sys.stderr)
+        print(f"  ⚠ 手元の HEAD を取得できませんでした ({e})。照合できないため"
+              f"印は押していません。手で押す: python3 {script} set --state success "
+              f"--sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
         return
 
-    if not remote_sha:
-        print(f"  ⚠ ゲートの印を押せませんでした (GitHub から PR #{pr_number} の head を"
-              f"取得できない)。gh の設定とリポジトリを確認してください。", file=sys.stderr)
-        return
-
-    if local_sha and local_sha != remote_sha:
+    if local_sha and local_sha != reviewed_sha:
         # ここが e-6873 の本体。押さずに断る。
         print(
             f"  ⚠ ゲートの印は押していません — 手元の HEAD が push されていません。\n"
             f"      手元:   {local_sha[:12]}\n"
-            f"      GitHub: {remote_sha[:12]} (= いまの PR head)\n"
+            f"      GitHub: {reviewed_sha[:12]} (= いまの PR head / レビューした差分)\n"
             f"    このまま押すと **GitHub 側の古い sha に** 印が付きます。印は sha 単位な\n"
             f"    ので、その後 push した head は pending のまま残り「レビューはやったのに\n"
             f"    取り込めない」状態になります (2026-10-06 に PR #786 で実際に起きた)。\n"
@@ -3853,22 +3869,31 @@ def _ci_flip_review_gate_success(pr_number: str) -> None:
             file=sys.stderr)
         return
 
+    # **その sha に対して全必須種別が充足しているか** を見る。1 種別の実施で
+    # 緑を押せてしまう形が PR #785 の事故だった (ms-119 e-6859)。
+    _ob = pr_review_obligations(pr_number, pr_repo, head_sha=reviewed_sha)
+    if _ob.get("owed"):
+        print(f"  (ゲートの印はまだ押していません: {reviewed_sha[:12]} に対して "
+              f"{', '.join(_ob['owed'])} が未実施です。全必須種別が **同じ差分に"
+              f"対して** 実施されてから緑になります)", file=sys.stderr)
+        return
+
     try:
         r = subprocess.run(["python3", script, "set", "--state", "success",
-                            "--sha", remote_sha, "--pr", pr_number],
+                            "--sha", reviewed_sha, "--pr", pr_number],
                            capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"  ⚠ ゲートの印を押せませんでした ({e})。手で押す: python3 {script} "
-              f"set --state success --sha {remote_sha} --pr {pr_number}", file=sys.stderr)
+              f"set --state success --sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
         return
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip().splitlines()
         print(f"  ⚠ ゲートの印を押せませんでした "
               f"({detail[-1] if detail else f'exit {r.returncode}'})。"
               f"手で押す: python3 {script} set --state success "
-              f"--sha {remote_sha} --pr {pr_number}", file=sys.stderr)
+              f"--sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
         return
-    print(f"  ✓ ゲートの印を success に押しました ({remote_sha[:12]})")
+    print(f"  ✓ ゲートの印を success に押しました ({reviewed_sha[:12]})")
 
 
 def cmd_review_skip():
@@ -3972,6 +3997,14 @@ def cmd_review_skip():
         # 別リポジトリの同じ番号の免除と区別できない (監査記録として辿れない)。
         # 明示が無ければ cwd のリポジトリを解決し、取れなければ空文字 = 「不明」。
         record["repo"] = pr_repo or _resolve_review_pr_repo("", [])
+        # ms-119 e-6859: **いつの時点の免除か**。免除は sha 単位にしない (人間が
+        # 理由付きで出した判断を push ごとに出し直させるのは現実的でない) ので、
+        # 以後の差分も覆う。だからこそ「どの差分を見てこの判断を出したのか」を
+        # 残し、関門が緑を出すときに開示する —— 覆う範囲が広い判断ほど、いつの
+        # ものかが読めないと監査できない。取れなければ空 = 不明 (推測で埋めない)。
+        _skip_sha, _unused_state, _unused_err = resolve_pr_head(
+            pr_number, record["repo"])
+        record["skipped_at_sha"] = _skip_sha
 
     # Durable audit first (the record must survive even if trigger clearing
     # races); then clear ONLY this type's review-due obligation.
@@ -4369,6 +4402,17 @@ def cmd_review_done():
     # 「全て実施済み — gate を通過できます」と、別リポジトリの PR には成り立たない
     # ことを言ってしまう (実機で踏んだ: 誤った --repo を渡すと、この PR 番号の
     # 記録が 2 件とも依然 block されているのに「通過できます」と出た)。
+    # ms-119 e-6859: **どの差分に対する実施か** を、何も書く前に確かめる。
+    # 関門は「現在の差分に対して全種別が実施済みか」を問うので、この sha が
+    # 記録の本体になる。明示の --reviewed-sha が在ればそれを使う (judge に
+    # 渡した bundle が古い head のものだった、と正直に記録できるようにする)。
+    _reviewed_sha = os.environ.get("BEACON_REVIEWED_SHA", "").strip()
+    _sha_error = ""
+    if _reviewed_sha:
+        _sha_source = "explicit"
+    else:
+        _reviewed_sha, _pr_state, _sha_error = resolve_pr_head(pr_number, pr_repo)
+        _sha_source = "gh"
     _owed_before = _pending_review_types_for_pr(pr_number, pr_repo)
     # 「既に台帳に在るか」も **この実行が書く前に** 見る。後で見ると、この実行自身の
     # 記録で必ず真になり、下の「義務が無かったので非 0 で終える」分岐が死ぬ
@@ -4391,10 +4435,25 @@ def cmd_review_done():
     # トリガーファイルを消した **後** で、かつ remaining を数える **前**。
     # fork で打ったときに親からも実施済みとして見えるようにするのが目的。
     _ledger_state = record_review_done_across_worktrees(
-        review_type, pr_number, pr_repo)
+        review_type, pr_number, pr_repo, reviewed_sha=_reviewed_sha)
     remaining = _pending_review_types_for_pr(pr_number, pr_repo)
     print(f"レビュー実施を記録: {review_type} / "
           f"{pr_repo + '#' if pr_repo else 'PR #'}{pr_number} (review-due 解消)")
+    # ms-119 e-6859: **どの差分に対する実施として記録したか** を必ず言う。
+    # ここを黙ると、利用者は「PR をレビューした」と読み、関門が後で同じ種別を
+    # もう一度要求したときに壊れたと誤解する。
+    if _reviewed_sha:
+        _src_txt = ("--reviewed-sha で明示" if _sha_source == "explicit"
+                    else "いまの PR head")
+        print(f"  対象の差分: {_reviewed_sha[:12]} ({_src_txt})。"
+              f"この sha に対する実施として記録しました — 以後コミットを積むと"
+              f"この種別は再度要ります (ms-119 e-6859)。")
+    else:
+        print(f"  ⚠ どの差分に対する実施かを pin できませんでした "
+              f"({_sha_error or '理由不明'})。この記録は監査には残りますが、"
+              f"**関門は差し引きません** (「現在の差分をレビューした」と言えない"
+              f"ため)。gh の認証とリポジトリ指定を直して打ち直すか、"
+              f"`--reviewed-sha <sha>` で明示してください。", file=sys.stderr)
     if not pr_repo:
         print("  ⚠ どのリポジトリの PR かを記録できませんでした — この記録からは"
               "「どの差分に対する実施か」を辿れません。`--repo <owner/name>` を"
@@ -4411,9 +4470,21 @@ def cmd_review_done():
         print("  ⚠ 共有置き場 (git の共通ディレクトリ) が取れなかったので、この "
               "cwd 限りの記録です — fork / 親の別の作業フォルダからは未実施に"
               "見えます。", file=sys.stderr)
+    # ms-119 e-6859: **関門が実際に何を要求しているか** は導出側が答える。
+    # `remaining` (= トリガーファイルの残り) は「ナッジがまだ出るか」であって
+    # 関門ではないので、この 2 つを別の名前で持ち、別の文として出す。
+    # 旧実装は `remaining` が空になった時点で「gate を通過できます」と言っていた
+    # ので、他の種別が **古い sha しか見ていない** 場合でも通過を名乗った。
+    _gate = pr_review_obligations(pr_number, pr_repo, head_sha=_reviewed_sha)
+    _gate_owed = _gate.get("owed") or []
     if remaining:
-        print(f"  残りの未実施レビュー: {', '.join(remaining)}")
-    else:
+        print(f"  残りの未実施レビュー (ナッジ): {', '.join(remaining)}")
+    if _gate_owed:
+        print(f"  関門がまだ要求している種別 ({(_reviewed_sha or '?')[:12]} に対して): "
+              f"{', '.join(_gate_owed)}")
+        for _line in format_pr_review_obligation_disclosure(_gate):
+            print(_line)
+    if not remaining:
         # All reviews for this PR have run — stamp a done-marker so the tick
         # anchor does NOT re-fire review-due for this (now review-less) PR.
         try:
@@ -4425,8 +4496,19 @@ def cmd_review_done():
             pass
         _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
         if _owed_before:
-            print(f"  {_where} の独立レビューは全て実施済み "
-                  f"— approve/merge の gate を通過できます。")
+            # ms-119 e-6859: 「gate を通過できます」は **導出が空のときだけ**。
+            # ナッジが消えたことと関門が開いたことは別の事実で、以前これを
+            # 同一視していたために、judge が見ていない差分に対して通過を
+            # 名乗っていた (PR #785 / #835)。
+            if _gate_owed:
+                print(f"  ⚠ {_where} のナッジは消えましたが、**関門はまだ開いて"
+                      f"いません** — {(_reviewed_sha or '?')[:12]} に対して "
+                      f"{', '.join(_gate_owed)} が未実施です。", file=sys.stderr)
+            else:
+                print(f"  {_where} の独立レビューは全て "
+                      f"{(_reviewed_sha or '?')[:12]} に対して実施済み "
+                      f"— approve/merge の gate を通過できます "
+                      f"(この sha の上にコミットを積むと再度要ります)。")
         else:
             # 元から義務が無かった = この (リポジトリ, 番号) に review-due が
             # 発火していない。**「全て実施済み」と言ってはいけない** —— 同じ番号の
@@ -4454,7 +4536,7 @@ def cmd_review_done():
         # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by
         # BEACON_REVIEW_GATE_CI=1 + a resolvable head SHA so default behavior and
         # tests are unchanged; best-effort (a failed gh post never breaks `done`).
-        _ci_flip_review_gate_success(pr_number)
+        _ci_flip_review_gate_success(pr_number, pr_repo, _reviewed_sha)
 
 
 
@@ -7267,7 +7349,7 @@ def _help_registry():
         # `beacon review done --help` が「`beacon review --help` を見よ」と案内し、
         # その `review --help` は context の 1 行しか出さない **閉じたループ** に
         # なっていた (案内に従うと情報が無い場所に着く)。
-        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings)", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
+        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings) [--reviewed-sha <sha>]", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。記録は **どの差分に対する実施か** を持つ — 既定は gh に聞いた「いまの PR head」で、`--reviewed-sha` で明示できる。実施後にコミットを積むとその種別は再度「要る」側に戻る (ms-119 e-6859: 以前は PR 単位だったので、judge が見ていない差分に対して関門が緑になった)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
         {"command": "beacon review skip --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason <text>", "flags": ["--json"], "description": "人間が意図的にレビューを省く一級経路。--reason 必須で監査ログ (.beacon/review-skips.jsonl) に理由を残す (ms-119 e-4124)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac-verdict <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac-verdict を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},

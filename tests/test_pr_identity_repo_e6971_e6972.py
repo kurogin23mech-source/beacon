@@ -50,7 +50,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import cmd_pr  # noqa: E402
-import commands_shared as cs  # noqa: E402
+import commands_shared as cs
+import _gh_head_stub  # noqa: E402
 import core  # noqa: E402
 
 
@@ -891,9 +892,36 @@ def test_the_subtraction_headline_does_not_blame_only_worktrees(
         "原因として名乗っている:\n" + headline)
 
 
-def _run_review_done(tmp_path, monkeypatch, *, pr, repo, triggers_seed):
-    """`cmd_review_done` を隔離して走らせ、``(stdout, stderr)`` を返す。"""
+def _run_review_done(tmp_path, monkeypatch, *, pr, repo, triggers_seed,
+                     head_sha="feedfacecafe0000", seed_other_types_done=False):
+    """`cmd_review_done` を隔離して走らせ、``(stdout, stderr)`` を返す。
+
+    ms-119 e-6859: 実施の記録は **どの差分に対する実施か** を持つので、
+    ``cmd_review_done`` は gh に head sha を聞く。この module の主題は
+    **身元 (どのリポジトリの PR か)** なので、head は決め打ちで差し替えて
+    主題を変えずに通す。``head_sha=None`` を渡すと「head を確かめられない」
+    状態 (= 関門が閉じたままになる形) を測れる。
+    """
     import commands
+    if head_sha is not None:
+        _gh_head_stub.install(monkeypatch, {pr: head_sha})
+    if seed_other_types_done and head_sha:
+        # ms-119 e-6859: 関門は **必須種別すべてが同じ差分に対して** 実施済みかを
+        # 問う。この試験が測りたいのは「最後の義務を解消したら、そう名乗る」側な
+        # ので、ax 以外の必須種別は同じ head に対して実施済みとして置いておく
+        # (そうしないと測りたい分岐に到達しない)。
+        import review_spine
+        _led = tmp_path / "ledger"
+        _led.mkdir(exist_ok=True)
+        for _t in review_spine.required_pr_open_review_types():
+            if _t == "ax":
+                continue
+            (_led / f"pr-{pr}-{_t}.json").write_text(json.dumps({
+                "ref": pr, "ref_kind": "pr", "pr": pr, "pr_repo": repo,
+                "review_type": _t, "reviewed_sha": head_sha, "sha_pinned": True,
+                "recorded_by": "seed", "recorded_at": "2026-11-05T00:00:00Z",
+                "recorded_in_cwd": str(tmp_path), "shared": True,
+            }, ensure_ascii=False), encoding="utf-8")
     triggers = tmp_path / "triggers"
     triggers.mkdir(exist_ok=True)
     for rtype, trepo in triggers_seed:
@@ -958,11 +986,14 @@ def test_review_done_does_claim_gate_passage_when_it_really_cleared_the_last_one
     """効く側も測る (でないと報告を丸ごと消しても緑になる)。"""
     out, err, code = _run_review_done(
         tmp_path, monkeypatch, pr="3", repo="o/r",
-        triggers_seed=[("ax", "o/r")])
+        triggers_seed=[("ax", "o/r")], seed_other_types_done=True)
     combined = out + err
     assert code is None, f"最後の義務を解消したのに exit={code}"
-    assert "o/r#3 の独立レビューは全て実施済み" in combined, combined
+    assert "o/r#3 の独立レビューは全て" in combined, combined
     assert "gate を通過できます" in combined, combined
+    # ms-119 e-6859: 名乗りが **どの差分に対して** かを言っていること。
+    # 「PR をレビューした」と読める文面に戻ると、この課題が直した穴が戻る。
+    assert "feedfacecafe" in combined, combined
 
 
 # --- 9. 不変条件は「主張」でなく「コード」で閉じる (独立保守性レビュー high 2 件) ---
@@ -1305,8 +1336,9 @@ def test_an_idempotent_re_run_still_exits_zero(tmp_path, monkeypatch):
     """
     out, err, code = _run_review_done(tmp_path, monkeypatch, pr="3",
                                       repo="o/r",
-                                      triggers_seed=[("ax", "o/r")])
-    assert "全て実施済み" in (out + err)
+                                      triggers_seed=[("ax", "o/r")],
+                                      seed_other_types_done=True)
+    assert "独立レビューは全て" in (out + err)
     assert code is None, code
     # 2 回目: 義務は無いが台帳に記録が在る → 0 で終わる (冪等)
     out2, err2, code2 = _run_review_done(tmp_path, monkeypatch, pr="3",
