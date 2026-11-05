@@ -125,6 +125,24 @@ def _run_pr_approve(data, *, entry_id="e-400", rationale="LGTM",
     cmd_pr.load_project = lambda: data
     cmd_pr.save_project = lambda d: captured.__setitem__("saved", d)
 
+    # ms-119 e-6859: `beacon pr approve` は独立レビューの関門を通る。関門は
+    # 「必須種別すべてが **現在の head に対して** 実施済みか」を導出で問うように
+    # なったので、何も用意しない fixture では止まる (= 以前は「トリガーが 1 つも
+    # 無い」ことを「義務が無い」と読んでいたので素通りしていた)。
+    #
+    # この file の主題は **approve 時のタスク自動完了** であって関門ではないので、
+    # 関門は充足している状態に差し替えて主題まで到達させる。関門そのものの挙動は
+    # tests/test_review_merge_gate.py が pin している (そちらを消してもここが
+    # 緑のままになるが、それは責務分界どおり —— 関門の試験をこちらに重ねると、
+    # どちらが関門の正典かが読めなくなる)。
+    orig_ob = cmd_pr.pr_review_obligations
+    cmd_pr.pr_review_obligations = lambda pr_number, pr_repo="", **kw: {
+        "owed": [], "resolved": True, "head_sha": "stub-head",
+        "pr_state": "OPEN", "satisfied": [], "legacy_no_sha": [],
+        "unpinned": [], "stale": [], "skipped": [], "provenance": [],
+        "required": [],
+    }
+
     env_backup = {
         k: os.environ.get(k)
         for k in ("BEACON_ENTRY_ID", "BEACON_RATIONALE",
@@ -147,6 +165,7 @@ def _run_pr_approve(data, *, entry_id="e-400", rationale="LGTM",
     finally:
         cmd_pr.load_project = orig_load
         cmd_pr.save_project = orig_save
+        cmd_pr.pr_review_obligations = orig_ob
         for k, v in env_backup.items():
             if v is None:
                 os.environ.pop(k, None)

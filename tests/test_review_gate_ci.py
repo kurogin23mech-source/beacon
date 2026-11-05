@@ -138,6 +138,29 @@ def test_ci_flip_pushes_the_mark_to_the_reviewed_sha(monkeypatch):
     assert SHA in pushes[0], f"レビューした sha に押していない: {pushes[0]}"
 
 
+def test_ci_flip_targets_the_reviewed_sha_not_the_local_head(monkeypatch, capsys):
+    """押す先は **レビューした sha**。手元 HEAD を流用しないこと。
+
+    **反転ハーネスが捕まえた偽の緑** (2026-11-05): 上の試験は stub の手元 HEAD と
+    レビューした sha を同じ値にしていたので、``--sha reviewed_sha`` を
+    ``--sha local_sha`` に書き換えても通った = 2 つを区別していなかった。
+
+    区別が出るのは ``git rev-parse HEAD`` が **空を返す** とき (commit が 1 つも
+    無いリポジトリ等。非 0 終了でも例外は飛ばないのでここに到達する)。手元 HEAD を
+    流用していると空の sha に押しに行く。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    _all_types_done_at(monkeypatch, SHA)
+    calls = _stub_subprocess(monkeypatch, local_head="")
+    commands._ci_flip_review_gate_success("42", "o/r", SHA)
+    pushes = [c for c in calls
+              if "review-gate-ci.py" in " ".join(c) and "success" in c]
+    assert pushes, f"印を押していない: {calls}"
+    i = pushes[0].index("--sha")
+    assert pushes[0][i + 1] == SHA, (
+        f"手元 HEAD (空) を押す先に流用した: {pushes[0]}")
+
+
 def test_ci_flip_refuses_without_a_reviewed_sha(monkeypatch, capsys):
     """どの差分に対する実施か pin できていないなら押さない。
 

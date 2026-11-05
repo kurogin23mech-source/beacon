@@ -103,6 +103,26 @@ def test_a_new_record_that_failed_to_pin_is_NOT_credited():
     assert [u["review"] for u in ob["unpinned"]] == ["ax"]
 
 
+def test_an_unpinned_record_is_not_credited_EVEN_IF_its_sha_matches_head():
+    """``sha_pinned: False`` を名乗る記録は、sha が head と一致していても信用しない。
+
+    **反転ハーネスが捕まえた偽の緑** (2026-11-05): 上の
+    ``test_a_new_record_that_failed_to_pin_is_NOT_credited`` は sha 空の記録しか
+    見ていなかったので、``sha_pinned is False`` の枝を丸ごと消しても
+    「sha が空」の枝が代わりに拾って緑のままだった = その枝を守っていなかった。
+
+    枝が本当に効くのは **sha を持ちながら pin していないと名乗る記録** のとき。
+    いまの書き口はこの組み合わせを作らない (``sha_pinned = bool(reviewed_sha)``) が、
+    台帳はローカルのファイルなので手書き / 破損で在りうる。名乗りと中身が食い違う
+    記録は信用しない側に倒す。
+    """
+    ob = _derive([{"review_type": "ax", "reviewed_sha": HEAD, "sha_pinned": False}],
+                 head=HEAD)
+    assert ob["satisfied"] == [], "pin していないと名乗る記録を差し引いた"
+    assert "ax" in ob["owed"]
+    assert [u["review"] for u in ob["unpinned"]] == ["ax"]
+
+
 def test_a_record_claiming_to_be_pinned_with_an_empty_sha_is_not_trusted():
     """名乗りと中身が食い違う記録は信用しない側に倒す。"""
     ob = _derive([{"review_type": "ax", "reviewed_sha": "", "sha_pinned": True}])
