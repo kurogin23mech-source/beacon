@@ -480,19 +480,25 @@ TREK_RETIRED_CHANNELS = _TREK_SCHEDULER_CHANNELS
 # only a disclosure that names no command, so nothing on these channels forces
 # an invoke today. The provenance gate below is NOT dead with them — it decides
 # whether an event keeps ``auto-execute`` at all, which still matters for the
-# operation channels. The reasoning, unchanged: such instructions are only safe
-# when the triggering event was minted
-# by the Beacon server itself during a scheduler / operation tick (= a
-# T1-system envelope, ``issuer == "beacon-system"``). A project editor can post
-# an ``auto-execute`` event on these channels, but they can NOT forge a valid
-# T1-system envelope: the server verify-on-post (server/app.py post_bus_event)
+# operation channels. The reasoning, unchanged in shape: such instructions are
+# only safe when the triggering event carries the proof of human authority ITS
+# channel demands (``bus_delivery.PROVENANCE_REQUIREMENTS``) — for
+# ``operation-trigger`` that is the T2 envelope the human minted at ``beacon
+# operation approve`` for that op_id. A project editor can post an
+# ``auto-execute`` event on these channels, but they can NOT forge a valid
+# envelope: the server verify-on-post (server/app.py post_bus_event)
 # degrades any envelope whose signature/issuer fails to T5, which strips
-# auto-execute before the event is persisted. So requiring T1-system provenance
+# auto-execute before the event is persisted. So requiring the proof
 # on the *persisted* envelope composes with the server's verify to become a real
-# gate, not mere defense-in-depth. Non-system events on these channels are
+# gate, not mere defense-in-depth.
+#
+# ms-185 e-7078: the proof used to be a server-minted ``T1-system`` envelope
+# (``issuer == "beacon-system"``). Trek was its only issuer, so that tier, its
+# mint endpoint and its predicate were all removed together; what remains is the
+# per-channel map above. Non-system events on these channels are
 # downgraded to propose-to-ai (same treatment as an allowlist miss) so a forced
 # Skill invoke with an attacker-controlled id is structurally impossible.
-# ms-160 e-5803: the T1-system provenance constants + gate AND the auto-execute
+# ms-160 e-5803: the provenance constants + gate AND the auto-execute
 # downgrade decision moved to lib/bus_delivery.py (SYSTEM_PROVENANCE_CHANNELS /
 # has_required_provenance / classify_auto_execute) so the Codex inbox hook shares
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
@@ -1287,7 +1293,7 @@ def main() -> None:
     downgraded_audit: list[dict] = []
     for ev in unread:
         # ms-160 e-5803: the auto-execute downgrade decision (allowlist miss +
-        # T1-system provenance gate) is now shared with the Codex inbox hook via
+        # per-channel provenance gate) is now shared with the Codex inbox hook via
         # lib/bus_delivery.classify_auto_execute.
         delivery, downgraded_from, downgrade_reason = _classify_delivery(
             ev, allowlist)

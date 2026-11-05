@@ -252,10 +252,31 @@ def test_non_dm_broadcast_cross_user_passes(wired):
 
 
 def test_operation_envelope_cross_user_passes(wired):
-    """T1-system (Trek scheduler) / T2 (Operation) envelopes are pre-approved."""
-    env = {"tier": "T1-system", "issuer": "beacon-system", "actions_authorized": []}
+    """T2 (Operation) envelopes are pre-approved.
+
+    ms-185 e-7078 / e-7323: この carve-out は以前 T1-system (= Trek スケジューラ
+    のサーバ署名) と T2 の 2 つを受けていた。T1-system は発行できる者が Trek と
+    一緒に 0 になったので tier ごと落とし、ここも T2 だけにした (満たし手の無い
+    値を列挙に残すと、その経路が生きていると誤読させる)。
+    """
+    env = {"tier": "T2", "issuer": "alice@example.com", "actions_authorized": []}
     resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob", envelope=env)
     assert resp.status_code == 200, resp.text
+
+
+def test_the_retired_server_signature_is_no_longer_a_carve_out(wired):
+    """消えた tier を名乗る封筒が carve-out として通らない (e-7078)。
+
+    「T1-system を列挙から外した」ことを、宣言ではなく**振る舞い**で測る。
+    carve-out に残っていればここが 200 で緑になるので、列挙を戻すと赤くなる。
+    """
+    env = {"tier": "T1-system", "issuer": "beacon-system",
+           "actions_authorized": []}
+    resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob",
+                 envelope=env)
+    assert resp.status_code != 200, (
+        "発行者が 0 になった tier が、いまも事前承認済みとして cross-user を "
+        "通している — carve-out の列挙に残っている疑い")
 
 
 # ---------------------------------------------------------------------------

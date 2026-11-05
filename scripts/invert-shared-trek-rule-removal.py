@@ -28,16 +28,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 GATE = ROOT / "server" / "dm_gate.py"
 APP = ROOT / "server" / "app.py"
 CONSENT = ROOT / "lib" / "dm_consent.py"
-# e-7069 (独立保守性レビューの medium): 同じ「共有作業部屋の参加者か」判定が
-# 正本 (lib/trek.py) と CLI 側 (lib/cmd_bus.py) の 2 箇所にあり、突き合わせる
-# 検査を足して両側を別々に壊して測っていた。
-#
-# ms-185 e-7070: 正本が消えて**実装が 1 本になった**ので、突き合わせる相手が
-# 無い。正本の本番呼び出し元は ``/api/system/trek-internal-send`` 1 箇所だけで、
-# その経路ごと落ちたため正本は呼び出し元ゼロになった。残る CLI 側は送信予算の
-# 迂回判定がまだ使っているので、**そちら単独を壊す測定は続ける** (下の 2 件)。
-# ズレの測定ではなく「CLI 側が緩む方へ転ばないか」の測定に意味が移った。
-CMD_BUS = ROOT / "lib" / "cmd_bus.py"
+# ms-185 e-7080 / e-7321: ここに CMD_BUS (= lib/cmd_bus.py) を変異対象として
+# 持っていた。送信予算の迂回判定を判定ごと撤去したので当て先が無くなり、
+# 変異 2 件と一緒に落とした。CMD_BUS_TEST は baseline の一員として残す
+# (予算ゲート本体の試験はいまも在り、壊れていないことを毎周確認する)。
+# ms-185 e-7078: 規則 0 の削除は dm_gate だけでなく tier 自体 (envelope) と
+# 送信側 carve-out (app) にも跨るので、3 ファイルを変異対象に持つ。
+ENVELOPE = ROOT / "server" / "envelope.py"
 
 GATE_TEST = "tests/test_dm_gate.py"
 AUDIT_TEST = "tests/test_audit_log_no_trek_bypass_e7068.py"
@@ -53,8 +50,18 @@ ALIGN_TEST = "tests/test_dm_consent_skill_alignment_e6349.py"
 # dm_gate の不在検査 1 件は tests/test_dm_gate.py へ移設してある。
 # CLI 側を壊す 2 件は、緩む方へ転んだことを CLI 側自身の試験で受ける。
 CMD_BUS_TEST = "tests/test_bus_budget.py"
+ENVELOPE_TEST = "tests/test_envelope.py"
+# 鍵を消すと「本番で未設定なら起動を拒む」起動時ガードが成立しなくなる。
+# 鍵の生存を測るなら、起動ガード (tests/test_scheduler_key_startup.py) ではなく
+# **残った唯一の消費者** を当て先にする。起動ガードは env 変数を操作して
+# 「本番で未設定なら起動を拒む」を測るので、鍵を取る関数が消えても赤くならない
+# (実測: 鍵を消しても 12 passed)。ティック endpoint の試験は鍵で認証するため
+# 6 件が赤くなる。鍵を残す理由そのもの (= 本番のティック駆動) を測る形。
+SCHEDULER_KEY_TEST = ("tests/test_system_tick_entrypoint_e7065.py"
+                      "::test_new_entrypoint_requires_the_internal_key")
 BASELINE = [GATE_TEST, AUDIT_TEST, CONSENT_TEST, BACKSTOP_TEST, ALIGN_TEST,
-            CMD_BUS_TEST]
+            CMD_BUS_TEST, ENVELOPE_TEST,
+            "tests/test_system_tick_entrypoint_e7065.py"]
 
 
 # --- 戻す方向 (= 規則の復活) ------------------------------------------------
@@ -114,8 +121,14 @@ def gate_keeps_a_vestigial_param(src: str) -> str:
 
 
 def gate_keeps_the_session_grain_params(src: str) -> str:
-    """session id の引数だけ残す (= 共有 Trek の session 粒度判定の残骸)。"""
-    anchor = "    envelope_issuer: str = \"\",\n"
+    """session id の引数だけ残す (= 共有 Trek の session 粒度判定の残骸)。
+
+    ms-185 e-7078: 当て先は ``envelope_issuer`` 行だった。その引数は規則 0 と
+    一緒に消えたので、**署名の最後の引数行へ張り替えた**。アンカーが外れると
+    この変異は SKIP になり、ハーネスは「SKIP は緑と同じ害」と言いながら通って
+    しまう — 削除作業で anchor を消したら、同じ変更で張り替える。
+    """
+    anchor = "    actions_authorized: Iterable[str] | None,\n"
     assert anchor in src, "anchor not found (gate_keeps_the_session_grain_params)"
     return src.replace(
         anchor,
@@ -182,12 +195,82 @@ def consent_mixes_retired_into_the_live_map(src: str) -> str:
 
 # --- 消しすぎる方向 (= 一緒に消してはいけない権限) --------------------------
 
-def gate_drops_the_server_signature_authority(src: str) -> str:
-    """サーバ自身の署名による通過を一緒に消す (= 本番の自律発火が止まる)。"""
-    anchor = '''    if envelope_tier == "T1-system" and envelope_issuer == "beacon-system":
-        return (False, GATE_REASON_T1_SYSTEM)'''
-    assert anchor in src, "anchor not found (gate_drops_the_server_signature_authority)"
-    return src.replace(anchor, "    pass  # MUTANT", 1)
+# --- 規則 0 (サーバ署名による確認省略) を戻す方向 (ms-185 e-7078 / e-7323) ----
+#
+# e-7068 の時点では、この権限は「一緒に消してはいけないもの」として逆方向に
+# 測っていた。e-7078 で去就を決め、**消す**ことにしたので、測る向きが反転した
+# (= いまは戻ってこないことを測る)。発行者が恒久に 0 になった tier の判定を
+# 残すと、迂回する側の分岐だけが生き続ける形になるため。
+
+def gate_restores_rule_zero_entirely(src: str) -> str:
+    """規則 0 を丸ごと戻す (= 判定も理由コードも引数も)。"""
+    anchor = "    # Rule 1: same user → always skip."
+    assert anchor in src, "anchor not found (gate_restores_rule_zero_entirely)"
+    restored = (
+        '    GATE_REASON_T1_SYSTEM = "t1_system_envelope"  # MUTANT\n'
+        '    if envelope.get("tier") == "T1-system":  # MUTANT\n'
+        '        return (False, GATE_REASON_T1_SYSTEM)\n\n'
+    )
+    return src.replace(anchor, restored + anchor, 1)
+
+
+def gate_restores_only_the_t1_system_reason_code(src: str) -> str:
+    """理由コードだけ戻す (= 誰も返さない理由コードが語彙に残る)。"""
+    anchor = 'GATE_REASON_CROSS_USER_ACTION = "cross_user_action_pending_approval"'
+    assert anchor in src, "anchor not found (gate_restores_only_the_t1_system_reason_code)"
+    return src.replace(
+        anchor,
+        anchor + '\nGATE_REASON_T1_SYSTEM = "t1_system_envelope"  # MUTANT', 1)
+
+
+def gate_keeps_the_envelope_tier_param(src: str) -> str:
+    """規則 0 を駆動していた引数だけ残す (= 誰も読まない引数)。"""
+    anchor = "    actions_authorized: Iterable[str] | None,\n) -> tuple[bool, str]:"
+    assert anchor in src, "anchor not found (gate_keeps_the_envelope_tier_param)"
+    return src.replace(
+        anchor,
+        '    actions_authorized: Iterable[str] | None,\n'
+        '    envelope_tier: str = "",  # MUTANT\n'
+        '    envelope_issuer: str = "",  # MUTANT\n'
+        ") -> tuple[bool, str]:", 1)
+
+
+def envelope_restores_the_retired_tier(src: str) -> str:
+    """消した tier を語彙に戻す (= 偽造封筒が verify を通れる形に戻る)。"""
+    anchor = 'VALID_TIERS = {TIER_T1, TIER_T2, TIER_T3, TIER_T5}'
+    assert anchor in src, "anchor not found (envelope_restores_the_retired_tier)"
+    return src.replace(
+        anchor,
+        'TIER_T1_SYSTEM = "T1-system"  # MUTANT\n'
+        'T1_SYSTEM_ISSUER = "beacon-system"  # MUTANT\n'
+        'VALID_TIERS = {TIER_T1, TIER_T1_SYSTEM, TIER_T2, TIER_T3, TIER_T5}', 1)
+
+
+def app_restores_the_retired_tier_carve_out(src: str) -> str:
+    """送信側の事前承認 carve-out に消した tier を戻す。"""
+    anchor = "        consent_operation_env = env_tier == envelope_mod.TIER_T2"
+    assert anchor in src, "anchor not found (app_restores_the_retired_tier_carve_out)"
+    return src.replace(
+        anchor,
+        '        consent_operation_env = env_tier in (  # MUTANT\n'
+        '            "T1-system", envelope_mod.TIER_T2,\n'
+        '        )', 1)
+
+
+# --- 消しすぎる方向 (= 一緒に消してはいけないもの) --------------------------
+#
+# ms-185 e-7078: 発行口を落とすときに **スケジューラ鍵まで一緒に消す** のが
+# 新しい消しすぎリスク。この鍵は T1-system 発行口専用ではなく
+# POST /api/system/tick も守っており、本番のティック駆動 (scripts/vps-tick.sh)
+# がそれを使う。消すと本番の Operation 自律が止まる。
+
+def envelope_drops_the_scheduler_key(src: str) -> str:
+    """スケジューラ鍵を発行口と一緒に消す (= 本番のティック駆動が止まる)。"""
+    anchor = "def scheduler_internal_key() -> str:"
+    assert anchor in src, "anchor not found (envelope_drops_the_scheduler_key)"
+    return src.replace(
+        anchor,
+        "def _removed_scheduler_internal_key() -> str:  # MUTANT", 1)
 
 
 def gate_drops_the_same_user_rule(src: str) -> str:
@@ -205,27 +288,20 @@ def gate_drops_the_same_user_rule(src: str) -> str:
 # 別々に壊す: どちらを直し忘れても捕まる形でなければ意味がない。
 
 
-def cmd_bus_loosens_the_session_grain(src: str) -> str:
-    """CLI 側の phase-A 判定を user_id 一致に緩める (= 粒度のズレ)。"""
-    anchor = '        return any((m.get("session_id") or "") == session_id for m in members)'
-    assert anchor in src, "anchor not found (cmd_bus_loosens_the_session_grain)"
-    return src.replace(
-        anchor,
-        '        return any((m.get("user_id") or "") == user_id for m in members)  # MUTANT',
-        1)
-
-
-def cmd_bus_pre_a_matches_anything(src: str) -> str:
-    """CLI 側の pre-A 判定を常に真にする (= 正本より緩い側へ転ぶ)。"""
-    anchor = ('    return bool(user_id) and any(\n'
-              '        (m.get("user_id") or "") == user_id for m in members\n'
-              '    )')
-    assert anchor in src, "anchor not found (cmd_bus_pre_a_matches_anything)"
-    return src.replace(anchor, "    return True  # MUTANT", 1)
-
-
 # ms-185 e-7070: trek_phase_a_needs_only_the_sender を落とした。正本
 # (lib/trek.py の在籍判定) を壊す変異で、その正本ごと消えた。
+#
+# ms-185 e-7080 / e-7321: CLI 側の粒度を壊す 2 件 (session 粒度を緩める /
+# pre-A が何でも一致する) も落とした。測っていた対象 = 送信予算の迂回判定
+# (_is_trek_internal_send とそれが使う参加者の粒度判定) を判定ごと撤去したので、
+# 当てる場所が無い。**判定が消えたら、その判定のための変異も消す** —
+# アンカーの無い変異を残すと SKIP になり、ハーネス自身が「SKIP は緑と同じ害」と
+# 言いながら素通りする (この MS で実際に 1 件踏んだ)。
+#
+# 迂回が戻ってこないことは、迂回路を足すと赤くなる形では測っていない。
+# 予算ゲートが**例外なく通る**ことは tests/test_bus_budget.py 前半の
+# 予算ゲート本体の試験が測っており、迂回路を足す変異は「新しい迂回路の形」を
+# 先に決めないと書けない (= 存在しない形への変異は書けない)。
 
 
 CASES = [
@@ -255,20 +331,28 @@ CASES = [
      CONSENT_TEST + "::test_shared_trek_is_no_longer_a_carve_out"),
     ("引退した理由を現役の辞書に戻す", CONSENT, consent_mixes_retired_into_the_live_map,
      ALIGN_TEST + "::test_retired_reasons_live_in_their_own_map_not_the_live_one"),
+    # 規則 0 を戻す方向 (ms-185 e-7078 / e-7323)
+    ("規則 0 を丸ごと戻す", GATE, gate_restores_rule_zero_entirely,
+     AUDIT_TEST + "::test_the_t1_system_bypass_is_retired_not_vacuous"),
+    ("規則 0 の理由コードだけ戻す", GATE,
+     gate_restores_only_the_t1_system_reason_code,
+     GATE_TEST + "::test_the_judge_has_no_trek_shaped_input_or_output"),
+    ("規則 0 の引数だけ残す", GATE, gate_keeps_the_envelope_tier_param,
+     GATE_TEST + "::test_the_judge_has_no_trek_shaped_input_or_output"),
+    ("消した tier を語彙に戻す", ENVELOPE, envelope_restores_the_retired_tier,
+     ENVELOPE_TEST + "::test_the_retired_tier_cannot_be_issued"),
+    ("送信側の carve-out に消した tier を戻す", APP,
+     app_restores_the_retired_tier_carve_out,
+     BACKSTOP_TEST + "::test_the_retired_server_signature_is_no_longer_a_carve_out"),
     # 消しすぎる方向
-    ("サーバ署名の権限を一緒に消す", GATE, gate_drops_the_server_signature_authority,
-     AUDIT_TEST + "::test_t1_system_authority_is_untouched"),
+    ("スケジューラ鍵を一緒に消す", ENVELOPE, envelope_drops_the_scheduler_key,
+     SCHEDULER_KEY_TEST),
     ("同一ユーザーの規則を一緒に消す", GATE, gate_drops_the_same_user_rule,
      GATE_TEST + "::test_gate_skip_when_sender_equals_receiver"),
     # 2 実装のズレ (e-7069) — 正本側と CLI 側を別々に壊す
     # ms-185 e-7070: 当て先は CLI 側だけになった (正本が消えて実装が 1 本)。
     # 受け手も「正本より緩くないか」の相対比較から、粒度そのものを測る絶対の
     # 試験へ移設してある (tests/test_bus_budget.py の末尾)。
-    ("CLI 側が session 粒度を緩める", CMD_BUS, cmd_bus_loosens_the_session_grain,
-     CMD_BUS_TEST + "::test_phase_a_matches_on_session_id_not_user_id"),
-    ("CLI 側の pre-A が何でも一致する", CMD_BUS,
-     cmd_bus_pre_a_matches_anything,
-     CMD_BUS_TEST + "::test_pre_a_with_a_blank_user_id_never_matches"),
 ]
 
 # 赤いこと自体はガードが効いた証拠にならない (変異が構文を壊しても赤くなる)。
@@ -279,7 +363,7 @@ def run_one(target: str):
 
 def main() -> int:
     originals = {p: p.read_text(encoding="utf-8")
-                 for p in (GATE, APP, CONSENT, CMD_BUS)}
+                 for p in (GATE, APP, CONSENT, ENVELOPE)}
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 

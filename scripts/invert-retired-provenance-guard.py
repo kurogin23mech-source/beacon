@@ -289,8 +289,12 @@ def point_a_channel_at_the_wrong_predicate(src: str) -> str:
     assert anchor in src, "anchor not found (point_a_channel_at_the_wrong_predicate)"
     return src.replace(
         anchor,
-        '    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n'
-        '        has_server_minted_envelope, _OPERATION_ADVICE),', 1)
+        # ms-185 e-7078: 以前はここで ``has_server_minted_envelope`` を差し込んで
+        # いたが、その述語は tier ごと削除された。消えた名前を差し込むと
+        # **NameError = 構文を壊した赤**になり、ハーネスは (正しく) それを有効な
+        # 赤として数えない。なので「満たし手が居ない証拠を要求する」性質だけを
+        # inline の述語で再現する。測る性質は変わらない。
+        '    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n        (lambda ev: isinstance(ev.get("envelope"), dict)  # MUTANT\n         and ev["envelope"].get("tier") == "T1-system"\n         and ev["envelope"].get("issuer") == "beacon-system"),\n        _OPERATION_ADVICE),', 1)
 
 
 # --- scripts/codex-inbox-hook.py への追加の壊し方 ---------------------------
@@ -338,10 +342,11 @@ def accept_the_retired_proof_again(src: str) -> str:
     anchor = ("    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n"
               "        has_approved_operation_envelope, _OPERATION_ADVICE),")
     assert anchor in src, "anchor not found (accept_the_retired_proof_again)"
+    # ms-185 e-7078: 同じ理由で inline の述語に置き換えてある (消えた名前を
+    # 差し込むと NameError になり、有効な赤として数えられない)。
     return src.replace(
         anchor,
-        "    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n"
-        "        has_server_minted_envelope, _OPERATION_ADVICE),", 1)
+        '    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n        (lambda ev: isinstance(ev.get("envelope"), dict)  # MUTANT\n         and ev["envelope"].get("tier") == "T1-system"\n         and ev["envelope"].get("issuer") == "beacon-system"),\n        _OPERATION_ADVICE),', 1)
 
 
 def drop_the_scope_match(src: str) -> str:

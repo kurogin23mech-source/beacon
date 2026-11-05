@@ -103,7 +103,13 @@ def test_shared_trek_no_longer_bypasses_the_gate():
 
 
 def test_the_judge_has_no_trek_shaped_input_or_output():
-    """機械で測る: Trek を渡す口も、Trek を名乗る理由コードも無い。"""
+    """機械で測る: Trek を渡す口も、Trek を名乗る理由コードも無い。
+
+    ms-185 e-7078 / e-7323 で規則 0 (= サーバ署名 T1-system による確認の省略) も
+    判定ごと落としたので、その引数と理由コードの不在を**同じ試験に足している**
+    (並列に別の試験を作らない — 退役は 1 つの問い「この判定を駆動する口が残って
+    いないか」で測れる)。
+    """
     import inspect
     params = set(inspect.signature(dm_gate.should_gate_dm_action).parameters)
     assert "shared_trek_lookup" not in params
@@ -113,6 +119,11 @@ def test_the_judge_has_no_trek_shaped_input_or_output():
     assert not hasattr(dm_gate, "GATE_REASON_SHARED_TREK")
     assert not hasattr(dm_gate, "build_shared_trek_lookup_from_lists")
     assert not hasattr(dm_gate, "shared_trek_member")
+    # 規則 0 (ms-185 e-7078) — 発行者が 0 になった tier を見る判定
+    assert "envelope_tier" not in params, (
+        "規則 0 が唯一の読み手だった引数が残っている (誰も使わない引数を作らない)")
+    assert "envelope_issuer" not in params
+    assert not hasattr(dm_gate, "GATE_REASON_T1_SYSTEM")
 
 
 # ---------------------------------------------------------------------------

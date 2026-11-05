@@ -212,3 +212,62 @@ def test_the_three_skill_copies_agree_on_this_section():
         t = p.read_text()
         sections.append(t[t.index("### Step 3.1:"):t.index("### Step 3.2:")])
     assert sections[0] == sections[1] == sections[2]
+
+
+# ---------------------------------------------------------------------------
+# ms-185 e-7078 / 独立 AX レビュー — 引退した免除の軸が「まだ在る」と読める
+# 出力を残さない。
+#
+# **起きたこと**: `beacon bus consent-check` は、答えが「宛先確認が必要」のとき
+# 「この軸は判定していないので、真なら実際には不要かもしれない」という但し書きを
+# 出す。その一覧が **JSON 側と人間向け文面で別々に手書きされていた**。Trek 参加を
+# 理由にした免除が e-7068 で判定ごと消えたあと、JSON 側は Trek を外したのに
+# **人間向けの文面だけが「Trek 参加中なら実際には不要」と言い続けた** (= 同じ
+# 関数の中で 2 つの出力が食い違う)。文脈を持たない読み手がこれを信じると、
+# 要るはずの人間確認を省きうる — 認可の境界に関わる。
+#
+# **なぜこの測り方か**: 「Trek という語が無いこと」を文字列で測ると、語を言い換え
+# られた瞬間に素通りする (= 偽の緑)。代わりに **引退した判定理由の辞書そのもの**
+# (dm_consent.RETIRED_CONSENT_REASON_EXPLANATIONS) と突き合わせる。新しく引退した
+# 軸が出ても、辞書に入った時点でこの試験が効く。
+# ---------------------------------------------------------------------------
+
+def _carve_outs():
+    import cmd_bus
+    return cmd_bus._CONSENT_CARVE_OUTS_NOT_CHECKED
+
+
+def test_retired_consent_axes_are_not_offered_as_carve_outs():
+    """引退した判定理由が「見ていない軸」の一覧に居ない。
+
+    居ると、答えが「必要」のときに「その軸が真なら不要」と案内してしまうが、
+    その軸を真にする機構はもう無い (= 満たせない免除を案内する)。
+    """
+    retired = set(dm_consent.RETIRED_CONSENT_REASON_EXPLANATIONS)
+    assert retired, "前提: 引退した判定理由の辞書が空ではない"
+    offered = {key for key, _label in _carve_outs()}
+    leaked = offered & retired
+    assert not leaked, (
+        f"引退した判定理由が免除の案内に残っている: {sorted(leaked)}。"
+        "その軸を真にする機構はもう無いので、案内は満たせない免除になる")
+
+
+def test_the_two_outputs_of_consent_check_share_one_source():
+    """JSON と人間向け文面が同じ出所から導かれている。
+
+    手書きの一覧を 2 箇所に持つと、軸が引退したとき片方だけ古くなる
+    (実際に起きた: JSON は Trek を外したのに文面だけ残った)。
+    """
+    import inspect
+
+    import cmd_bus
+    src = inspect.getsource(cmd_bus.cmd_bus_consent_check)
+    # どちらの出力も定数を経由していること。文字列直書きが復活したら赤くなる。
+    assert "_CONSENT_CARVE_OUTS_NOT_CHECKED" in src, (
+        "免除の一覧が定数を経由していない — 手書きに戻った疑い")
+    assert src.count("_CONSENT_CARVE_OUTS_NOT_CHECKED") >= 2, (
+        "JSON と人間向け文面の片方しか定数を見ていない "
+        "(= もう片方が手書きのまま古くなる構造が残っている)")
+    # 引退した軸の語が、案内の文面に直書きで戻ってきていないこと。
+    assert "Trek 参加中" not in src, (
+        "引退した免除 (Trek 参加) の案内が文面に直書きで戻っている")

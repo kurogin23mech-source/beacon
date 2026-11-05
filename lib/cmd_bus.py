@@ -176,190 +176,20 @@ def _bus_budget_refund_one() -> bool:
     return True
 
 
-# ms-185 e-7070 — ``members[]`` の粒度判定。元は ``lib/trek.py`` の
-# ``is_session_id_keyed`` / ``get_migration_phase`` で、e-7070 が本体 (5,146 行)
-# を落としたのでここへ写した。送信予算の迂回判定だけがこれを要るので、
-# 5,146 行を残すより写す方が畳む目的に沿う。
+# ms-185 e-7080 / e-7321: ここに送信予算の迂回判定 4 つが在った
+# (``_is_session_id_keyed`` / ``_record_bus_budget_trek_bypass`` /
+# ``_trek_has_joined_member`` / ``_is_trek_internal_send``)。「送り手と受け手が
+# 同じ稼働中の共同作業空間 (Trek) に居るなら自動返信の予算ゲートを飛ばす」という
+# 規則で、e-7070 で Trek の作成経路が消えたあとは **恒久に偽** になっていた。
 #
-# なぜ粒度が 2 つあるか: phase A 以降の trek は ``members[]`` が session_id
-# keyed で、pre-A の trek は user_id keyed のまま残っている。1 user が N
-# session を持つので user_id は phase A 以降では曖昧であり、session_id が
-# member identity の真値。両方の世代の記録が現に在るため判定が要る。
+# e-7070 の時点では、この迂回が要るからと言って落とした正本 (lib/trek.py) から
+# 粒度判定を**写して**延命した。それは面を縮めるのではなく移しただけで、SPEC
+# 設計方針4 (常に偽を返す lookup を残す形は採らない) に反していた。独立思想
+# レビューの指摘 (e-7321) を受けて、写した helper ごと落とした。
 #
-# この迂回自体の撤去は e-7080 (= 認可の第 3 の迂回路)。そのときこの helper も
-# 一緒に落ちる。
-_TREK_SESSION_KEYED_PHASES = ("A", "B", "C")
-_TREK_DEFAULT_MIGRATION_PHASE = "pre-A"
-_TREK_VALID_MIGRATION_PHASES = ("pre-A", "A", "B", "C")
-
-
-def _is_session_id_keyed(trek_doc: dict) -> bool:
-    """True if this trek's ``members[]`` is session_id keyed (phase A/B/C).
-
-    ``trek.meta.migration_phase`` が無い / 未知の値なら migration 未着手として
-    扱う (= 旧 user_id keyed)。原典は例外を上げずこの既定に落ちる形だったので、
-    呼び出し側に在った ``try/except`` は要らなくなった (= 本体を消したあと
-    黙って ``False`` 固定になる劣化を作らない)。
-    """
-    meta = trek_doc.get("meta") or {}
-    phase = meta.get("migration_phase") or _TREK_DEFAULT_MIGRATION_PHASE
-    if phase not in _TREK_VALID_MIGRATION_PHASES:
-        phase = _TREK_DEFAULT_MIGRATION_PHASE
-    return phase in _TREK_SESSION_KEYED_PHASES
-
-
-def _record_bus_budget_trek_bypass(trek_id: str) -> None:
-    """Bump the per-Trek bypass counter on the budget file (ms-75 / e-2044).
-
-    The counter is informational — it surfaces in ``bus budget show`` so a
-    leader can see "this session sent N DMs that bypassed the budget gate
-    because they were Trek-internal". It does not gate or rate-limit; the
-    structural rationale is that Trek scope IS the gate (= pre-approved
-    blanket consent), and a counter gives observability without re-adding
-    a soft cap that the SPEC explicitly rejected.
-
-    Best-effort write: budget file absent / unreadable / unwritable all
-    silently no-op (= the bypass already happened, audit is the bonus).
-    """
-    if not trek_id:
-        return
-    try:
-        b = _read_bus_budget() or {
-            "total": 0, "used": 0,
-            "channels": [], "armed": False,
-        }
-        bypassed = dict(b.get("trek_bypassed") or {})
-        bypassed[trek_id] = int(bypassed.get(trek_id, 0)) + 1
-        b["trek_bypassed"] = bypassed
-        _write_bus_budget(b)
-    except Exception:
-        return
-
-
-def _trek_has_joined_member(
-    members: list, *, phase_a: bool, session_id: str, user_id: str
-) -> bool:
-    """True iff a *joined* member of ``members[]`` identifies (session_id, user_id).
-
-    Branches on the trek's phase, mirroring the server-side ``dm_gate``
-    shared-Trek lookup exactly (PR #491 parent re-review). The invited-vs-joined
-    distinction is structural, NOT a separate ``joined_at`` check:
-
-      * **phase-A (session_id keyed)**: match by ``session_id`` presence.
-        ``trek.accept_invitation`` writes ``session_id`` and ``joined_at``
-        together on join, while an invite placeholder has NEITHER — so a member
-        carrying a session_id is already joined, and an invite placeholder (no
-        session_id) simply never matches a real session id.
-      * **pre-A (legacy user_id grain)**: match by ``user_id``. A
-        pre-session-grain member predates ``joined_at`` tracking and is joined
-        by the legacy contract; imposing ``joined_at`` here would drop existing
-        treks (the regression this re-review corrected).
-    """
-    if phase_a:
-        if not session_id:
-            return False
-        return any((m.get("session_id") or "") == session_id for m in members)
-    return bool(user_id) and any(
-        (m.get("user_id") or "") == user_id for m in members
-    )
-
-
-def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
-    """Decide whether the current --in-reply-to send is Trek-internal.
-
-    Returns ``(True, trek_id)`` iff both the caller's session and
-    ``recipient_sid`` are joined members of the same active Trek; otherwise
-    ``(False, "")``.
-
-    Detection material (判定は ``lib/trek.build_shared_trek_lookup_from_lists``
-    と同じ session 粒度。ms-185 e-7068 で受信側の確認ゲートからは同じ規則が
-    削除されたので、これは **予算の最適化だけ**に効く):
-      * caller's user_id + session_id from the cloud identity
-      * recipient's user_id resolved from the project session registry
-      * caller's joined active treks; both sender session and recipient
-        session must appear as joined ``members[]`` of the same trek
-
-    e-4116 (ms-75): the same-user leader↔fork case (= solo-dev dogfood, both
-    sessions owned by one cloud user) is the PRIMARY Trek-internal case and
-    MUST bypass. The old code excluded ``recipient_user_id == my_user_id``,
-    which structurally denied the bypass to exactly that case and made Trek
-    coordination deadlock on budget exhaustion. Membership is checked at
-    session grain (``_trek_member_matches``), so same-user is included via two
-    distinct member entries while a same-user send to a *non-member* session
-    is still correctly gated.
-
-    Best-effort: any exception or missing material returns ``(False, "")``
-    so the regular budget gate stays in force. The bypass MUST NOT fire
-    on a misconfigured send — that would be a silent budget relaxation.
-    """
-    if not recipient_sid:
-        return False, ""
-    if not _is_cloud_mode():
-        # Local mode uses ~/.beacon/treks/; recipient session lookup
-        # requires a cloud-side directory listing. Keep local mode strict
-        # (= no bypass), the safer side of the SPEC.
-        return False, ""
-    try:
-        my_user_id, _, my_session_id = _resolve_creator_identity()
-        if not my_user_id:
-            return False, ""
-        client, config = _get_api_client()
-        project_id = _resolve_bus_project_id(config)
-        # Resolve recipient session → user.
-        recipient_user_id = ""
-        try:
-            sessions = client.list_sessions(project_id) or []
-        except Exception:
-            return False, ""
-        for s in sessions:
-            if s.get("session_id") == recipient_sid:
-                actor = s.get("actor") or {}
-                recipient_user_id = actor.get("user_id") or ""
-                break
-        # e-4116: NO same-user exclusion. A single user's leader/fork sessions
-        # coordinating inside a Trek are the main case to bypass; membership
-        # (below) is what gates it, not user distinctness.
-        if not recipient_user_id:
-            return False, ""
-        # Walk my joined active treks. Both my session AND the recipient
-        # session must be joined members of the same active trek.
-        try:
-            my_treks = client.list_treks() or []
-        except Exception:
-            return False, ""
-        for trek in my_treks:
-            if trek.get("status") != "active":
-                continue
-            # e-4116 follow-up (PR #491 parent review 1): a halted trek must
-            # NOT grant bypass — leader pulled the Andon cord. This mirrors
-            # the server-side dm_gate lookup, which skips halted treks; the
-            # CLI mirror was missing it (fork finding M1), so a halted-but-
-            # active trek still bypassed budget on the CLI send path.
-            if trek.get("halt"):
-                continue
-            members = trek.get("members") or []
-            # Branch on trek phase once (mirror server _is_phase_a_plus), then
-            # match both endpoints at that grain. Doing it per-trek (not
-            # per-member) is what lets a phase-A invite placeholder — no
-            # session_id — be correctly excluded instead of falling through to
-            # a legacy user match.
-            phase_a = _is_session_id_keyed(trek)
-            am_member = _trek_has_joined_member(
-                members, phase_a=phase_a,
-                session_id=my_session_id, user_id=my_user_id,
-            )
-            if not am_member:
-                continue
-            recipient_is_member = _trek_has_joined_member(
-                members, phase_a=phase_a,
-                session_id=recipient_sid, user_id=recipient_user_id,
-            )
-            if recipient_is_member:
-                return True, str(trek.get("trek_id") or "")
-        return False, ""
-    except Exception:
-        return False, ""
-
+# 結果: 自動返信は **例外なく通常の予算ゲートを通る** (迂回路が無い)。
+# 判定を駆動していた MCP 側の分岐と流量ブレーキ (channel/bus.mjs /
+# channel/trek-rate.mjs) も同じ変更で落としてある。
 
 def cmd_bus_budget_grant():
     """Set or refresh the outbound-send budget for autonomous mode.
@@ -433,19 +263,20 @@ def cmd_bus_budget_show():
     print(f"Budget: {used}/{total} used  →  {remaining} remaining  ({state})")
     if b.get("granted_at"):
         print(f"  granted_at: {b['granted_at']}")
-    # ms-75 / e-2044 — Trek-internal bypass audit. The counter is purely
-    # informational; bypassed sends did not consume from total/used. Surface
-    # it here so the leader can see "the executor has been chatty within the
-    # trek but did not draw down the autonomous-loop guardrail".
-    bypassed = b.get("trek_bypassed") or {}
-    if bypassed:
-        total_bypassed = sum(int(v) for v in bypassed.values())
-        print(
-            f"  Trek-internal bypassed: {total_bypassed} send(s) "
-            f"(did NOT count against budget — ms-75 / e-2044)"
-        )
-        for trek_id, n in sorted(bypassed.items()):
-            print(f"    {trek_id}: {n}")
+    # ms-185 e-7080 / e-7321: ここに迂回した送信数のカウンタ表示が在った。
+    # 書き手 (_record_bus_budget_trek_bypass) を落としたので、これ以降どの予算
+    # ファイルにもこの値は書かれない。**常に空の欄を残すのは一番ありがちな後退**
+    # (e-7068 で同じ理由で監査記録の空 field を落としている) なので表示も落とした。
+    # 予算ファイルは grant / clear で頻繁に書き換わる短命な状態であり、後から
+    # 監査する恒久記録ではない (実測: いまリポジトリに在る予算ファイルはこの
+    # キーを持っていない)。恒久記録の読み面を守る SPEC 方針5 とは別の話。
+    #
+    # **古い値が残っている予算ファイルを読みたい場合**: 上の ``--json`` は
+    # 保存されている dict を**そのまま**出すので、`trek_bypassed` を持つ古い
+    # ファイルならそちらには今も現れる (独立 AX レビューの指摘 = 人間向けの
+    # 表示だけを消すと、どこで読めるかが分からなくなる)。人間向けの表示が
+    # 出さないのは「書き手が居ない欄を常に空で見せない」ためで、値を読めなく
+    # する意図ではない。
 
 
 def cmd_bus_budget_clear():
@@ -709,53 +540,38 @@ def cmd_bus_send():
     # bypass), so a failed send below can refund exactly that slot.
     _budget_slot_consumed = False
     if gate_applies:
-        # ms-75 / e-2044: Trek-internal sends bypass the budget gate. Trek
-        # is an opt-in pre-approval scope (= 缶詰の作業部屋), so the budget
-        # cap (= runaway-autonomy guardrail) is structurally redundant for
-        # member-to-member DMs within an active Trek both sides have
-        # joined. (ms-185 e-7068: 受信側の確認ゲートに在った同じ規則は削除済。
-        # 残っているのは予算の層だけで、認可の境界ではない。この経路自体も
-        # e-7080 で呼び出し側と一緒に落ちる。)
-        # The check is best-effort: any error path (no auth, network blip,
-        # unknown recipient) falls through to the regular budget gate so we
-        # never silently relax enforcement on a misconfigured send.
-        trek_bypass, bypass_trek_id = _is_trek_internal_send(recipient)
-        if trek_bypass:
-            budget = {
-                "armed": True,
-                "trek_bypass": True,
-                "trek_id": bypass_trek_id,
-            }
-            _record_bus_budget_trek_bypass(bypass_trek_id)
-        else:
-            b = _read_bus_budget()
-            if b is None:
-                # Reachable only when autonomous via --in-reply-to but not armed
-                # (no budget file): _bus_is_armed() guarantees a file when armed.
-                # Preserves the historical default-OFF: a reply needs a grant.
-                print(
-                    "Error: this is an autonomous send (--in-reply-to set) but no "
-                    "auto-reply budget is granted. Default state requires human "
-                    "approval. Run `beacon bus budget grant <N>` to authorize N "
-                    "auto-sends, or pass --manual for an explicit human-approved "
-                    "one-off send.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            allowed, budget = _bus_budget_consume_one()
-            if not allowed:
-                total = int(budget.get("total", 0))
-                used = int(budget.get("used", 0))
-                print(
-                    f"Error: auto-reply budget exhausted ({used}/{total} used). "
-                    "Run `beacon bus budget grant <N>` to re-grant, or pass "
-                    "--manual for an explicit human-approved one-off send.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            # A real slot was decremented (armed budget, not a Trek bypass).
-            # Remember so the send failure path can refund it (e-2999).
-            _budget_slot_consumed = bool(budget.get("armed"))
+        # ms-185 e-7080 / e-7321: ここに「送り手と受け手が同じ稼働中の共同作業空間
+        # (Trek) に居るなら予算ゲートを飛ばす」分岐が在った。Trek の作成経路が
+        # e-7070 で消えて判定が恒久に偽になったので、分岐ごと落とした。自動送信は
+        # **例外なく** 下の予算ゲートを通る (迂回路が無い = 厳しくなる方向)。
+        b = _read_bus_budget()
+        if b is None:
+            # Reachable only when autonomous via --in-reply-to but not armed
+            # (no budget file): _bus_is_armed() guarantees a file when armed.
+            # Preserves the historical default-OFF: a reply needs a grant.
+            print(
+                "Error: this is an autonomous send (--in-reply-to set) but no "
+                "auto-reply budget is granted. Default state requires human "
+                "approval. Run `beacon bus budget grant <N>` to authorize N "
+                "auto-sends, or pass --manual for an explicit human-approved "
+                "one-off send.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        allowed, budget = _bus_budget_consume_one()
+        if not allowed:
+            total = int(budget.get("total", 0))
+            used = int(budget.get("used", 0))
+            print(
+                f"Error: auto-reply budget exhausted ({used}/{total} used). "
+                "Run `beacon bus budget grant <N>` to re-grant, or pass "
+                "--manual for an explicit human-approved one-off send.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Remember the decremented slot so the send failure path can refund
+        # it (e-2999).
+        _budget_slot_consumed = bool(budget.get("armed"))
     elif manual and armed:
         # e-3901: an explicit --manual override of the armed gate. Stamp the
         # payload so the decision-event trail shows a human deliberately
@@ -1501,6 +1317,25 @@ def cmd_bus_ack():
         print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
 
 
+# 宛先確認の判定で **安価に証明できないため見ていない軸** (= 答えが「必要」でも、
+# これが真なら実際には不要でありうる)。**JSON と人間向け文面の両方をここから導く。**
+#
+# ms-185 e-7078 / 独立 AX レビュー: 以前は JSON 側 (`carve_outs_not_checked`) と
+# 人間向けの但し書きがそれぞれ手書きの一覧を持っていた。その結果、Trek 参加を
+# 理由にした免除が e-7068 で判定ごと消えたあとも、**人間向けの文面だけが
+# 「Trek 参加中なら実際には不要」と言い続けていた** (JSON 側は既に Trek を
+# 外していたので、同じ関数の中で 2 つの出力が食い違っていた)。文脈を持たない
+# 読み手がこれを信じると、要るはずの人間確認を省きうる = 認可の境界に関わる。
+#
+# 軸が引退したとき片方だけ古くなる構造を畳むため、出所を 1 つにした。
+# tests/test_dm_consent_skill_alignment_e6349.py が、引退した判定理由
+# (dm_consent.RETIRED_CONSENT_REASON_EXPLANATIONS) がこの一覧に居ないことを
+# 引退辞書そのものと突き合わせて測る (= 文字列の手書き一致ではない)。
+_CONSENT_CARVE_OUTS_NOT_CHECKED = (
+    ("operation_envelope", "Operation の事前承認経由"),
+)
+
+
 def cmd_bus_consent_check():
     """Answer "does this send need a human recipient-confirmation?" (ms-160 e-6349).
 
@@ -1584,7 +1419,8 @@ def cmd_bus_consent_check():
             "identity_uncertain": identity_uncertain,
             # 判定に使わなかった carve-out。答えが「必要」でも、これらが真なら
             # 実際には不要でありうる。
-            "carve_outs_not_checked": ["operation_envelope"],
+            "carve_outs_not_checked": [
+                k for k, _ in _CONSENT_CARVE_OUTS_NOT_CHECKED],
             "caveats": caveats,
         }, ensure_ascii=False))
         return
@@ -1595,8 +1431,10 @@ def cmd_bus_consent_check():
     for c in caveats:
         print(f"  ※ {c}")
     if required:
-        print("  ※ Trek 参加中 / Operation の事前承認経由なら実際には不要です "
-              "(この 2 軸は判定していません)。")
+        _labels = [label for _, label in _CONSENT_CARVE_OUTS_NOT_CHECKED]
+        _n = len(_labels)
+        print(f"  ※ {' / '.join(_labels)}なら実際には不要です "
+              f"(この {_n} 軸は判定していません)。")
 
 
 def cmd_bus_status():
