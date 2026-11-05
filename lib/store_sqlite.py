@@ -122,16 +122,15 @@ class SqliteStore:
 
     def get_document(self, doc_id: str) -> dict:
         return self._files.get_document(doc_id)
-
-    def list_treks(self, **kwargs):
-        return self._files.list_treks(**kwargs)
-
-    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
-    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
-    # which went with the CLI in e-7069. ``list_treks`` stays because
-    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
-    # bypass is removed in e-7080, and this passthrough goes with it.
-
+    # ms-185 e-7322: ここに Trek の読み出し passthrough (``list_treks``) が在った。
+    # 残置の根拠として「``lib/cmd_bus.py`` の送信予算の迂回判定が ``store.list_treks()``
+    # 経由で来る」と書いていたが、**それは誤りだった** (独立思想レビューの指摘、実測で
+    # 確認)。cmd_bus には ``store.`` の使用が 1 つも無く、迂回の分岐自体も既に消えて
+    # いる。生きている読み手が居ない配線を、整合を主張するコメント付きで 5 ファイルに
+    # 残していた形。製品として pin されている読み出し面はクラウド側 (HTTP 3 ルートと
+    # 3 backend の get_trek / list_treks / list_trek_logs) で、そちらは残っている
+    # (tests/test_trek_record_read_surface_e7081.py)。ローカル記録を読む経路は
+    # これで製品から無くなる — 判断記録は e-7324。
     def create_org(self, **kwargs) -> dict:
         return self._files.create_org(**kwargs)
 

@@ -173,39 +173,15 @@ class Store(Protocol):
         (= LocalStore: ファイル不在、 StoreApi: 404 / transport 失敗)。
         """
         ...
-
-    # ms-84 Phase 2 — trek read passthrough (ms-185 e-7070 で縮小)。
-    # 元は cmd_trek_show / timeline / aggregate が ``_is_cloud_mode()`` で
-    # 分岐していたのを Store に集約したもの。その CLI は e-7069 で落ちたので、
-    # 残る読み手は ``lib/cmd_bus.py`` の送信予算の迂回判定だけ (e-7080 で消える)。
-
-    def list_treks(self, *, actor_id: str | None = None,
-                   status: str = "", include_archived: bool = False,
-                   all_actors: bool = False) -> list[dict]:
-        """List trek docs visible to the caller.
-
-        Both backends honor ``status`` filter and ``include_archived``
-        switch. ``all_actors`` is server-side only (= admin view) — local
-        backend ignores it because there is no remote registry; ``actor_id``
-        is local-only (= cloud server resolves the caller from auth token).
-        Cloud transport / 403 errors propagate as RuntimeError, matching
-        the legacy cloud branch behavior.
-        """
-        ...
-
-    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
-    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
-    # which went with the CLI in e-7069. ``list_treks`` stays because
-    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
-    # bypass is removed in e-7080, and this passthrough goes with it.
-
-    # ------------------------------------------------------------------
-    # Organizations (ms-118 / e-4231) — top-level tenancy entity.
-    # trek と同型: org は project.json の外に住む cross-project entity なので、
-    # local backend は ~/.beacon/orgs/ の file、cloud backend は /api/orgs を
-    # 経由する。CLI から backend 分岐を消すため Store に集約する。
-    # ------------------------------------------------------------------
-
+    # ms-185 e-7322: ここに Trek の読み出し passthrough (``list_treks``) が在った。
+    # 残置の根拠として「``lib/cmd_bus.py`` の送信予算の迂回判定が ``store.list_treks()``
+    # 経由で来る」と書いていたが、**それは誤りだった** (独立思想レビューの指摘、実測で
+    # 確認)。cmd_bus には ``store.`` の使用が 1 つも無く、迂回の分岐自体も既に消えて
+    # いる。生きている読み手が居ない配線を、整合を主張するコメント付きで 5 ファイルに
+    # 残していた形。製品として pin されている読み出し面はクラウド側 (HTTP 3 ルートと
+    # 3 backend の get_trek / list_treks / list_trek_logs) で、そちらは残っている
+    # (tests/test_trek_record_read_surface_e7081.py)。ローカル記録を読む経路は
+    # これで製品から無くなる — 判断記録は e-7324。
     def create_org(self, *, name: str, creator_user_id: str = "",
                    creator_email: str = "") -> dict:
         """team org (= 明示的に立てる組織) を作り、作成者を owner にする。

@@ -123,14 +123,51 @@ class TestCodexTallyIsWiredToTheRightCounter:
 
 
 class TestCodexNoticeTextTellsTheRightFix:
-    """通知文の文言を固定する (ここはソース文字列検査でよい — 文言そのものが対象)。"""
+    """通知文が正しい直し方を名指すことを測る。
+
+    ms-185 e-7308: ここは以前**ソース文字列検査**だった (``"auto-execute remove
+    --channel" in src``)。文言が hook の中に凍結コピーで在ったので、それで測れていた。
+    委譲した今は hook のソースにその literal は無く、**返ってくる文字列**を見る形に
+    変えている。ソース検査のままにすると、委譲した瞬間に赤くなるか、あるいは
+    共有層が別のことを言い出しても緑のままになる (= どちらの向きにも間違う)。
+    """
 
     def test_retired_notice_points_at_removing_the_stale_optin(self, codex):
-        src = CODEX_HOOK.read_text(encoding="utf-8")
-        assert "auto-execute remove --channel" in src, (
+        out = codex.render_retired_advice(bd=bd)
+        assert "auto-execute remove --channel" in out, (
             "引退した channel の直し方として `beacon bus auto-execute remove "
             "--channel <名前>` を案内していません。opt-in し直す案内では直りません。"
         )
+
+    def test_retired_notice_is_byte_equal_to_the_shared_layer(self, codex):
+        """引退理由の文言が共有層と**等値** (部分一致ではない)。"""
+        assert codex.render_retired_advice(bd=bd) == \
+            bd.downgrade_advice(RETIRED, "")
+
+    def test_codex_hook_follows_the_shared_source_for_retired(self, codex,
+                                                              monkeypatch):
+        """真値源を差し替えると Codex 側の引退案内も変わる (= 委譲している)。
+
+        **直した穴 (ms-185 e-7308)**: この検査は証拠欠落の理由にしか無かった
+        (``test_codex_hook_follows_the_shared_source``)。引退理由は hook の中の
+        凍結コピーで、共有層を差し替えても出力が変わらないことを実測で確認した
+        うえで委譲に直した。Claude 側には 4 理由すべての等値比較が在ったので、
+        同じ非対称がこの理由だけ残っていた形。
+        """
+        sentinel = "__SHARED_LAYER_SENTINEL__"
+        monkeypatch.setattr(bd, "downgrade_advice",
+                            lambda reason, channel="": sentinel)
+        assert codex.render_retired_advice(bd=bd) == sentinel, (
+            "真値源を差し替えても Codex 側の引退案内が変わりません "
+            "(= 独自コピーを持っている)。"
+        )
+
+    def test_codex_retired_advice_does_not_guess_without_the_shared_layer(
+            self, codex):
+        """lib が読めないとき、回復手段を推測で名乗らない (e-7077 の教訓)。"""
+        out = codex.render_retired_advice(bd=None)
+        assert "auto-execute remove" not in out
+        assert "回復手段を提示できません" in out
 
     def test_each_counter_has_its_own_notice_block(self, codex):
         import re

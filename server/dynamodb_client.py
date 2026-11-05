@@ -1761,15 +1761,12 @@ def get_operation_envelope(project_id: str,
 def get_trek(trek_id: str) -> dict | None:
     resp = _table("treks").get_item(Key={"trek_id": trek_id})
     return resp.get("Item")
-
-
-def save_trek(trek_id: str, data: dict) -> None:
-    # PK is trek_id; caller-supplied trek_id in ``data`` is overwritten on
-    # purpose (= same shape as save_project / save_document).
-    item = {**data, "trek_id": trek_id}
-    _table("treks").put_item(Item=item)
-
-
+# ms-185 e-7306: ここに Trek の書き込み 3 関数 (save_trek / delete_trek /
+# append_trek_log) が在った。e-7070 が書き込み経路 (作成・参加・承認・halt・発火)
+# を全部落としたので呼び出し元ゼロになり、ここでも落とした。読み出し 3 関数
+# (get_trek / list_treks / list_trek_logs) は意図して残す面 (e-7081 / SPEC 方針5 =
+# 記録を後から読めなくしない) で、tests/test_trek_record_read_surface_e7081.py が
+# 両 backend について名指しで固定している。
 def list_treks(actor_id: str | None = None, *,
                status: str | None = None,
                include_archived: bool = False) -> list[dict]:
@@ -1796,22 +1793,6 @@ def list_treks(actor_id: str | None = None, *,
     result.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
                 reverse=True)
     return result
-
-
-def delete_trek(trek_id: str) -> bool:
-    if get_trek(trek_id) is None:
-        return False
-    # Phase 1: top-level delete only. Subcollection cascade follows the
-    # delete_project pattern once e-1663 lands.
-    _table("treks").delete_item(Key={"trek_id": trek_id})
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Organizations (ms-113 / e-3731) — top-level entity, PK=org_id.
-# Same schema as firestore_client. Scan is fine at dev scale.
-# ---------------------------------------------------------------------------
-
 def get_org(org_id: str) -> dict | None:
     resp = _table("organizations").get_item(Key={"org_id": org_id})
     return resp.get("Item")
@@ -1887,17 +1868,6 @@ _TREK_LOGS_FALLBACK: dict[str, list[dict]] = {}
 def _mint_trek_log_id() -> str:
     import secrets as _secrets
     return f"log-{_secrets.token_hex(8)}"
-
-
-def append_trek_log(trek_id: str, log_entry: dict) -> str:
-    payload = dict(log_entry or {})
-    log_id = payload.get("log_id") or _mint_trek_log_id()
-    payload["log_id"] = log_id
-    payload["trek_id"] = trek_id
-    _TREK_LOGS_FALLBACK.setdefault(trek_id, []).append(payload)
-    return log_id
-
-
 def list_trek_logs(trek_id: str, *, limit: int = 100,
                    since: str = "") -> list[dict]:
     rows = list(_TREK_LOGS_FALLBACK.get(trek_id) or [])
