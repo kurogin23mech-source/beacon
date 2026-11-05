@@ -144,8 +144,22 @@ def _derive_action(method: str, path: str) -> str:
     # being confused with project member ops.
     if path.startswith("/api/treks"):
         # ms-185 e-7070: the member / scope / halt / leader / start / summary
-        # sub-branches named write endpoints that no longer exist. Only the
-        # read routes survive (= GET), so one arm is all that can be reached.
+        # sub-branches named write endpoints that no longer exist, so they
+        # collapsed into this one arm.
+        #
+        # ms-185 e-7071 — **no arm here is reachable today, including this one.**
+        # The earlier note said "one arm is all that can be reached", which
+        # overstated it: this function is only called for ``_AUDIT_METHODS``
+        # (POST/PUT/PATCH/DELETE) and ``routers_treks.py`` now mounts GET only,
+        # so nothing routed can arrive here at all.
+        #
+        # It is kept rather than deleted because it is the fail-safe side: if a
+        # mutating /api/treks route ever comes back, this names it ``trek.*``
+        # instead of letting it fall through to ``project.*`` with an empty
+        # project_id — a misfiled audit record is harder to notice than a
+        # missing feature. ``/api/treks`` stays in ``_AUDIT_PATHS`` for the same
+        # reason. The creation route not coming back is pinned by
+        # ``tests/test_trek_removal_pinned_e7079.py``.
         return f"trek.{method.lower()}"
     for plural, singular in _RESOURCE_SINGULAR.items():
         if f"/{plural}" in path:
