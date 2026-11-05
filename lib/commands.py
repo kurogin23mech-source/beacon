@@ -2295,7 +2295,12 @@ def _emit_decision_verification_context():
               "(skills/decision-verification/review-type.json missing).",
               file=sys.stderr)
         sys.exit(1)
-    origin_id, origin_content, origin_provenance = _repo_file_origin(desc)
+    # ms-119 e-7345 (独立レビュー 2 体の合意指摘): ここは 3 番目の呼び出し元で、
+    # 以前は gaps を渡さず provenance も捨てていた。原典が食い違っていても警告が
+    # 出ず、どの版で判定したかも載らない —— この関数群の目的が、この 1 経路だけで
+    # 無効化されていた。gaps は resolve より前に作って渡す。
+    gaps = []
+    origin_id, origin_content, origin_provenance = _repo_file_origin(desc, gaps)
 
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
     limit_raw = os.environ.get("BEACON_DECISION_LIMIT", "").strip()
@@ -2319,7 +2324,8 @@ def _emit_decision_verification_context():
         "ref": kind or "all",
         "content": json.dumps(decisions, ensure_ascii=False, indent=2),
     }
-    gaps = []
+    # ここで `gaps = []` と書き直すと、原典解決が積んだ食い違いの開示を捨てる。
+    # 実際に 1 度書いてしまった — 配線を足しても、後ろで作り直せば消える。
     if not decisions:
         gaps.append(
             "検証対象の decision がありません "
@@ -2336,6 +2342,7 @@ def _emit_decision_verification_context():
         gaps=gaps,
         known_judge_types=set(registry.keys()),
         artifact=artifact,
+        origin_provenance=origin_provenance,
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
@@ -2357,8 +2364,14 @@ def _reviewed_repo_root():
 
 
 def _capability_root():
-    """The checkout the running capability was installed from."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    """The checkout the running capability was installed from.
+
+    Delegates — the expression lives once in ``review_spine.install_root``.
+    独立レビュー (低) の指摘: 重複を畳むのが主題の変更で、同じ式を別名でもう 1 つ
+    増やしていた。片方だけ直る形を作らないため、呼ぶだけにする。
+    """
+    import review_spine  # local import — matches this file's module-import idiom
+    return review_spine.install_root()
 
 
 def _resolve_repo_file_origin(ref, gaps):
@@ -2393,28 +2406,48 @@ def _resolve_repo_file_origin(ref, gaps):
     reviewed_path = os.path.join(reviewed_root, *rel) if reviewed_root else ""
     cap_path = os.path.join(cap_root, *rel)
 
+    unreadable = []
+
     def _read(path):
+        """Read ``path``, or return None — distinguishing "absent" from "there
+        but unreadable" (独立レビュー misleading の指摘).
+
+        握り潰すと、権限が壊れたファイルや同名ディレクトリが「無い」と名乗る。
+        読み手は消したパスを疑って探しに行き、`ls -la` で気づくまで空回りする。
+        """
         try:
             with open(path, encoding="utf-8") as fh:
                 return fh.read()
-        except OSError:
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            unreadable.append((path, type(exc).__name__))
             return None
 
     reviewed_text = _read(reviewed_path) if reviewed_path else None
     cap_text = _read(cap_path)
+    for path, why in unreadable:
+        # 在るのに読めなかったことは、落ちた先が在っても黙らない (= 「無いので
+        # capability を使った」という体で進むのを止める)。
+        gaps.append(f"原典 {ref} の候補 {path} は存在しますが読めませんでした "
+                    f"({why})。権限か、同名のディレクトリを疑ってください。")
 
     if reviewed_text is not None:
         chosen, path, source = reviewed_text, reviewed_path, "reviewed-repo"
         if cap_text is not None and cap_text != reviewed_text:
             gaps.append(
-                f"原典 {ref} が 2 つの作業ツリーで食い違っています: レビュー対象の "
+                f"原典 {ref} の内容が 2 つの作業ツリーで異なります: レビュー対象の "
                 f"{reviewed_path} ({len(reviewed_text.splitlines())} 行) を使い、"
                 f"インストール元の {cap_path} ({len(cap_text.splitlines())} 行) は "
-                f"使いませんでした。インストール元が古い (未 pull) 可能性があります。")
+                f"使いませんでした。インストール元が古い (未 pull) 可能性があります。"
+                f"揃えるなら `git -C {cap_root} pull`。"
+                f"(行数が同じでも内容は異なりえます — 判定は内容の一致で行っています)")
     elif cap_text is not None:
         chosen, path, source = cap_text, cap_path, "capability"
     else:
-        print(f"Error: 原典 not found at {ref} "
+        why = ("読めませんでした (" + ", ".join(f"{p}: {w}" for p, w in unreadable)
+               + ")") if unreadable else "見つかりません"
+        print(f"Error: 原典 {ref} を使えません — {why} "
               f"(探した場所: {reviewed_path or '(git 管理下でない)'} / {cap_path})",
               file=sys.stderr)
         sys.exit(1)
@@ -2422,21 +2455,28 @@ def _resolve_repo_file_origin(ref, gaps):
     return chosen, {"resolved_from": source, "path": path}
 
 
-def _repo_file_origin(desc, gaps=None):
+def _repo_file_origin(desc, gaps):
     """``(origin_id, origin_content, provenance)`` for a repo-file 原典 descriptor,
     or exit with a clean error. Used by the BATCH review-context path (e-4125).
 
     ms-119 e-7345: the resolution itself now lives in
     :func:`_resolve_repo_file_origin`, shared with the single-type path. Before
     that the two paths each had their own hand-written copy — the follow-up this
-    docstring used to ask for."""
+    docstring used to ask for.
+
+    ``gaps`` is a REQUIRED positional argument, deliberately: it used to default
+    to ``None`` and the body then made a throwaway list, so a caller that forgot
+    it got the resolution but **silently lost the divergence disclosure** — which
+    is the whole point of this function. Two independent reviews found exactly
+    that happening in the decision-verification path. A caller that forgets now
+    fails loudly instead of quietly judging by a standard nobody can audit."""
     origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
     ref = origin_spec.get("ref", "")
     if origin_spec.get("kind") != "repo-file" or not ref:
         print(f"Error: batch は原典が repo-file の review type のみ対象です "
               f"(descriptor: {desc.get('id')})。", file=sys.stderr)
         sys.exit(1)
-    content, provenance = _resolve_repo_file_origin(ref, gaps if gaps is not None else [])
+    content, provenance = _resolve_repo_file_origin(ref, gaps)
     return ref, content, provenance
 
 

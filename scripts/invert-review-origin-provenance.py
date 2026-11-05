@@ -43,9 +43,9 @@ def stop_disclosing_the_divergence(src: str) -> str:
     内容は正しい方を配るので、出力だけ見れば問題なく見える。**使っていない基準が
     在ったことが隠れる**のが害。
     """
-    anchor = '            gaps.append(\n                f"原典 {ref} が 2 つの作業ツリーで食い違っています'
+    anchor = '            gaps.append(\n                f"原典 {ref} の内容が 2 つの作業ツリーで異なります'
     assert anchor in src, "anchor not found (stop_disclosing_the_divergence)"
-    return src.replace(anchor, '            pass  # MUTANT\n            _unused = (\n                f"原典 {ref} が 2 つの作業ツリーで食い違っています', 1)
+    return src.replace(anchor, '            pass  # MUTANT\n            _unused = (\n                f"原典 {ref} の内容が 2 つの作業ツリーで異なります', 1)
 
 
 def warn_even_when_the_trees_agree(src: str) -> str:
@@ -76,6 +76,64 @@ def stop_carrying_provenance(src: str) -> str:
     return src.replace(anchor, "    if False:\n        slot.update({})", 1)
 
 
+
+# --- 独立レビューが実測した盲点を埋める壊し方 ---------------------------------
+#
+# 初版のケースはすべて、2 つの根を monkeypatch で差し替えたテストを当て先にして
+# いた。**だから本物の根の実装を壊しても全件緑のまま**で、独立 AX レビューが実測
+# した (dirname を 1 段浅くしても 8 件緑)。ハーネスがテストの盲点をそのまま相続して
+# いたということ。以下はその穴を埋める。
+
+def break_the_real_capability_root(src: str) -> str:
+    """本物の根の計算を 1 段浅くする (本番なら原典が永久に見つからない)。
+
+    **独立 AX レビューが実測した回帰そのもの。** 初版のケースでは当て先が全部
+    monkeypatch 済みだったため、これが緑のまま通っていた。
+    """
+    anchor = "    return review_spine.install_root()"
+    assert anchor in src, "anchor not found (break_the_real_capability_root)"
+    return src.replace(
+        anchor, "    return os.path.dirname(os.path.abspath(__file__))", 1)
+
+
+def break_the_real_reviewed_root(src: str) -> str:
+    """git の頂点ではなく cwd を返す (= サブディレクトリから走らせると外す)。"""
+    anchor = '    return out.stdout.strip() if out.returncode == 0 else ""'
+    assert anchor in src, "anchor not found (break_the_real_reviewed_root)"
+    return src.replace(anchor, '    return os.getcwd()', 1)
+
+
+def give_gaps_a_default_again(src: str) -> str:
+    """``gaps`` に既定値を戻す (= 渡し忘れた呼び出し元が黙って開示を失う形)。
+
+    **これが独立 2 体の合意指摘そのもの。** 既定値があると、3 番目の呼び出し元が
+    渡し忘れても解決だけ成功し、食い違いの開示がその場で消える。
+    """
+    anchor = "def _repo_file_origin(desc, gaps):"
+    assert anchor in src, "anchor not found (give_gaps_a_default_again)"
+    return src.replace(anchor, "def _repo_file_origin(desc, gaps=None):", 1)
+
+
+def drop_provenance_in_the_third_caller(src: str) -> str:
+    """3 番目の呼び出し元が出所を渡さない形に戻す (= 初版の欠陥)。"""
+    anchor = """        artifact=artifact,
+        origin_provenance=origin_provenance,
+    )"""
+    assert anchor in src, "anchor not found (drop_provenance_in_the_third_caller)"
+    return src.replace(anchor, """        artifact=artifact,
+    )""", 1)
+
+
+def swallow_the_unreadable_disclosure(src: str) -> str:
+    """読めなかったことを黙って「無い」に畳む (= 初版の握り潰し)。"""
+    anchor = """        except OSError as exc:
+            unreadable.append((path, type(exc).__name__))
+            return None"""
+    assert anchor in src, "anchor not found (swallow_the_unreadable_disclosure)"
+    return src.replace(anchor, """        except OSError:
+            return None""", 1)
+
+
 CASES = [
     ("原典を capability 側から解決する形に戻す (= 本番の事故そのもの)", CMD,
      resolve_from_capability_again,
@@ -90,6 +148,22 @@ CASES = [
      T + "::test_missing_in_both_trees_exits_naming_where_it_looked"),
     ("bundle が出所を運ばなくする", SPINE, stop_carrying_provenance,
      T + "::test_the_bundle_carries_which_tree_the_origin_came_from"),
+    # --- 独立レビューが実測した盲点 (本物の根 / 全呼び出し元の配線) ---
+    ("本物の根の計算を 1 段浅くする (AX レビューが実測した回帰)", CMD,
+     break_the_real_capability_root,
+     T + "::test_the_real_capability_root_points_at_the_checkout"),
+    ("本物の根を 1 段浅くする → 唯一の定義であることの固定も赤くなる", CMD,
+     break_the_real_capability_root,
+     T + "::test_the_real_capability_root_has_one_definition"),
+    ("git の頂点ではなく cwd を返す", CMD, break_the_real_reviewed_root,
+     T + "::test_the_real_reviewed_repo_root_returns_the_git_toplevel"),
+    ("gaps に既定値を戻す (= 渡し忘れが黙る形 / 合意指摘そのもの)", CMD,
+     give_gaps_a_default_again,
+     T + "::test_gaps_is_a_required_argument_so_a_caller_cannot_silently_skip_it"),
+    ("3 番目の呼び出し元が出所を渡さない", CMD, drop_provenance_in_the_third_caller,
+     T + "::test_the_decision_verification_path_discloses_the_divergence"),
+    ("読めなかったことを黙って「無い」に畳む", CMD, swallow_the_unreadable_disclosure,
+     T + "::test_unreadable_is_disclosed_instead_of_being_called_absent"),
 ]
 
 

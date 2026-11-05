@@ -78,8 +78,21 @@ _BUILTIN_REVIEW_TYPES = {
 }
 
 
-def _install_root():
+def install_root():
+    """The checkout this capability is running from (the parent of ``lib/``).
+
+    Public because more than one module needs it and the expression is easy to
+    get subtly wrong (one ``dirname`` too few still returns a plausible path).
+    ms-119 e-7345: ``commands._capability_root`` used to hold its own copy of
+    this same expression under a different name — a second definition of one
+    concept that a later edit would have to find by guessing the other's name.
+    """
     return _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+
+
+def _install_root():
+    """Deprecated alias kept for existing callers in this module."""
+    return install_root()
 
 
 def _default_skills_dir():
