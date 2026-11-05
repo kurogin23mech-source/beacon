@@ -1310,6 +1310,25 @@ def cmd_bus_ack():
         print(f"Cursor: {recipient} → {result.get('last_seen_at', '(unchanged)')}")
 
 
+# 宛先確認の判定で **安価に証明できないため見ていない軸** (= 答えが「必要」でも、
+# これが真なら実際には不要でありうる)。**JSON と人間向け文面の両方をここから導く。**
+#
+# ms-185 e-7078 / 独立 AX レビュー: 以前は JSON 側 (`carve_outs_not_checked`) と
+# 人間向けの但し書きがそれぞれ手書きの一覧を持っていた。その結果、Trek 参加を
+# 理由にした免除が e-7068 で判定ごと消えたあとも、**人間向けの文面だけが
+# 「Trek 参加中なら実際には不要」と言い続けていた** (JSON 側は既に Trek を
+# 外していたので、同じ関数の中で 2 つの出力が食い違っていた)。文脈を持たない
+# 読み手がこれを信じると、要るはずの人間確認を省きうる = 認可の境界に関わる。
+#
+# 軸が引退したとき片方だけ古くなる構造を畳むため、出所を 1 つにした。
+# tests/test_dm_consent_skill_alignment_e6349.py が、引退した判定理由
+# (dm_consent.RETIRED_CONSENT_REASON_EXPLANATIONS) がこの一覧に居ないことを
+# 引退辞書そのものと突き合わせて測る (= 文字列の手書き一致ではない)。
+_CONSENT_CARVE_OUTS_NOT_CHECKED = (
+    ("operation_envelope", "Operation の事前承認経由"),
+)
+
+
 def cmd_bus_consent_check():
     """Answer "does this send need a human recipient-confirmation?" (ms-160 e-6349).
 
@@ -1393,7 +1412,8 @@ def cmd_bus_consent_check():
             "identity_uncertain": identity_uncertain,
             # 判定に使わなかった carve-out。答えが「必要」でも、これらが真なら
             # 実際には不要でありうる。
-            "carve_outs_not_checked": ["operation_envelope"],
+            "carve_outs_not_checked": [
+                k for k, _ in _CONSENT_CARVE_OUTS_NOT_CHECKED],
             "caveats": caveats,
         }, ensure_ascii=False))
         return
@@ -1404,8 +1424,10 @@ def cmd_bus_consent_check():
     for c in caveats:
         print(f"  ※ {c}")
     if required:
-        print("  ※ Trek 参加中 / Operation の事前承認経由なら実際には不要です "
-              "(この 2 軸は判定していません)。")
+        _labels = [label for _, label in _CONSENT_CARVE_OUTS_NOT_CHECKED]
+        _n = len(_labels)
+        print(f"  ※ {' / '.join(_labels)}なら実際には不要です "
+              f"(この {_n} 軸は判定していません)。")
 
 
 def cmd_bus_status():

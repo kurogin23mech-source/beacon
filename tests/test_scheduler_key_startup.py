@@ -4,8 +4,13 @@ Twin of test_envelope_secret_startup.py for the *other* internal secret.
 ``server/envelope.py`` falls back to a hard-coded placeholder scheduler key
 when ``BEACON_SCHEDULER_INTERNAL_KEY`` is unset. That placeholder is visible
 in the public repo, so a production deploy that forgets the env var would let
-anyone drive ``POST /api/system/trek-scheduler/tick`` (fire Trek / Operation
-autonomy) and the T1-system envelope mint path.
+anyone drive ``POST /api/system/tick`` (fire Operation autonomy).
+
+ms-185: the key used to guard two surfaces. e-7070 deleted the Trek half of the
+tick (the path is still reachable under its old trek-named spelling, which now
+forwards), and e-7078 deleted the ``T1-system`` envelope mint endpoint that
+shared this key — so the tick is the ONLY surface it guards now. The key itself
+stays: production ticks (``scripts/vps-tick.sh``) authenticate with it.
 
 The fix (``server/app.py:_verify_scheduler_key_configured``) is a startup
 handler that:

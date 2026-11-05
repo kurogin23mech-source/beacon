@@ -87,10 +87,15 @@ _SENTINEL = object()
 def _t1_system_envelope(scope: str = "trek:tk-abc12345") -> dict:
     """Minimal server-minted T1-system envelope, as persisted on the event.
 
-    ms-97 P2: the inbox-hook requires this provenance before routing a ``trek-*``
+    ms-97 P2: the inbox-hook required this provenance before routing a ``trek-*``
     auto-execute event into a Level 3 imperative block, so those on-wire fixtures
-    must carry it (production Trek cadence events do — server/app.py mints them
-    via ``issue_t1_system_envelope``).
+    carried it.
+
+    ms-185 e-7078: **nothing can produce this shape any more.** The tier, its mint
+    endpoint and ``issue_t1_system_envelope`` are all deleted (a correctly signed
+    envelope of this shape now degrades to T5 at verify). It survives here only as
+    a synthetic "not the required proof" value for gates that never call verify —
+    see the measurement note below.
 
     ms-185 e-7078 — this docstring used to say "production cadence events always
     do", and the ``operation-trigger`` fixture below defaulted to this shape on
