@@ -2158,15 +2158,12 @@ def cmd_review_context():
             print(f"Error: --origin-doc is not valid for --type {review_type} "
                   f"(its 原典 is fixed to {ref}).", file=sys.stderr)
             sys.exit(1)
-        install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        origin_path = os.path.join(install_root, *ref.split("/"))
         origin_id = ref
-        try:
-            with open(origin_path, encoding="utf-8") as f:
-                origin_content = f.read()
-        except OSError as e:
-            print(f"Error: 原典 not found at {origin_id}: {e}", file=sys.stderr)
-            sys.exit(1)
+        # ms-119 e-7345: 解決は 1 箇所 (_resolve_repo_file_origin) に寄せた。
+        # 以前はここと batch 側の _repo_file_origin に同じ解決が手書きで 2 つ
+        # 並んでおり、片方だけ直る形だった (コード内の注記自身が「抽出は価値ある
+        # follow-up」と認めていた)。
+        origin_content, origin_provenance = _resolve_repo_file_origin(ref, gaps)
     elif origin_kind == "doc":
         # 原典 is a document supplied at review time (a target's SPEC / vision).
         # Absence is itself a finding (SPEC § 方針5): surface as a gap, don't lie.
@@ -2276,6 +2273,7 @@ def cmd_review_context():
         implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
         artifact=artifact,
         external_references=external_references,
+        origin_provenance=origin_provenance,
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
@@ -2297,7 +2295,12 @@ def _emit_decision_verification_context():
               "(skills/decision-verification/review-type.json missing).",
               file=sys.stderr)
         sys.exit(1)
-    origin_id, origin_content = _repo_file_origin(desc)
+    # ms-119 e-7345 (独立レビュー 2 体の合意指摘): ここは 3 番目の呼び出し元で、
+    # 以前は gaps を渡さず provenance も捨てていた。原典が食い違っていても警告が
+    # 出ず、どの版で判定したかも載らない —— この関数群の目的が、この 1 経路だけで
+    # 無効化されていた。gaps は resolve より前に作って渡す。
+    gaps = []
+    origin_id, origin_content, origin_provenance = _repo_file_origin(desc, gaps)
 
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
     limit_raw = os.environ.get("BEACON_DECISION_LIMIT", "").strip()
@@ -2321,7 +2324,8 @@ def _emit_decision_verification_context():
         "ref": kind or "all",
         "content": json.dumps(decisions, ensure_ascii=False, indent=2),
     }
-    gaps = []
+    # ここで `gaps = []` と書き直すと、原典解決が積んだ食い違いの開示を捨てる。
+    # 実際に 1 度書いてしまった — 配線を足しても、後ろで作り直せば消える。
     if not decisions:
         gaps.append(
             "検証対象の decision がありません "
@@ -2338,30 +2342,142 @@ def _emit_decision_verification_context():
         gaps=gaps,
         known_judge_types=set(registry.keys()),
         artifact=artifact,
+        origin_provenance=origin_provenance,
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
 
-def _repo_file_origin(desc):
-    """(origin_id, origin_content) for a repo-file 原典 descriptor, or exit with a
-    clean error. Used by the BATCH review-context path (e-4125); the single-type
-    path (cmd_review_context) resolves its origin inline because it also handles
-    the doc-origin kind. Extracting the full single-path collection into a shared
-    helper is a worthwhile follow-up (e-4125 maint review)."""
+def _reviewed_repo_root():
+    """The working tree being reviewed (= git toplevel of cwd), or "" if none.
+
+    ms-119 e-7345. The 原典 of a repo-file review type lives in a working tree,
+    and the review runs **somewhere**: a fork's worktree, a clone, the installed
+    capability's own checkout. Those can hold different versions of the same
+    原典, so which tree we read decides what standard the judge applies.
+    """
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _capability_root():
+    """The checkout the running capability was installed from.
+
+    Delegates — the expression lives once in ``review_spine.install_root``.
+    独立レビュー (低) の指摘: 重複を畳むのが主題の変更で、同じ式を別名でもう 1 つ
+    増やしていた。片方だけ直る形を作らないため、呼ぶだけにする。
+    """
+    import review_spine  # local import — matches this file's module-import idiom
+    return review_spine.install_root()
+
+
+def _resolve_repo_file_origin(ref, gaps):
+    """Read a repo-file 原典, preferring the repo under review (ms-119 e-7345).
+
+    Returns ``(content, provenance)`` or exits with a clean error.
+
+    **Why the repo under review wins.** The 原典 is the standard the judge
+    applies, and a change to the 原典 IS reviewable: a PR that rewrites the
+    principles must be judged against what it establishes, and a fork's worktree
+    is the truth for its own review. Reading the capability's checkout instead
+    delivers whatever版 that tree happens to hold — which, when it is behind,
+    silently judges the change by a retired standard.
+
+    **Measured (2026-11-05)**: right after a PR restructured the AX 原典 from
+    6 principles to P1〜P8 and landed on origin/main, a review run from a worktree
+    was handed the 216-line OLD 原典 (the capability's checkout had not pulled;
+    the worktree's own file was 437 lines). ``gaps`` was empty, so neither the
+    judge nor the reader could tell. One review's whole new lens never got
+    applied, and re-running with the right 原典 took findings from 1 to 3.
+
+    **Fallback is still the capability.** Reviewing a repo that is not this tool
+    (no local copy of the 原典) must keep working — the 原典 travels with the
+    capability by design. So: prefer the reviewed tree, fall back, and **always
+    say which**. When both exist and differ, that divergence goes in ``gaps``
+    rather than being resolved quietly: the point is not to pick a winner
+    silently but to stop a review from claiming a standard it did not use.
+    """
+    rel = ref.split("/")
+    reviewed_root = _reviewed_repo_root()
+    cap_root = _capability_root()
+    reviewed_path = os.path.join(reviewed_root, *rel) if reviewed_root else ""
+    cap_path = os.path.join(cap_root, *rel)
+
+    unreadable = []
+
+    def _read(path):
+        """Read ``path``, or return None — distinguishing "absent" from "there
+        but unreadable" (独立レビュー misleading の指摘).
+
+        握り潰すと、権限が壊れたファイルや同名ディレクトリが「無い」と名乗る。
+        読み手は消したパスを疑って探しに行き、`ls -la` で気づくまで空回りする。
+        """
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            unreadable.append((path, type(exc).__name__))
+            return None
+
+    reviewed_text = _read(reviewed_path) if reviewed_path else None
+    cap_text = _read(cap_path)
+    for path, why in unreadable:
+        # 在るのに読めなかったことは、落ちた先が在っても黙らない (= 「無いので
+        # capability を使った」という体で進むのを止める)。
+        gaps.append(f"原典 {ref} の候補 {path} は存在しますが読めませんでした "
+                    f"({why})。権限か、同名のディレクトリを疑ってください。")
+
+    if reviewed_text is not None:
+        chosen, path, source = reviewed_text, reviewed_path, "reviewed-repo"
+        if cap_text is not None and cap_text != reviewed_text:
+            gaps.append(
+                f"原典 {ref} の内容が 2 つの作業ツリーで異なります: レビュー対象の "
+                f"{reviewed_path} ({len(reviewed_text.splitlines())} 行) を使い、"
+                f"インストール元の {cap_path} ({len(cap_text.splitlines())} 行) は "
+                f"使いませんでした。インストール元が古い (未 pull) 可能性があります。"
+                f"揃えるなら `git -C {cap_root} pull`。"
+                f"(行数が同じでも内容は異なりえます — 判定は内容の一致で行っています)")
+    elif cap_text is not None:
+        chosen, path, source = cap_text, cap_path, "capability"
+    else:
+        why = ("読めませんでした (" + ", ".join(f"{p}: {w}" for p, w in unreadable)
+               + ")") if unreadable else "見つかりません"
+        print(f"Error: 原典 {ref} を使えません — {why} "
+              f"(探した場所: {reviewed_path or '(git 管理下でない)'} / {cap_path})",
+              file=sys.stderr)
+        sys.exit(1)
+
+    return chosen, {"resolved_from": source, "path": path}
+
+
+def _repo_file_origin(desc, gaps):
+    """``(origin_id, origin_content, provenance)`` for a repo-file 原典 descriptor,
+    or exit with a clean error. Used by the BATCH review-context path (e-4125).
+
+    ms-119 e-7345: the resolution itself now lives in
+    :func:`_resolve_repo_file_origin`, shared with the single-type path. Before
+    that the two paths each had their own hand-written copy — the follow-up this
+    docstring used to ask for.
+
+    ``gaps`` is a REQUIRED positional argument, deliberately: it used to default
+    to ``None`` and the body then made a throwaway list, so a caller that forgot
+    it got the resolution but **silently lost the divergence disclosure** — which
+    is the whole point of this function. Two independent reviews found exactly
+    that happening in the decision-verification path. A caller that forgets now
+    fails loudly instead of quietly judging by a standard nobody can audit."""
     origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
     ref = origin_spec.get("ref", "")
     if origin_spec.get("kind") != "repo-file" or not ref:
         print(f"Error: batch は原典が repo-file の review type のみ対象です "
               f"(descriptor: {desc.get('id')})。", file=sys.stderr)
         sys.exit(1)
-    install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    origin_path = os.path.join(install_root, *ref.split("/"))
-    try:
-        with open(origin_path, encoding="utf-8") as f:
-            return ref, f.read()
-    except OSError as e:
-        print(f"Error: 原典 not found at {ref}: {e}", file=sys.stderr)
-        sys.exit(1)
+    content, provenance = _resolve_repo_file_origin(ref, gaps)
+    return ref, content, provenance
 
 
 def cmd_review_batch_context():
@@ -2422,14 +2538,19 @@ def cmd_review_batch_context():
     reviews = []
     for d in due:
         rtype = d["review"]
-        origin_id, origin_content = _repo_file_origin(registry.get(rtype, {}))
+        # 原典の食い違いは review type ごとに出るので、共有 gaps を汚さず
+        # この bundle の gaps にだけ載せる (別の type の原典は別ファイル)。
+        type_gaps = list(shared_gaps)
+        origin_id, origin_content, origin_provenance = _repo_file_origin(
+            registry.get(rtype, {}), type_gaps)
         bundle = review_spine.assemble_review_context(
             rtype, origin_id=origin_id, origin_content=origin_content,
             diff_text=diff_text, mode="diff", target_ref=target_ref,
-            gaps=list(shared_gaps),
+            gaps=type_gaps,
             known_judge_types=set(review_spine.judge_run_review_types().keys()),
             implementer_model=implementer_model,
-            external_references=external_references)
+            external_references=external_references,
+            origin_provenance=origin_provenance)
         reviews.append({"review_type": rtype, "judge_run": True, "bundle": bundle})
 
     print(json.dumps({
