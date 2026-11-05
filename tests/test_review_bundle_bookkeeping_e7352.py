@@ -42,15 +42,11 @@ from __future__ import annotations
 
 import ast
 import inspect
-import os
-import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-
-import commands  # noqa: E402
-import review_spine as rs  # noqa: E402
+import commands
+import review_spine as rs
 
 
 def _section(path_a, path_b=None, body="@@ -1 +1 @@\n-old\n+new\n"):

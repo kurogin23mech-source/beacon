@@ -28,16 +28,11 @@ from __future__ import annotations
 
 import ast
 import inspect
-import io
-import os
-import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-
-import commands  # noqa: E402
-import review_spine  # noqa: E402
+import commands
+import review_spine
 
 
 # --- 1. 解決は 3 つ組を return する 1 関数 ------------------------------------
