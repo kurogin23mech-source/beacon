@@ -217,9 +217,17 @@ def has_approved_operation_envelope(ev: dict) -> bool:
 # can mint (the judgment stays in the code, always fails, and nobody notices
 # because the failure looks like ordinary caution).
 #
-# The proof differs per channel because the authorizing human differs:
+# The proof differs per channel because the authorizing human differs. Today
+# there is exactly one gated channel:
 #   operation-trigger → the person who ran ``beacon operation approve`` for THIS op
-#   trek-*            → the person who activated the Trek (the server signs for them)
+#
+# ms-185: ``trek-*`` used to be listed here as "the person who activated the Trek
+# (the server signs for them)". e-7071 moved those channels into
+# RETIRED_PROVENANCE_CHANNELS and e-7078 deleted the server-signed tier itself —
+# so nothing in this repository can produce that proof any more. Keep this list
+# in step with ``PROVENANCE_REQUIREMENTS`` below: a channel named here without an
+# entry there (or the reverse) is the "gate nobody can pass" shape this whole
+# section exists to prevent.
 class ProvenanceRequirement(NamedTuple):
     """What a gated channel demands, **and** what the operator can do about it.
 
