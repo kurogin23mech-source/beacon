@@ -28,16 +28,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 GATE = ROOT / "server" / "dm_gate.py"
 APP = ROOT / "server" / "app.py"
 CONSENT = ROOT / "lib" / "dm_consent.py"
-# e-7069 (独立保守性レビューの medium): 同じ「共有作業部屋の参加者か」判定が
-# 正本 (lib/trek.py) と CLI 側 (lib/cmd_bus.py) の 2 箇所にあり、突き合わせる
-# 検査を足して両側を別々に壊して測っていた。
-#
-# ms-185 e-7070: 正本が消えて**実装が 1 本になった**ので、突き合わせる相手が
-# 無い。正本の本番呼び出し元は ``/api/system/trek-internal-send`` 1 箇所だけで、
-# その経路ごと落ちたため正本は呼び出し元ゼロになった。残る CLI 側は送信予算の
-# 迂回判定がまだ使っているので、**そちら単独を壊す測定は続ける** (下の 2 件)。
-# ズレの測定ではなく「CLI 側が緩む方へ転ばないか」の測定に意味が移った。
-CMD_BUS = ROOT / "lib" / "cmd_bus.py"
+# ms-185 e-7080 / e-7321: ここに CMD_BUS (= lib/cmd_bus.py) を変異対象として
+# 持っていた。送信予算の迂回判定を判定ごと撤去したので当て先が無くなり、
+# 変異 2 件と一緒に落とした。CMD_BUS_TEST は baseline の一員として残す
+# (予算ゲート本体の試験はいまも在り、壊れていないことを毎周確認する)。
 # ms-185 e-7078: 規則 0 の削除は dm_gate だけでなく tier 自体 (envelope) と
 # 送信側 carve-out (app) にも跨るので、3 ファイルを変異対象に持つ。
 ENVELOPE = ROOT / "server" / "envelope.py"
@@ -294,27 +288,20 @@ def gate_drops_the_same_user_rule(src: str) -> str:
 # 別々に壊す: どちらを直し忘れても捕まる形でなければ意味がない。
 
 
-def cmd_bus_loosens_the_session_grain(src: str) -> str:
-    """CLI 側の phase-A 判定を user_id 一致に緩める (= 粒度のズレ)。"""
-    anchor = '        return any((m.get("session_id") or "") == session_id for m in members)'
-    assert anchor in src, "anchor not found (cmd_bus_loosens_the_session_grain)"
-    return src.replace(
-        anchor,
-        '        return any((m.get("user_id") or "") == user_id for m in members)  # MUTANT',
-        1)
-
-
-def cmd_bus_pre_a_matches_anything(src: str) -> str:
-    """CLI 側の pre-A 判定を常に真にする (= 正本より緩い側へ転ぶ)。"""
-    anchor = ('    return bool(user_id) and any(\n'
-              '        (m.get("user_id") or "") == user_id for m in members\n'
-              '    )')
-    assert anchor in src, "anchor not found (cmd_bus_pre_a_matches_anything)"
-    return src.replace(anchor, "    return True  # MUTANT", 1)
-
-
 # ms-185 e-7070: trek_phase_a_needs_only_the_sender を落とした。正本
 # (lib/trek.py の在籍判定) を壊す変異で、その正本ごと消えた。
+#
+# ms-185 e-7080 / e-7321: CLI 側の粒度を壊す 2 件 (session 粒度を緩める /
+# pre-A が何でも一致する) も落とした。測っていた対象 = 送信予算の迂回判定
+# (_is_trek_internal_send とそれが使う参加者の粒度判定) を判定ごと撤去したので、
+# 当てる場所が無い。**判定が消えたら、その判定のための変異も消す** —
+# アンカーの無い変異を残すと SKIP になり、ハーネス自身が「SKIP は緑と同じ害」と
+# 言いながら素通りする (この MS で実際に 1 件踏んだ)。
+#
+# 迂回が戻ってこないことは、迂回路を足すと赤くなる形では測っていない。
+# 予算ゲートが**例外なく通る**ことは tests/test_bus_budget.py 前半の
+# 予算ゲート本体の試験が測っており、迂回路を足す変異は「新しい迂回路の形」を
+# 先に決めないと書けない (= 存在しない形への変異は書けない)。
 
 
 CASES = [
@@ -366,11 +353,6 @@ CASES = [
     # ms-185 e-7070: 当て先は CLI 側だけになった (正本が消えて実装が 1 本)。
     # 受け手も「正本より緩くないか」の相対比較から、粒度そのものを測る絶対の
     # 試験へ移設してある (tests/test_bus_budget.py の末尾)。
-    ("CLI 側が session 粒度を緩める", CMD_BUS, cmd_bus_loosens_the_session_grain,
-     CMD_BUS_TEST + "::test_phase_a_matches_on_session_id_not_user_id"),
-    ("CLI 側の pre-A が何でも一致する", CMD_BUS,
-     cmd_bus_pre_a_matches_anything,
-     CMD_BUS_TEST + "::test_pre_a_with_a_blank_user_id_never_matches"),
 ]
 
 # 赤いこと自体はガードが効いた証拠にならない (変異が構文を壊しても赤くなる)。
@@ -381,7 +363,7 @@ def run_one(target: str):
 
 def main() -> int:
     originals = {p: p.read_text(encoding="utf-8")
-                 for p in (GATE, APP, CONSENT, CMD_BUS, ENVELOPE)}
+                 for p in (GATE, APP, CONSENT, ENVELOPE)}
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 

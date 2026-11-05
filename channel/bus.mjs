@@ -38,9 +38,6 @@ import {
   consumeBusBudgetOne, refundBusBudgetOne, refuseMessage, isArmed,
 } from './bus-budget.mjs'
 import {
-  checkAndRecordTrekReply, rateHoldMessage,
-} from './trek-rate.mjs'
-import {
   classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
 } from './bus-qualgate.mjs'
 import { livenessAssertionStale, isOrphanedBridge } from './bus-liveness-assert.mjs'
@@ -1025,39 +1022,19 @@ async function apiPut(p, body) {
   return r.json()
 }
 
-// e-4116 (ms-75): ask the server whether an autonomous reply is Trek-internal
-// (= both this session and the recipient session are joined members of the
-// same active Trek). Such replies bypass the auto-reply budget: a Trek is a
-// pre-approved scope with its own TTL / halt controls, so the runaway cap is
-// structurally redundant for member-to-member coordination. Before this the
-// MCP path had no Trek awareness and leader↔executor DMs exhausted the budget,
-// deadlocking Trek coordination (observed 2026-07-24).
+// ms-185 e-7080 / e-7321: ここに `checkTrekInternalReply` (= この返信が共同作業
+// 空間 (Trek) の内側かをサーバに尋ね、内側なら自動返信の予算ゲートを飛ばす判定)
+// が在った。e-7070 でサーバ側の口 (`GET /api/system/trek-internal-send`) が消えた
+// あと、この関数は常に「内側でない」を返すだけのスタブになっていた。
 //
-// The judgment lives server-side (single source of truth = dm_gate's
-// session-grain shared-Trek lookup); bus.mjs only asks. Fail-closed: any error
-// returns not-internal so the budget gate stays in force (never a silent
-// relaxation). BEACON_TREK_BYPASS_OFF=1 is an explicit escape hatch (mirrors
-// BEACON_QUALGATE_OFF / BEACON_BUS_NO_LIVE_CHECK).
-// ms-185 e-7070 — **the server side of this is gone.** The route this asked
-// (`GET /api/system/trek-internal-send`) was deleted together with the Trek
-// body, so every call 404'd, got caught by the try/catch at the call site, and
-// fell back to not-internal. The result was already permanently `false`; the
-// only thing the request still did was spend a network round-trip on the hot
-// path (every armed / --in-reply-to send) and write a misleading log line.
+// **スタブのまま残す形は採らない。** SPEC 設計方針4 が「lookup が常に偽を返すように
+// 残す形は採らない — 誰もセットしない判定が残ると、掃除した動かない配線をまた 1 つ
+// 作る」と名指しで却下している。呼び出し側の分岐・`BEACON_TREK_BYPASS_OFF`・
+// `BEACON_TREK_RATE_*` のブレーキ・`trek-rate.mjs` の読み込みも同じ変更で落とした。
 //
-// So this now returns the same answer **without asking**. Behaviour is
-// unchanged by construction (the answer was already always not-internal); what
-// changes is that the comments above stop describing a live mechanism and the
-// dead round-trip disappears.
-//
-// Removing this function, `BEACON_TREK_BYPASS_OFF`, the `BEACON_TREK_RATE_*`
-// brake and the call-site branch outright is **e-7080**, which carries the
-// acceptance condition that DM receive is verified on a real session afterwards
-// (this file is the receive path for every session, so that removal is not
-// something to fold into a deletion commit that cannot run it).
-async function checkTrekInternalReply(_recipientProjectId, _recipientSessionId) {
-  return { trek_internal: false }
-}
+// 結果として自動返信は **常に通常の予算ゲートを通る** (迂回路が無い)。これは
+// 緩める方向ではなく厳しくする方向 — 以前は Trek の内側なら予算も品質ゲートも
+// 飛ばせる経路が宣言上は在った。
 
 // e-1667: per-iteration watchdog wrapper. Caps any awaited promise at
 // ITERATION_WATCHDOG_MS so a hung pollOnce / scheduler / heartbeat cannot
@@ -1207,47 +1184,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   // Track whether the pessimistic budget decrement committed a slot, so a
   // held / failed send can refund it (ms-100 e-2999) instead of burning a turn.
   let budgetConsumed = false
-  // e-4116 (ms-75): Trek-internal replies bypass the budget gate entirely.
-  // Checked server-side before consuming budget so leader↔executor DMs inside
-  // an active Trek never deadlock on budget exhaustion. Fail-closed on error
-  // (checkTrekInternalReply returns not-internal), so the gate stays in force.
-  let trekInternal = false
-  let trekInternalId = ''
+  // ms-185 e-7080 / e-7321: ここに「この返信は Trek の内側か」を尋ねて予算ゲートと
+  // 品質ゲートを飛ばす分岐と、飛ばした分の代わりに効かせる Trek ごとの流量ブレーキ
+  // (`BEACON_TREK_RATE_*`) が在った。尋ねる先のサーバの口は e-7070 で消えており、
+  // 判定は常に「内側でない」= この 2 block はどちらも恒久に通らない死んだ分岐
+  // だった。SPEC 設計方針4 に従って、スタブで残さず分岐ごと落とした。
+  //
+  // 結果: 自動返信は **例外なく通常の予算ゲートを通る**。
   if (autonomous) {
-    try {
-      const ti = await checkTrekInternalReply(recipient_project_id, recipient_session_id)
-      trekInternal = !!(ti && ti.trek_internal)
-      trekInternalId = (ti && ti.trek_id) || ''
-      if (trekInternal) {
-        log(`reply Trek-internal (trek_id=${trekInternalId || '?'}) → budget + qual gate bypassed, per-trek rate brake applied`)
-      }
-    } catch (e) {
-      trekInternal = false
-      log(`trek-internal check failed (${e.message}); budget gate stays in force`)
-    }
-  }
-  // e-4116 follow-up (PR #491 review 2): Trek-internal replies bypass BOTH the
-  // budget cap and the qual gate, so they'd otherwise have no volume brake at
-  // all — a leader↔executor loop could spin unbounded until manual halt / 24h
-  // TTL. Apply a per-trek rolling rate cap instead: past N replies / window,
-  // HOLD for the human. Self-healing (sliding window) so it never deadlocks
-  // normal coordination. BEACON_TREK_RATE_OFF=1 is the escape hatch.
-  if (autonomous && trekInternal && process.env.BEACON_TREK_RATE_OFF !== '1' && trekInternalId) {
-    const capEnv = Number.parseInt(process.env.BEACON_TREK_RATE_CAP ?? '', 10)
-    const winEnv = Number.parseInt(process.env.BEACON_TREK_RATE_WINDOW_SEC ?? '', 10)
-    const rate = checkAndRecordTrekReply(CWD, trekInternalId, {
-      cap: Number.isFinite(capEnv) && capEnv > 0 ? capEnv : undefined,
-      windowSec: Number.isFinite(winEnv) && winEnv > 0 ? winEnv : undefined,
-    })
-    if (!rate.allowed) {
-      log(`reply HELD by Trek rate brake: trek=${trekInternalId} ${rate.count}/${rate.cap}`)
-      return {
-        content: [{ type: 'text', text: rateHoldMessage(trekInternalId, rate.count, rate.cap) }],
-        isError: true,
-      }
-    }
-  }
-  if (autonomous && !trekInternal) {
     const gate = consumeBusBudgetOne(CWD)
     if (!gate.allowed) {
       const msg = refuseMessage(gate.reason, gate.budget)
