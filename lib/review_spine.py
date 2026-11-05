@@ -198,10 +198,27 @@ def whole_target_artifact(commits, *, target_id, truncated=False):
     }
 
 
+def _origin_slot(origin_id, origin_content, provenance):
+    """Build the bundle's ``origin`` slot, carrying provenance when the caller
+    knows it (ms-119 e-7345).
+
+    Kept separate so the shape lives in one place: a judge reads
+    ``origin.resolved_from`` to know which working tree's 原典 it was handed, and
+    a human reads it to know which version a past verdict was reached under.
+    Callers that cannot say (a doc-origin 原典 has no checkout) pass nothing and
+    the slot keeps its old two-key shape.
+    """
+    slot = {"id": origin_id, "content": origin_content}
+    if provenance:
+        slot.update({k: v for k, v in provenance.items() if v})
+    return slot
+
+
 def assemble_review_context(review_type, *, origin_id, origin_content,
                             diff_text, mode, target_ref, gaps=None,
                             known_judge_types=None, external_references=None,
-                            implementer_model="", artifact=None):
+                            implementer_model="", artifact=None,
+                            origin_provenance=None):
     """Assemble the review-kernel bundle handed to an independent judge subagent.
 
     This is the *structural* enforcement of reviewer independence (ms-119
@@ -218,6 +235,13 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         review_type: REVIEW_AX / REVIEW_PHILOSOPHY (attainment is human-gated,
             not a subagent judge — see review_bindings_for_transition).
         origin_id: identifier of the 原典 (doc-id or repo-relative file path).
+        origin_provenance: optional ``{"resolved_from": ..., "path": ...}`` saying
+            WHICH checkout the 原典 was read from. A repo-file 原典 lives in a
+            working tree, and more than one tree can hold a different version of
+            it (a worktree being reviewed vs the installed capability), so the
+            bundle states which one it carries instead of leaving the judge to
+            assume (ms-119 e-7345 — a review silently judged by a stale 原典
+            cannot be told apart from one judged by the current one).
         origin_content: the full text of the 原典 (never a summary).
         diff_text: the mechanically-collected unified diff (git / gh pr diff).
         mode: "diff" (change-scoped) or "full-surface" (snapshot audit).
@@ -257,7 +281,7 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         "review_type": review_type,
         "mode": mode,
         "target_ref": target_ref,
-        "origin": {"id": origin_id, "content": origin_content},
+        "origin": _origin_slot(origin_id, origin_content, origin_provenance),
         "artifact": artifact,
         "independence_contract": INDEPENDENCE_CONTRACT,
         "external_references": list(external_references or []),
