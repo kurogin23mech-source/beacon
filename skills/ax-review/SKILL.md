@@ -111,19 +111,26 @@ surface の品質が計器の入力品質を決める。full-surface mode では
 {
   "mode": "diff | full-surface",
   "principles_reviewed": {
-    "P1": "ok", "P2": "finding", "P3": "ok", "P4": "unchecked",
-    "P5": "ok", "P6": "ok", "P7": "ok", "P8": "ok",
-    "naming": "finding", "least-surprise": "ok"
+    "P1": {"verdict": "ok", "basis": "差し替え/除外/延期/取り消し/やり直しを doc 系の操作に当てた。いずれも 1 操作で言える"},
+    "P2": {"verdict": "finding", "basis": ""},
+    "P3": {"verdict": "ok", "basis": "外部に届く操作はこの差分に無い"},
+    "P4": {"verdict": "unchecked", "basis": "呼び直しの宣言を読む surface が差分に無く、確かめられなかった"},
+    "P5": {"verdict": "ok", "basis": "新しい鍵は 2 つで、どちらも Usage に形つきで出ている"},
+    "P6": {"verdict": "finding", "basis": ""},
+    "P7": {"verdict": "ok", "basis": "役ごとの文脈を触る変更が差分に無い"},
+    "P8": {"verdict": "ok", "basis": "記録面を触る変更が差分に無い"},
+    "naming": {"verdict": "finding", "basis": ""},
+    "least-surprise": {"verdict": "ok", "basis": "名前と挙動の乖離は見つからなかった"}
   },
   "findings": [
     {
-      "principle": ["naming"],
+      "principle": ["P6", "naming"],
       "surface": "beacon doc --ms / beacon task -m",
-      "defect": "同じ『どのMSか』の指定が task/log では -m、doc/milestone では --ms",
-      "failure_class": "指せない",
-      "what_goes_wrong": "『ms-5 に doc を足して』と頼まれた AI が、task で覚えた -m を doc に渡す。-m は黙って無視され、doc はアクティブ MS 側に付く。AI は成功と読む",
+      "defect": "同じ『どのMSか』の指定が task/log では -m、doc/milestone では --ms。さらに doc 側の -m は黙って無視される",
+      "failure_class": "確かめられない",
+      "what_goes_wrong": "『ms-5 に doc を足して』と頼まれた AI が、task で覚えた -m を doc に渡す。-m は黙って無視され、doc はアクティブ MS 側に付く。エラーは出ないので AI は成功と読み、間違った MS に付いた doc がそのまま残る",
       "structural_fix": "全コマンドで --ms に統一し -m は全所 alias、無効時はエラー",
-      "impact": "人の手間が増える",
+      "severity": "人の手間が増える",
       "detectability": "silent",
       "confidence": "high"
     }
@@ -141,25 +148,37 @@ surface の品質が計器の入力品質を決める。full-surface mode では
 
 - `mode`: この実行が diff / full-surface のどちらだったかを明示する。
 - `principles_reviewed`: **必須。10 キーすべてを埋める** (`P1`〜`P8` と
-  `naming` / `least-surprise`)。値は 3 つだけ:
+  `naming` / `least-surprise`)。各値は `{"verdict": ..., "basis": ...}` の形。
+  `verdict` は 3 つだけ:
   - `ok` = 当てて、問題が無かった
   - `finding` = 当てて、問題を見つけた (`findings` に 1 件以上ある)
   - `unchecked` = **当てられなかった** (surface が読めない / この変更に関係が無い)
 
+  `basis` は **`ok` と `unchecked` では必須**の 1 行。`ok` なら **何を当てたか**
+  (どの surface を見て、どう確かめたか)、`unchecked` なら **なぜ当てられなかったか**。
+  `finding` のときは `findings` 側が根拠を運ぶので空でよい。
+
   この欄がある理由は 1 つで、**「見ていない」と「問題が無い」を読み手が区別できる
-  ようにする**ため。黙って飛ばすと、読み手は「見て問題が無かった」と読む。迷ったら
-  `ok` ではなく `unchecked` に倒す (緑に倒す側が常に危ない)。
+  ようにする**ため。黙って飛ばすと、読み手は「見て問題が無かった」と読む。
+  **裏付けの 1 行を要るようにしているのは、宣言だけなら無検証で埋められるから** ——
+  初版は裸の値で書かせていて、独立レビューが「10 キー全部を無検証で `ok` と書いた
+  出力と、実際に当てた出力はスキーマ上区別できない」と指摘した。迷ったら `ok` では
+  なく `unchecked` に倒す (緑に倒す側が常に危ない)。
 - `principle`: **文字列の配列**。値は `"P1"`〜`"P8"` と、横断レンズの `"naming"` /
   `"least-surprise"` のみ。1 finding が複数に跨る場合は複数記載する (支配的 1 つに
   丸めない)。
 - `failure_class`: `届いていない` / `指せない` / `言えない` / `確かめられない` の
   4 値 (原典 §4)。**どの失敗につながるかを必ず書かせる**ことで、指摘が指示の工夫では
-  なく構造の修正に向かう。
+  なく構造の修正に向かう。原典 §4 の表の「直す場所」列は **当たりどころの目安**で、
+  `principle` 欄を縛る対応表ではない (同じ分類でも破れている原則は別でありうる)。
 - `what_goes_wrong`: このままだと AI がどう間違えるかを、**具体的な依頼文と、その
   結果**で書く。「誤用しうる」のような抽象文は不可 — 依頼文が書けない finding は、
   まだ欠陥として立っていない。
-- `impact`: `顧客に届く` / `手が失われる・二重になる` / `人の手間が増える` の 3 値
-  (原典 §5)。
+- `severity`: `顧客に届く` / `手が失われる・二重になる` / `人の手間が増える` の 3 値
+  (原典 §5 の「重さ」)。**キー名を変えてはならない** — 畳んだレポートを作る
+  `review_spine.aggregate_review_reports` が全レビュー種別の finding から `severity`
+  を読むので、ここだけ別名にすると **AX の指摘だけ重さが空になる** (初版で実際に
+  踏んだ)。値の語彙は種別ごとに違ってよいが、キーの名前は共有の契約。
 - `detectability`: `silent` / `misleading` / `visible` の 3 値。影響が同じなら
   silent を上に倒す。misleading = エラーは出るが真因と無関係な文言で誤診を誘発し、
   誤った回復ループに入らせる。
