@@ -6,10 +6,12 @@ just linger — it makes the NEXT run refuse operation-bearing sends, so bus tes
 fail by the dozen on a developer's machine while CI stays green (CI starts from a
 clean checkout). The failure looks like the developer's own regression.
 
-``cmd_trek_join`` reaches ``_arm_for_trek``, which writes an unconditional
-20-turn grant, and tests/test_trek_cli_cloud.py drove it with no isolation. It
-was hit 6 times on 2026-10-01 across four sessions; one of them nearly shipped a
-real regression behind "probably that bus thing again".
+The case that forced this (all three actors are since gone — ms-185 removed the
+Trek CLI — but the shape is why the override exists): ``cmd_trek_join`` reached
+``_arm_for_trek``, which wrote an unconditional 20-turn grant, and
+tests/test_trek_cli_cloud.py drove it with no isolation. It was hit 6 times on
+2026-10-01 across four sessions; one of them nearly shipped a real regression
+behind "probably that bus thing again".
 
 Pinned here:
   * the budget path honours an override, so isolation is a mechanism rather than

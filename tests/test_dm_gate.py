@@ -19,16 +19,20 @@ Four acceptance-criteria branches are pinned:
 (d) ``actions_authorized`` empty → gate skip regardless of (a)/(b)
     (= pure information-sharing DM has nothing to approve).
 
-Plus two helper-level pins:
+Plus one helper-level pin:
 
-(e) ``build_shared_trek_lookup_from_lists`` correctly walks the trek
-    member list to detect shared membership in both creator and member
-    slots.
 (f) ``GATE_REASON_*`` constants are stable strings (audit log relies on
     these strings; renaming silently would break post-hoc analysis).
 
-The judge takes a ``shared_trek_lookup`` callback so tests can inject a
-deterministic in-memory lookup without spinning up Firestore / DynamoDB.
+ms-185 e-7068 / e-7071: there was an (e) — that
+``build_shared_trek_lookup_from_lists`` walked the trek member list — and the
+judge took a ``shared_trek_lookup`` callback so a test could inject an
+in-memory lookup instead of Firestore / DynamoDB. The shared-Trek rule was
+deleted outright, so the callback is not a parameter any more and the walker
+is gone with the body. What stands in their place are three absence guards:
+``test_shared_trek_no_longer_bypasses_the_gate``,
+``test_the_judge_has_no_trek_shaped_input_or_output`` and
+``test_the_convenience_probe_is_gone_with_its_rule``.
 """
 
 from __future__ import annotations
@@ -341,7 +345,11 @@ def test_the_convenience_probe_is_gone_with_its_rule():
     AC18 当時この helper は「2 つの session_id が同じ active phase A+ trek に
     居るか」を 1 行で問うための便利関数で、**呼び出し元はテストだけ**だった
     (本番コードからの参照ゼロを実測して消した)。規則を消すときに helper だけ
-    残すと、誰も呼ばない判定が 1 つ生き続ける。判定本体は ``lib/trek`` 側に
-    移してあり、そちらは実際の呼び出し元 (予算の最適化) と一緒に生きている。
+    残すと、誰も呼ばない判定が 1 つ生き続ける。
+
+    当時この docstring は「判定本体は ``lib/trek`` 側に移してあり、そちらは実際の
+    呼び出し元 (予算の最適化) と一緒に生きている」と書いていた。**それは今は誤り**
+    で、上のコメントが書いている通り ``lib/trek`` ごと消えている (ms-185 e-7070 /
+    e-7071 で突き合わせ)。同じファイルの中で 2 つの記述が食い違っていた。
     """
     assert not hasattr(dm_gate, "shared_trek_member")

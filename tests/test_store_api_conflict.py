@@ -137,8 +137,11 @@ def test_load_project_local_mirror_preserves_allowlist(tmp_path):
 def test_save_project_local_mirror_preserves_allowlist(tmp_path):
     """Symmetric: a save that triggers _write_mirror MUST persist
     bus_auto_execute_channels into the local file. This is what
-    `cmd_bus_auto_execute_add` and `_arm_trek_channels_and_budget` rely on
-    to keep the inbox hook in sync after a CLI write."""
+    `cmd_bus_auto_execute_add` relies on to keep the inbox hook in sync after a
+    CLI write. (`_arm_trek_channels_and_budget` was the second such writer until
+    ms-185 e-7070 removed it with the Trek CLI; the allowlist value below stays a
+    retired `trek-*` name on purpose — a stale opt-in is exactly what this mirror
+    has to carry through.)"""
     import json as _json
     cache_path = tmp_path / "project.json"
     allowlist = ["trek-progress-check"]
