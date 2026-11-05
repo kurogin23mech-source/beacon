@@ -1663,7 +1663,8 @@ def _load_org_for_member(org_id: str, user: dict) -> dict:
 
 # ---------------------------------------------------------------------------
 # ms-97 / Phase 7-C / AC24, e-2603 — blanket scope approval endpoints.
-# Leader-only. The category string is validated by trek_mod helpers.
+# Leader-only. The category string was validated by trek_mod helpers (removed
+# in ms-185 e-7070 with the rest of the body).
 # ---------------------------------------------------------------------------
 
 

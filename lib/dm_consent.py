@@ -18,10 +18,13 @@ What lives here (= e-3442, the shared foundation both ① and ② build on):
 
   * ``classify_send_consent`` — the pure discrimination function. Given
     resolved facts about a send (sender/recipient user_id, channel,
-    reply-vs-new, Trek / Operation carve-outs) it answers "does a human
+    reply-vs-new, Operation carve-out) it answers "does a human
     need to confirm this recipient before it goes out?". It mirrors the
-    same-user / shared-Trek axes of ``dm_gate.should_gate_dm_action`` so
-    the two sides stay in lock-step.
+    same-user axis of ``dm_gate.should_gate_dm_action`` so the two sides
+    stay in lock-step. (A shared-Trek axis was the second mirrored one;
+    ms-185 e-7068 deleted that rule from ``dm_gate`` outright, so there is
+    nothing left to mirror — pinned by
+    ``tests/test_audit_log_no_trek_bypass_e7068.py``.)
 
   * the ``recipient_confirmed`` **consent claim** — build / parse /
     match helpers for the claim that records *who* confirmed *which*
@@ -41,7 +44,8 @@ What does NOT live here:
   * token / claim issuance UX in the Skill (= ④, e-3445)
 
 Design方針 (SPEC ``FZcvJ5ivhLu0UkEtw7Ew`` §1–§4):
-  §1 cross-user だけ厳格化 — same-user / Trek / Operation は素通り。
+  §1 cross-user だけ厳格化 — same-user / Operation は素通り
+     (Trek も素通りだったが ms-185 e-7068 で規則ごと削除)。
   §2 reply は宛先が親 envelope から導出されるので new-send だけに課す。
   §4 consent claim は auto-execute 権限 claim と混ぜない (意味の混線回避)。
 """
@@ -232,9 +236,12 @@ def classify_send_consent(
         Bus channel. Only the ``dm`` channel carries person-directed
         messages that can misfire to the wrong human; broadcast /
         coordination channels (claim-signal, ops, test-*) have no single
-        recipient and skip consent. Trek-scoped / operation channels
-        (operation-trigger, trek-*) are a pre-approved scope and also skip
-        (§1).
+        recipient and skip consent. A pre-approved channel also skips
+        (§1) — that set is now ``operation-trigger`` alone
+        (``dm_qualgate.PRE_APPROVED_CHANNELS``, exact match only). ``trek-*``
+        used to be in it by prefix match; ms-185 e-7067 replaced the prefix
+        with an exact list and e-7071 left the family out of it, so a
+        ``trek-*`` send is NOT pre-approved any more.
     is_reply : bool
         True when this send replies to a received DM (has ``in_reply_to``).
         The recipient is derived from the parent envelope, so it cannot
@@ -326,7 +333,7 @@ def cross_user_send_advisory(
     proxy (no extra lookup) and reuses :func:`classify_send_consent` so this
     advisory can never diverge from the actual server rule. ``None`` = no
     advisory (proceed silently). Conservative on the carve-outs it cannot cheaply
-    prove client-side (operation / shared-Trek → treated as not-applicable),
+    prove client-side (operation → treated as not-applicable),
     which at worst shows one extra non-blocking hint — never suppresses a real
     one and never blocks a send.
     """
