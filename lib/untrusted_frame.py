@@ -28,11 +28,16 @@ Scope boundary (kept narrow so A/B tasks stay reviewable):
     are NOT implemented here.
 
 Classification is fail-closed (方針3): a received event is untrusted **unless**
-it is a kept, opt-in, *authorized* autonomous imperative (operation-trigger /
-trek-* auto-execute that already passed the receiver's provenance gate). Those
-are rendered in their own dedicated imperative blocks and are trusted by
-explicit human opt-in; everything else surfaced to the AI as free-text content
-is untrusted. Authentication ≠ content-safety (方針4): a perfectly signed DM's
+it is a kept, opt-in, *authorized* autonomous imperative — today that means an
+``operation-trigger`` auto-execute event that passed the receiver's provenance
+gate. (``trek-*`` used to be the other such channel. ms-185 retired those
+channels, so they are downgraded *before* the provenance gate is ever consulted
+and can never be kept again — see ``RETIRED_PROVENANCE_CHANNELS`` in
+lib/bus_delivery.py.) Such events are rendered in their own dedicated imperative
+blocks and are trusted by explicit human opt-in; everything else surfaced to the
+AI as free-text content is untrusted.
+
+Authentication ≠ content-safety (方針4): a perfectly signed DM's
 free-text body is STILL untrusted, so the marker does not consult the envelope
 beyond that opt-in check.
 
