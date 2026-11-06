@@ -73,6 +73,53 @@ def test_store_read_functions_survive_on_both_backends():
         f"片方の backend だけ残すと、backend を切り替えた瞬間に読めなくなる")
 
 
+def test_the_local_read_path_is_gone_and_stays_gone():
+    """ローカル記録を読む経路は**意図して無い** (ms-185 e-7322 / e-7327)。
+
+    この file の他のテストは「残す」側を測っているので、ここだけ向きが逆になる。
+    足した理由: 上の 2 本を読んだ人が「方針5 = 記録を後から読めなくしない」から
+    ローカル側も残すべきだと推測して復元しうるため。実際に起きたのは逆で、
+    ``lib/store*.py`` の ``list_treks`` 5 箇所には**生きた読み手が居ないのに**
+    「``lib/cmd_bus.py`` の送信予算の迂回が来る」という**誤った根拠のコメント**が
+    付いていた (独立思想レビューが実測で否定。cmd_bus には ``store.`` の使用が
+    1 つも無い)。
+
+    残す面はクラウド側 (上の 2 本が固定している HTTP 3 ルート + 3 backend の
+    読み取り 3 関数)。ローカルの ``~/.beacon/treks/*.json`` は**消していない**ので
+    素の JSON として手で開けば読める。製品面として読む口は無い、が正しい状態。
+    判断記録は e-7324。
+
+    戻すときの条件: 実在する読み手と一緒に戻すこと。読み手の無い passthrough を
+    「将来使うから」で置くと、誤った根拠のコメントが 5 ファイルに増殖した前回と
+    同じ形になる。
+    """
+    import importlib
+    import sys
+
+    sys.path.insert(0, str(REPO / "lib"))
+
+    # Store 層の 4 実装 + 抽象に ``list_treks`` が無い。
+    for mod_name, cls_name in (("store", "Store"), ("store_local", "LocalStore"),
+                               ("store_api", "StoreApi"), ("store_sqlite", "SqliteStore")):
+        mod = importlib.import_module(mod_name)
+        cls = getattr(mod, cls_name, None)
+        assert cls is not None, f"{mod_name}.{cls_name} が無い (この検査の前提が崩れている)"
+        assert not hasattr(cls, "list_treks"), (
+            f"{cls_name}.list_treks が戻っている — 読み手が在るか確かめること。"
+            f"前回は読み手ゼロのまま『cmd_bus が来る』と書いて 5 ファイルに残した")
+
+    # HTTP クライアントの便利メソッド 2 つも無い。
+    api_client = importlib.import_module("api_client")
+    for name in ("list_treks", "get_trek"):
+        assert not hasattr(api_client.ApiClient, name), (
+            f"api_client.ApiClient.{name} が戻っている — 32 メソッドに適用した"
+            f"『呼び出し元ゼロなら落とす』と一貫しない")
+
+    # ローカル記録を読むモジュールごと無い。
+    assert not (REPO / "lib" / "trek_store.py").exists(), (
+        "lib/trek_store.py が戻っている — 読み手と一緒に戻したのか確認すること")
+
+
 def test_the_search_path_can_still_include_trek_records():
     """過去の記録を横断検索する経路 (--include-trek) が生きている。"""
     import inspect

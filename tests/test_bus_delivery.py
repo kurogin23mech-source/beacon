@@ -164,12 +164,12 @@ class TestHasRequiredProvenance:
         """Every gated channel names a predicate, and every predicate is gated.
 
         This is what keeps the two declarations from drifting apart. A channel in
-        SYSTEM_PROVENANCE_CHANNELS with no requirement would be gated on
+        GATED_PROVENANCE_CHANNELS with no requirement would be gated on
         ``has_required_provenance`` returning True for everything (= an open gate
         that reads as closed); a requirement for a channel nobody gates is a
         predicate that never runs.
         """
-        assert bd.SYSTEM_PROVENANCE_CHANNELS == frozenset(
+        assert bd.GATED_PROVENANCE_CHANNELS == frozenset(
             bd.PROVENANCE_REQUIREMENTS)
 
 

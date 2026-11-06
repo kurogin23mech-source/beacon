@@ -16,7 +16,8 @@ Trek 側が ``now_iso`` を再束縛すると (``server/app.py`` の quiesce 分
 漏れる — つまり quiesce が走った tick だけ、注入された時計ではなく実時計が渡る
 (ms-128 AC12 の意図が破れる)。e-7065 で ``_run_trek_tick`` を別関数に出して構造的に
 閉じたので、**その構造そのもの**を固定する: ``_fire_due_scheduled`` は
-``_run_system_tick`` から呼ばれ、``_run_trek_tick`` からは呼ばれない。
+``_run_system_tick`` から呼ばれ、``_run_trek_tick`` からは呼ばれない
+(``_run_trek_tick`` はその後 ms-185 e-7070 で削除された。下の e-7070 の注記も参照)。
 
 実行時テストでなく AST (構文木) テストなのは、この欠陥が DB の種類に依らない
 変数スコープの問題だから — 束縛が無条件で呼び出しより前にあることを見るのが、

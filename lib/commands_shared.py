@@ -621,7 +621,7 @@ def _canonicalize_project_ref(ref: str) -> str:
         return _resolve(ref, db_or_lister=lister)
     except ValueError:
         # Ambiguous — surface the input unchanged. The downstream call
-        # (= /bus send, /trek scope add) will hit a clearer error path
+        # (= /bus send) will hit a clearer error path
         # (= "project not found" or rejection at the server) instead of
         # the resolver hijacking error reporting.
         return ref
@@ -712,7 +712,8 @@ def _get_notes_path():
 
 # promoted from commands.py so cmd_org (org+member family) and other callers
 
-# (deploy / cloud / trek / bus) depend on commands_shared, not commands.py.
+# (deploy / cloud / bus) depend on commands_shared, not commands.py. (The trek
+# family was one of them until ms-185 removed it.)
 
 # ---------------------------------------------------------------------------
 
@@ -1304,8 +1305,9 @@ def _gate_target_class(data: dict, kind: str) -> None:
 # ---------------------------------------------------------------------------
 # ms-127 e-4803: bus budget / recipient / identity leaf helpers promoted from
 # commands.py. Shared foundation used by both the bus family (cmd_bus.py) and a
-# few commands.py callers (_arm_for_trek / cmd_acquisition_attack_list_send /
-# _check_recipient_live_health). The 6 identity/swap/budget-path helpers below
+# few commands.py callers (cmd_acquisition_attack_list_send /
+# _check_recipient_live_health; _arm_for_trek was a third until ms-185 e-7070
+# removed it with lib/cmd_trek.py). The 6 identity/swap/budget-path helpers below
 # are pulled in transitively by _resolve_recipient_live / _read_bus_budget /
 # _write_bus_budget, so they must live here too (a commands_shared resident
 # cannot reach back into cmd_bus without forming a cycle). importlib is a local
@@ -1320,12 +1322,14 @@ def _get_bus_budget_path() -> str:
     (ms-141 e-4965). ms-166 e-6621: without an override the only way to keep a
     test off the real repo ``.beacon/`` was for that test to set
     ``BEACON_PROJECT_FILE`` itself, so every code path that grants budget had to
-    be isolated by hand at every call site. ``cmd_trek_join`` reaches
-    ``_arm_for_trek``, which writes an unconditional 20-turn grant, and
-    tests/test_trek_cli_cloud.py drove it with no isolation — leaving a
-    ``trek_id: tk-fake01`` budget in the developer's working copy that made the
-    NEXT run treat sends as autonomous and refuse them (bus tests failing by the
-    dozen, locally only; CI starts from a clean checkout and stayed green).
+    be isolated by hand at every call site. The case that forced this (all three
+    actors are since gone — ms-185 removed the Trek CLI — but the shape is the
+    reason the override exists): ``cmd_trek_join`` reached ``_arm_for_trek``,
+    which wrote an unconditional 20-turn grant, and tests/test_trek_cli_cloud.py
+    drove it with no isolation — leaving a ``trek_id: tk-fake01`` budget in the
+    developer's working copy that made the NEXT run treat sends as autonomous and
+    refuse them (bus tests failing by the dozen, locally only; CI starts from a
+    clean checkout and stayed green).
 
     An override plus one autouse fixture closes the whole class, including code
     paths added later, instead of asking each new test to remember."""
@@ -1366,7 +1370,7 @@ def _write_bus_budget(data: dict) -> None:
 # (project + channel + recipient + payload) of each dm send in a small cwd-local
 # log; a second send with the same fingerprint within a short window returns the
 # first send's result verbatim instead of posting again. Scoped to channel="dm"
-# because non-dm channels (operation-trigger / trek / heartbeat) legitimately
+# because non-dm channels (operation-trigger / heartbeat) legitimately
 # repeat identical payloads. `--allow-duplicate` bypasses the guard for an
 # intentional resend (AX: auto-correct the common accidental case, keep an
 # explicit escape for the rare intentional one).
@@ -2184,18 +2188,22 @@ def _application_map_applies() -> bool:
 # ms-127 e-4820: docs / frontmatter / project-id leaf helpers promoted from
 # commands.py alongside the trek family split. _get_docs_dir / _parse_frontmatter
 # / _read_local_doc / _current_project_id and the DEFAULT_SCOPE constant are
-# shared foundation used by the trek family (cmd_trek.py) and by many commands.py
-# callers (cmd_doc_* / _auto_fire_operation_triggers / account / table-doc). A
-# commands_shared resident cannot reach back into cmd_trek without a cycle, so
-# these live here. datetime is imported locally inside _read_local_doc.
+# shared foundation used by many commands.py callers (cmd_doc_* /
+# _auto_fire_operation_triggers / account / table-doc). They were promoted here
+# because the trek family (cmd_trek.py) needed them too and a commands_shared
+# resident cannot reach back into cmd_trek without a cycle; ms-185 e-7070 removed
+# that family, and the helpers stay here because the other callers are still on
+# them. datetime is imported locally inside _read_local_doc.
 # ---------------------------------------------------------------------------
 
 def _current_project_id() -> str:
     """Return the current project's id (= what ``load_project()`` operates on).
 
-    Used by trek-show / trek-timeline aggregation to decide which scope
-    entries it can resolve locally (= same-project) and which are
-    cross-project hints the caller must visit separately.
+    Its first readers were the trek-show / trek-timeline aggregations, which
+    used it to decide which scope entries they could resolve locally
+    (= same-project) and which were cross-project hints the caller had to visit
+    separately. Those are gone (ms-185 e-7070); the resolution order below is
+    what the remaining callers rely on.
 
     Resolution order (ms-83 / e-2007 dogfood finding):
       1. ``data.id`` / ``data.project_id`` on the local project.json

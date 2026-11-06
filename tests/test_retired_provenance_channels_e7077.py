@@ -7,7 +7,7 @@
 
   1. その channel をプロジェクトが明示的に opt-in したか (``bus_auto_execute_channels``)
   2. その channel が「人間が許可した証拠」を要求する側で、届いた event にその証拠が在るか
-     (``SYSTEM_PROVENANCE_CHANNELS`` + ``has_required_provenance``)
+     (``GATED_PROVENANCE_CHANNELS`` + ``has_required_provenance``)
 
      ms-185 e-7078 で、要求する証拠は channel ごとに違う形になった
      (``PROVENANCE_REQUIREMENTS``)。operation-trigger が求めるのは「人間が
@@ -20,7 +20,7 @@
 人間の同意) を表す。``test_bus_delivery.py::test_non_provenance_channel_kept_without_envelope``
 が固定している。
 
-ところがこの設計は、**channel を ``SYSTEM_PROVENANCE_CHANNELS`` から外したのに、どこかの
+ところがこの設計は、**channel を ``GATED_PROVENANCE_CHANNELS`` から外したのに、どこかの
 プロジェクトの許可リストにその channel の古い opt-in が残っている**とき破れる。その channel は
 「署名が必要」から「opt-in だけで信頼」へ**黙って階級が変わり**、署名の無い
 ``delivery=auto-execute`` が実行される。
@@ -37,7 +37,7 @@
   * コード側 = ``RETIRED_PROVENANCE_CHANNELS`` に移す (許可リストに在っても降格し続ける)
   * データ側 = 各プロジェクトの許可リストから古い opt-in を外す
 
-このファイルはコード側を固定する。**名前を ``SYSTEM_PROVENANCE_CHANNELS`` から消すだけで、
+このファイルはコード側を固定する。**名前を ``GATED_PROVENANCE_CHANNELS`` から消すだけで、
 ``RETIRED_PROVENANCE_CHANNELS`` に足さなければ赤くなる** — それがこのガードの要点で、
 ``scripts/invert-retired-provenance-guard.py`` が「壊したら本当に赤くなるか」を実測する。
 """
@@ -53,10 +53,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import bus_delivery as bd  # noqa: E402
 
-# サーバが発行する channel の「族」。ここに挙げた名前は、SYSTEM_PROVENANCE_CHANNELS か
+# サーバが発行する channel の「族」。ここに挙げた名前は、GATED_PROVENANCE_CHANNELS か
 # RETIRED_PROVENANCE_CHANNELS の **どちらかに必ず**居なければならない。
 #
-# なぜ手で列挙するのか: 「現在の SYSTEM_PROVENANCE_CHANNELS の中身」を期待値にすると、
+# なぜ手で列挙するのか: 「現在の GATED_PROVENANCE_CHANNELS の中身」を期待値にすると、
 # 名前を消したときに期待値も一緒に消えてテストが素通りする (= 自分を検証できないガードに
 # なる)。族の名前は仕様であってコードの写しではないので、ここに固定して置く。
 #
@@ -95,16 +95,16 @@ class TestClassificationCoverage:
     def test_every_known_gated_channel_is_classified(self):
         """族の各 channel が「現役」か「引退済み」のどちらかに居る。
 
-        ``SYSTEM_PROVENANCE_CHANNELS`` から名前を消しただけ (= 引退先に足し忘れ) だと
+        ``GATED_PROVENANCE_CHANNELS`` から名前を消しただけ (= 引退先に足し忘れ) だと
         ここで赤くなる。これが「畳む作業で署名なし自動実行の窓を開ける」のを止める
         唯一の機械的な歯止め。
         """
-        classified = bd.SYSTEM_PROVENANCE_CHANNELS | bd.RETIRED_PROVENANCE_CHANNELS
+        classified = bd.GATED_PROVENANCE_CHANNELS | bd.RETIRED_PROVENANCE_CHANNELS
         unclassified = KNOWN_GATED_CHANNELS - classified
         assert not unclassified, (
             "gated channel "
             + ", ".join(sorted(unclassified))
-            + " が、現役 (SYSTEM_PROVENANCE_CHANNELS) にも引退済み "
+            + " が、現役 (GATED_PROVENANCE_CHANNELS) にも引退済み "
             "(RETIRED_PROVENANCE_CHANNELS) にも居ません。provenance から名前を消すなら "
             "引退済みへ移してください。消すだけだと、その channel の古い opt-in が "
             "残っているプロジェクトで、署名の無い自動実行が通ります (ms-185 e-7077)。"
@@ -112,7 +112,7 @@ class TestClassificationCoverage:
 
     def test_the_two_sets_do_not_overlap(self):
         """現役と引退済みが同時に成立することはない (= 判定の順序に依らせない)。"""
-        both = bd.SYSTEM_PROVENANCE_CHANNELS & bd.RETIRED_PROVENANCE_CHANNELS
+        both = bd.GATED_PROVENANCE_CHANNELS & bd.RETIRED_PROVENANCE_CHANNELS
         assert not both, (
             "channel " + ", ".join(sorted(both))
             + " が現役と引退済みの両方に居ます。どちらか一方にしてください。"
@@ -278,12 +278,12 @@ class TestGatedChannelsAreActuallySatisfiable:
         これが強制力の本体。ここが緑でないと以下の 2 本は「見本を書かなかった
         channel」を黙って飛ばせてしまい、当初の穴に戻る。
         """
-        assert set(SATISFYING_ENVELOPES) == set(bd.SYSTEM_PROVENANCE_CHANNELS), (
+        assert set(SATISFYING_ENVELOPES) == set(bd.GATED_PROVENANCE_CHANNELS), (
             "ゲートした channel と『満たせる封筒の見本』がズレています。"
             "見本を書けない channel は、誰も満たせない証拠を要求しています。"
         )
 
-    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("channel", sorted(bd.GATED_PROVENANCE_CHANNELS))
     def test_the_declared_predicate_accepts_its_own_minters_shape(self, channel):
         """宣言した述語が、その channel の発行者が実際に作る形を受け入れる。
 
@@ -297,7 +297,7 @@ class TestGatedChannelsAreActuallySatisfiable:
             "(= 誰も満たせない門)。"
         )
 
-    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("channel", sorted(bd.GATED_PROVENANCE_CHANNELS))
     def test_a_properly_proven_event_is_kept_with_default_args(self, channel):
         """既定引数で classify_auto_execute を通し、降格されないことを測る。
 
@@ -311,7 +311,7 @@ class TestGatedChannelsAreActuallySatisfiable:
             "(= 本番で自律実行が一度も成立しない状態)。"
         )
 
-    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("channel", sorted(bd.GATED_PROVENANCE_CHANNELS))
     def test_the_advice_points_at_something_actionable_or_says_it_cannot(
             self, channel):
         """回復手段の文字列が「空でない」より強いことを要求する。

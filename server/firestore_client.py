@@ -2155,21 +2155,12 @@ def get_trek(trek_id: str) -> dict | None:
     if not doc.exists:
         return None
     return {**(doc.to_dict() or {}), "trek_id": doc.id}
-
-
-def save_trek(trek_id: str, data: dict) -> None:
-    """Save a trek document (full replace).
-
-    The caller is responsible for assembling the full doc; this mirrors
-    ``save_project`` which is also a full set (no merge). Mutators that
-    need merge semantics should compose get → modify → save.
-
-    ``trek_id`` field in ``data`` is ignored — the doc id is the truth.
-    """
-    payload = {k: v for k, v in data.items() if k != "trek_id"}
-    get_db().collection(TREKS_COLLECTION).document(trek_id).set(payload)
-
-
+# ms-185 e-7306: ここに Trek の書き込み 3 関数 (save_trek / delete_trek /
+# append_trek_log) が在った。e-7070 が書き込み経路 (作成・参加・承認・halt・発火)
+# を全部落としたので呼び出し元ゼロになり、ここでも落とした。読み出し 3 関数
+# (get_trek / list_treks / list_trek_logs) は意図して残す面 (e-7081 / SPEC 方針5 =
+# 記録を後から読めなくしない) で、tests/test_trek_record_read_surface_e7081.py が
+# 両 backend について名指しで固定している。
 def list_treks(actor_id: str | None = None, *,
                status: str | None = None,
                include_archived: bool = False) -> list[dict]:
@@ -2204,29 +2195,6 @@ def list_treks(actor_id: str | None = None, *,
     result.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
                 reverse=True)
     return result
-
-
-def delete_trek(trek_id: str) -> bool:
-    """Delete a trek. Returns True if it existed.
-
-    Phase 1: hard delete of the top-level doc only. Subcollections
-    (activity log, summaries, claims — e-1663) are introduced later;
-    when they land this function will cascade like ``delete_project``.
-    """
-    doc_ref = get_db().collection(TREKS_COLLECTION).document(trek_id)
-    if not doc_ref.get().exists:
-        return False
-    doc_ref.delete()
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Organizations (ms-113 / e-3731) — top-level entity, doc id = org_id.
-# Mirrors the trek store shape (get / save full-replace / list / delete).
-# The doc id is authoritative and merged in last so it wins over any stale
-# ``org_id`` field, exactly like ``get_trek`` / ``list_treks``.
-# ---------------------------------------------------------------------------
-
 def get_org(org_id: str) -> dict | None:
     """Load an organization document. Returns None if not found."""
     doc = get_db().collection(ORGS_COLLECTION).document(org_id).get()
@@ -2313,31 +2281,6 @@ TREK_LOGS_SUBCOLLECTION = "logs"
 def _mint_trek_log_id() -> str:
     import secrets as _secrets
     return f"log-{_secrets.token_hex(8)}"
-
-
-def append_trek_log(trek_id: str, log_entry: dict) -> str:
-    """Append a trek log entry. Returns the assigned log_id.
-
-    ``log_entry`` is the caller-supplied record (= ``kind`` / ``session_id``
-    / ``payload`` / ``created_at`` / ...). This helper stamps ``log_id`` and
-    ``trek_id`` so callers don't have to (= safe defaults: ``log_id`` is
-    minted if absent, ``trek_id`` is forced to the path arg).
-    """
-    payload = dict(log_entry or {})
-    log_id = payload.get("log_id") or _mint_trek_log_id()
-    payload["log_id"] = log_id
-    payload["trek_id"] = trek_id
-    (
-        get_db()
-        .collection(TREKS_COLLECTION)
-        .document(trek_id)
-        .collection(TREK_LOGS_SUBCOLLECTION)
-        .document(log_id)
-        .set(payload)
-    )
-    return log_id
-
-
 def list_trek_logs(trek_id: str, *, limit: int = 100,
                    since: str = "") -> list[dict]:
     """Return ``treks/{trek_id}/logs`` ordered by ``created_at`` ascending.

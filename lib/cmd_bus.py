@@ -190,6 +190,15 @@ def _bus_budget_refund_one() -> bool:
 # 結果: 自動返信は **例外なく通常の予算ゲートを通る** (迂回路が無い)。
 # 判定を駆動していた MCP 側の分岐と流量ブレーキ (channel/bus.mjs /
 # channel/trek-rate.mjs) も同じ変更で落としてある。
+#
+# ms-185 e-7326: **ここに在った世代判定の写しが落ちたことで、二重実装は解消した。**
+# e-7326 は「``_is_session_id_keyed`` / ``_get_migration_phase`` が当時この file と
+# ``server/routers_treks.py`` の 2 つにベタ書きで写され、一致を測る検査がゼロ」と
+# いう欠陥として起票されたが、着手時にはその前提が古くなっていた (写しは上の
+# e-7080 / e-7321 で消えている)。いま宣言を持つのは
+# ``server/routers_treks.py`` だけで、それが唯一の所有者であることを
+# ``tests/test_member_generation_single_owner_e7326.py`` が固定している
+# (2 つ目が現れたら赤くなる)。
 
 def cmd_bus_budget_grant():
     """Set or refresh the outbound-send budget for autonomous mode.

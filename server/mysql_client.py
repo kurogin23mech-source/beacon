@@ -2730,13 +2730,12 @@ def get_operation_envelope(project_id: str,
 
 def get_trek(trek_id: str) -> dict | None:
     return _get("treks", trek_id)
-
-
-def save_trek(trek_id: str, data: dict) -> None:
-    item = {**data, "trek_id": trek_id}
-    _put("treks", trek_id, item)
-
-
+# ms-185 e-7306: ここに Trek の書き込み 3 関数 (save_trek / delete_trek /
+# append_trek_log) が在った。e-7070 が書き込み経路 (作成・参加・承認・halt・発火)
+# を全部落としたので呼び出し元ゼロになり、ここでも落とした。読み出し 3 関数
+# (get_trek / list_treks / list_trek_logs) は意図して残す面 (e-7081 / SPEC 方針5 =
+# 記録を後から読めなくしない) で、tests/test_trek_record_read_surface_e7081.py が
+# 両 backend について名指しで固定している。
 def list_treks(actor_id: str | None = None, *,
                status: str | None = None,
                include_archived: bool = False) -> list[dict]:
@@ -2764,21 +2763,6 @@ def list_treks(actor_id: str | None = None, *,
     result.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
                 reverse=True)
     return result
-
-
-def delete_trek(trek_id: str) -> bool:
-    if get_trek(trek_id) is None:
-        return False
-    _delete("treks", trek_id)
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Organizations (ms-113 / e-3731) — top-level entity, PK=org_id, sk=''.
-# See firestore_client for semantics; MySQL persists via the generic
-# (pk, sk, data JSON) row model.
-# ---------------------------------------------------------------------------
-
 def get_org(org_id: str) -> dict | None:
     return _get("organizations", org_id)
 
@@ -2841,22 +2825,6 @@ def master_scan(entity: str) -> list[dict]:
 def _mint_trek_log_id() -> str:
     import secrets as _secrets
     return f"log-{_secrets.token_hex(8)}"
-
-
-def append_trek_log(trek_id: str, log_entry: dict) -> str:
-    """treks/{trek_id}/logs に 1 件追記する (= firestore と同じ永続化)。
-
-    dynamodb_client は in-memory fallback だが、MySQL は trek_logs テーブル
-    (pk=trek_id, sk=log_id) に実体化する。log_id / trek_id は未指定なら補完。
-    """
-    payload = dict(log_entry or {})
-    log_id = payload.get("log_id") or _mint_trek_log_id()
-    payload["log_id"] = log_id
-    payload["trek_id"] = trek_id
-    _put("trek_logs", trek_id, payload, sk=log_id)
-    return log_id
-
-
 def list_trek_logs(trek_id: str, *, limit: int = 100,
                    since: str = "") -> list[dict]:
     """treks/{trek_id}/logs を created_at 昇順で返す (= firestore と同じ意味論)。

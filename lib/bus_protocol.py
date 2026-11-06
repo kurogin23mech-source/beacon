@@ -245,7 +245,8 @@ def filter_event(event: dict, config: FilterConfig) -> str:
 
     # Filter 2b (= e-1209): DM with no recipient stamp is treated as
     # malformed-drop. Codex receive loop missed this and ended up
-    # persisting broadcast traffic (operation-trigger / trek-* / test-*)
+    # persisting broadcast traffic (operation-trigger / test-*; trek-* was
+    # here until ms-185 retired the family — lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS)
     # into a Codex DM inbox.
     if is_dm and not intended:
         return FILTER_DROP_DM_UNADDRESSED

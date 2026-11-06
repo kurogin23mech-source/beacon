@@ -194,13 +194,25 @@ def mutate_tick_health_hides_sources(src: str) -> str:
 def mutate_call_deadline_outside_registry(src: str) -> str:
     """登録簿を回しつつ、締切リマインドだけ直呼びも残す (= 二重の出所)。
 
-    「登録簿から消しても動き続ける」形。報告と実体が静かにズレる。"""
-    anchor = "        if changed:\n            try:\n                db.save_project(pid, project)"
+    「登録簿から消しても動き続ける」形。報告と実体が静かにズレる。
+
+    ms-185 e-7309: **当て先が実装からズレて SKIP していた** (= 偽の安全。SKIP は
+    緑と同じ害で、ここは「壊すと赤くなる」を測る唯一の場所だった)。元の当て先は
+    ``if changed: / try: / db.save_project(pid, project)`` を 8 字下げで探していたが、
+    (a) その block は e-7066 で ``_fire_source_operations`` 側へ移って 4 字下げになり、
+    (b) ``if changed:`` と ``try:`` の間にコメント行が入り、(c) ``_fire_due_deadlines``
+    の引数も 4 つから 3 つ (pid / now_iso / report) に変わっていた。3 つとも変わって
+    いたので、文字列として一致しなくなっていた。
+
+    守るテストは ``_fire_due_scheduled`` を構文木で読んで直呼びを探すので、変異は
+    **その関数の中**に入れないと赤くならない (旧当て先は別の関数の中だった = 直しても
+    当てる場所が間違っている)。登録簿を回すループの直前に入れる。
+    """
+    anchor = ("        for _source_name, _fire_source in SCHEDULED_SOURCES:\n")
     assert anchor in src, "anchor not found (mutate_call_deadline_outside_registry)"
     return src.replace(
         anchor,
-        "        _fire_due_deadlines(pid, project, now_iso, report)  # MUTANT\n"
-        + anchor, 1)
+        "        _fire_due_deadlines(pid, now_iso, report)  # MUTANT\n" + anchor, 1)
 
 
 # --- ms-185 e-7066 follow-up: 「配線は在るが毎回失敗」の検知 ----------------

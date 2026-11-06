@@ -259,7 +259,7 @@ def make_a_gated_channel_unsatisfiable(src: str) -> str:
     # 残った operation-trigger のエントリに移す (足す変異の中身は同じ)。
     tail = ('    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n'
             '        has_approved_operation_envelope, _OPERATION_ADVICE),')
-    head = ('SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",')
+    head = ('GATED_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",')
     assert tail in src and head in src, \
         "anchor not found (make_a_gated_channel_unsatisfiable)"
     return src.replace(
@@ -268,7 +268,7 @@ def make_a_gated_channel_unsatisfiable(src: str) -> str:
         '    "nobody-can-satisfy-me": ProvenanceRequirement(lambda ev: False, "x"),',
         1).replace(
         head,
-        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n'
+        'GATED_PROVENANCE_CHANNELS = frozenset({\n'
         '    "nobody-can-satisfy-me",\n    "operation-trigger",', 1)
 
 
@@ -389,11 +389,11 @@ def let_the_set_and_map_drift(src: str) -> str:
     集合と要求表がズレた状態。fail-closed なので実害は「黙って降格し続ける」で、
     まさに e-7078 が消した「誰も満たせない判定」の再生産。
     """
-    anchor = 'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",'
+    anchor = 'GATED_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",'
     assert anchor in src, "anchor not found (let_the_set_and_map_drift)"
     return src.replace(
         anchor,
-        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "nobody-declares-me",'
+        'GATED_PROVENANCE_CHANNELS = frozenset({\n    "nobody-declares-me",'
         '\n    "operation-trigger",', 1)
 
 

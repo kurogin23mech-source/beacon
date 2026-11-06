@@ -18,10 +18,12 @@ project auth-guard family (``_load`` / ``_require_project_role`` /
 ``_require_write`` / ``_require_owner`` / ``_load_meta_only``) is NOT moved — it
 is shared across all three slices and reads ``_auth_enabled``, so it stays owned
 by app.py and is INJECTED into every make_router. This keeps the slices
-independent (no circular imports), the same resolution used for the trek guards.
+independent (no circular imports), the same resolution the trek guards used
+before ms-185 e-7070 removed them.
 
 Module-level helpers below are self-contained (depend only on db / core /
-operations / trek_mod / envelope_mod / master_adapter / work_model) — no auth
+operations / envelope_mod / master_adapter / work_model; trek_mod was one of
+them until ms-185 e-7070) — no auth
 flag, no injected app.py callables — so they live at module scope. All route
 handlers are nested inside make_router so they can close over the injected deps.
 
@@ -294,7 +296,8 @@ class PurgeRequest(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Module-level project helpers (self-contained: db / core / operations /
-# trek_mod / envelope_mod / master_adapter). Verbatim from app.py.
+# envelope_mod / master_adapter; trek_mod was in this list until ms-185 e-7070
+# removed it). Verbatim from app.py.
 # ---------------------------------------------------------------------------
 
 def _master_linking_enabled() -> bool:
