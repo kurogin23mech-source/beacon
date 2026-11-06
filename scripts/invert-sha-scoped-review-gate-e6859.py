@@ -114,7 +114,7 @@ def stamp_the_local_head_instead_of_the_reviewed_sha(src: str) -> str:
 def stamp_without_checking_every_required_type(src: str) -> str:
     """全種別の充足を見ずに印を押す = 1 種別の実施で今の head を緑にできた形
     (PR #785 の事故の本体)。"""
-    anchor = '    if _ob.get("owed"):'
+    anchor = "    if _blocking:"
     assert anchor in src, "anchor not found (stamp_without_checking_every_required_type)"
     return src.replace(anchor, "    if False:", 1)
 
@@ -230,14 +230,19 @@ def hand_write_the_obligations_fake_again(src: str) -> str:
 
 
 def stop_naming_which_sha_was_reviewed(src: str) -> str:
-    """stale の理由から「実施した差分」を落とす = 保守性① で足した次の一手。
+    """開示の ``↺`` 行から「実施した差分」を落とす。
 
-    いまの head を言うだけでは「では何を見ればいいのか」が分からない。
+    守る性質は保守性① と同じ (どの sha に対する実施だったかを言う = 次の一手が
+    分かる) だが、**事実の住所が移った** ので当て先も移した: 親レビューの
+    指摘 2 で「事実は開示に 1 箇所 / 理由は関門の文面」に分担を決めたため、
+    以前の当て先 (関門の文面側の ``detail``) はもう存在しない。
     """
-    anchor = ('    detail = " / ".join(f"{s[\'review\']}='
-              '{s[\'reviewed_sha\'][:12]}" for s in stale)')
+    anchor = ('            f"    \u21ba {s[\'review\']}: \u5b9f\u65bd\u306f '
+              '{s[\'reviewed_sha\'][:12]} \u306b\u5bfe\u3059\u308b\u3082\u306e\u3067\u3001"')
     assert anchor in src, "anchor not found (stop_naming_which_sha_was_reviewed)"
-    return src.replace(anchor, '    detail = "(省略)"', 1)
+    return src.replace(anchor, (
+        '            f"    \u21ba {s[\'review\']}: \u5b9f\u65bd\u306f '
+        '(\u7701\u7565) \u306b\u5bfe\u3059\u308b\u3082\u306e\u3067\u3001"'), 1)
 
 
 def claim_passage_against_the_recorded_sha(src: str) -> str:
@@ -335,6 +340,37 @@ def accept_a_short_sha_without_expanding_it(src: str) -> str:
         "        _full, _resolve_err = _reviewed_sha, \"\""), 1)
 
 
+def let_a_display_reader_read_owed_directly(src: str) -> str:
+    """表示側が `blocking` でなく `owed` を直接読む = 親レビュー AX high の退行。
+
+    `passed: True` の辞書に対して「関門はまだ開いていません」と矛盾する文言を
+    返せるようになる。
+    """
+    anchor = "    gate_owed = review_blocking_types(ob)"
+    assert anchor in src, "anchor not found (let_a_display_reader_read_owed_directly)"
+    return src.replace(anchor, '    gate_owed = ob.get("owed") or []', 1)
+
+
+def make_blocking_compute_independently(src: str) -> str:
+    """`blocking` を関門が読む値と無関係に計算する = 答えが 2 つに戻る。"""
+    anchor = ("    passed = ob.get(\"passed\")\n"
+              "    if passed is None:\n"
+              "        passed = _review_gate_passed(ob)")
+    assert anchor in src, "anchor not found (make_blocking_compute_independently)"
+    return src.replace(anchor, "    passed = _review_gate_passed(ob)", 1)
+
+
+def restate_the_stale_fact_in_the_block_error(src: str) -> str:
+    """stale の事実 (sha の対応) を関門の文面にも書く = 同じ事実が 2 回出る。"""
+    anchor = ('    return (f"\\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"\n'
+              '            f"積まれた** ため再度要ります (どの種別がどの差分に対する実施だったかは"')
+    assert anchor in src, "anchor not found (restate_the_stale_fact_in_the_block_error)"
+    return src.replace(anchor, (
+        '    _d = " / ".join(f"{s[\'review\']}={s[\'reviewed_sha\'][:12]}" for s in stale)\n'
+        '    return (f"\\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"\n'
+        '            f"積まれた** ため再度要ります ({_d} / "'), 1)
+
+
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
 EXPECT_RED = [
     ("関門が導出でなくトリガーファイルを読む (e-6859 の退行そのもの)",
@@ -409,9 +445,10 @@ EXPECT_RED = [
      OBL_STUB, hand_write_the_obligations_fake_again,
      f"{SHA_T}::test_the_shared_obligations_fake_is_derived_from_the_real_function"),
 
-    ("stale の理由から「実施した差分」を落とす (保守性①)",
+    ("開示から「実施した差分」を落とす (保守性① / 住所は親レビュー 2 で移動)",
      SHARED, stop_naming_which_sha_was_reviewed,
-     f"{SHA_T}::test_the_gate_messages_are_pure_builders"),
+     f"{SHA_T}::test_the_stale_fact_is_stated_in_exactly_one_place "
+     f"{GATE_T}::test_gate_blocks_again_after_a_commit_is_pushed"),
     ("最後の名乗りを「記録した sha」に対して評価する (ドッグフーディングで踏んだ形)",
      CMDS, claim_passage_against_the_recorded_sha,
      f"{SHA_T}::test_review_done_asks_the_real_head_not_the_recorded_sha"),
@@ -447,6 +484,18 @@ EXPECT_RED = [
          "    value = str(value or \"\").strip()\n    return value, \"\"", 1),
      f"{SHA_T}::test_a_shortened_sha_is_expanded_at_the_entrance "
      f"{SHA_T}::test_an_unresolvable_sha_is_refused_not_recorded"),
+    # --- 親セッションのレビュー (2026-11-06) の指摘に対する修正 ---
+    ("表示側が blocking でなく owed を直接読む (親レビュー AX high の退行)",
+     SHARED, let_a_display_reader_read_owed_directly,
+     f"{SHA_T}::test_no_reader_can_say_blocked_while_passed_is_true"),
+
+    ("blocking を関門が読む値と無関係に計算する (答えが 2 つに戻る)",
+     SHARED, make_blocking_compute_independently,
+     f"{SHA_T}::test_blocking_follows_the_value_the_gate_reads"),
+
+    ("stale の事実を関門の文面にも書く (同じ事実が 2 回出る)",
+     SHARED, restate_the_stale_fact_in_the_block_error,
+     f"{SHA_T}::test_the_stale_fact_is_stated_in_exactly_one_place"),
 ]
 
 

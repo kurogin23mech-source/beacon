@@ -3980,7 +3980,36 @@ def pr_review_obligations(pr_number: str, pr_repo: str = "", *,
     # 読むだけにする (文面の選び分けには ``resolved`` / ``owed`` を使ってよいが、
     # 通す / 止めるの決定はここ 1 箇所)。
     out["passed"] = _review_gate_passed(out)
+    # 表示 / 機械読みの両方が **これ** を見る (``owed`` は導出の内訳)。
+    out["blocking"] = review_blocking_types(out)
     return out
+
+
+def review_blocking_types(ob: dict) -> list:
+    """**実際に関門を止めている種別**。``passed`` なら必ず空 (ms-119 e-6859)。
+
+    親セッションのレビュー (2026-11-06, AX high) が実測した欠陥: 2 周目で判定を
+    ``passed`` 1 箇所に畳んだのに、**同じ PR が新設した 2 つの読み手がその統合から
+    漏れていた**。``decide_review_done_report`` は ``owed`` だけを読むので、
+    ``{"pr_state": "MERGED", "passed": True, "owed": ["maintainability"]}`` を
+    渡すと「関門はまだ開いていません — maintainability が未実施です」と、同じ辞書の
+    ``passed: True`` と **正面から矛盾する文言** を返した。``review status --json``
+    も生の ``owed`` を返すので、``passed: true`` と非空の ``owed`` が同じ応答に並んだ。
+    読んだ AI は解消済みの関門をブロック扱いで報告する。
+
+    「両方直してね」では閉じない (2 回連続で同じ型を踏んだ)。**表示側が ``owed`` を
+    直接読める限り、同じ矛盾はいつでも作れる** ので、止めている種別そのものを
+    導出して表示側はそれだけを読む。``owed`` は導出の内訳として残す
+    (「この head に対する実施記録が無い種別」という事実は事実)。
+
+    判定は ``passed`` が在ればそれに従う (無ければ ``_review_gate_passed`` で計算)。
+    **関門が読む値と同じ値から導く** のが要点 —— ここで独立に計算すると、また
+    2 つの答えが生まれる。
+    """
+    passed = ob.get("passed")
+    if passed is None:
+        passed = _review_gate_passed(ob)
+    return [] if passed else list(ob.get("owed") or [])
 
 
 def _review_gate_passed(ob: dict) -> bool:
@@ -4033,7 +4062,11 @@ def decide_review_done_report(ob: dict, *, remaining: list, owed_before: list,
             ``flip_gate`` — CI の印を押しに行くか。
             ``exit_code`` — ``None`` なら正常終了、整数ならその値で終える。
     """
-    gate_owed = ob.get("owed") or []
+    # **``owed`` でなく ``blocking``** (= 実際に止めている種別)。親レビュー
+    # (2026-11-06 AX high) が実測した通り、ここが ``owed`` を直接読んでいたため
+    # ``passed: True`` の辞書に対して「関門はまだ開いていません」と矛盾する文言を
+    # 返していた。
+    gate_owed = review_blocking_types(ob)
     resolved = bool(ob.get("resolved"))
     head = str(ob.get("head_sha") or "")
     # 記録した差分が、いまの head と違うか (= 正直に過去の sha を記録した場合)。
@@ -4131,21 +4164,26 @@ def format_review_stale_reason(ob: dict) -> str:
     stale = ob.get("stale") or []
     if not stale:
         return ""
-    # **どの sha に対する実施だったか** を種別ごとに言う。いまの head を言うだけでは
-    # 「では何を見ればいいのか」が分からない (独立 AX レビューが求めた「次の一手を
-    # 示す」の形)。
-    detail = " / ".join(f"{s['review']}={s['reviewed_sha'][:12]}" for s in stale)
+    # **事実 (どの種別がどの sha に対する実施だったか) は書かない。**
+    #
+    # 独立保守性レビュー (2026-11-06, 親セッション): stale の説明がこの関数と
+    # ``format_pr_review_obligation_disclosure`` の 2 つの独立した文面生成から
+    # 作られ、``_review_gate_check`` が両方を続けて印字していた。**同じ事実が
+    # 別語彙で 2 回出る** —— このPRが判定層で畳んだ「2 つの口が同じ問いに別々に
+    # 答える」型を、文面層で作っている形だった。
+    #
+    # そこで分担を決める: **事実は開示 (``↺`` の行) に 1 箇所**、ここは
+    # **なぜ省けないかの理由だけ**。理由は種別ごとに繰り返す意味が無いので 1 回。
     return (f"\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"
-            f"積まれた** ため再度要ります (実施した差分: {detail} / いまの head: "
-            f"{(ob.get('head_sha') or '?')[:12]})。"
-            f"修正コミットこそ欠陥を作ることが実測されているので、ここは"
-            f"省けません (ms-119 e-6859)。")
+            f"積まれた** ため再度要ります (どの種別がどの差分に対する実施だったかは"
+            f"下の ↺ 行)。修正コミットこそ欠陥を作ることが実測されているので、"
+            f"ここは省けません (ms-119 e-6859)。")
 
 
 def format_review_gate_block_error(ob: dict, *, action: str,
                                    pr_number: str) -> str:
     """未実施のレビューが在るときに関門が出す文面 (ms-119 e-6859)。純粋。"""
-    pending = ob.get("owed") or []
+    pending = review_blocking_types(ob)
     runs = "\n".join(
         f"    /beacon-review-run --type {t} --pr {pr_number}" for t in pending)
     return (

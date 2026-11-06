@@ -94,9 +94,14 @@ def obligations(*, head_sha=DEFAULT_HEAD, owed=None, satisfied=None,
     # 偽の緑になる —— この module が閉じようとしている穴そのもの。
     # ``overrides`` で明示されていればそれを尊重する (「通るはずなのに通らない」
     # 側を測りたい試験のため)。
+    import commands_shared
     if "passed" not in overrides:
-        import commands_shared
         base["passed"] = commands_shared._review_gate_passed(base)
+    # ``blocking`` (= 実際に止めている種別) も本物の導出から (ms-119 e-6859、
+    # 親レビュー 2026-11-06)。ここを手書きすると、`passed` と食い違う fake が
+    # 作れてしまい、fake 経由の試験が矛盾を見逃す。
+    if "blocking" not in overrides:
+        base["blocking"] = commands_shared.review_blocking_types(base)
     return base
 
 

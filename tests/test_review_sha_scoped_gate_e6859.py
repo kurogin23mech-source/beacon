@@ -534,9 +534,36 @@ def test_the_gate_messages_are_pure_builders():
     blocked = cs.format_review_gate_block_error(ob2, action="approve",
                                                 pr_number="838")
     assert "積まれた" in blocked, "一度やったのに赤い理由を言っていない"
-    assert HEAD[:12] in blocked, "どの sha に対する実施だったかを言っていない"
     # 副作用なしで確かめる経路を案内すること (AX① で足した動詞)
     assert "beacon review status" in blocked
+
+
+def test_the_stale_fact_is_stated_in_exactly_one_place():
+    """stale の **事実** (どの種別がどの sha に対する実施か) は 1 箇所だけ。
+
+    独立保守性レビュー (2026-11-06, 親セッション): stale の説明が
+    ``format_review_gate_block_error`` と ``format_pr_review_obligation_disclosure``
+    の 2 つの独立した文面生成から作られ、``_review_gate_check`` が両方を続けて
+    印字していた —— **同じ事実が別語彙で 2 回出る**。このPRが判定層で畳んだ
+    「2 つの口が同じ問いに別々に答える」型を、文面層で作っている形だった。
+
+    分担: **事実は開示 (``↺`` の行)**、**理由は関門の文面** (なぜ省けないか)。
+    """
+    ob = _derive([{"review_type": "ax", "reviewed_sha": HEAD, "sha_pinned": True}],
+                 [], head=NEXT)
+    ob["provenance"] = []
+    blocked = cs.format_review_gate_block_error(ob, action="approve",
+                                                pr_number="838")
+    disclosure = "\n".join(cs.format_pr_review_obligation_disclosure(ob))
+
+    # 事実 (sha の対応) は開示にだけ在る
+    assert HEAD[:12] in disclosure, "開示が実施した差分を言っていない"
+    assert HEAD[:12] not in blocked, (
+        "関門の文面が同じ事実を 2 回目として繰り返している:\n" + blocked)
+    # 理由 (省けない) は関門の文面にだけ在る
+    assert "省けません" in blocked
+    assert "省けません" not in disclosure, (
+        "開示が理由も繰り返している:\n" + disclosure)
 
 
 # --- 保守性② 試験の fake が本物の形から導出されているか ---------------------
@@ -852,3 +879,85 @@ def test_an_unresolvable_sha_is_refused_not_recorded(monkeypatch):
     monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _R())
     got, err = cs.resolve_full_commit_sha("deadbee")
     assert got == "" and "解決できません" in err, (got, err)
+
+
+# --- 親レビュー (2026-11-06) の指摘に対する修正 ---------------------------
+
+def test_no_reader_can_say_blocked_while_passed_is_true():
+    """``passed: True`` の辞書から「まだ開いていません」が **出ないこと**。
+
+    親レビュー (AX high) が実測した欠陥: 2 周目で判定を ``passed`` 1 箇所に
+    畳んだのに、**同じ PR が新設した 2 つの読み手がその統合から漏れていた**。
+    ``decide_review_done_report`` は ``owed`` だけを読むので、
+    ``{"pr_state": "MERGED", "passed": True, "owed": ["maintainability"]}`` に
+    対して「関門はまだ開いていません — maintainability が未実施です」と、
+    同じ辞書の ``passed: True`` と正面から矛盾する文言を返した。
+
+    「両方直してね」では閉じない (2 回連続で同じ型を踏んだ)。表示側が ``owed`` を
+    直接読める限り同じ矛盾はいつでも作れるので、**止めている種別そのものを導出**
+    して表示側はそれだけを読む形にした。
+    """
+    ob = {"pr_state": "MERGED", "passed": True, "owed": ["maintainability"],
+          "resolved": True, "head_sha": "a" * 40, "stale": [], "skipped": [],
+          "satisfied": [], "legacy_no_sha": [], "unpinned": [], "provenance": [],
+          "required": ["ax", "maintainability"]}
+    assert cs.review_blocking_types(ob) == [], "passed なのに止めている種別が在る"
+
+    r = cs.decide_review_done_report(
+        ob, remaining=[], owed_before=["maintainability"],
+        reviewed_sha="a" * 40, already_recorded=False, where="o/r#838")
+    joined = "\n".join(t for _s, t in r["lines"])
+    assert "関門はまだ開いていません" not in joined, (
+        "passed:True に対してブロックを名乗った:\n" + joined)
+    assert "通過できます" in joined, joined
+
+    blocked = cs.format_review_gate_block_error(ob, action="merge",
+                                                pr_number="838")
+    assert "maintainability" not in blocked.split("\n")[0], (
+        "関門の文面が passed:True の辞書から未実施を列挙した:\n" + blocked)
+
+
+def test_blocking_follows_the_value_the_gate_reads():
+    """``blocking`` は **関門が読む値と同じ値** から導かれること。
+
+    ここで独立に計算すると、また 2 つの答えが生まれる。
+    """
+    base = {"pr_state": "OPEN", "resolved": True, "owed": ["ax"]}
+    assert cs.review_blocking_types({**base, "passed": False}) == ["ax"]
+    assert cs.review_blocking_types({**base, "passed": True}) == []
+    # passed が無ければ規則から計算する (部分的な辞書でも矛盾しない)
+    assert cs.review_blocking_types(base) == ["ax"]
+
+
+def test_the_json_payload_carries_the_blocking_set(monkeypatch, capsys):
+    """``review status --json`` が ``blocking`` を運ぶこと。
+
+    親レビュー: ``--json`` が生の ``owed`` だけを返すので、``passed: true`` と
+    非空の ``owed`` が同じ応答に並び、読んだ AI が解消済みの関門をブロック扱いで
+    報告した。
+    """
+    ob = _ob(owed=["ax"], satisfied=[], pr_state="MERGED")
+    monkeypatch.setattr(commands, "pr_review_obligations", lambda *a, **k: ob)
+    monkeypatch.setattr(commands, "_resolve_review_pr_repo", lambda *a, **k: "o/r")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "838")
+    monkeypatch.setenv("BEACON_PR_REPO", "o/r")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    try:
+        commands.cmd_review_status()
+    except SystemExit:
+        pass
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["passed"] is True
+    assert payload["blocking"] == [], (
+        "passed:true なのに blocking が非空: " + str(payload["blocking"]))
+
+
+def test_the_duplicate_comment_paragraph_is_gone():
+    """同一の太字見出しを持つコメント段落が 2 連続していないこと。
+
+    独立保守性レビュー (low): どちらが正本かの目印が無い。
+    """
+    src = open("lib/commands.py", encoding="utf-8").read()
+    needle = '関門は「いまの head」に対して問う'
+    assert src.count(needle) == 1, (
+        f"同じ見出しのコメントが {src.count(needle)} 箇所ある")

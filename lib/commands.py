@@ -500,6 +500,7 @@ from commands_shared import (  # noqa: F401
     _review_skips_log_path,
     is_commit_sha_shaped,
     resolve_full_commit_sha,
+    review_blocking_types,
     # ms-119 e-6859 (独立保守性レビュー): 文面は純粋な builder に切り出す。
     format_review_sha_unpinned_warning,
     decide_review_done_report,
@@ -3878,9 +3879,12 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
     # **その sha に対して全必須種別が充足しているか** を見る。1 種別の実施で
     # 緑を押せてしまう形が PR #785 の事故だった (ms-119 e-6859)。
     _ob = pr_review_obligations(pr_number, pr_repo, head_sha=reviewed_sha)
-    if _ob.get("owed"):
+    # ms-119 e-6859 (親レビュー 2026-11-06): 判定に関わる読み手は **blocking** を
+    # 見る。`owed` を直接読むと、`passed` と食い違う文言を作れてしまう。
+    _blocking = review_blocking_types(_ob)
+    if _blocking:
         print(f"  (ゲートの印はまだ押していません: {reviewed_sha[:12]} に対して "
-              f"{', '.join(_ob['owed'])} が未実施です。全必須種別が **同じ差分に"
+              f"{', '.join(_blocking)} が未実施です。全必須種別が **同じ差分に"
               f"対して** 実施されてから緑になります)", file=sys.stderr)
         return
 
@@ -3975,7 +3979,9 @@ def cmd_review_status():
         sys.exit(2)
     print(f"  いまの差分: {ob['head_sha'][:12]}")
     print(f"  必須の種別: {', '.join(ob.get('required') or []) or '(なし)'}")
-    owed = ob.get("owed") or []
+    # **blocking** を読む (`owed` は導出の内訳)。`--json` も同じ値を `blocking` で
+    # 運ぶので、機械読みと人の表示が食い違わない (親レビュー 2026-11-06 AX high)。
+    owed = review_blocking_types(ob)
     for line in format_pr_review_obligation_disclosure(ob):
         print(line)
     if owed:
@@ -4617,15 +4623,6 @@ def cmd_review_done():
     # 旧実装は `remaining` が空になった時点で「gate を通過できます」と言っていた
     # ので、他の種別が **古い sha しか見ていない** 場合でも通過を名乗った。
     #
-    # **関門は「いまの head」に対して問う** (head_sha を渡さない)。
-    # ここを `head_sha=_reviewed_sha` にしていたのを、この機構のドッグフーディングで
-    # 自分で踏んだ (2026-11-06): 1 周目のレビューを `--reviewed-sha <古い sha>` で
-    # 正直に記録したところ、「独立レビューは全て <古い sha> に対して実施済み —
-    # approve/merge の gate を通過できます」と出たが、同じ瞬間に
-    # `beacon review status` は両種別を未実施 (exit 2) と答えた。つまり
-    # **名乗りと実態がズレた** —— この課題が消すために在る欠陥と同じ型を、
-    # 直したばかりの場所で作っていた。記録した sha に対する充足は「記録の事実」で
-    # あって「関門が開いたか」ではない。
     # **関門は「いまの head」に対して問う** (head_sha を渡さない)。この機構の
     # ドッグフーディングで踏んだ (2026-11-06): 1 周目のレビューを
     # `--reviewed-sha <古い sha>` で正直に記録したら「gate を通過できます」と出た
