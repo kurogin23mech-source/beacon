@@ -496,9 +496,27 @@ case "${1:-}" in
     review)
         case "${2:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
+            status)
+                shift 2
+                # ms-119 e-6859: 関門の状態を副作用なしで読む。促し
+                # (`beacon trigger check`) は別の面なので、関門を確かめたいときは
+                # こちらを使う (促しの空リストを「関門が開いた」と読ませない)。
+                _rst_pr="" _rst_repo="" _rst_json=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --pr)   _need_flag_value "$#" "$1"; _rst_pr="$2";   shift 2 ;;
+                        --repo) _need_flag_value "$#" "$1"; _rst_repo="$2"; shift 2 ;;
+                        --json) _rst_json="1";                              shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      _guard_no_positional "review status" "$1" ;;
+                    esac
+                done
+                BEACON_PR_NUMBER="$_rst_pr" BEACON_PR_REPO="$_rst_repo" \
+                    BEACON_JSON="$_rst_json" \
+                    python3 "$COMMANDS_PY" review_status ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind="" _rd_sha=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
@@ -519,6 +537,12 @@ case "${1:-}" in
                         # 「書き忘れた」が記録上まったく同じだった。省略を許さず、
                         # 0 件ならそう宣言してもらう (値を取らない旗)。
                         --no-findings)          _rd_nofind="1";                                shift ;;
+                        # ms-119 e-6859: **どの差分に対する実施か** を明示する。
+                        # 既定は gh に聞いた「いまの PR head」。judge に渡した
+                        # bundle が古い head のものだったときに、正直にその sha を
+                        # 記録できるようにするための上書き口 (関門はこの sha と
+                        # いまの head を突き合わせるので、嘘を書くと通らない)。
+                        --reviewed-sha)         _need_flag_value "$#" "$1"; _rd_sha="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
                         # ms-166 e-6918: 位置引数を黙って捨てない。done だけ
                         # `*) shift ;;` で捨てており `beacon review done ms-166` が
@@ -539,6 +563,7 @@ case "${1:-}" in
                     BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
                     BEACON_REVIEW_NO_FINDINGS="$_rd_nofind" \
+                    BEACON_REVIEWED_SHA="$_rd_sha" \
                     python3 "$COMMANDS_PY" review_done ;;
             skip)
                 shift 2

@@ -50,9 +50,16 @@ GATE_CONTEXT = "beacon-review-gate"
 
 def required_review_types():
     """The judge-run reviews that must be recorded before merge (the PR-open
-    節目 pair: AX + maintainability). Data-driven from the review-type registry
-    so a new pr-open review joins the gate with no edit here."""
-    return [d["review"] for d in review_spine.batch_review_types_for_node("pr-open")]
+    節目 pair: AX + maintainability).
+
+    ms-119 e-6859 (independent maintainability review, round 2): this used to
+    recompute the set with the same expression the local gate uses. The two
+    agreed only by coincidence, and the gate's own docstring claimed they could
+    not drift — a promise nothing enforced. Whoever narrows the set on one side
+    would leave the other requiring a different set, which is this PR's own
+    defect shape (the judge saw one diff, the gate guards another) reproduced on
+    the required-types axis. So delegate: ONE function owns the set."""
+    return review_spine.required_pr_open_review_types()
 
 
 def status_payload(state, *, pr="", description=""):

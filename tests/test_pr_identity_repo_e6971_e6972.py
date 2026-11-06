@@ -50,7 +50,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import cmd_pr  # noqa: E402
-import commands_shared as cs  # noqa: E402
+import commands_shared as cs
+import _gh_head_stub  # noqa: E402
 import core  # noqa: E402
 
 
@@ -476,8 +477,8 @@ def test_a_different_repositorys_review_does_not_lift_this_gate(
     cs.record_review_done_across_worktrees("ax", "3", "other/app")
 
     with redirect_stderr(io.StringIO()):
-        pending_other = cs._pending_review_types_for_pr("3", "o/r")
-        pending_same = cs._pending_review_types_for_pr("3", "other/app")
+        pending_other = cs._pr_open_review_nudge_pending_types("3", "o/r")
+        pending_same = cs._pr_open_review_nudge_pending_types("3", "other/app")
     assert pending_other == ["ax"], (
         "別リポジトリの実施記録で関門が外れた: " + repr(pending_other))
     assert pending_same == [], (
@@ -505,7 +506,7 @@ def test_a_legacy_record_without_a_repository_still_lifts_the_gate(
         json.dumps({"pr": "3", "review_type": "ax",
                     "recorded_by": "someone"}), encoding="utf-8")
     with redirect_stderr(io.StringIO()):
-        assert cs._pending_review_types_for_pr("3", "o/r") == []
+        assert cs._pr_open_review_nudge_pending_types("3", "o/r") == []
 
 
 def test_the_subtraction_disclosure_names_the_repository(tmp_path, monkeypatch):
@@ -524,7 +525,7 @@ def test_the_subtraction_disclosure_names_the_repository(tmp_path, monkeypatch):
     cs.record_review_done_across_worktrees("ax", "3", "o/r")
     err = io.StringIO()
     with redirect_stderr(err):
-        cs._pending_review_types_for_pr("3", "o/r")
+        cs._pr_open_review_nudge_pending_types("3", "o/r")
     assert "o/r" in err.getvalue(), (
         "どのリポジトリの差分に対する実施で関門を外したか言っていない:\n"
         + err.getvalue())
@@ -697,10 +698,10 @@ def test_pending_ignores_another_known_repositorys_trigger(
                         lambda: (str(tmp_path / "ledger"), True))
     _fire(tmp_path, monkeypatch, "ax", "3", "other/app")
     with redirect_stderr(io.StringIO()):
-        assert cs._pending_review_types_for_pr("3", "o/r") == []
-        assert cs._pending_review_types_for_pr("3", "other/app") == ["ax"]
+        assert cs._pr_open_review_nudge_pending_types("3", "o/r") == []
+        assert cs._pr_open_review_nudge_pending_types("3", "other/app") == ["ax"]
         # repo を知らない呼び出しは絞り込めないので残す (関門を残す側)
-        assert cs._pending_review_types_for_pr("3") == ["ax"]
+        assert cs._pr_open_review_nudge_pending_types("3") == ["ax"]
 
 
 def test_a_wrong_repo_review_done_does_not_lift_any_other_repos_gate(
@@ -741,9 +742,9 @@ def test_a_wrong_repo_review_done_does_not_lift_any_other_repos_gate(
     assert _ei.value.code == 3
 
     with redirect_stderr(io.StringIO()):
-        assert cs._pending_review_types_for_pr("3", "o/r") == ["ax"], (
+        assert cs._pr_open_review_nudge_pending_types("3", "o/r") == ["ax"], (
             "無関係なリポジトリの review done で o/r の関門が外れた")
-        assert cs._pending_review_types_for_pr("3", "other/app") == ["ax"], (
+        assert cs._pr_open_review_nudge_pending_types("3", "other/app") == ["ax"], (
             "無関係なリポジトリの review done で other/app の関門が外れた")
 
 
@@ -774,7 +775,7 @@ def test_the_right_repos_review_done_does_lift_its_own_gate(
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         commands.cmd_review_done()
     with redirect_stderr(io.StringIO()):
-        assert cs._pending_review_types_for_pr("3", "o/r") == []
+        assert cs._pr_open_review_nudge_pending_types("3", "o/r") == []
 
 
 def test_every_review_due_caller_passes_the_repository():
@@ -880,7 +881,7 @@ def test_the_subtraction_headline_does_not_blame_only_worktrees(
         encoding="utf-8")
     err = io.StringIO()
     with redirect_stderr(err):
-        assert cs._pending_review_types_for_pr("3", "o/r") == []
+        assert cs._pr_open_review_nudge_pending_types("3", "o/r") == []
     out = err.getvalue()
     # **見出しの行だけを見る。** 出力全体への部分一致で測った版は、種別ごとの
     # 明細行が "(リポジトリ未記録)" を必ず出すので、見出しを固定文に戻しても緑に
@@ -891,9 +892,36 @@ def test_the_subtraction_headline_does_not_blame_only_worktrees(
         "原因として名乗っている:\n" + headline)
 
 
-def _run_review_done(tmp_path, monkeypatch, *, pr, repo, triggers_seed):
-    """`cmd_review_done` を隔離して走らせ、``(stdout, stderr)`` を返す。"""
+def _run_review_done(tmp_path, monkeypatch, *, pr, repo, triggers_seed,
+                     head_sha="feedfacecafe0000", seed_other_types_done=False):
+    """`cmd_review_done` を隔離して走らせ、``(stdout, stderr)`` を返す。
+
+    ms-119 e-6859: 実施の記録は **どの差分に対する実施か** を持つので、
+    ``cmd_review_done`` は gh に head sha を聞く。この module の主題は
+    **身元 (どのリポジトリの PR か)** なので、head は決め打ちで差し替えて
+    主題を変えずに通す。``head_sha=None`` を渡すと「head を確かめられない」
+    状態 (= 関門が閉じたままになる形) を測れる。
+    """
     import commands
+    if head_sha is not None:
+        _gh_head_stub.install(monkeypatch, {pr: head_sha})
+    if seed_other_types_done and head_sha:
+        # ms-119 e-6859: 関門は **必須種別すべてが同じ差分に対して** 実施済みかを
+        # 問う。この試験が測りたいのは「最後の義務を解消したら、そう名乗る」側な
+        # ので、ax 以外の必須種別は同じ head に対して実施済みとして置いておく
+        # (そうしないと測りたい分岐に到達しない)。
+        import review_spine
+        _led = tmp_path / "ledger"
+        _led.mkdir(exist_ok=True)
+        for _t in review_spine.required_pr_open_review_types():
+            if _t == "ax":
+                continue
+            (_led / f"pr-{pr}-{_t}.json").write_text(json.dumps({
+                "ref": pr, "ref_kind": "pr", "pr": pr, "pr_repo": repo,
+                "review_type": _t, "reviewed_sha": head_sha, "sha_pinned": True,
+                "recorded_by": "seed", "recorded_at": "2026-11-05T00:00:00Z",
+                "recorded_in_cwd": str(tmp_path), "shared": True,
+            }, ensure_ascii=False), encoding="utf-8")
     triggers = tmp_path / "triggers"
     triggers.mkdir(exist_ok=True)
     for rtype, trepo in triggers_seed:
@@ -958,11 +986,14 @@ def test_review_done_does_claim_gate_passage_when_it_really_cleared_the_last_one
     """効く側も測る (でないと報告を丸ごと消しても緑になる)。"""
     out, err, code = _run_review_done(
         tmp_path, monkeypatch, pr="3", repo="o/r",
-        triggers_seed=[("ax", "o/r")])
+        triggers_seed=[("ax", "o/r")], seed_other_types_done=True)
     combined = out + err
     assert code is None, f"最後の義務を解消したのに exit={code}"
-    assert "o/r#3 の独立レビューは全て実施済み" in combined, combined
+    assert "o/r#3 の独立レビューは全て" in combined, combined
     assert "gate を通過できます" in combined, combined
+    # ms-119 e-6859: 名乗りが **どの差分に対して** かを言っていること。
+    # 「PR をレビューした」と読める文面に戻ると、この課題が直した穴が戻る。
+    assert "feedfacecafe" in combined, combined
 
 
 # --- 9. 不変条件は「主張」でなく「コード」で閉じる (独立保守性レビュー high 2 件) ---
@@ -1014,7 +1045,7 @@ def test_the_gate_sees_the_triggers_it_just_fired(tmp_path, monkeypatch):
     """**judge が実測した迂回の再現**: 発火した関門が自分から見えること。
 
     judge は本番の入口 (`cmd_pr_add`) を走らせ、`o~r/x` の PR#5 で
-    `_pending_review_types_for_pr('5','o~r/x')` が `[]` を返すことを実測した
+    `_pr_open_review_nudge_pending_types('5','o~r/x')` が `[]` を返すことを実測した
     (= 発火直後なのに approve/merge の関門が空)。
     """
     triggers = tmp_path / "triggers"
@@ -1025,10 +1056,10 @@ def test_the_gate_sees_the_triggers_it_just_fired(tmp_path, monkeypatch):
     repo = core.extract_pr_repo_from_url(url)      # → "" (不明に倒れる)
     cs._fire_review_due_for_pr("ax", "ax", "5", "t", url, pr_repo=repo)
     with redirect_stderr(io.StringIO()):
-        assert cs._pending_review_types_for_pr("5", repo) == ["ax"], (
+        assert cs._pr_open_review_nudge_pending_types("5", repo) == ["ax"], (
             "発火したトリガーが自分の関門から見えない")
         # 壊れた repo 値で引いても、不明として扱われるので見える (関門を残す側)
-        assert cs._pending_review_types_for_pr("5", "o~r/x") == ["ax"]
+        assert cs._pr_open_review_nudge_pending_types("5", "o~r/x") == ["ax"]
 
 
 def test_a_non_digit_pr_number_is_not_written_as_a_trigger(tmp_path, monkeypatch):
@@ -1127,7 +1158,7 @@ def test_the_legacy_tolerance_decision_lives_in_one_place():
     assert "廃止してよい条件" in anchor, "廃止条件が書かれていない"
     # 旧式を扱う各所が、理由を再論せず定数を指していること
     for fn in ("review_due_filename", "_clear_review_due_for_pr",
-               "_pending_review_types_for_pr", "_pr_open_reviewed_marker_path"):
+               "_pr_open_review_nudge_pending_types", "_pr_open_reviewed_marker_path"):
         doc = inspect.getdoc(getattr(cs, fn)) or ""
         assert "LEGACY_REVIEW_DUE_TOLERANCE" in doc, (
             f"{fn} が旧式許容の判断を独自の散文で持っている (1 箇所に寄せる)")
@@ -1227,7 +1258,7 @@ def test_a_never_reviewed_pr_keeps_its_gate_shut(tmp_path, monkeypatch):
         except SystemExit:
             pass
     with redirect_stderr(io.StringIO()):
-        assert cs._pending_review_types_for_pr("9", "repoB/y") == ["ax"], (
+        assert cs._pr_open_review_nudge_pending_types("9", "repoB/y") == ["ax"], (
             "一度もレビューしていない repoB の PR#9 の関門が開いた")
 
 
@@ -1305,8 +1336,9 @@ def test_an_idempotent_re_run_still_exits_zero(tmp_path, monkeypatch):
     """
     out, err, code = _run_review_done(tmp_path, monkeypatch, pr="3",
                                       repo="o/r",
-                                      triggers_seed=[("ax", "o/r")])
-    assert "全て実施済み" in (out + err)
+                                      triggers_seed=[("ax", "o/r")],
+                                      seed_other_types_done=True)
+    assert "独立レビューは全て" in (out + err)
     assert code is None, code
     # 2 回目: 義務は無いが台帳に記録が在る → 0 で終わる (冪等)
     out2, err2, code2 = _run_review_done(tmp_path, monkeypatch, pr="3",

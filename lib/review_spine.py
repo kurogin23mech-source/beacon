@@ -444,6 +444,194 @@ def batch_review_types_for_node(node, *, registry=None):
     return []
 
 
+#: 実施記録が「どの差分に対する実施か」を持たないとき (= 旧形式 / 解決できなかった)
+#: のしるし。推測で埋めず空のままにする —— 「不明」を特定の sha とみなすと、関門を
+#: 外してよいかの判定を捏造することになる。
+REVIEW_SHA_UNKNOWN = ""
+
+
+def required_pr_open_review_types(registry=None):
+    """PR が取り込まれる前に **記録されていなければならない** レビュー種別。
+
+    ``batch_review_types_for_node("pr-open")`` から導く (= registry が唯一の
+    真実源)。新しい pr-open 種別の descriptor を置けば、ここも関門も自動で追従する。
+    ``scripts/review-gate-ci.py:required_review_types`` と同じ集合を指すので、
+    ローカルの関門と CI の required check が別の集合を見ることがない。
+    """
+    return [d["review"]
+            for d in batch_review_types_for_node("pr-open", registry=registry)]
+
+
+def derive_pr_review_obligations(*, required, performed, skipped, head_sha):
+    """PR の「まだ要るレビュー」を **導出する** (ms-119 e-6859)。純粋関数。
+
+        owed = required − (head_sha に対する実施) − (理由付きの免除)
+
+    **なぜ導出なのか。** 以前この問いは「義務ファイルが在るか」で答えていた。
+    義務は PR-open で 1 回書かれ、``beacon review done`` が消す —— つまり
+    「要る / 要らない」を **削除と復活の状態遷移** で表していた。新しいコミットを
+    積んでも復活させる経路が無かったので、一度実施すれば以後どれだけ積んでも
+    「実施済み」のままだった。実測 (PR #785 / #834 / #835 / #836): judge が一度も
+    見ていない差分に対して ``beacon-review-gate`` が緑になり、しかも #835 では
+    **AX の findings を直したコミット自身が未レビュー** のまま帳簿上「レビュー済み」
+    だった。修正コミットこそ欠陥を作ることが 3 周連続で実測されているので、この穴は
+    統計的にいちばん危ない領域を帳簿から隠していた。
+
+    状態遷移の形を保ったまま「push で復活させる」経路を足しても、復活経路を 1 つ
+    忘れれば同じ穴が残る。導出なら **忘れる経路が構造的に存在しない** —— head_sha が
+    変わった瞬間に第 2 項が空になり、全種別が owed に戻る。
+
+    Args:
+        required: 必須種別の列 (``required_pr_open_review_types()``)。
+        performed: 実施記録の列。各要素は
+            ``{"review_type", "reviewed_sha", "sha_pinned"}``
+            (余分なキーは無視する)。``sha_pinned`` の 3 値が要点 ——
+            下の「3 値である理由」を参照。
+        skipped: 理由付きで免除された種別の列。各要素は
+            ``{"review_type", "skipped_at_sha"}`` か、種別の文字列。
+        head_sha: いまレビュー対象になっている差分の sha。確かめられなければ
+            ``REVIEW_SHA_UNKNOWN`` / None を渡す —— **呼び出し側は head が不明なら
+            関門を閉じたままにする** (「現在の差分に対して実施済み」と言えないため)。
+
+    **``sha_pinned`` が 3 値である理由** (ここを 2 値にすると穴が開く):
+
+    ``True``
+        この記録は「どの差分に対する実施か」を自分で pin している。
+        ``reviewed_sha == head_sha`` のときだけ差し引く。
+    ``None`` (= 記録にその欄が無い / 旧形式)
+        この変更より前に書かれた記録。``LEGACY_REVIEW_DUE_TOLERANCE`` と同じ判断で
+        **差し引くが開示する** —— 黙って厳しくして、実際に実施したレビューを
+        まとめて未実施に戻さない。open な PR の寿命 (数日〜数週) を超えれば
+        自然に居なくなる。
+    ``False``
+        **新しい記録なのに sha を pin できなかった** (= 実施は記録したが、head を
+        確かめられなかった)。これは差し引かない。ここを ``None`` と同じ扱いに
+        すると、旧記録のための寛容が **恒久的な抜け道** に変わる: gh が落ちている
+        / offline で ``review done`` を打つたびに「sha 無しだから差し引く」記録が
+        増え、以後の全差分を覆ってしまう。「緩めると言い換えで素通りする」型
+        そのものなので、旧形式への寛容と「今回 pin できなかった」を分けて持つ。
+
+    Returns:
+        dict:
+            ``head_sha`` / ``head_known`` — 判定の土台。
+            ``required`` — 必須種別 (重複を畳んだ入力順)。
+            ``owed`` — まだ要る種別 (required 順)。
+            ``satisfied`` — head_sha に対する実施が在る種別。
+            ``legacy_no_sha`` — 旧形式の記録 (``sha_pinned is None`` かつ sha 無し)
+                のため **従来どおり差し引いた** 種別。呼び出し側は開示する。
+            ``unpinned`` — ``sha_pinned is False`` の記録。差し引かない。
+                ``[{"review", "reason"}]``。
+            ``stale`` — 実施記録が **別の sha** に対するものだった種別。
+                ``[{"review", "reviewed_sha"}]``。owed に戻る。
+            ``skipped`` — 免除で差し引いた種別。``[{"review", "skipped_at_sha"}]``。
+                免除は sha 単位にしない (人間が理由付きで出した判断を、push ごとに
+                出し直させるのは現実的でない) が、**どの時点の免除かを開示する**。
+
+        **バケツは 1 種別につき 1 つ** (排他)。強い根拠が勝つ順は
+        ``satisfied`` > ``legacy_no_sha`` > ``skipped``、差し引かれなかった側は
+        ``stale`` / ``unpinned`` のどちらか 1 つ。2 つ以上のバケツに同じ種別が
+        載ると、開示が「実施済み」と「免除」を同時に言い、読み手がどちらを信じれば
+        よいか決められない (独立 AX レビューが実測した形)。
+    """
+    req = []
+    for t in (required or []):
+        t = str(t or "").strip()
+        if t and t not in req:
+            req.append(t)
+
+    head = str(head_sha or "").strip()
+    head_known = bool(head)
+
+    # --- 実施記録を 4 つに分ける ---
+    satisfied = []
+    legacy_no_sha = []
+    unpinned = {}
+    stale_by_type = {}
+    for rec in (performed or []):
+        if not isinstance(rec, dict):
+            continue
+        rtype = str(rec.get("review_type") or "").strip()
+        if not rtype or rtype not in req:
+            continue
+        if rtype in satisfied:
+            continue                    # head 一致が既に在る種別は上書きしない
+        rsha = str(rec.get("reviewed_sha") or "").strip()
+        pinned = rec.get("sha_pinned", None)
+
+        if pinned is False:
+            # 新しい記録だが sha を pin できなかった = 差し引かない。
+            unpinned.setdefault(
+                rtype,
+                "実施は記録されていますが、どの差分に対する実施か pin できて"
+                "いません (記録時に head を確かめられなかった)")
+            continue
+        if not rsha:
+            if pinned is None:
+                # 旧形式 —— 従来どおり差し引く (開示はする)。
+                if rtype not in legacy_no_sha:
+                    legacy_no_sha.append(rtype)
+            else:
+                # pinned=True を名乗りながら sha が空 = 名乗りが実装と合っていない。
+                # 信用しない側に倒す。
+                unpinned.setdefault(
+                    rtype, "記録が sha を pin したと名乗っていますが空です")
+            continue
+        if head_known and rsha == head:
+            satisfied.append(rtype)
+            stale_by_type.pop(rtype, None)
+            unpinned.pop(rtype, None)
+        else:
+            # head 不明のときも「確かめられないので信用しない」側に倒す。
+            stale_by_type.setdefault(rtype, rsha)
+
+    # --- 免除 ---
+    #
+    # **1 種別につき開示されるバケツは必ず 1 つ** (ms-119 e-6859、独立 AX レビュー)。
+    # 初版は免除と旧形式を無条件に積んでいたので、同じ種別に「実施済み」と「免除」の
+    # 両方の記録が在ると、開示に ``✓ ax: <sha> に対して実施`` と
+    # ``⊘ ax: 人間が理由付きで免除`` が **同時に出た**。judge の指摘どおり
+    # 「差し引いた根拠を必ず言う」という設計意図が、2 つの矛盾する根拠を並べることで
+    # 「どちらを信じればいいか分からない」形に転化していた。
+    #
+    # 優先順位は **強い根拠が勝つ** 順: 実施 (この head を見た) > 旧形式の寛容
+    # (見たが差分が不明) > 免除 (見ていないが人間が免除した)。弱い側を黙って
+    # 落とすのではなく、強い根拠が在るならそれだけを言う。
+    legacy_no_sha = [t for t in legacy_no_sha if t not in satisfied]
+    _already = set(satisfied) | set(legacy_no_sha)
+    skipped_out = []
+    for s in (skipped or []):
+        if isinstance(s, dict):
+            rtype = str(s.get("review_type") or "").strip()
+            at = str(s.get("skipped_at_sha") or "").strip()
+        else:
+            rtype, at = str(s or "").strip(), ""
+        if not rtype or rtype not in req or rtype in _already:
+            continue
+        if any(x["review"] == rtype for x in skipped_out):
+            continue
+        skipped_out.append({"review": rtype, "skipped_at_sha": at})
+
+    credited = (set(satisfied) | set(legacy_no_sha)
+                | {x["review"] for x in skipped_out})
+    owed = [t for t in req if t not in credited]
+    stale = [{"review": t, "reviewed_sha": stale_by_type[t]}
+             for t in req if t in stale_by_type and t not in credited]
+    unpinned_out = [{"review": t, "reason": unpinned[t]}
+                    for t in req if t in unpinned and t not in credited]
+
+    return {
+        "head_sha": head,
+        "head_known": head_known,
+        "required": req,
+        "owed": owed,
+        "satisfied": satisfied,
+        "legacy_no_sha": legacy_no_sha,
+        "unpinned": unpinned_out,
+        "stale": stale,
+        "skipped": skipped_out,
+    }
+
+
 def _finding_key(finding):
     """Normalized dedup key for a finding: (file, line, lowercased title stripped
     of trailing punctuation/whitespace). Pure."""
