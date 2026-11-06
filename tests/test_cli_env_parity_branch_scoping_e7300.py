@@ -53,6 +53,26 @@ def _handle(cmd, args):
     elif cmd == "d":
         _run_commands_py(x, "verb_d", {"BEACON_D": "1"})
         env = {"BEACON_LATER": "1"}
+    elif cmd == "e":
+        try:
+            env = {"BEACON_E": "1"}
+            _run_commands_py(x, "verb_e", env)
+        except Exception:
+            env = {"BEACON_EXCEPT": "1"}
+    elif cmd == "f":
+        def _helper():
+            env = {"BEACON_NESTED": "1"}
+            return env
+        g = lambda: {"BEACON_LAMBDA": "1"}
+        env = {"BEACON_F": "1"}
+        _run_commands_py(x, "verb_f", env)
+    elif cmd == "g":
+        try:
+            pass
+        except Exception:
+            env = {"BEACON_G1": "1"}
+        env = {"BEACON_G0": "1"}
+        _run_commands_py(x, "verb_g", env)
 '''
 
 
@@ -104,3 +124,69 @@ def test_the_real_dispatch_is_still_parseable_and_reports_verbs():
     sets, verbs = mod._python_sets(REPO / "beacon_cli" / "dispatch.py")
     assert len(verbs) > 50, f"verb をほとんど拾えていない: {len(verbs)}"
     assert any(sets.get(v) for v in verbs), "どの verb も鍵を 1 つも拾えていない"
+
+
+# ---------------------------------------------------------------------------
+# PR #839 の独立保守性レビュー (high) で見つかった 2 つの over-report 経路
+# ---------------------------------------------------------------------------
+# **e-7300 は姉妹分岐からの貸与を塞いだが、同じ貸与が別の 2 経路で残っていた。**
+# モジュール冒頭が「報告を少なくする側に倒す、over-report しない」と書いている
+# のに、実際には over-report していた —— 過大報告は「配線されている」と誤って
+# 言うことなので、この検査が存在する理由 (未配線の検出) を静かに外す。
+#
+# 1 経路だけ塞いで「構造で閉じた」と称した形。独立 judge が合成ソースで実証した。
+
+
+def test_an_except_handler_above_the_call_is_not_on_the_path():
+    """祖先が ``try`` のとき、その except 本体は経路上に無い。
+
+    呼び出しが ``try`` 本体の中に在るなら、except が走った実行では**その呼び出しは
+    起きていない**。にもかかわらず except 本体が数えられていた。原因は header の
+    判定が「list の先頭要素が ``ast.stmt`` なら block とみなして飛ばす」という
+    除外型だったこと —— ``ast.Try`` の ``handlers`` は先頭が ``ast.excepthandler``
+    なので素通りした。許可型 (入れてよいフィールドを名前で挙げる) に変えた。
+    """
+    sets = _sets_for(PROBE)
+    assert sets["verb_e"] == {"BEACON_E"}, (
+        f"except 本体の鍵が経路に混入している: {sorted(sets['verb_e'])}")
+
+
+def test_a_nested_definition_before_the_call_contributes_nothing():
+    """呼び出しより前の ``def`` / ``lambda`` の**本体**は経路上に無い。
+
+    関数を定義しても本体は走らないので、helper 内部の代入は「渡している」側に
+    入らない。以前は ``ast.walk`` で丸ごと歩いていたため混入していた。
+    """
+    sets = _sets_for(PROBE)
+    assert sets["verb_f"] == {"BEACON_F"}, (
+        f"入れ子の定義の本体が経路に混入している: {sorted(sets['verb_f'])}")
+
+
+def test_an_except_handler_before_the_call_still_counts():
+    """呼び出し**より前**の兄弟 ``try`` の except 本体は数える。
+
+    上の 2 つと向きが逆なので分けて測る。この except は呼び出しに到達する前に
+    走り得るので、「渡している」側に倒すのが正しい (経路上の ``if`` の本体を
+    数えるのと同じ理由)。過大報告を塞ぐ修正で、こちら側まで切り落として
+    **偽のギャップ**を作っていないことを確かめる。
+    """
+    sets = _sets_for(PROBE)
+    assert sets["verb_g"] == {"BEACON_G0", "BEACON_G1"}, (
+        f"到達前に走り得る except の鍵を落としている (偽のギャップ): "
+        f"{sorted(sets['verb_g'])}")
+
+
+def test_a_loop_header_above_the_call_is_on_the_path():
+    """``for`` / ``while`` の header は経路上に在る (許可型の取りこぼし検査)。
+
+    許可型に変えた副作用で、header を持つ文の header まで落としていないか。
+    落とすと「渡していない」と誤判定して偽のギャップを作る。
+    """
+    sets = _sets_for('''
+def _handle(cmd, args):
+    for k in [1]:
+        env = {"BEACON_LOOP": "1"}
+        _run_commands_py(x, "verb_loop", env)
+''')
+    assert sets["verb_loop"] == {"BEACON_LOOP"}, (
+        f"ループ配下の経路が落ちている: {sorted(sets['verb_loop'])}")

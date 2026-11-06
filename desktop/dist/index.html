@@ -2511,27 +2511,13 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 
 /* ms-185 e-7325: ここに Trek detail 画面の CSS が在った (約 790 行)。画面本体
    (openTrek / render 系 / dispatcher) ごと落としたので一緒に落としている。
-   下の .beacon-toast は Trek と一緒に生まれたが、clipboard コピーの通知として
-   使われ続けているので残している。 */
-/* ms-86 / e-2133: toast — clipboard copy 完了通知。 画面下中央に 1.5 秒だけ出す。 */
-.beacon-toast {
-  position: fixed;
-  left: 50%;
-  bottom: 40px;
-  transform: translateX(-50%);
-  background: var(--bg-raised, #1a1a1a);
-  color: var(--text-primary);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 8px 14px;
-  font-size: 0.78rem;
-  font-family: var(--font-mono, monospace);
-  z-index: 10000;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.beacon-toast.show { opacity: 1; }
+
+   e-7325 の時点では、ここに在った `.beacon-toast` を「Trek と一緒に生まれたが
+   clipboard コピーの通知として使われ続けているので残す」と書いて残していた。
+   **その記述は誤りだった** (PR #839 の独立保守性レビュー, medium)。唯一の
+   呼び出し元は削除した `copy-trek-sid` の handler で、残したのは呼び出し元ゼロの
+   死んだ配線だった。CSS / 関数 / DOM 生成をまとめて落としてある。再び通知が要る
+   なら、その時の呼び出し元と一緒に足すこと。 */
 
 /* ---- Tooltip card (ms-82 e-1970) ----
    Use `.beacon-tooltip` + `data-tooltip="..."` on any inline element to show
@@ -7077,24 +7063,6 @@ function _shortSessionId(sid) {
   if (s.length <= 22) return s;
   return s.slice(0, 10) + '…' + s.slice(-8);
 }
-let _beaconToastTimer = null;
-function _beaconShowToast(text) {
-  try {
-    let el = document.getElementById('beacon-toast');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'beacon-toast';
-      el.className = 'beacon-toast';
-      document.body.appendChild(el);
-    }
-    el.textContent = text;
-    requestAnimationFrame(() => el.classList.add('show'));
-    if (_beaconToastTimer) clearTimeout(_beaconToastTimer);
-    _beaconToastTimer = setTimeout(() => {
-      try { el.classList.remove('show'); } catch (_e) {}
-    }, 1500);
-  } catch (_e) { /* noop — toast は best-effort */ }
-}
 function closeRetro() { state.retroContent = null; render(); }
 
 // ---- Documents ----
@@ -7994,15 +7962,18 @@ document.addEventListener('wheel', _markUserScrolling, { passive: true });
 document.addEventListener('touchmove', _markUserScrolling, { passive: true });
 
 function renderOnDataChange() {
-  // ms-86 / e-2270 — when Trek detail is open, WS-driven project frames
-  // must NOT trigger a re-render. Trek detail reads from
-  // ``state.openTrekScope`` (= the cross-project aggregate fetched once
-  // by openTrek), which is independent of ``state.project`` (= the
-  // background project that the WS is subscribed to). A project frame
-  // ms-43 e-3746 — same reasoning as the removed Trek guard (ms-185 e-7325:
-  // that guard skipped the re-render while a Trek detail page was open),
-  // applied to the
-  // document / retro viewer. While the user is reading a doc (or a retro),
+  // ms-185 e-7325 (PR #839 の独立保守性レビュー, medium): ここには ms-86 / e-2270 の
+  // 説明が在った — Trek detail を開いている間は WS 由来の再レンダーを止める、という
+  // ガードと、それが ``state.openTrekScope`` を読む理由。ガードと state の両方を
+  // e-7325 で落としたので、説明も消してある。
+  //
+  // 最初はガード行だけ消して説明を残し、文を途中で分断する形になっていた。
+  // server/app.py では自分で「列挙を現在形で書くと、後に訂正が続いてもその訂正より
+  // 前が現在の内容として読まれる」と診断して過去形に直したのに、同じ diff の
+  // このファイルでその罠に落ちていた (独立 judge が指摘)。
+  //
+  // ms-43 e-3746 — 文書 / 振り返りの閲覧中も同じ理屈で再レンダーを止める。
+  // While the user is reading a doc (or a retro),
   // ``renderDocumentsSection`` replaces #main-content with the viewer, and a
   // project_changed WS frame carries only milestone / task / entry deltas —
   // none of which the open viewer shows. The fall-through render() below

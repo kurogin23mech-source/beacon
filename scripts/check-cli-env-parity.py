@@ -198,6 +198,65 @@ def _copy_source(node):
     return None
 
 
+# ある文へ**入る前に評価される**フィールド (= header)。ms-185 e-7330 follow-up
+# (PR #839 の独立保守性レビュー, high)。
+#
+# 以前はここを「list の先頭要素が ast.stmt なら block とみなして飛ばす」という
+# 形で判定していた。``ast.Try`` の ``handlers`` は先頭要素が ``ast.excepthandler``
+# (= ``ast.stmt`` ではない) なので**その判定を素通りし、except 本体が丸ごと経路に
+# 混入していた**。呼び出しが ``try`` 本体の中に在るとき、except が走ったなら
+# その呼び出しは起きていない —— つまり except 本体は到達経路上に無い。
+#
+# 「block でない物を通す」という除外型の判定は、新しい構文 (match / TryStar 等) が
+# 増えるたびに静かに穴が開く。入れてよいフィールドを**名前で挙げる**許可型に変えた。
+# 挙げていない型の文が祖先に来たら header は空 = 何も足さない (= 報告を少なくする側)。
+_HEADER_FIELDS = {
+    ast.If: ("test",),
+    ast.While: ("test",),
+    ast.For: ("target", "iter"),
+    ast.AsyncFor: ("target", "iter"),
+    ast.With: ("items",),
+    ast.AsyncWith: ("items",),
+    ast.Try: (),          # body へ直接入る。handlers / orelse / finalbody は経路外
+}
+if hasattr(ast, "TryStar"):          # py3.11+
+    _HEADER_FIELDS[ast.TryStar] = ()
+if hasattr(ast, "match_case"):       # py3.10+ (match 文)
+    _HEADER_FIELDS[ast.Match] = ("subject",)
+    _HEADER_FIELDS[ast.match_case] = ("guard",)
+
+# 関数 / クラス / lambda の**定義**は、その本体を実行しない。
+_NOT_EXECUTED_HERE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _walk_executed(node):
+    """``node`` を評価したときに**実際に走る**部分だけを歩く。
+
+    ms-185 e-7330 follow-up (PR #839 の独立保守性レビュー, high): 以前は
+    ``ast.walk`` で丸ごと歩いていたので、呼び出しより前に在る**入れ子の
+    ``def`` の本体**まで数えていた。関数を定義しても本体は走らないので、
+    helper 内部の無関係な代入が「渡している」側に混入していた。
+
+    どちらの漏れも**過大報告** (= 渡していない鍵を渡していると数える) で、
+    この検査が存在する理由 (未配線の検出) を静かに外す。モジュール冒頭が
+    「報告を少なくする側に倒す、over-report しない」と書いているのに、実際には
+    over-report する経路が 2 つ在った。
+    """
+    yield node
+    if isinstance(node, _NOT_EXECUTED_HERE):
+        # 定義そのもの (= 名前の束縛) は経路上。本体は走らないので降りない。
+        # 定義時に評価されるのは装飾子 / 既定引数 / 基底クラスだけなので、そこは歩く。
+        for field in ("decorator_list", "bases", "keywords", "args", "returns"):
+            value = getattr(node, field, None)
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if isinstance(item, ast.AST):
+                    yield from _walk_executed(item)
+        return
+    for child in ast.iter_child_nodes(node):
+        yield from _walk_executed(child)
+
+
 class _ReachingPath:
     """ある呼び出しへ**到達する経路上**の文を返す (ms-185 e-7300)。
 
@@ -258,21 +317,18 @@ class _ReachingPath:
         for depth, stmt in enumerate(chain):
             lst, idx = self._slot[stmt]
             for before in lst[:idx]:
-                out.extend(ast.walk(before))
+                out.extend(_walk_executed(before))
             if depth == 0:
                 # 最内の文は丸ごと (呼び出しと同一文での組み立てを拾う)
-                out.extend(ast.walk(stmt))
+                out.extend(_walk_executed(stmt))
             else:
-                # 外側の文は header (if の test 等) だけ。block は内側の段が担う。
-                for _field, value in ast.iter_fields(stmt):
-                    if isinstance(value, list):
-                        if value and isinstance(value[0], ast.stmt):
-                            continue
-                        for item in value:
-                            if isinstance(item, ast.AST):
-                                out.extend(ast.walk(item))
-                    elif isinstance(value, ast.AST) and not isinstance(value, ast.stmt):
-                        out.extend(ast.walk(value))
+                # 外側の文は **header だけ**。block は内側の段が担う。
+                for field in _HEADER_FIELDS.get(type(stmt), ()):
+                    value = getattr(stmt, field, None)
+                    items = value if isinstance(value, list) else [value]
+                    for item in items:
+                        if isinstance(item, ast.AST):
+                            out.extend(_walk_executed(item))
         return out
 
 
