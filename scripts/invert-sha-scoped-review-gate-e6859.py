@@ -239,6 +239,20 @@ def stop_naming_which_sha_was_reviewed(src: str) -> str:
     return src.replace(anchor, '    detail = "(省略)"', 1)
 
 
+def claim_passage_against_the_recorded_sha(src: str) -> str:
+    """最後の名乗りを「いまの head」でなく「記録した sha」に対して評価する。
+
+    **ドッグフーディングで自分が踏んだ形** (2026-11-06)。過去の sha を正直に記録
+    すると「gate を通過できます」と出るのに、同じ瞬間に `review status` は未実施と
+    答えた = 名乗りと実態のズレ。
+    """
+    anchor = "    _gate = pr_review_obligations(pr_number, pr_repo)\n    _gate_owed"
+    assert anchor in src, "anchor not found (claim_passage_against_the_recorded_sha)"
+    return src.replace(anchor, (
+        "    _gate = pr_review_obligations(pr_number, pr_repo, "
+        "head_sha=_reviewed_sha)\n    _gate_owed"), 1)
+
+
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
 EXPECT_RED = [
     ("関門が導出でなくトリガーファイルを読む (e-6859 の退行そのもの)",
@@ -316,6 +330,9 @@ EXPECT_RED = [
     ("stale の理由から「実施した差分」を落とす (保守性①)",
      SHARED, stop_naming_which_sha_was_reviewed,
      f"{SHA_T}::test_the_gate_messages_are_pure_builders"),
+    ("最後の名乗りを「記録した sha」に対して評価する (ドッグフーディングで踏んだ形)",
+     CMDS, claim_passage_against_the_recorded_sha,
+     f"{SHA_T}::test_review_done_asks_the_real_head_not_the_recorded_sha"),
 ]
 
 

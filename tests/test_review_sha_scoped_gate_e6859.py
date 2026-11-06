@@ -571,3 +571,60 @@ def test_the_nudge_face_is_named_as_such():
     import inspect
     gate = inspect.getsource(cmd_pr._review_gate_check)
     assert "nudge" not in gate, "関門が促しの面を読んでいる (e-6859 の退行)"
+
+
+# --- ドッグフーディングで自分が踏んだ名乗りのズレ (2026-11-06) ---------------
+
+def test_review_done_asks_the_real_head_not_the_recorded_sha(tmp_path, monkeypatch):
+    """``review done`` の「gate を通過できます」は **いまの head** に対する判定であること。
+
+    **この機構を自分に当てて踏んだ** (2026-11-06)。1 周目のレビューを
+    ``--reviewed-sha <古い sha>`` で正直に記録したところ、
+
+        kurogin23mech-source/beacon#838 の独立レビューは全て 1ccc819d12d0 に対して
+        実施済み — approve/merge の gate を通過できます
+
+    と出たが、同じ瞬間に ``beacon review status`` は両種別を未実施 (exit 2) と
+    答えた。名乗りと実態がズレていた —— この課題が消すために在る欠陥と同じ型を、
+    直したばかりの場所で作っていた。
+
+    記録した sha に対する充足は「記録の事実」であって「関門が開いたか」ではない。
+    """
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+
+    old_sha, cur_head = HEAD, NEXT
+    tdir = _marker_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tdir))
+    monkeypatch.setattr(cs, "_review_done_dir",
+                        lambda: (str(tmp_path / "ledger"), True))
+    monkeypatch.setattr(commands, "_record_review_adjudication_decision",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "_ci_flip_review_gate_success",
+                        lambda *a, **k: None)
+    # いまの head は cur_head (= 記録する sha とは別物)
+    import _gh_head_stub
+    _gh_head_stub.install(monkeypatch, {"838": cur_head})
+    for t in rs.required_pr_open_review_types():
+        (tdir / cs.review_due_filename(t, "838", "o/r")).write_text(
+            json.dumps({"review": t, "pr_repo": "o/r"}), encoding="utf-8")
+
+    out, err = io.StringIO(), io.StringIO()
+    for t in rs.required_pr_open_review_types():
+        monkeypatch.setenv("BEACON_REVIEW_TYPE", t)
+        monkeypatch.setenv("BEACON_PR_NUMBER", "838")
+        monkeypatch.setenv("BEACON_PR_REPO", "o/r")
+        monkeypatch.setenv("BEACON_REVIEWED_SHA", old_sha)
+        monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                commands.cmd_review_done()
+        except SystemExit:
+            pass
+    combined = out.getvalue() + err.getvalue()
+
+    assert "gate を通過できます" not in combined, (
+        "いまの head を見ていないのに通過を名乗った:\n" + combined)
+    assert "関門はまだ開いていません" in combined, combined
+    # どちらの sha の話かを両方言うこと (記録は残る / 現在の差分には未実施)
+    assert old_sha[:12] in combined and cur_head[:12] in combined, combined

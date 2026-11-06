@@ -4578,8 +4578,23 @@ def cmd_review_done():
     # 関門ではないので、この 2 つを別の名前で持ち、別の文として出す。
     # 旧実装は `remaining` が空になった時点で「gate を通過できます」と言っていた
     # ので、他の種別が **古い sha しか見ていない** 場合でも通過を名乗った。
-    _gate = pr_review_obligations(pr_number, pr_repo, head_sha=_reviewed_sha)
+    #
+    # **関門は「いまの head」に対して問う** (head_sha を渡さない)。
+    # ここを `head_sha=_reviewed_sha` にしていたのを、この機構のドッグフーディングで
+    # 自分で踏んだ (2026-11-06): 1 周目のレビューを `--reviewed-sha <古い sha>` で
+    # 正直に記録したところ、「独立レビューは全て <古い sha> に対して実施済み —
+    # approve/merge の gate を通過できます」と出たが、同じ瞬間に
+    # `beacon review status` は両種別を未実施 (exit 2) と答えた。つまり
+    # **名乗りと実態がズレた** —— この課題が消すために在る欠陥と同じ型を、
+    # 直したばかりの場所で作っていた。記録した sha に対する充足は「記録の事実」で
+    # あって「関門が開いたか」ではない。
+    _gate = pr_review_obligations(pr_number, pr_repo)
     _gate_owed = _gate.get("owed") or []
+    # 記録した差分が、いまの head と違うか (= 正直に過去の sha を記録した場合)。
+    # 違うなら「記録はしたが、この種別は現在の差分に対しては未実施」と言う。
+    _recorded_for_an_older_diff = bool(
+        _reviewed_sha and _gate.get("resolved")
+        and _gate.get("head_sha") != _reviewed_sha)
     if remaining:
         print(f"  残りの未実施レビュー (ナッジ): {', '.join(remaining)}")
     if _gate_owed:
@@ -4599,12 +4614,20 @@ def cmd_review_done():
             # 同一視していたために、judge が見ていない差分に対して通過を
             # 名乗っていた (PR #785 / #835)。
             if _gate_owed:
+                _head_txt = ((_gate.get("head_sha") or "?")[:12]
+                             if _gate.get("resolved") else "いまの head (不明)")
                 print(f"  ⚠ {_where} のナッジは消えましたが、**関門はまだ開いて"
-                      f"いません** — {(_reviewed_sha or '?')[:12]} に対して "
+                      f"いません** — {_head_txt} に対して "
                       f"{', '.join(_gate_owed)} が未実施です。", file=sys.stderr)
+                if _recorded_for_an_older_diff:
+                    # 正直に過去の sha を記録した場合。記録は残るが関門は開かない。
+                    print(f"      (この記録は {_reviewed_sha[:12]} に対する実施"
+                          f"として残ります。いまの head は "
+                          f"{(_gate.get('head_sha') or '?')[:12]} なので、"
+                          f"現在の差分に対しては未実施です)", file=sys.stderr)
             else:
                 print(f"  {_where} の独立レビューは全て "
-                      f"{(_reviewed_sha or '?')[:12]} に対して実施済み "
+                      f"{(_gate.get('head_sha') or '?')[:12]} に対して実施済み "
                       f"— approve/merge の gate を通過できます "
                       f"(この sha の上にコミットを積むと再度要ります)。")
         else:
