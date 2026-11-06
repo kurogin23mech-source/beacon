@@ -65,22 +65,30 @@ jobs:
         run: go build -o viewer ./...
         working-directory: viewer
 
-      # ms-185 e-7352: Node, for the same reason Go is installed above — a
-      # toolchain the runner lacks does not fail the parity tests, it makes them
-      # SKIP, and a skip is as green as a pass. Measured on 2026-11-06: 25 test
-      # files / 303 tests guard themselves with ``skipif(shutil.which("node") is
-      # None)`` and every one of them was skipping on CI. They cover the bridge's
-      # JS side (envelope tiers, heartbeat body, qualgate, autonomous content,
-      # budget asymmetry) and the Python↔JS parity checks that are the only thing
-      # holding the two implementations together.
+      # ms-185 e-7352: pin the Node version instead of inheriting the runner's.
       #
-      # The step below runs ``channel/*.test.mjs`` as well. Those are node's own
-      # test runner, never invoked by pytest, and they were not in CI at all —
+      # 25 test files / 303 tests guard themselves with
+      # ``skipif(shutil.which("node") is None)``. They cover the bridge's JS side
+      # (envelope tiers, heartbeat body, qualgate, autonomous content, budget
+      # asymmetry) and the Python↔JS parity checks that are the only thing holding
+      # the two implementations together — so whether the runner has node decides
+      # whether a third of the bridge's coverage runs at all.
+      #
+      # **Correction to an earlier claim in this comment (measured 2026-11-06).**
+      # It said those 303 were skipping on CI. They were not: ubuntu-latest ships
+      # Node, so ``which("node")`` already resolved and they already ran. The skip
+      # count is 82 both before and after this step was added, and the pass count
+      # moved only by the 5 tests added in the same commit. What this step buys is
+      # that the version is PINNED rather than whatever the runner image happens
+      # to ship — the same property the Go step above has.
+      #
+      # The real hole was the step below: ``channel/*.test.mjs`` is node's own test
+      # runner, never invoked by pytest, and it was not in CI at all.
       # ``channel/bus-state-marker.test.mjs`` had been failing since ms-159 e-6488
       # added ``stateDetail`` to the reader without updating two expectations
       # (``assert/strict``'s deepEqual is deepStrictEqual, so a present-but-
-      # undefined key is not equal to an absent one). PR #835 passed every CI
-      # check while carrying that failure.
+      # undefined key is not equal to an absent one). PR #835 passed every CI check
+      # while carrying that failure.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

@@ -40,9 +40,14 @@ each line is classified in the companion audit (see the task's notes), and
 burning it down is follow-up work, not a precondition for stopping the bleeding.
 
 Deliberately conservative — both directions of imprecision are stated:
-  * the Python side is read per ENCLOSING FUNCTION, so a handler that mentions
-    a name anywhere counts as passing it. That under-reports (a name mentioned
-    but not actually threaded through slips by) and never over-reports.
+  * the Python side is read per REACHING PATH (ms-185 e-7300): for each dispatch
+    call, only the statements that can run before it on its own path are
+    resolved. Statements before it in the same block count whole (so a dict
+    built up incrementally — ``env = {...}`` then ``if ...: env["X"] = ...`` —
+    still counts as passed, erring toward reporting less). Sibling branches and
+    anything after the call do not. It still under-reports: an env built by a
+    shape this does not model (a call, a merge) falls back to every key the
+    path builds.
   * the bash side reads the 60 lines above the dispatch line, which is where
     the ``VAR=... python3 "$COMMANDS_PY" <verb>`` idiom puts its assignments.
 
@@ -60,15 +65,23 @@ the dispatch call surfaced 13 real pre-existing gaps (``skill_install`` x8,
 ``opportunity_add``, ``push_record``) — verified pre-existing by running the
 scoped version against an origin/main tree.
 
-So for any verb in a handler of that shape, **an OK from this checker is not
-evidence that its mapping is wired**; it only means nothing new was detected
-by a method that cannot see inside the branch. e-7079 saw this asymmetry
-directly: removing ``--trek`` from ``doc add`` on BOTH frontends was reported
-for bash (whose scan is per-file, not per-function) and stayed silent for
-Python. Fixing the scoping is follow-up work with its own review — a first
-attempt at it still leaked forward through source order, which is why it is
-not bolted onto an unrelated change. Patch kept at
-``.archive/cli-env-parity-branch-scoping-WIP.patch``.
+**ms-185 e-7300 fixed the scoping.** The 4 gaps that were still hidden when it
+landed (``push_record`` / ``deploy_record`` ``BEACON_JSON``, ``doc_add``
+``BEACON_TARGET``, ``opportunity_add`` ``BEACON_OPP_DESCRIPTION``) are recorded
+in KNOWN_GAPS with their verdicts; the other 9 of the 13 had been wired or
+recorded by then. The earlier count stands as the measurement that justified
+the change, not as today's state.
+
+The first attempt at this scoping leaked FORWARD through source order (it
+credited a dict assigned *after* the call), which is why it was not bolted onto
+an unrelated change; that patch is kept at
+``.archive/cli-env-parity-branch-scoping-WIP.patch``. The property is now
+pinned by ``tests/test_cli_env_parity_branch_scoping_e7300.py``, which measures
+all three directions on a minimal synthetic source: siblings invisible, keys
+added along the path counted, assignments after the call invisible.
+
+An OK from this checker still is not proof that every mapping is wired — the
+fallback above, and the bash side's line-window, both err toward silence.
 
 Plain script, no pytest import: scripts/ci-strict-drift-guards.sh calls it from
 jobs that have no pytest (ms-160 e-6349).
@@ -185,6 +198,138 @@ def _copy_source(node):
     return None
 
 
+class _ReachingPath:
+    """ある呼び出しへ**到達する経路上**の文を返す (ms-185 e-7300)。
+
+    **直した穴**: 以前は局所名の解決を ``ast.walk(fn)`` で囲っている関数ごと
+    行っていた。このリポジトリの処理部は ``if cmd == "..."`` の姉妹分岐が並び、
+    どの分岐も同じ局所名 ``env`` に辞書を組み立てるので、**ある分岐が渡す鍵が
+    隣の分岐の「渡している」集合にも貸与されていた**。実測 (2026-11-03):
+    push record は list 分岐の BEACON_JSON を、doc add / update / show / delete は
+    list 分岐の BEACON_TREK_ID を、渡していないのに渡していると判定されていた。
+    検査が存在する理由そのものについて、自分の担当範囲の一部で赤くなれない状態。
+
+    経路の作り方: 呼び出しから関数まで親を辿り、各段で **その文より前の文は
+    部分木ごと**、含んでいる文は次の段へ降りる。姉妹分岐 (別の arm / 呼び出しより
+    後の文) は入らない。
+
+    「前の文は部分木ごと」が偽のギャップを防ぐ: ``env = {...}`` の後に
+    ``if ...: env["X"] = ...`` を足して、その後で渡す形は、``if`` が呼び出しより
+    前に在るので中身まで数える。実行されるか分からない分岐でも「渡している」側に
+    倒すのは、この検査が一貫して報告を少なくする側へ寄せているのと同じ理由。
+    """
+
+    def __init__(self, fn):
+        self._fn = fn
+        # 子 -> 親、および文 -> (その文が属する list, index)
+        self._parent = {}
+        self._slot = {}
+        for node in ast.walk(fn):
+            for _field, value in ast.iter_fields(node):
+                items = value if isinstance(value, list) else [value]
+                for i, item in enumerate(items):
+                    if not isinstance(item, ast.AST):
+                        continue
+                    self._parent[item] = node
+                    if isinstance(item, ast.stmt) and isinstance(value, list):
+                        self._slot[item] = (value, i)
+
+    def _enclosing_stmt(self, node):
+        cur = node
+        while cur is not None and not (isinstance(cur, ast.stmt) and cur in self._slot):
+            cur = self._parent.get(cur)
+        return cur
+
+    def stmts_reaching(self, call):
+        """``call`` に到達する経路上の AST ノード列。"""
+        st = self._enclosing_stmt(call)
+        if st is None:
+            return []
+        # 内側から外側へ、各段の「その文を含む文」を集める
+        chain = []
+        cur = st
+        while cur is not None:
+            chain.append(cur)
+            parent = self._parent.get(cur)
+            cur = self._enclosing_stmt(parent) if parent is not None else None
+            if cur is not None and cur in chain:   # 念のための循環止め
+                break
+        out = []
+        for depth, stmt in enumerate(chain):
+            lst, idx = self._slot[stmt]
+            for before in lst[:idx]:
+                out.extend(ast.walk(before))
+            if depth == 0:
+                # 最内の文は丸ごと (呼び出しと同一文での組み立てを拾う)
+                out.extend(ast.walk(stmt))
+            else:
+                # 外側の文は header (if の test 等) だけ。block は内側の段が担う。
+                for _field, value in ast.iter_fields(stmt):
+                    if isinstance(value, list):
+                        if value and isinstance(value[0], ast.stmt):
+                            continue
+                        for item in value:
+                            if isinstance(item, ast.AST):
+                                out.extend(ast.walk(item))
+                    elif isinstance(value, ast.AST) and not isinstance(value, ast.stmt):
+                        out.extend(ast.walk(value))
+        return out
+
+
+def _locals_along(nodes):
+    """経路上のノード列から「局所名 -> 書き込まれた BEACON_* 鍵」を組む。
+
+    以前は関数全体に対して 1 回だけ組んでいた処理を、経路ごとに呼べる純粋関数へ
+    出した (ms-185 e-7300)。中身の規則は変えていない — dict リテラル / 局所への
+    代入 / ``d["BEACON_X"] = ...`` の subscript 書き込み / ``d.update({...})`` /
+    ``dict(x)`` と ``{**x}`` の写し。
+    """
+    locals_: dict = collections.defaultdict(set)
+    copies: list = []          # (dest, source) for dict(x) / {**x}
+
+    def _record(tgt, value):
+        keys = _env_keys_of(value)
+        if isinstance(tgt, ast.Name):
+            if keys:
+                locals_[tgt.id] |= keys
+            src = _copy_source(value)
+            if src:
+                copies.append((tgt.id, src))
+        if (isinstance(tgt, ast.Subscript)
+                and isinstance(tgt.value, ast.Name)
+                and isinstance(tgt.slice, ast.Constant)
+                and isinstance(tgt.slice.value, str)
+                and tgt.slice.value.startswith("BEACON_")):
+            locals_[tgt.value.id].add(tgt.slice.value)
+
+    for node in nodes:
+        # plain and ANNOTATED assignment (``base_env: Dict[str, str] = {...}``
+        # is an AnnAssign, and missing it made every key of the biggest env
+        # dict in the file invisible)
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                _record(tgt, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            _record(node.target, node.value)
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "attr", None) == "update"
+                and isinstance(getattr(node.func, "value", None), ast.Name)
+                and node.args):
+            locals_[node.func.value.id] |= _env_keys_of(node.args[0])
+
+    # propagate copies to a fixed point (dict(dict(x)) chains are rare but
+    # cost nothing to follow)
+    for _ in range(len(copies) + 1):
+        changed = False
+        for dest, src in copies:
+            if locals_.get(src) and not locals_[src] <= locals_[dest]:
+                locals_[dest] |= locals_[src]
+                changed = True
+        if not changed:
+            break
+    return locals_
+
+
 def _python_sets(dispatch_path: pathlib.Path):
     """verb -> BEACON_* names the handler actually PUTS IN the env it passes.
 
@@ -207,54 +352,7 @@ def _python_sets(dispatch_path: pathlib.Path):
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        # local name -> BEACON_* keys written into it. Two passes, because a
-        # copy (``env = dict(base_env)``) can precede or follow the literal it
-        # copies depending on how the handler is written.
-        locals_: dict = collections.defaultdict(set)
-        copies: list = []          # (dest, source) for dict(x) / {**x}
-
-        def _record(tgt, value):
-            keys = _env_keys_of(value)
-            if isinstance(tgt, ast.Name):
-                if keys:
-                    locals_[tgt.id] |= keys
-                src = _copy_source(value)
-                if src:
-                    copies.append((tgt.id, src))
-            # env["BEACON_X"] = ...
-            if (isinstance(tgt, ast.Subscript)
-                    and isinstance(tgt.value, ast.Name)
-                    and isinstance(tgt.slice, ast.Constant)
-                    and isinstance(tgt.slice.value, str)
-                    and tgt.slice.value.startswith("BEACON_")):
-                locals_[tgt.value.id].add(tgt.slice.value)
-
-        for node in ast.walk(fn):
-            # plain and ANNOTATED assignment (``base_env: Dict[str, str] = {...}``
-            # is an AnnAssign, and missing it made every key of the biggest env
-            # dict in the file invisible)
-            if isinstance(node, ast.Assign):
-                for tgt in node.targets:
-                    _record(tgt, node.value)
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                _record(node.target, node.value)
-            # env.update({...})
-            if (isinstance(node, ast.Call)
-                    and getattr(node.func, "attr", None) == "update"
-                    and isinstance(getattr(node.func, "value", None), ast.Name)
-                    and node.args):
-                locals_[node.func.value.id] |= _env_keys_of(node.args[0])
-
-        # propagate copies to a fixed point (dict(dict(x)) chains are rare but
-        # cost nothing to follow)
-        for _ in range(len(copies) + 1):
-            changed = False
-            for dest, src in copies:
-                if locals_.get(src) and not locals_[src] <= locals_[dest]:
-                    locals_[dest] |= locals_[src]
-                    changed = True
-            if not changed:
-                break
+        reach = _ReachingPath(fn)
 
         for node in ast.walk(fn):
             if not (isinstance(node, ast.Call)
@@ -271,13 +369,16 @@ def _python_sets(dispatch_path: pathlib.Path):
             for kw in node.keywords:
                 if kw.arg == "env":
                     env_arg = kw.value
+            # ms-185 e-7300: 局所名の解決は **この呼び出しへ到達する経路だけ**から
+            # 組む (姉妹分岐は互いに見えない)。
+            locals_ = _locals_along(reach.stmts_reaching(node))
             if isinstance(env_arg, ast.Dict):
                 passed |= _env_keys_of(env_arg)
             elif isinstance(env_arg, ast.Name):
                 passed |= locals_.get(env_arg.id, set())
             elif env_arg is not None:
                 # an expression we do not model (a call, a merge, …): fall back
-                # to every key this function builds, so an unmodelled shape
+                # to every key this path builds, so an unmodelled shape
                 # reports LESS rather than inventing a gap.
                 passed |= set().union(*locals_.values()) if locals_ else set()
             sets[verb] |= passed
@@ -399,7 +500,7 @@ def main() -> int:
     stale = sorted(g for g in KNOWN_GAPS if g not in raw)
     if not rows and not stale:
         print("[cli-env-parity] OK: no NEW (verb, env, frontend) gap outside "
-              "the recorded backlog ({0} rows). Method: per-handler def-use on "
+              "the recorded backlog ({0} rows). Method: per-reaching-path def-use on "
               "the Python side, per-file comment/quote-aware scan on the bash "
               "side — both err toward reporting less, so this is 'nothing new "
               "was detected', not 'every mapping is proven'."
@@ -567,6 +668,21 @@ KNOWN_GAPS: dict = {
         "両フロント未配線 — 旗が存在しない。内部用か未実装かは個別判定が要る",
     ("task_cancel", "BEACON_JSON", "bash"):
         "bash 未配線 / python は渡す — bash 側の取りこぼし",
+    # ms-185 e-7300: 解決を到達経路に狭めた時点で露出した既存ギャップ。
+    # いずれも bash 側は渡しており python 側だけ未配線 (= Windows・pipx から
+    # 旗を打っても値が実装に届かない)。origin/main のツリーに同じ走査を当てて
+    # 既存であることを確認済み。直すのは 1 行ずつの判定が要る follow-up で、
+    # ここに置くのは「止血を先にする」ため (この file の冒頭の方針どおり)。
+    ("push_record", "BEACON_JSON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("deploy_record", "BEACON_JSON", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
+    ("doc_add", "BEACON_TARGET", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない。"
+        "ms-185 e-7071 で beacon-session-end Skill の記述を実測した際に人が見つけた"
+        "のと同じギャップで、この scoping 修正で初めて機械が捕まえた",
+    ("opportunity_add", "BEACON_OPP_DESCRIPTION", "python"):
+        "python 未配線 / bash は渡す — 二重フロント drift。Windows・pipx から使えない",
 }
 
 if __name__ == "__main__":
