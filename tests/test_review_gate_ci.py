@@ -108,16 +108,20 @@ def _all_types_done_at(monkeypatch, sha):
     台帳ファイルを置くのではなく **導出の口** を差し替える。印を押す条件が
     「その sha に対して全必須種別が充足している」であることを測りたいので、
     台帳の読み方ではなく条件そのものに焦点を合わせる (ms-119 e-6859)。
+
+    形は手書きせず共有 factory (``tests/_pr_obligations_stub.py``) から採る
+    (独立保守性レビュー) —— 手書きすると本物の返り値のキーが変わっても古い形を
+    返し続け、この試験群だけが偽の緑になる (judge が反転実験で実測した形)。
     """
     import review_spine
-    types = review_spine.required_pr_open_review_types()
+    import _pr_obligations_stub
 
     def fake(pr_number, pr_repo="", *, head_sha=None):
-        owed = [] if head_sha == sha else list(types)
-        return {"owed": owed, "satisfied": types if not owed else [],
-                "legacy_no_sha": [], "unpinned": [], "stale": [], "skipped": [],
-                "head_sha": head_sha or "", "head_known": bool(head_sha),
-                "resolved": bool(head_sha), "provenance": [], "required": types}
+        if head_sha == sha:
+            return _pr_obligations_stub.obligations(head_sha=sha)
+        return _pr_obligations_stub.obligations(
+            head_sha=head_sha or "", resolved=bool(head_sha),
+            owed=review_spine.required_pr_open_review_types(), satisfied=[])
 
     monkeypatch.setattr(commands, "pr_review_obligations", fake)
 

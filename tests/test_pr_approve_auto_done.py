@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
 import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 import core  # noqa: E402
+import _pr_obligations_stub  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +136,14 @@ def _run_pr_approve(data, *, entry_id="e-400", rationale="LGTM",
     # tests/test_review_merge_gate.py が pin している (そちらを消してもここが
     # 緑のままになるが、それは責務分界どおり —— 関門の試験をこちらに重ねると、
     # どちらが関門の正典かが読めなくなる)。
+    #
+    # 形は手書きせず共有 factory から採る (ms-119 e-6859、独立保守性レビュー):
+    # 手書きすると、本物の返り値のキーが変わっても fake は黙って古い形を返し続け、
+    # この試験群だけが「偽の緑」になる (judge が反転実験で実測した)。
     orig_ob = cmd_pr.pr_review_obligations
-    cmd_pr.pr_review_obligations = lambda pr_number, pr_repo="", **kw: {
-        "owed": [], "resolved": True, "head_sha": "stub-head",
-        "pr_state": "OPEN", "satisfied": [], "legacy_no_sha": [],
-        "unpinned": [], "stale": [], "skipped": [], "provenance": [],
-        "required": [],
-    }
+    _stub_ob = _pr_obligations_stub.obligations()
+    cmd_pr.pr_review_obligations = (
+        lambda pr_number, pr_repo="", **kw: _stub_ob)
 
     env_backup = {
         k: os.environ.get(k)

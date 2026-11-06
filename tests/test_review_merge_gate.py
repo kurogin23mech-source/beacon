@@ -74,14 +74,14 @@ def proj(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_pending_empty_when_no_triggers(proj):
-    assert commands._pending_review_types_for_pr("482") == []
+    assert commands._pr_open_review_nudge_pending_types("482") == []
 
 
 def test_pending_lists_fired_types(proj):
     _fire(proj, "ax", "482")
     _fire(proj, "maintainability", "482")
     _fire(proj, "ax", "999")  # other PR — must not leak in
-    assert sorted(commands._pending_review_types_for_pr("482")) == \
+    assert sorted(commands._pr_open_review_nudge_pending_types("482")) == \
         ["ax", "maintainability"]
 
 
@@ -199,14 +199,14 @@ def test_review_done_clears_and_unblocks(proj, monkeypatch, capsys):
     monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
     monkeypatch.setenv("BEACON_PR_NUMBER", "482")
     commands.cmd_review_done()
-    assert commands._pending_review_types_for_pr("482") == ["maintainability"]
+    assert commands._pr_open_review_nudge_pending_types("482") == ["maintainability"]
     # still blocked (maintainability owed)
     with pytest.raises(SystemExit):
         cmd_pr._review_gate_check("482", action="approve")
     # run the maintainability review → all clear
     monkeypatch.setenv("BEACON_REVIEW_TYPE", "maintainability")
     commands.cmd_review_done()
-    assert commands._pending_review_types_for_pr("482") == []
+    assert commands._pr_open_review_nudge_pending_types("482") == []
     cmd_pr._review_gate_check("482", action="approve")  # passes now
     # done-marker stamped so the anchor won't re-fire
     assert os.path.exists(commands._pr_open_reviewed_marker_path("482"))

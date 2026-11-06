@@ -39,6 +39,8 @@ SPINE = ROOT / "lib" / "review_spine.py"
 SHARED = ROOT / "lib" / "commands_shared.py"
 PR = ROOT / "lib" / "cmd_pr.py"
 CMDS = ROOT / "lib" / "commands.py"
+TRIG = ROOT / "lib" / "cmd_trigger.py"
+OBL_STUB = ROOT / "tests" / "_pr_obligations_stub.py"
 
 GATE_T = "tests/test_review_merge_gate.py"
 SHA_T = "tests/test_review_sha_scoped_gate_e6859.py"
@@ -60,7 +62,7 @@ def gate_reads_the_trigger_files_again(src: str) -> str:
     anchor = "    ob = pr_review_obligations(pr_number, pr_repo)"
     assert anchor in src, "anchor not found (gate_reads_the_trigger_files_again)"
     return src.replace(anchor, (
-        "    ob = {'owed': _pending_review_types_for_pr(pr_number, pr_repo),\n"
+        "    ob = {'owed': _pr_open_review_nudge_pending_types(pr_number, pr_repo),\n"
         "          'resolved': True, 'head_sha': '', 'pr_state': 'OPEN',\n"
         "          'satisfied': [], 'legacy_no_sha': [], 'unpinned': [],\n"
         "          'stale': [], 'skipped': [], 'provenance': []}"), 1)
@@ -159,6 +161,84 @@ def drop_the_live_github_guard_under_test(src: str) -> str:
     return src.replace(anchor, "    if (False", 1)
 
 
+# --- 独立レビュー (PR #838, AX + 保守性) の指摘に対する修正への壊し方 -------
+
+def suppress_the_nudge_forever_again(src: str) -> str:
+    """促しの抑止を「マーカーが在れば永久」に戻す = AX① の退行。
+
+    judge が実機で再現した形。関門は止まるが、``BEACON_REVIEW_GATE_CI`` 未設定の
+    リポジトリでは ``gh pr merge`` / UI が関門を経由しないので、促しの空リストを
+    信じて直接マージ経路へ進むと、事故が読み取り専用の確認経路側から再発する。
+    """
+    anchor = ("    marker = reviewed_marker_sha(pr_number, pr_repo)\n"
+              "    if marker is None or not marker:\n"
+              "        return False")
+    assert anchor in src, "anchor not found (suppress_the_nudge_forever_again)"
+    return src.replace(anchor, (
+        "    marker = reviewed_marker_sha(pr_number, pr_repo)\n"
+        "    if marker is not None:\n"
+        "        return True\n"
+        "    if marker is None or not marker:\n"
+        "        return False"), 1)
+
+
+def drop_the_sha_from_the_decision_evidence(src: str) -> str:
+    """追記記録から sha を落とす = AX②。履歴がどこにも残らなくなる。
+
+    台帳は (PR, 種別) ごとに上書きなので、追記側に sha が無いと「以前は別の sha を
+    見ていた」が再現できない。この課題の核心価値 (どの差分を見たかを辿れる) が
+    自己矮小化する。
+    """
+    anchor = ('                         + ([f"sha:{reviewed_sha}"] '
+              "if reviewed_sha else [])),")
+    assert anchor in src, "anchor not found (drop_the_sha_from_the_decision_evidence)"
+    return src.replace(anchor, "                         ),", 1)
+
+
+def let_two_buckets_disclose_the_same_type(src: str) -> str:
+    """開示のバケツの排他を外す = AX③。「実施済み」と「免除」が同時に出る。"""
+    anchor = ("    legacy_no_sha = [t for t in legacy_no_sha if t not in satisfied]\n"
+              "    _already = set(satisfied) | set(legacy_no_sha)")
+    assert anchor in src, "anchor not found (let_two_buckets_disclose_the_same_type)"
+    return src.replace(anchor, "    _already = set()", 1)
+
+
+def accept_any_string_as_a_sha(src: str) -> str:
+    """sha の形の検査を外す = AX④。貼り間違いでも成功を名乗る。"""
+    anchor = '_SHA_SHAPE = re.compile(r"\\A[0-9a-fA-F]{7,64}\\Z")'
+    assert anchor in src, "anchor not found (accept_any_string_as_a_sha)"
+    return src.replace(anchor, '_SHA_SHAPE = re.compile(r".*", re.S)', 1)
+
+
+def hand_write_the_obligations_fake_again(src: str) -> str:
+    """試験の fake を本物から導出するのをやめ、手書きに戻す = 保守性②。
+
+    本物のキーが変わっても fake は古い形を返し続け、fake 経由の試験群だけが
+    偽の緑になる (judge が反転実験で実測した形)。
+    """
+    anchor = "    base = review_spine.derive_pr_review_obligations("
+    assert anchor in src, "anchor not found (hand_write_the_obligations_fake_again)"
+    head = src[: src.index(anchor)]
+    tail = src[src.index("    base.update({"):]
+    hand = (
+        '    base = {"owed": list(_owed), "satisfied": list(_satisfied),\n'
+        '            "legacy_no_sha": [], "unpinned": [], "stale": [],\n'
+        '            "skipped": [], "head_sha": head_sha,\n'
+        '            "head_known": bool(head_sha), "required": required}\n')
+    return head + hand + tail
+
+
+def stop_naming_which_sha_was_reviewed(src: str) -> str:
+    """stale の理由から「実施した差分」を落とす = 保守性① で足した次の一手。
+
+    いまの head を言うだけでは「では何を見ればいいのか」が分からない。
+    """
+    anchor = ('    detail = " / ".join(f"{s[\'review\']}='
+              '{s[\'reviewed_sha\'][:12]}" for s in stale)')
+    assert anchor in src, "anchor not found (stop_naming_which_sha_was_reviewed)"
+    return src.replace(anchor, '    detail = "(省略)"', 1)
+
+
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
 EXPECT_RED = [
     ("関門が導出でなくトリガーファイルを読む (e-6859 の退行そのもの)",
@@ -211,12 +291,37 @@ EXPECT_RED = [
     ("試験中の gh 遮断を外す (試験が生きた GitHub に依存する形)",
      SHARED, drop_the_live_github_guard_under_test,
      f"{SHA_T}::test_resolve_pr_head_does_not_touch_live_github_under_test"),
+    # --- 独立レビュー (PR #838) の指摘に対する修正 ---
+    ("促しの抑止を「マーカーが在れば永久」に戻す (AX①)",
+     TRIG, suppress_the_nudge_forever_again,
+     f"{SHA_T}::test_the_nudge_refires_after_a_commit_is_pushed "
+     f"{SHA_T}::test_a_legacy_marker_without_a_sha_does_not_suppress_the_nudge"),
+
+    ("追記記録から sha を落とす (AX② — 履歴がどこにも残らない)",
+     CMDS, drop_the_sha_from_the_decision_evidence,
+     f"{SHA_T}::test_the_reviewed_sha_survives_in_the_append_only_decision_arm"),
+
+    ("開示のバケツの排他を外す (AX③ — 実施済みと免除が同時に出る)",
+     SPINE, let_two_buckets_disclose_the_same_type,
+     f"{SHA_T}::test_one_type_is_disclosed_in_exactly_one_bucket"),
+
+    ("sha の形の検査を外す (AX④ — 貼り間違いでも成功を名乗る)",
+     SHARED, accept_any_string_as_a_sha,
+     f"{SHA_T}::test_the_sha_shape_is_checked"),
+
+    ("試験の fake を手書きに戻す (保守性② — fake 経由が偽の緑に戻る)",
+     OBL_STUB, hand_write_the_obligations_fake_again,
+     f"{SHA_T}::test_the_shared_obligations_fake_is_derived_from_the_real_function"),
+
+    ("stale の理由から「実施した差分」を落とす (保守性①)",
+     SHARED, stop_naming_which_sha_was_reviewed,
+     f"{SHA_T}::test_the_gate_messages_are_pure_builders"),
 ]
 
 
 def main() -> int:
     originals = {p: p.read_text(encoding="utf-8")
-                 for p in (SPINE, SHARED, PR, CMDS)}
+                 for p in (SPINE, SHARED, PR, CMDS, TRIG, OBL_STUB)}
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 

@@ -68,16 +68,20 @@ def _all_types_done_at(monkeypatch, sha):
 
     印を押す条件に「その sha に対して全種別が充足している」が加わったので、
     この file の主題 (= 押す / 断るときに何を言うか) に到達させるために必要。
+
+    形は共有 factory (``tests/_pr_obligations_stub.py``) から採る —— 手書きすると
+    本物のキーが変わっても古い形を返し続け、この試験だけが偽の緑になる
+    (独立保守性レビューが反転実験で実測した形)。
     """
     import review_spine
-    types_ = review_spine.required_pr_open_review_types()
+    import _pr_obligations_stub
 
     def fake(pr_number, pr_repo="", *, head_sha=None):
-        owed = [] if head_sha == sha else list(types_)
-        return {"owed": owed, "satisfied": [] if owed else types_,
-                "legacy_no_sha": [], "unpinned": [], "stale": [], "skipped": [],
-                "head_sha": head_sha or "", "head_known": bool(head_sha),
-                "resolved": bool(head_sha), "provenance": [], "required": types_}
+        if head_sha == sha:
+            return _pr_obligations_stub.obligations(head_sha=sha)
+        return _pr_obligations_stub.obligations(
+            head_sha=head_sha or "", resolved=bool(head_sha),
+            owed=review_spine.required_pr_open_review_types(), satisfied=[])
 
     monkeypatch.setattr(commands, "pr_review_obligations", fake)
 
@@ -122,7 +126,7 @@ def _run_done_with_unresolvable_head(monkeypatch, capsys, *, gh_error):
                         lambda pr, repo="": ("", "", gh_error))
     monkeypatch.setattr(commands, "resolve_pr_head",
                         lambda pr, repo="": ("", "", gh_error))
-    monkeypatch.setattr(commands, "_pending_review_types_for_pr",
+    monkeypatch.setattr(commands, "_pr_open_review_nudge_pending_types",
                         lambda pr, repo="": ["ax"])
     monkeypatch.setattr(commands, "_clear_review_due_for_pr",
                         lambda *a, **k: None)

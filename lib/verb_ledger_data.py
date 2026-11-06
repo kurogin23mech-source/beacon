@@ -398,6 +398,7 @@ VERB_LEDGER = {
     "review_context": {"cls": "Q", "secondary": [], "note": "[post-memo] review-kernel(原典+diff)を JSON 出力=read-only 供給(Q)、状態変更なし"},
     "review_done": {"cls": "B", "secondary": [], "note": "[post-memo] review-due トリガ解消=gate 制御の機械操作(B)、review 実施の記録"},
     "review_skip": {"cls": "R", "secondary": ["B"], "note": "[post-memo] 人間の waiver 決定を durable audit に記録(R)/review-due トリガ解消(B)"},
+    "review_status": {"cls": "Q", "secondary": [], "note": "[post-memo] 関門の導出結果を読み取り専用で出す(Q)、状態変更なし。ms-119 e-6859: 関門の状態を知る唯一の経路が副作用のある done/approve/merge だったため"},
 
     # --- rollback ---
     "rollback": {"cls": "C", "secondary": ["B"], "note": ""},

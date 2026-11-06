@@ -40,8 +40,9 @@ from commands_shared import (
     parse_review_due_filename,
     reviewed_marker_paths,
     _fire_pr_open_review_triggers,
-    _pending_review_types_for_pr,
+    _pr_open_review_nudge_pending_types,
     _pr_open_reviewed_marker_path,
+    reviewed_marker_sha,
     _get_cloud_config_path,
     _resolve_active_api_url,
     _extract_token,
@@ -708,8 +709,10 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
     try:
         import subprocess
         r = subprocess.run(
+            # ms-119 e-6859: headRefOid も聞く。同じ 1 リクエストなので追加費用は
+            # 無く、これで「いまの差分まで見たか」を促し側も判定できる。
             ["gh", "pr", "list", "--state", "open", "--json",
-             "number,title,url"],
+             "number,title,url,headRefOid"],
             capture_output=True, text=True, timeout=15)
         if r.returncode != 0 or not r.stdout.strip():
             return
@@ -752,25 +755,50 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
                for fn in existing):
             continue
         # Fresh open PR with no review-due yet → fire the pr-open set.
-        if _pr_open_reviewed_marker_exists(num, _repo):
+        #
+        # ms-119 e-6859: 抑止は **見た差分に限る**。以前はマーカーが在れば永久に
+        # 抑止していたので、`review done` の後にコミットを積んでも促しが出ず、
+        # 「促しが消えた」を「関門が開いた」と読ませた (独立 AX レビューが実機で
+        # 再現)。関門は正しく止まるが、`BEACON_REVIEW_GATE_CI` 未設定のリポジトリ
+        # では `gh pr merge` / UI のマージボタンが関門を経由しないため、促しの
+        # 空リストを信じて直接マージ経路へ進むと、この課題が塞いだはずの事故が
+        # 読み取り専用の確認経路側で再発する。
+        #
+        # **促しは出す側に倒す**: sha が分からない (gh が返さない / 旧形式の
+        # マーカー) ときは抑止しない。促しは止める力を持たないので、過剰に出て
+        # 煩いのは実害が小さく、出ないのは事故に直結する。
+        _head = str(pr.get("headRefOid") or "").strip()
+        if _reviewed_marker_covers_head(num, _repo, _head):
             continue
         _fire_pr_open_review_triggers(num, pr.get("title") or "",
                                       pr.get("url") or "", pr_repo=_repo)
 
 
-def _pr_open_reviewed_marker_exists(pr_number: str, pr_repo: str = "") -> bool:
-    """True when this PR's reviews were already run once (a done-marker exists),
-    so the anchor must NOT re-fire review-due for it. `beacon review done`
-    stamps this marker the first time all of a PR's reviews clear.
+def _reviewed_marker_covers_head(pr_number: str, pr_repo: str,
+                                 head_sha: str) -> bool:
+    """この PR の「実施済み」マーカーが **いまの head を覆っている** か
+    (ms-119 e-6859)。覆っていれば促しを再発火しない。
 
-    ms-166 e-6971: リポジトリ別のマーカーと旧式 (リポジトリ無し) の **両方** を見る。
-    片方だけ見ると、既存のマーカーを無視して再発火する / 逆に別リポジトリの
-    「実施済み」でこのリポジトリの発火を止める、のどちらかになる。
+    覆っていると言えるのは、マーカーが在り、かつその ``reviewed_sha`` が
+    いまの head と一致するときだけ。次のどれでも **覆っていない** 扱いにする
+    (= 促しを出す):
+
+    * マーカーが無い (= まだ一度も実施していない)
+    * マーカーに sha が無い (= 旧形式。どの差分まで見たかを言っていない)
+    * ``head_sha`` が取れない (= 一致を確かめられない)
+    * sha が食い違う (= 実施後にコミットが積まれた)
+
+    **促しは出す側に倒す**。関門 (``pr_review_obligations``) は逆に止める側へ
+    倒すが、促しは止める力を持たないので、非対称が正しい —— 過剰に促して煩いのは
+    実害が小さく、促さないのは「もう要らない」と誤読させて事故に直結する。
     """
-    # 住所の列挙は commands_shared.reviewed_marker_paths が唯一の場所
-    # (独立保守性レビュー medium: 同じ 2 要素集合が 2 箇所で手組みされていた)。
-    return any(os.path.exists(p)
-               for p in reviewed_marker_paths(pr_number, pr_repo))
+    marker = reviewed_marker_sha(pr_number, pr_repo)
+    if marker is None or not marker:
+        return False
+    head_sha = str(head_sha or "").strip()
+    if not head_sha:
+        return False
+    return marker == head_sha
 
 
 def _cleanup_spec_needed_triggers() -> None:

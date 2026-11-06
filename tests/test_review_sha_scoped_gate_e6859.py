@@ -311,3 +311,263 @@ def test_a_satisfied_type_discloses_which_sha_and_whose_record():
                           "recorded_by": "someone", "recorded_at": "2026-11-05"}]}
     line = "\n".join(cs.format_pr_review_obligation_disclosure(ob))
     assert HEAD[:12] in line and "someone" in line, line
+
+
+# ===========================================================================
+# 6. 独立レビュー (AX / 保守性, PR #838) の指摘に対する修正
+#
+# judge 2 体が挙げた 7 件を全て直した。ここはその各点を留める。どれも
+# 「直したつもり」で終わらせないために、**壊れる側の形** を 1 件ずつ測る。
+# ===========================================================================
+
+# --- AX① 促しと関門が同じ意味になったか -----------------------------------
+#
+# judge の実測した事故の筋道: 古い head に `review done` した後、コミットを積んで
+# `beacon trigger check` を叩くと促しが 1 件も出ない。関門 (approve/merge) は
+# 正しく止まるが、`BEACON_REVIEW_GATE_CI` 未設定のリポジトリでは `gh pr merge` /
+# UI のマージボタンが関門を経由しないので、促しの空リストを信じて直接マージ経路へ
+# 進むと、この課題が塞いだはずの事故が **読み取り専用の確認経路側から** 再発する。
+
+def _marker_env(tmp_path, monkeypatch):
+    tdir = tmp_path / "triggers"
+    tdir.mkdir(exist_ok=True)
+    monkeypatch.setattr(cs, "_get_triggers_dir", lambda: str(tdir))
+    return tdir
+
+
+def test_the_nudge_marker_records_which_diff_was_reviewed(tmp_path, monkeypatch):
+    _marker_env(tmp_path, monkeypatch)
+    cs.write_reviewed_marker("838", "o/r", HEAD)
+    assert cs.reviewed_marker_sha("838", "o/r") == HEAD
+
+
+def test_the_nudge_refires_after_a_commit_is_pushed(tmp_path, monkeypatch):
+    """**AX① の本体**: 実施後にコミットを積んだら促しが戻ること。"""
+    import cmd_trigger
+    _marker_env(tmp_path, monkeypatch)
+    cs.write_reviewed_marker("838", "o/r", HEAD)
+    assert cmd_trigger._reviewed_marker_covers_head("838", "o/r", HEAD) is True, (
+        "見た差分のままなら促しを抑止してよい")
+    assert cmd_trigger._reviewed_marker_covers_head("838", "o/r", NEXT) is False, (
+        "コミットを積んだのに促しを抑止している (= 促しが消えたままになる)")
+
+
+@pytest.mark.parametrize("marker_sha,head,why", [
+    (None, HEAD, "マーカーが無い (まだ一度も実施していない)"),
+    (HEAD, "", "head が取れない (一致を確かめられない)"),
+])
+def test_the_nudge_errs_toward_firing(tmp_path, monkeypatch, marker_sha, head, why):
+    """促しは **出す側に倒す**。
+
+    関門は止める側へ倒すが、促しは止める力を持たないので非対称が正しい ——
+    過剰に促して煩いのは実害が小さく、促さないのは「もう要らない」と誤読させて
+    事故に直結する。
+    """
+    import cmd_trigger
+    _marker_env(tmp_path, monkeypatch)
+    if marker_sha:
+        cs.write_reviewed_marker("838", "o/r", marker_sha)
+    assert cmd_trigger._reviewed_marker_covers_head("838", "o/r", head) is False, why
+
+
+def test_a_legacy_marker_without_a_sha_does_not_suppress_the_nudge(
+        tmp_path, monkeypatch):
+    """旧形式のマーカー (レビュー種別の文字列だけ) は抑止に使えないこと。
+
+    「どの差分まで見たか」を言っていないので、抑止の根拠にならない。
+    """
+    import cmd_trigger
+    tdir = _marker_env(tmp_path, monkeypatch)
+    with open(cs._pr_open_reviewed_marker_path("838", "o/r"), "w",
+              encoding="utf-8") as f:
+        f.write("ax")                      # 旧形式
+    assert cs.reviewed_marker_sha("838", "o/r") == ""
+    assert cmd_trigger._reviewed_marker_covers_head("838", "o/r", HEAD) is False
+
+
+def test_the_anchor_asks_github_for_the_head(tmp_path, monkeypatch):
+    """促しの再発火が **いまの head を見ている** こと (= gh に聞いていること)。
+
+    `headRefOid` を聞かなくなると、促しは再び head を見られなくなる (そして
+    判定は「抑止しない」側に倒れるので、黙って過剰発火に変わる = 気づきにくい)。
+    """
+    import inspect
+    import cmd_trigger
+    src = inspect.getsource(
+        cmd_trigger._auto_fire_pr_open_review_triggers_for_open_prs)
+    assert "headRefOid" in src, "gh に head を聞いていない"
+    assert "_reviewed_marker_covers_head" in src, "head を見た抑止判定を通っていない"
+
+
+# --- AX② 「どの差分を見たか」の履歴が残るか --------------------------------
+
+def test_the_reviewed_sha_survives_in_the_append_only_decision_arm(monkeypatch):
+    """台帳は上書きで履歴を持たないので、**追記のみの判断記録** に sha を残すこと。
+
+    judge の指摘: この課題の核心価値は「どの差分を見たかを辿れるようにする」
+    なのに、その事実を持つ唯一の置き場が (PR, 種別) ごとに上書きされるため、
+    次の実施で前の sha が消える。PR #785 の経緯 (1 周目は古い sha のみ実施、
+    保守性だけ後から再実施) を、まさにそれを直した後の仕組みで再現できない。
+    """
+    captured = {}
+
+    class _Client:
+        def record_decision(self, project_id, payload):
+            captured.update(payload)
+
+    import contextlib
+    monkeypatch.setattr(cs, "_is_cloud_mode", lambda: True)
+    # ``_get_api_client`` は ``(client, config)`` を返し、呼び出し側は
+    # ``config["project_id"]`` を読む (空なら何も書かずに戻る)。
+    monkeypatch.setattr(cs, "_get_api_client",
+                        lambda: (_Client(), {"project_id": "p"}))
+    monkeypatch.setattr(cs, "best_effort_decision_write",
+                        lambda *a, **k: contextlib.nullcontext())
+    commands._record_review_adjudication_decision(
+        "ax", "838", "採用 1 / 却下 0", [], "o/r", no_findings=False,
+        reviewed_sha=HEAD)
+    assert captured, "判断記録が書かれていない"
+    assert f"sha:{HEAD}" in captured.get("evidence", []), (
+        "どの差分に対する実施かが追記記録に残っていない: "
+        + str(captured.get("evidence")))
+
+
+# --- AX③ 開示のバケツが排他か ----------------------------------------------
+
+@pytest.mark.parametrize("performed,skipped,winner", [
+    ([{"review_type": "ax", "reviewed_sha": HEAD, "sha_pinned": True}],
+     [{"review_type": "ax", "skipped_at_sha": HEAD}], "satisfied"),
+    ([{"review_type": "ax"}],
+     [{"review_type": "ax", "skipped_at_sha": HEAD}], "legacy_no_sha"),
+    ([], [{"review_type": "ax", "skipped_at_sha": HEAD}], "skipped"),
+])
+def test_one_type_is_disclosed_in_exactly_one_bucket(performed, skipped, winner):
+    """同一種別が 2 つのバケツに載らないこと (強い根拠が勝つ)。
+
+    judge が実測した形: 実施と免除の両方の記録が在ると、開示に
+    ``✓ ax: <sha> に対して実施`` と ``⊘ ax: 人間が理由付きで免除`` が
+    **同時に出た**。「差し引いた根拠を必ず言う」という設計意図が、2 つの矛盾する
+    根拠を並べることで「どちらを信じればいいか分からない」形に転化していた。
+    """
+    ob = _derive(performed, skipped, head=HEAD)
+    buckets = {
+        "satisfied": list(ob["satisfied"]),
+        "legacy_no_sha": list(ob["legacy_no_sha"]),
+        "skipped": [s["review"] for s in ob["skipped"]],
+    }
+    hit = [name for name, types in buckets.items() if "ax" in types]
+    assert hit == [winner], f"バケツが {hit} (期待: [{winner}]) — {buckets}"
+    lines = cs.format_pr_review_obligation_disclosure(
+        {**ob, "provenance": [{"review_type": "ax", "reviewed_sha": HEAD}]})
+    ax_lines = [l for l in lines if " ax:" in l]
+    assert len(ax_lines) == 1, "開示が 1 種別について 2 行以上出ている:\n" + "\n".join(ax_lines)
+
+
+# --- AX④ sha の形を検査するか ----------------------------------------------
+
+@pytest.mark.parametrize("value,ok", [
+    ("1ccc819d12d06f043ed51483b30539ab9aef5177", True),
+    ("1ccc819", True),
+    ("a3f91", False),          # 桁が足りない (貼り間違い)
+    ("not-a-real-sha!!", False),
+    ("ZZZZZZZ", False),
+    ("", False),
+])
+def test_the_sha_shape_is_checked(value, ok):
+    """judge の実測: ``--reviewed-sha "not-a-real-sha!!"`` が通り、即座に
+    「この sha に対する実施として記録しました」と **成功を名乗った**。
+    次に head を解決できれば stale に戻るので実害は限定的だが、その場の成功文言が
+    誤った確信を生むのが欠陥。
+    """
+    assert cs.is_commit_sha_shaped(value) is ok
+
+
+# --- 保守性① 文面の組み立てが判定から切り出されているか ---------------------
+
+def test_the_gate_messages_are_pure_builders():
+    """文面が純粋関数として単独で呼べること (= 判定と混ざっていないこと)。
+
+    judge の指摘: 切り出す前は ``_review_gate_check`` が 32 → 109 行に膨らみ、
+    分岐と文面生成が同じ行に混在していた。「ある分岐の文面だけ直す」つもりで
+    判定条件を壊す事故が起きやすい形。姉妹の
+    ``format_pr_review_obligation_disclosure`` と同じ手筋に揃えた。
+    """
+    ob = _derive([], [], head="")
+    ob["head_error"] = "gh が落ちている"
+    msg = cs.format_review_head_unresolved_error(
+        ob, action="merge", pr_number="838", pr_repo="o/r")
+    assert "merge できません" in msg and "gh が落ちている" in msg
+    assert "gh pr view 838 --repo o/r" in msg, "復帰手順にリポジトリが入っていない"
+
+    ob2 = _derive([{"review_type": "ax", "reviewed_sha": HEAD, "sha_pinned": True}],
+                  [], head=NEXT)
+    blocked = cs.format_review_gate_block_error(ob2, action="approve",
+                                                pr_number="838")
+    assert "積まれた" in blocked, "一度やったのに赤い理由を言っていない"
+    assert HEAD[:12] in blocked, "どの sha に対する実施だったかを言っていない"
+    # 副作用なしで確かめる経路を案内すること (AX① で足した動詞)
+    assert "beacon review status" in blocked
+
+
+# --- 保守性② 試験の fake が本物の形から導出されているか ---------------------
+
+def test_the_shared_obligations_fake_is_derived_from_the_real_function():
+    """fake の形を手書きしないこと。
+
+    judge が反転実験で実測: ``owed`` キー名を変えると本物の経路を通る試験は
+    赤くなるのに、手書き fake を使う試験群は無傷で緑だった。fake 経由の試験に
+    「本物の形が変わった」を検知する経路が無かった = このPRが主題にしている
+    偽の緑と同じ形の弱点を、このPRが新設した試験の中に残していた。
+    """
+    import _pr_obligations_stub as stub
+
+    # 既定は「関門が開く」形 (関門を主題にしない試験が主題まで到達するため)
+    fake = stub.obligations()
+    assert fake["owed"] == []
+    assert fake["satisfied"] == rs.required_pr_open_review_types()
+
+    # **振る舞いで測る**: 本物の返り値に手を入れたら、factory の出力にもそれが
+    # 現れること。キー集合の比較では「本物と同じ形を手書きした fake」と区別できず、
+    # 反転ハーネスが実際に素通りした (= この試験自身が偽の緑だった、2026-11-06)。
+    # 導出しているかは「本物を通っているか」でしか測れない。
+    import review_spine
+    _real = review_spine.derive_pr_review_obligations
+    _seen = {}
+
+    def _spy(**kwargs):
+        _seen.update(kwargs)
+        out = _real(**kwargs)
+        out["_DERIVED_FROM_THE_REAL_FUNCTION"] = True
+        return out
+
+    review_spine.derive_pr_review_obligations = _spy
+    try:
+        spied = stub.obligations(head_sha=HEAD)
+    finally:
+        review_spine.derive_pr_review_obligations = _real
+
+    assert spied.get("_DERIVED_FROM_THE_REAL_FUNCTION") is True, (
+        "factory が本物の純粋関数を通っていない (形を手書きしている) — "
+        "本物のキーが変わっても古い形を返し続け、fake 経由の試験群が偽の緑になる")
+    assert _seen.get("head_sha") == HEAD, (
+        "factory が head_sha を本物に渡していない: " + str(_seen))
+
+
+# --- 保守性③ 促しの面が名前で分かるか --------------------------------------
+
+def test_the_nudge_face_is_named_as_such():
+    """関門と促しが名前で区別できること。
+
+    judge の指摘: 旧名 ``_pending_review_types_for_pr`` はどちらの面か言わないので、
+    文脈ゼロの AI が「PR のレビュー義務」を grep するとこれが真っ先に見つかり、
+    既存試験が大量に直接呼んでいるため「これが正しい API」と誤認する。この課題の
+    主題が「お願いではなく構造で閉じる」なのに、この 1 関数の誤用防止だけ長い
+    docstring (= お願い) に依存していた。
+    """
+    assert hasattr(cs, "_pr_open_review_nudge_pending_types")
+    assert not hasattr(cs, "_pending_review_types_for_pr"), (
+        "どちらの面か言わない旧名が残っている")
+    import cmd_pr
+    import inspect
+    gate = inspect.getsource(cmd_pr._review_gate_check)
+    assert "nudge" not in gate, "関門が促しの面を読んでいる (e-6859 の退行)"

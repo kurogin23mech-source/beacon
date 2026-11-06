@@ -12,7 +12,7 @@ commands.py — acyclic (SPEC 方針4). This split promoted the review-due trigg
 helpers that the pr handlers share with the `beacon review` family (which stays
 in commands.py) into commands_shared: _fire_review_due_for_pr /
 _fire_pr_open_review_triggers / _clear_review_due_for_pr /
-_pending_review_types_for_pr / _pr_open_reviewed_marker_path + the
+_pr_open_review_nudge_pending_types / _pr_open_reviewed_marker_path + the
 _REVIEW_DUE_SUFFIX constant. Both sides import them from there (no cmd_pr <->
 commands cycle).
 
@@ -68,11 +68,15 @@ from commands_shared import (  # noqa: F401
     _clear_pr_open_review_triggers,
     _fire_pr_open_review_triggers,
     # ms-119 e-6859: 関門は `pr_review_obligations` (導出) を読む。
-    # `_pending_review_types_for_pr` はナッジ表示の面なので関門では使わない
+    # `_pr_open_review_nudge_pending_types` はナッジ表示の面なので関門では使わない
     # (その docstring がどちらの面か名乗っている)。
-    _pending_review_types_for_pr,
+    _pr_open_review_nudge_pending_types,
     pr_review_obligations,
+    # ms-119 e-6859 (独立保守性レビュー): 文面の組み立ては純粋な builder に切り出し、
+    # ここは「状態を判定 → builder を呼ぶ → print / exit」だけに保つ。
     format_pr_review_obligation_disclosure,
+    format_review_head_unresolved_error,
+    format_review_gate_block_error,
     _resolve_session_id,
     load_project,
     save_project,
@@ -129,26 +133,15 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
 
     if not ob.get("resolved"):
         # head が不明 = 「現在の差分に対して実施済み」と言えない。止める側に倒す。
-        msg = (
-            f"Error: PR #{pr_number} の head を確かめられないため {action} "
-            f"できません ({ob.get('head_error') or '理由不明'})。\n"
-            f"  ms-119 e-6859: 独立レビューの関門は「**現在の差分** に対して全種別が"
-            f"実施済みか」を問います。head が分からないと、台帳に在る実施記録が"
-            f"いまの差分に対するものか判定できません —— 判定できないまま通すと"
-            f"「レビュー済み」と表示しながら judge が見ていない差分を取り込む"
-            f"ことになります (PR #785 で実際に起きた形)。\n"
-            f"  復帰: gh の認証とリポジトリ指定を確認してください "
-            f"(`gh pr view {pr_number}" + (f" --repo {pr_repo}" if pr_repo else "") + "`)。\n"
-            f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
-            f"(監査痕跡が残ります)。"
-        )
         if override:
             print(f"⚠ PR #{pr_number} の head を確かめられないまま {action} します "
                   f"({ob.get('head_error') or '理由不明'}) — この {action} は "
                   f"override であり監査対象です。現在の差分がレビュー済みである"
                   f"保証はありません。", file=sys.stderr)
             return
-        print(msg, file=sys.stderr)
+        print(format_review_head_unresolved_error(
+            ob, action=action, pr_number=pr_number, pr_repo=pr_repo),
+            file=sys.stderr)
         sys.exit(2)
 
     pending = ob.get("owed") or []
@@ -171,30 +164,10 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
             print(line, file=sys.stderr)
         return
 
-    runs = "\n".join(
-        f"    /beacon-review-run --type {t} --pr {pr_number}" for t in pending)
-    stale = ob.get("stale") or []
-    why = ""
-    if stale:
-        # 「一度やったのにまた赤い」の理由を先に言う (= 利用者が壊れたと誤解しない)。
-        why = (f"\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"
-               f"積まれた** ため再度要ります (実施はいまの head "
-               f"{(ob.get('head_sha') or '')[:12]} ではなく別の sha に対するもの)。"
-               f"修正コミットこそ欠陥を作ることが実測されているので、ここは"
-               f"省けません (ms-119 e-6859)。")
-    print(
-        f"Error: PR #{pr_number} は独立レビューが未実施のため {action} できません "
-        f"(未実施: {', '.join(pending)})。{why}\n"
-        f"  ms-119 e-4060 / e-6859: レビューは PR-open の節目で発火し、"
-        f"**現在の差分に対して** 実施するまで approve/merge を構造的に塞ぎます。\n"
-        f"  文脈ゼロの独立 judge に原典+差分を渡して実行:\n{runs}\n"
-        f"  実行後は `beacon review done --type <type> --pr {pr_number}` で解消 "
-        f"(/beacon-review-run が最後に自動で叩きます)。\n"
-        f"  不要と判断したなら理由付きで免除: "
-        f"`beacon review skip --type <type> --pr {pr_number} --reason \"...\"`。\n"
-        f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
-        f"(監査痕跡が残ります)。",
-        file=sys.stderr)
+    print(format_review_gate_block_error(ob, action=action, pr_number=pr_number),
+          file=sys.stderr)
+    for line in disclosure:
+        print(line, file=sys.stderr)
     sys.exit(2)
 
 def _fetch_gh_pr_info(url: str) -> dict:

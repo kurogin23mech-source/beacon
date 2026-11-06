@@ -496,6 +496,24 @@ case "${1:-}" in
     review)
         case "${2:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
+            status)
+                shift 2
+                # ms-119 e-6859: 関門の状態を副作用なしで読む。促し
+                # (`beacon trigger check`) は別の面なので、関門を確かめたいときは
+                # こちらを使う (促しの空リストを「関門が開いた」と読ませない)。
+                _rst_pr="" _rst_repo="" _rst_json=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --pr)   _need_flag_value "$#" "$1"; _rst_pr="$2";   shift 2 ;;
+                        --repo) _need_flag_value "$#" "$1"; _rst_repo="$2"; shift 2 ;;
+                        --json) _rst_json="1";                              shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      _guard_no_positional "review status" "$1" ;;
+                    esac
+                done
+                BEACON_PR_NUMBER="$_rst_pr" BEACON_PR_REPO="$_rst_repo" \
+                    BEACON_JSON="$_rst_json" \
+                    python3 "$COMMANDS_PY" review_status ;;
             done)
                 shift 2
                 _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind="" _rd_sha=""

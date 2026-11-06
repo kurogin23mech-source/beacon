@@ -526,6 +526,12 @@ def derive_pr_review_obligations(*, required, performed, skipped, head_sha):
             ``skipped`` — 免除で差し引いた種別。``[{"review", "skipped_at_sha"}]``。
                 免除は sha 単位にしない (人間が理由付きで出した判断を、push ごとに
                 出し直させるのは現実的でない) が、**どの時点の免除かを開示する**。
+
+        **バケツは 1 種別につき 1 つ** (排他)。強い根拠が勝つ順は
+        ``satisfied`` > ``legacy_no_sha`` > ``skipped``、差し引かれなかった側は
+        ``stale`` / ``unpinned`` のどちらか 1 つ。2 つ以上のバケツに同じ種別が
+        載ると、開示が「実施済み」と「免除」を同時に言い、読み手がどちらを信じれば
+        よいか決められない (独立 AX レビューが実測した形)。
     """
     req = []
     for t in (required or []):
@@ -579,6 +585,19 @@ def derive_pr_review_obligations(*, required, performed, skipped, head_sha):
             stale_by_type.setdefault(rtype, rsha)
 
     # --- 免除 ---
+    #
+    # **1 種別につき開示されるバケツは必ず 1 つ** (ms-119 e-6859、独立 AX レビュー)。
+    # 初版は免除と旧形式を無条件に積んでいたので、同じ種別に「実施済み」と「免除」の
+    # 両方の記録が在ると、開示に ``✓ ax: <sha> に対して実施`` と
+    # ``⊘ ax: 人間が理由付きで免除`` が **同時に出た**。judge の指摘どおり
+    # 「差し引いた根拠を必ず言う」という設計意図が、2 つの矛盾する根拠を並べることで
+    # 「どちらを信じればいいか分からない」形に転化していた。
+    #
+    # 優先順位は **強い根拠が勝つ** 順: 実施 (この head を見た) > 旧形式の寛容
+    # (見たが差分が不明) > 免除 (見ていないが人間が免除した)。弱い側を黙って
+    # 落とすのではなく、強い根拠が在るならそれだけを言う。
+    legacy_no_sha = [t for t in legacy_no_sha if t not in satisfied]
+    _already = set(satisfied) | set(legacy_no_sha)
     skipped_out = []
     for s in (skipped or []):
         if isinstance(s, dict):
@@ -586,7 +605,7 @@ def derive_pr_review_obligations(*, required, performed, skipped, head_sha):
             at = str(s.get("skipped_at_sha") or "").strip()
         else:
             rtype, at = str(s or "").strip(), ""
-        if not rtype or rtype not in req:
+        if not rtype or rtype not in req or rtype in _already:
             continue
         if any(x["review"] == rtype for x in skipped_out):
             continue

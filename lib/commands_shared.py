@@ -2920,7 +2920,7 @@ _REVIEW_DUE_OWNER_SEP = "~"
 #: open な PR の寿命 (= 数日〜数週) を超えれば自然に満たされる。
 #: 廃止するときに直す場所は ``review_due_filename`` /
 #: ``parse_review_due_filename`` / ``_clear_review_due_for_pr`` /
-#: ``_pending_review_types_for_pr`` / ``_pr_open_reviewed_marker_path`` /
+#: ``_pr_open_review_nudge_pending_types`` / ``_pr_open_reviewed_marker_path`` /
 #: ``cmd_review_skip`` の義務確認 —— この一覧がここに在ることが要点。
 LEGACY_REVIEW_DUE_TOLERANCE = (
     "リポジトリを名前に持たない旧式のトリガー / マーカーも受ける "
@@ -3158,13 +3158,18 @@ def _clear_pr_open_review_triggers(pr_number: str, pr_repo: str = "",
 
 _REVIEW_DUE_SUFFIX = "-review-due-"
 
-def _pending_review_types_for_pr(pr_number: str, pr_repo: str = "") -> list:
-    """Return the review types whose review-due trigger is still present for this
-    PR — i.e. independent reviews (AX / maintainability) that fired at PR-open
-    and have NOT been run/cleared yet. Empty when none outstanding.
+def _pr_open_review_nudge_pending_types(pr_number: str, pr_repo: str = "") -> list:
+    """**促し (ナッジ) の面**: この PR のレビュー未実施トリガーがまだ残っている種別。
 
-    **これは関門ではない。ナッジ (= 表示 / 「まだやってない」の促し) の面。**
-    (ms-119 e-6859)
+    関門ではない。関門は ``pr_review_obligations`` (ms-119 e-6859)。
+
+    名前に ``nudge`` を入れてあるのは、以前この関数が
+    ``_pending_review_types_for_pr`` という **どちらの面か言わない名前** だったため。
+    独立保守性レビューの指摘: 文脈ゼロの AI が「PR のレビュー義務」を grep すると
+    この名前が真っ先に見つかり、しかも既存の試験が大量に直接呼んでいるので
+    「これが正しい API」と誤認する。この課題の主題が「お願いではなく構造で閉じる」
+    なのに、この 1 関数の誤用防止だけ長い docstring (= お願い) に依存していた。
+    名前で予告すれば、散文を読まなくても面が分かる。
 
     かつてこれが ``beacon pr approve/merge`` の唯一の関門信号だった (e-4060)。
     しかしこの面は **トリガーファイルの有無** を読むので、``beacon review done``
@@ -3279,12 +3284,67 @@ def _announce_review_ledger_subtraction(pr_number: str, subtracted: list) -> Non
                          f"(台帳ファイルが手で書かれた可能性)")
     print("\n".join(lines), file=sys.stderr)
 
+def write_reviewed_marker(pr_number: str, pr_repo: str, reviewed_sha: str) -> None:
+    """再発火抑止マーカーに **どの差分まで見たか** を書く (ms-119 e-6859)。
+
+    以前はレビュー種別の文字列だけを書いていたので、マーカーが在る = 以後
+    **永久に** 再発火を抑止した。独立 AX レビューが実測した欠陥: 古い head に
+    ``review done`` した後、新しいコミットを積んで ``beacon trigger check`` を
+    叩いても促しが 1 件も出ない。関門 (approve/merge) は正しく止まるが、
+    ``BEACON_REVIEW_GATE_CI`` 未設定のリポジトリでは ``gh pr merge`` や UI の
+    マージボタンが関門を経由しないので、**促しの空リストを信じて直接マージ経路へ
+    進むと、この課題が塞いだはずの事故が「読み取り専用の確認経路」側で再発する**。
+
+    なので抑止は「この sha まで見た」という条件付きにする。sha が分からなければ
+    何も書かない —— **促しは出す側に倒す** (促しは止める力を持たないので、
+    過剰に出て煩いのは実害が小さいが、出ないのは事故に直結する)。
+    """
+    reviewed_sha = str(reviewed_sha or "").strip()
+    if not reviewed_sha:
+        return
+    try:
+        os.makedirs(_get_triggers_dir(), exist_ok=True)
+        path = _pr_open_reviewed_marker_path(pr_number, pr_repo)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"reviewed_sha": reviewed_sha,
+                       "pr_number": str(pr_number or ""),
+                       "pr_repo": str(pr_repo or "")}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        return
+
+
+def reviewed_marker_sha(pr_number: str, pr_repo: str = "") -> Optional[str]:
+    """マーカーが「ここまで見た」と言っている sha。無ければ None。
+
+    旧形式 (レビュー種別の文字列だけが入っている) は **sha 不明** として ``""``
+    を返す —— 「どの差分まで見たか」を言っていないので、促しの抑止には使えない
+    (``LEGACY_REVIEW_DUE_TOLERANCE`` の判断は関門側の話。促しは出す側に倒す)。
+    マーカーがそもそも無ければ None。
+    """
+    for path in sorted(reviewed_marker_paths(pr_number, pr_repo)):
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read().strip()
+        except OSError:
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            return ""          # 旧形式 = sha 不明
+        if isinstance(rec, dict):
+            return str(rec.get("reviewed_sha") or "").strip()
+        return ""
+    return None
+
+
 def reviewed_marker_paths(pr_number: str, pr_repo: str = "") -> set:
     """再発火抑止マーカーの **全ての住所** を返す (ms-166 e-6971)。
 
     リポジトリ別の名前と旧式 (リポジトリ無し) の名前の 2 つ。独立保守性レビュー
     medium: この 2 要素の集合が 2 箇所で手組みされていた
-    (``cmd_trigger._pr_open_reviewed_marker_exists`` と
+    (``cmd_trigger._reviewed_marker_covers_head`` と
     ``_clear_pr_open_review_triggers``)。3 つ目の形を足す / 旧式を廃止するときに
     片方だけ直すと、**再発火の抑止と merge 時の後片付けが「レビュー済みか」で
     食い違う** —— この MS が直している欠陥の再発そのもの。数える場所を 1 つにする。
@@ -3554,6 +3614,18 @@ def record_review_done_across_worktrees(review_type: str, pr_number: str,
     冪等: 同じ (PR, 種別) を 2 回記録しても増えない (同じファイル名を上書きする)。
     これが「重複した判断記録を作らずに済む」の土台 —— 親で ``review done`` を
     打ち直す必要が無くなるので、同一レビューに対する判断記録が二重に残らない。
+
+    **この台帳は「いまの充足状態」だけを答える。経緯は持たない** (ms-119 e-6859)。
+    上書きなので、同じ種別を次の sha で記録した瞬間に前の ``reviewed_sha`` は
+    消える。それはこの面の役割としては正しい (関門が問うのは「いまの head を
+    見たか」であって履歴ではない) が、**履歴はどこかに要る** —— 「AX は本当に
+    この PR の最終コミットを見たのか / 以前は別の sha を見ていたのか」を後から
+    辿れないと、この課題の核心価値が自己矮小化する (独立 AX レビューの指摘)。
+    そこで役割を分けてある:
+
+    * **この台帳** = いまの充足状態 (上書き、冪等)
+    * **decision arm** = 経緯 (追記のみ)。``_record_review_adjudication_decision``
+      が evidence に ``sha:<reviewed_sha>`` を載せるので、実施のたびに 1 行残る。
     """
     review_type = str(review_type or "").strip()
     pr_number = str(pr_number or "").strip()
@@ -3612,7 +3684,7 @@ def record_review_done_across_worktrees(review_type: str, pr_number: str,
 # 「このレビューはまだ要るか」の **導出** (ms-119 e-6859)
 #
 # 以前この問いは「レビュー未実施トリガーのファイルが在るか」で答えていた
-# (= `_pending_review_types_for_pr`)。義務は PR-open で 1 回書かれ、
+# (= `_pr_open_review_nudge_pending_types`)。義務は PR-open で 1 回書かれ、
 # `beacon review done` が消す —— つまり「要る / 要らない」を **削除と復活の状態
 # 遷移** で表しており、新しいコミットを積んでも復活させる経路が無かった。
 # 実測 (PR #785 / #834 / #835 / #836): judge が一度も見ていない差分に対して
@@ -3625,7 +3697,7 @@ def record_review_done_across_worktrees(review_type: str, pr_number: str,
 # head sha を確かめられなければ **関門は閉じたままにする** (「現在の差分に対して
 # 実施済み」と言えないため)。2026-11-05 に user が決めた方針。
 #
-# `_pending_review_types_for_pr` は残すが、**関門ではなくナッジ (表示) の面**。
+# `_pr_open_review_nudge_pending_types` は残すが、**関門ではなくナッジ (表示) の面**。
 # 2 つの面が別物であることを名前と docstring で言い切る (同じ問いに 2 つの答えが
 # 在る状態を黙って残さない)。
 # ---------------------------------------------------------------------------
@@ -3702,6 +3774,30 @@ def read_pr_review_skips(pr_number: str, pr_repo: str = "") -> list:
     except OSError:
         return []
     return [latest[k] for k in sorted(latest)]
+
+
+#: git の commit sha として受け付ける形 (ms-119 e-6859、独立 AX レビュー)。
+#:
+#: 16 進のみ、短縮 sha の下限 (git の既定は 7) から full の 40 桁まで。sha256 への
+#: 移行も視野に 64 桁まで許す (git は既に sha256 リポジトリを扱える)。
+#:
+#: **なぜ形を検査するか**: ``--reviewed-sha`` は任意の文字列を受け取れたので、
+#: judge の実測で ``--reviewed-sha "not-a-real-sha!!"`` が通り、即座に
+#: 「この sha に対する実施として記録しました」と **成功を名乗った**。桁を欠損して
+#: 貼り間違えても同じで、読み手は正しく記録できたと信じて作業を終える。
+#: 次に head を解決できれば stale に戻るので実害は限定的だが、**その場の成功文言が
+#: 誤った確信を生む** のが欠陥 (AX の「確かめられない」型)。
+_SHA_SHAPE = re.compile(r"\A[0-9a-fA-F]{7,64}\Z")
+
+
+def is_commit_sha_shaped(value: str) -> bool:
+    """``value`` が git の commit sha (短縮含む) の形をしているか。
+
+    形だけを見る —— **その sha が実在するかは見ない** (実在検査は git / GitHub に
+    問い合わせる別の話で、offline では答えられない)。名乗りを実装に合わせるため、
+    この関数は「形」としか言わない。
+    """
+    return bool(_SHA_SHAPE.match(str(value or "").strip()))
 
 
 def resolve_pr_head(pr_number: str, pr_repo: str = "") -> Tuple[str, str, str]:
@@ -3819,6 +3915,80 @@ def pr_review_obligations(pr_number: str, pr_repo: str = "", *,
     out["pr_number"] = pr_number
     out["pr_repo"] = pr_repo
     return out
+
+
+def format_review_head_unresolved_error(ob: dict, *, action: str,
+                                        pr_number: str, pr_repo: str = "") -> str:
+    """head を確かめられないときに関門が出す文面 (ms-119 e-6859)。純粋。
+
+    文面の組み立てを判定から切り出してある (独立保守性レビュー)。切り出す前は
+    ``_review_gate_check`` が 32 行から 109 行に膨らみ、状態の判定と文面生成が
+    同じ行に混ざっていた —— 「ある分岐の文面だけ直す」つもりで判定条件を壊す
+    (あるいは逆) 事故が起きやすい形。姉妹の
+    ``format_pr_review_obligation_disclosure`` と同じ手筋に揃える。
+    """
+    where = f"`gh pr view {pr_number}" + (f" --repo {pr_repo}" if pr_repo else "") + "`"
+    return (
+        f"Error: PR #{pr_number} の head を確かめられないため {action} できません "
+        f"({ob.get('head_error') or '理由不明'})。\n"
+        f"  ms-119 e-6859: 独立レビューの関門は「**現在の差分** に対して全種別が"
+        f"実施済みか」を問います。head が分からないと、台帳に在る実施記録が"
+        f"いまの差分に対するものか判定できません —— 判定できないまま通すと"
+        f"「レビュー済み」と表示しながら judge が見ていない差分を取り込む"
+        f"ことになります (PR #785 で実際に起きた形)。\n"
+        f"  復帰: gh の認証とリポジトリ指定を確認してください ({where})。\n"
+        f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
+        f"(監査痕跡が残ります)。")
+
+
+def format_review_stale_reason(ob: dict) -> str:
+    """「一度実施したのに、また要る」理由の 1 文 (ms-119 e-6859)。純粋。
+
+    stale が無ければ空文字。これを言わないと、利用者は関門が壊れたと誤解する。
+    """
+    stale = ob.get("stale") or []
+    if not stale:
+        return ""
+    # **どの sha に対する実施だったか** を種別ごとに言う。いまの head を言うだけでは
+    # 「では何を見ればいいのか」が分からない (独立 AX レビューが求めた「次の一手を
+    # 示す」の形)。
+    detail = " / ".join(f"{s['review']}={s['reviewed_sha'][:12]}" for s in stale)
+    return (f"\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"
+            f"積まれた** ため再度要ります (実施した差分: {detail} / いまの head: "
+            f"{(ob.get('head_sha') or '?')[:12]})。"
+            f"修正コミットこそ欠陥を作ることが実測されているので、ここは"
+            f"省けません (ms-119 e-6859)。")
+
+
+def format_review_gate_block_error(ob: dict, *, action: str,
+                                   pr_number: str) -> str:
+    """未実施のレビューが在るときに関門が出す文面 (ms-119 e-6859)。純粋。"""
+    pending = ob.get("owed") or []
+    runs = "\n".join(
+        f"    /beacon-review-run --type {t} --pr {pr_number}" for t in pending)
+    return (
+        f"Error: PR #{pr_number} は独立レビューが未実施のため {action} できません "
+        f"(未実施: {', '.join(pending)})。{format_review_stale_reason(ob)}\n"
+        f"  ms-119 e-4060 / e-6859: レビューは PR-open の節目で発火し、"
+        f"**現在の差分に対して** 実施するまで approve/merge を構造的に塞ぎます。\n"
+        f"  文脈ゼロの独立 judge に原典+差分を渡して実行:\n{runs}\n"
+        f"  実行後は `beacon review done --type <type> --pr {pr_number}` で解消 "
+        f"(/beacon-review-run が最後に自動で叩きます)。\n"
+        f"  不要と判断したなら理由付きで免除: "
+        f"`beacon review skip --type <type> --pr {pr_number} --reason \"...\"`。\n"
+        f"  いまの関門の状態だけを見たい (何も変えたくない) なら: "
+        f"`beacon review status --pr {pr_number}`。\n"
+        f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
+        f"(監査痕跡が残ります)。")
+
+
+def format_review_sha_unpinned_warning(sha_error: str) -> str:
+    """実施を記録したが差分を pin できなかったときの文面 (ms-119 e-6859)。純粋。"""
+    return (f"  ⚠ どの差分に対する実施かを pin できませんでした "
+            f"({sha_error or '理由不明'})。この記録は監査には残りますが、"
+            f"**関門は差し引きません** (「現在の差分をレビューした」と言えない"
+            f"ため)。gh の認証とリポジトリ指定を直して打ち直すか、"
+            f"`--reviewed-sha <sha>` で明示してください。")
 
 
 def format_pr_review_obligation_disclosure(ob: dict) -> list:
