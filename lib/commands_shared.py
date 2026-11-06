@@ -3800,6 +3800,46 @@ def is_commit_sha_shaped(value: str) -> bool:
     return bool(_SHA_SHAPE.match(str(value or "").strip()))
 
 
+def resolve_full_commit_sha(value: str) -> Tuple[str, str]:
+    """短縮 sha を **完全な sha に伸ばす** (ms-119 e-6859)。``(sha, error)`` を返す。
+
+    **なぜ要るか (ドッグフーディングで踏んだ、2026-11-06)**: ``--reviewed-sha`` は
+    形 (16 進 7〜64 桁) しか見ていなかったので、人が普通にコピーする短縮 sha
+    (``3a19535d``) がそのまま台帳に入った。ところが関門は head と **完全一致** で
+    比べるので、``3a19535d != 3a19535ddcb5...`` となり **永久に一致しない**。
+    つまり正直に記録した人が黙って損をする (記録は残るが関門は一生開かない)。
+    実測: ``review done --reviewed-sha 3a19535d`` の直後に
+    ``↺ ax: 実施は 3a19535d に対するもので、いまの head (3a19535ddcb5) では
+    ありません`` と出た。
+
+    長さを揃える方法は 2 つあった。**前方一致で比べる** 案は採らない —— 比較の側を
+    緩めると、曖昧な前置と偶然の一致を区別できなくなり、このリポジトリが繰り返し
+    踏んでいる「緩い一致で偽の緑」になる。代わりに **入口で伸ばす**: git に解決させ、
+    解決できない値は受け取らない。比較は完全一致のまま 1 つに保てる。
+
+    git が無い / リポジトリ外 / その sha がローカルに無い場合は error を返す
+    (= 受け取らない)。推測で伸ばさない。
+    """
+    value = str(value or "").strip()
+    if not value:
+        return "", "値が空です"
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--verify", "--end-of-options",
+             f"{value}^{{commit}}"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", f"git rev-parse を呼べませんでした ({type(exc).__name__})"
+    if out.returncode != 0:
+        detail = (out.stderr or "").strip().splitlines()
+        return "", (f"git がこの sha を解決できません"
+                    f"{': ' + detail[-1] if detail else ''}")
+    full = (out.stdout or "").strip()
+    if not is_commit_sha_shaped(full):
+        return "", f"git の応答が sha の形ではありません ({full!r})"
+    return full, ""
+
+
 def resolve_pr_head(pr_number: str, pr_repo: str = "") -> Tuple[str, str, str]:
     """GitHub に「この PR のいまの head sha と状態」を聞く (ms-119 e-6859)。
 

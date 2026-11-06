@@ -323,6 +323,18 @@ def inline_the_report_decision_again(src: str) -> str:
     return src[: src.index(anchor)] + src[end:]
 
 
+def accept_a_short_sha_without_expanding_it(src: str) -> str:
+    """短縮 sha を伸ばさずそのまま記録する = ドッグフーディングで踏んだ形。
+
+    関門は完全一致で比べるので、短縮 sha の記録は一生一致しない (記録は残るのに
+    関門が一生開かない)。
+    """
+    anchor = "        _full, _resolve_err = resolve_full_commit_sha(_reviewed_sha)"
+    assert anchor in src, "anchor not found (accept_a_short_sha_without_expanding_it)"
+    return src.replace(anchor, (
+        "        _full, _resolve_err = _reviewed_sha, \"\""), 1)
+
+
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
 EXPECT_RED = [
     ("関門が導出でなくトリガーファイルを読む (e-6859 の退行そのもの)",
@@ -428,6 +440,13 @@ EXPECT_RED = [
     ("review done が分岐判定の戻り値を無視する (何も言わなくなる)",
      CMDS, inline_the_report_decision_again,
      f"{SHA_T}::test_review_done_asks_the_real_head_not_the_recorded_sha"),
+    ("短縮 sha を伸ばさずそのまま記録する (ドッグフーディングで踏んだ形 2)",
+     SHARED, lambda s: s.replace(
+         "    value = str(value or \"\").strip()\n    if not value:\n"
+         "        return \"\", \"値が空です\"",
+         "    value = str(value or \"\").strip()\n    return value, \"\"", 1),
+     f"{SHA_T}::test_a_shortened_sha_is_expanded_at_the_entrance "
+     f"{SHA_T}::test_an_unresolvable_sha_is_refused_not_recorded"),
 ]
 
 

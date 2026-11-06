@@ -632,6 +632,10 @@ def test_review_done_asks_the_real_head_not_the_recorded_sha(tmp_path, monkeypat
                         lambda *a, **k: None)
     monkeypatch.setattr(commands, "_ci_flip_review_gate_success",
                         lambda *a, **k: None)
+    # この試験の sha は架空なので、git への解決は差し替える (主題は「名乗りが
+    # いまの head を見ているか」であって sha の実在検査ではない)。
+    monkeypatch.setattr(commands, "resolve_full_commit_sha",
+                        lambda v: (v, ""))
     # いまの head は cur_head (= 記録する sha とは別物)
     import _gh_head_stub
     _gh_head_stub.install(monkeypatch, {"838": cur_head})
@@ -806,3 +810,45 @@ def test_the_test_helper_lives_in_one_place():
             f"{mod_name} が分岐を手書きしている")
         assert "def fake(" not in src, (
             f"{mod_name} に fake の分岐が残っている")
+
+
+def test_a_shortened_sha_is_expanded_at_the_entrance(monkeypatch):
+    """短縮 sha は **入口で伸ばす** (ms-119 e-6859、ドッグフーディングで踏んだ)。
+
+    関門は head と完全一致で比べるので、人が普通にコピーする短縮 sha
+    (``3a19535d``) をそのまま台帳に入れると **永久に一致しない** 記録になる
+    (記録は残るのに関門は一生開かない = 正直に記録した人が黙って損をする)。
+    実測: ``review done --reviewed-sha 3a19535d`` の直後に
+    ``↺ ax: 実施は 3a19535d に対するもので、いまの head (3a19535ddcb5) では
+    ありません`` と出た。
+
+    **比較を前方一致に緩める案は採らない** —— 比較の側を緩めると曖昧な前置と
+    偶然の一致を区別できなくなり、このリポジトリが繰り返し踏んでいる「緩い一致で
+    偽の緑」になる。入口で伸ばせば比較は完全一致 1 つに保てる。
+    """
+    import subprocess as _sp
+    full = "a" * 40
+
+    class _R:
+        returncode = 0
+        stdout = full + "\n"
+        stderr = ""
+
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _R())
+    got, err = cs.resolve_full_commit_sha("aaaaaaa")
+    assert (got, err) == (full, ""), (got, err)
+
+
+def test_an_unresolvable_sha_is_refused_not_recorded(monkeypatch):
+    """git が解決できない sha は **受け取らない** (推測で伸ばさない)。
+
+    形は合っているが実在しない値を記録すると、やはり一生一致しない記録になる。
+    """
+    class _R:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: Needed a single revision\n"
+
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _R())
+    got, err = cs.resolve_full_commit_sha("deadbee")
+    assert got == "" and "解決できません" in err, (got, err)

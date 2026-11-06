@@ -499,6 +499,7 @@ from commands_shared import (  # noqa: F401
     # 読み手 (read_pr_review_skips) の両方が参照するので commands_shared が持つ。
     _review_skips_log_path,
     is_commit_sha_shaped,
+    resolve_full_commit_sha,
     # ms-119 e-6859 (独立保守性レビュー): 文面は純粋な builder に切り出す。
     format_review_sha_unpinned_warning,
     decide_review_done_report,
@@ -4533,6 +4534,26 @@ def cmd_review_done():
               f"(既定で gh に問い合わせます)。", file=sys.stderr)
         sys.exit(1)
     if _reviewed_sha:
+        # **短縮 sha を伸ばす** (ms-119 e-6859、ドッグフーディングで踏んだ)。
+        # 関門は head と完全一致で比べるので、人が普通にコピーする短縮 sha を
+        # そのまま入れると **永久に一致しない** 記録になる (記録は残るのに関門は
+        # 一生開かない = 正直に記録した人が黙って損をする)。比較を前方一致に
+        # 緩めるのではなく、入口で伸ばして比較は 1 つに保つ。
+        _full, _resolve_err = resolve_full_commit_sha(_reviewed_sha)
+        if not _full:
+            print(f"Error: --reviewed-sha を完全な sha に解決できませんでした "
+                  f"({_reviewed_sha!r}: {_resolve_err})。\n"
+                  f"  関門は差分を **完全一致** で突き合わせるので、短縮や"
+                  f"間違った sha をそのまま記録すると、記録は残るのに関門が"
+                  f"一生開かない状態になります。\n"
+                  f"  このリポジトリに在る sha を渡してください。いまの PR head を"
+                  f"使うなら --reviewed-sha を省けば既定で gh に問い合わせます。",
+                  file=sys.stderr)
+            sys.exit(1)
+        if _full != _reviewed_sha:
+            print(f"  (--reviewed-sha {_reviewed_sha} を完全な sha "
+                  f"{_full[:12]}… に解決しました)")
+        _reviewed_sha = _full
         _sha_source = "explicit"
     else:
         _reviewed_sha, _pr_state, _sha_error = resolve_pr_head(pr_number, pr_repo)
