@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "review-gate-ci.py"
 sys.path.insert(0, str(ROOT / "lib"))
 import commands  # noqa: E402
+import _pr_obligations_stub  # noqa: E402
 
 
 def _load_script_module():
@@ -105,25 +106,11 @@ def _stub_subprocess(monkeypatch, local_head=SHA):
 def _all_types_done_at(monkeypatch, sha):
     """「全必須種別が この sha に対して実施済み」を導出側に見せる。
 
-    台帳ファイルを置くのではなく **導出の口** を差し替える。印を押す条件が
-    「その sha に対して全必須種別が充足している」であることを測りたいので、
-    台帳の読み方ではなく条件そのものに焦点を合わせる (ms-119 e-6859)。
-
-    形は手書きせず共有 factory (``tests/_pr_obligations_stub.py``) から採る
-    (独立保守性レビュー) —— 手書きすると本物の返り値のキーが変わっても古い形を
-    返し続け、この試験群だけが偽の緑になる (judge が反転実験で実測した形)。
+    分岐も文面も共有 stub に 1 箇所だけ置いてある (ms-119 e-6859、独立保守性
+    レビュー 2 周目: この helper が 2 つの試験ファイルに逐語で重複しており、
+    片方だけ直して「直した」と判断できる形だった)。
     """
-    import review_spine
-    import _pr_obligations_stub
-
-    def fake(pr_number, pr_repo="", *, head_sha=None):
-        if head_sha == sha:
-            return _pr_obligations_stub.obligations(head_sha=sha)
-        return _pr_obligations_stub.obligations(
-            head_sha=head_sha or "", resolved=bool(head_sha),
-            owed=review_spine.required_pr_open_review_types(), satisfied=[])
-
-    monkeypatch.setattr(commands, "pr_review_obligations", fake)
+    return _pr_obligations_stub.install_satisfied_at(monkeypatch, commands, sha)
 
 
 def test_ci_flip_pushes_the_mark_to_the_reviewed_sha(monkeypatch):

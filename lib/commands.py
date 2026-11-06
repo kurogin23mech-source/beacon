@@ -501,6 +501,7 @@ from commands_shared import (  # noqa: F401
     is_commit_sha_shaped,
     # ms-119 e-6859 (独立保守性レビュー): 文面は純粋な builder に切り出す。
     format_review_sha_unpinned_warning,
+    decide_review_done_report,
     write_reviewed_marker,
     reviewed_marker_sha,
     pr_review_obligations,
@@ -3940,14 +3941,29 @@ def cmd_review_status():
         pr_repo = _resolve_review_pr_repo("", [])
 
     ob = pr_review_obligations(pr_number, pr_repo)
+    # **判定は `passed` を読むだけ** (ms-119 e-6859、独立 AX レビュー 2 周目 high)。
+    # 初版は `--json` のとき判定より前に return していたので、owed が非空でも
+    # exit 0 を返した —— README に自分で「Exits 2 while anything is owed」と
+    # 書いておきながら、テキストモードにしか実装していなかった。judge の実測:
+    # `review status --pr 838 --json` が owed 2 件で exit 0、同じ PR の
+    # テキストモードは exit 2。**同じ問いに、出力形式だけで違う答えが返る** 形で、
+    # 「機械可読が欲しいから --json を付ける」という自然な選択が偽の緑を踏む。
+    # 終了コードは両モードで同じ 1 行から決める。
+    _rc = 0 if ob.get("passed") else 2
     if json_mode:
         print(json.dumps(ob, ensure_ascii=False))
-        return
+        sys.exit(_rc)
 
     _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
     print(f"独立レビューの関門: {_where}")
     if ob.get("pr_state"):
         print(f"  PR の状態: {ob['pr_state']}")
+    # merge / close 済みの PR に、これから課す義務は無い。関門と同じ判断
+    # (`passed`) を同じ言葉で言う —— ここだけ別に書くと、また 2 つの口が食い違う。
+    if ob.get("pr_state") in ("MERGED", "CLOSED"):
+        print(f"  → この PR は既に {ob['pr_state']} なので、独立レビューの関門は"
+              f"問いません (これから課す義務がありません)。")
+        sys.exit(_rc)
     if not ob.get("resolved"):
         # 関門と同じ判断を、同じ言葉で言う (ここだけ緩く答えると、この動詞が
         # 新しい「嘘の緑」になる)。
@@ -3966,9 +3982,10 @@ def cmd_review_status():
               f"止まります)")
         for t in owed:
             print(f"      /beacon-review-run --type {t} --pr {pr_number}")
-        sys.exit(2)
-    print("  → この差分に対して全必須種別が実施済み。approve / merge を通過できます "
-          "(この上にコミットを積むと再度要ります)。")
+    else:
+        print("  → この差分に対して全必須種別が実施済み。approve / merge を"
+              "通過できます (この上にコミットを積むと再度要ります)。")
+    sys.exit(_rc)
 
 
 def cmd_review_skip():
@@ -4588,76 +4605,33 @@ def cmd_review_done():
     # **名乗りと実態がズレた** —— この課題が消すために在る欠陥と同じ型を、
     # 直したばかりの場所で作っていた。記録した sha に対する充足は「記録の事実」で
     # あって「関門が開いたか」ではない。
+    # **関門は「いまの head」に対して問う** (head_sha を渡さない)。この機構の
+    # ドッグフーディングで踏んだ (2026-11-06): 1 周目のレビューを
+    # `--reviewed-sha <古い sha>` で正直に記録したら「gate を通過できます」と出た
+    # のに、同じ瞬間に `beacon review status` は未実施 (exit 2) と答えた。記録した
+    # sha に対する充足は「記録の事実」であって「関門が開いたか」ではない。
     _gate = pr_review_obligations(pr_number, pr_repo)
-    _gate_owed = _gate.get("owed") or []
-    # 記録した差分が、いまの head と違うか (= 正直に過去の sha を記録した場合)。
-    # 違うなら「記録はしたが、この種別は現在の差分に対しては未実施」と言う。
-    _recorded_for_an_older_diff = bool(
-        _reviewed_sha and _gate.get("resolved")
-        and _gate.get("head_sha") != _reviewed_sha)
-    if remaining:
-        print(f"  残りの未実施レビュー (ナッジ): {', '.join(remaining)}")
-    if _gate_owed:
-        print(f"  関門がまだ要求している種別 ({(_reviewed_sha or '?')[:12]} に対して): "
-              f"{', '.join(_gate_owed)}")
-        for _line in format_pr_review_obligation_disclosure(_gate):
-            print(_line)
-    if not remaining:
+    _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
+    # **どの行を出すか / どう終わるか** は純粋関数が決める (独立保守性レビュー
+    # 2 周目: 分岐が 8 個の局所状態変数と絡んで 279 行の中に在り、ある分岐の条件
+    # だけ直したい人が他を黙って壊していないか確信できない形だった)。
+    _report = decide_review_done_report(
+        _gate, remaining=remaining, owed_before=_owed_before,
+        reviewed_sha=_reviewed_sha, already_recorded=_already_recorded,
+        where=_where)
+    for _stream, _text in _report["lines"]:
+        print(_text, file=(sys.stderr if _stream == "err" else sys.stdout))
+    if _report["stamp_marker"]:
         # ナッジの再発火を **この sha に限って** 抑止する (ms-119 e-6859)。
         # 以前は種別の文字列を書いて永久に抑止していたので、コミットを積んだ後も
         # 促しが出ず、「促しが消えた」を「関門が開いた」と読ませていた。
         write_reviewed_marker(pr_number, pr_repo, _reviewed_sha)
-        _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
-        if _owed_before:
-            # ms-119 e-6859: 「gate を通過できます」は **導出が空のときだけ**。
-            # ナッジが消えたことと関門が開いたことは別の事実で、以前これを
-            # 同一視していたために、judge が見ていない差分に対して通過を
-            # 名乗っていた (PR #785 / #835)。
-            if _gate_owed:
-                _head_txt = ((_gate.get("head_sha") or "?")[:12]
-                             if _gate.get("resolved") else "いまの head (不明)")
-                print(f"  ⚠ {_where} のナッジは消えましたが、**関門はまだ開いて"
-                      f"いません** — {_head_txt} に対して "
-                      f"{', '.join(_gate_owed)} が未実施です。", file=sys.stderr)
-                if _recorded_for_an_older_diff:
-                    # 正直に過去の sha を記録した場合。記録は残るが関門は開かない。
-                    print(f"      (この記録は {_reviewed_sha[:12]} に対する実施"
-                          f"として残ります。いまの head は "
-                          f"{(_gate.get('head_sha') or '?')[:12]} なので、"
-                          f"現在の差分に対しては未実施です)", file=sys.stderr)
-            else:
-                print(f"  {_where} の独立レビューは全て "
-                      f"{(_gate.get('head_sha') or '?')[:12]} に対して実施済み "
-                      f"— approve/merge の gate を通過できます "
-                      f"(この sha の上にコミットを積むと再度要ります)。")
-        else:
-            # 元から義務が無かった = この (リポジトリ, 番号) に review-due が
-            # 発火していない。**「全て実施済み」と言ってはいけない** —— 同じ番号の
-            # 別リポジトリの PR は依然 block されていることがあり、その gate を
-            # 通過できるかは何も言えていない。--repo の指定間違いが最も疑わしい。
-            #
-            # 終了コードでも言う (独立 AX レビュー medium): 兄弟の `review skip` は
-            # 同じ意味 (解消すべき義務が無かった) で非 0 を返すのに、こちらは 0 を
-            # 返していた。`$?` だけを見る script / AI が「何も起きなかった」を
-            # 「関門が外れた」と取り違える。
-            #
-            # ただし **冪等な打ち直しは 0 のまま**。台帳に同じ (種別, PR) の記録が
-            # 既にあるなら「さっき実施して解消した」のであって、間違った指定では
-            # ない。ここを分けないと /beacon-review-run の再実行が失敗に見える。
-            print(f"  ℹ {_where} には未実施のレビューが元から在りませんでした "
-                  f"(review-due が発火していない)。この記録は残りますが、"
-                  f"どの PR の gate も新たに外れていません。"
-                  f"--repo の指定が意図と合っているか確認してください "
-                  f"(ms-166 e-6971)。", file=sys.stderr)
-            if not _already_recorded:
-                # CI の関門も倒さずに終える (何も解消していないので)。
-                sys.exit(3)
-        # ms-119 e-4073 (scaffold, opt-in): flip the CI gate status to success so
-        # a branch-protection required check unblocks the merge button on ALL
-        # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by
-        # BEACON_REVIEW_GATE_CI=1 + a resolvable head SHA so default behavior and
-        # tests are unchanged; best-effort (a failed gh post never breaks `done`).
+    if _report["flip_gate"]:
+        # ms-119 e-4073 (scaffold, opt-in): CI の印を success に押して、
+        # branch-protection の required check を全経路 (gh / UI / beacon) で外す。
         _ci_flip_review_gate_success(pr_number, pr_repo, _reviewed_sha)
+    if _report["exit_code"] is not None:
+        sys.exit(_report["exit_code"])
 
 
 

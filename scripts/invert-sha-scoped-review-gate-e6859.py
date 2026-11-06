@@ -41,6 +41,7 @@ PR = ROOT / "lib" / "cmd_pr.py"
 CMDS = ROOT / "lib" / "commands.py"
 TRIG = ROOT / "lib" / "cmd_trigger.py"
 OBL_STUB = ROOT / "tests" / "_pr_obligations_stub.py"
+GATE_CI = ROOT / "scripts" / "review-gate-ci.py"
 
 GATE_T = "tests/test_review_merge_gate.py"
 SHA_T = "tests/test_review_sha_scoped_gate_e6859.py"
@@ -246,11 +247,80 @@ def claim_passage_against_the_recorded_sha(src: str) -> str:
     すると「gate を通過できます」と出るのに、同じ瞬間に `review status` は未実施と
     答えた = 名乗りと実態のズレ。
     """
-    anchor = "    _gate = pr_review_obligations(pr_number, pr_repo)\n    _gate_owed"
+    anchor = "    _gate = pr_review_obligations(pr_number, pr_repo)\n    _where ="
     assert anchor in src, "anchor not found (claim_passage_against_the_recorded_sha)"
     return src.replace(anchor, (
         "    _gate = pr_review_obligations(pr_number, pr_repo, "
-        "head_sha=_reviewed_sha)\n    _gate_owed"), 1)
+        "head_sha=_reviewed_sha)\n    _where ="), 1)
+
+
+# --- 独立レビュー 2 周目 (PR #838) の指摘に対する修正への壊し方 -------------
+
+def let_the_gate_recompute_the_verdict(src: str) -> str:
+    """関門が `passed` を読むのをやめ、自分で再計算する = AX 2 周目 high の退行。
+
+    判定の所有が 2 箇所に戻るので、新しい呼び出し元が一部を写し忘れる経路が開く。
+    """
+    anchor = '    if ob.get("passed"):'
+    assert anchor in src, "anchor not found (let_the_gate_recompute_the_verdict)"
+    return src.replace(anchor, (
+        '    if ob.get("pr_state") in ("MERGED", "CLOSED") or '
+        '(ob.get("resolved") and not (ob.get("owed") or [])):'), 1)
+
+
+def make_json_mode_skip_the_verdict(src: str) -> str:
+    """`review status --json` が判定より前に return する = judge が実測した形。
+
+    README には「Exits 2 while anything is owed」と書いてあるのに、テキスト
+    モードにしか実装されていない状態に戻す。
+    """
+    anchor = ("    _rc = 0 if ob.get(\"passed\") else 2\n"
+              "    if json_mode:\n"
+              "        print(json.dumps(ob, ensure_ascii=False))\n"
+              "        sys.exit(_rc)")
+    assert anchor in src, "anchor not found (make_json_mode_skip_the_verdict)"
+    return src.replace(anchor, (
+        "    _rc = 0 if ob.get(\"passed\") else 2\n"
+        "    if json_mode:\n"
+        "        print(json.dumps(ob, ensure_ascii=False))\n"
+        "        return"), 1)
+
+
+def drop_the_merged_short_circuit_from_status(src: str) -> str:
+    """`review status` から merge 済みの早期 return を落とす。
+
+    関門は素通りさせるのに status は「未実施、approve / merge は止まります」と
+    言い、マージ済み PR にレビューの実行まで促す (judge が実測)。
+    """
+    anchor = '    if ob.get("pr_state") in ("MERGED", "CLOSED"):\n        print(f"  \u2192 \u3053\u306e PR \u306f\u65e2\u306b'
+    assert anchor in src, "anchor not found (drop_the_merged_short_circuit_from_status)"
+    idx = src.index(anchor)
+    end = src.index("    if not ob.get(\"resolved\"):", idx)
+    return src[:idx] + src[end:]
+
+
+def recompute_passed_in_the_test_stub(src: str) -> str:
+    """試験の共有 stub が `passed` を手書きする = fake 経由が偽の緑に戻る。"""
+    anchor = '        base["passed"] = commands_shared._review_gate_passed(base)'
+    assert anchor in src, "anchor not found (recompute_passed_in_the_test_stub)"
+    return src.replace(anchor, '        base["passed"] = not base.get("owed")', 1)
+
+
+def recompute_the_required_set_in_ci(src: str) -> str:
+    """CI の required check が委譲をやめて自分で計算する = 真実源が 2 つに戻る。"""
+    anchor = "    return review_spine.required_pr_open_review_types()"
+    assert anchor in src, "anchor not found (recompute_the_required_set_in_ci)"
+    return src.replace(anchor, (
+        '    return [d["review"] for d in '
+        'review_spine.batch_review_types_for_node("pr-open")]'), 1)
+
+
+def inline_the_report_decision_again(src: str) -> str:
+    """`review done` の分岐判定を純粋関数から外す (= 戻り値を無視して黙る)。"""
+    anchor = "    for _stream, _text in _report[\"lines\"]:"
+    assert anchor in src, "anchor not found (inline_the_report_decision_again)"
+    end = src.index("    if _report[\"stamp_marker\"]:")
+    return src[: src.index(anchor)] + src[end:]
 
 
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
@@ -333,12 +403,37 @@ EXPECT_RED = [
     ("最後の名乗りを「記録した sha」に対して評価する (ドッグフーディングで踏んだ形)",
      CMDS, claim_passage_against_the_recorded_sha,
      f"{SHA_T}::test_review_done_asks_the_real_head_not_the_recorded_sha"),
+    # --- 独立レビュー 2 周目 (PR #838) の指摘に対する修正 ---
+    ("関門が passed を読まず自分で再計算する (AX 2 周目 high)",
+     PR, let_the_gate_recompute_the_verdict,
+     f"{SHA_T}::test_the_gate_reads_passed_instead_of_recomputing"),
+
+    ("review status --json が判定より前に return する (出力形式で rc が変わる)",
+     CMDS, make_json_mode_skip_the_verdict,
+     f"{SHA_T}::test_review_status_exits_the_same_way_in_both_output_modes"),
+
+    ("review status から merge 済みの早期 return を落とす (関門と食い違う)",
+     CMDS, drop_the_merged_short_circuit_from_status,
+     f"{SHA_T}::test_review_status_and_the_gate_agree_about_a_merged_pr"),
+
+    ("試験の共有 stub が passed を手書きする (fake 経由が偽の緑に戻る)",
+     OBL_STUB, recompute_passed_in_the_test_stub,
+     f"{SHA_T}::test_the_pass_verdict_lives_in_one_place "
+     f"{SHA_T}::test_review_status_and_the_gate_agree_about_a_merged_pr"),
+
+    ("CI の required check が委譲をやめる (真実源が 2 つに戻る)",
+     GATE_CI, recompute_the_required_set_in_ci,
+     f"{SHA_T}::test_the_ci_required_check_delegates_instead_of_recomputing"),
+
+    ("review done が分岐判定の戻り値を無視する (何も言わなくなる)",
+     CMDS, inline_the_report_decision_again,
+     f"{SHA_T}::test_review_done_asks_the_real_head_not_the_recorded_sha"),
 ]
 
 
 def main() -> int:
     originals = {p: p.read_text(encoding="utf-8")
-                 for p in (SPINE, SHARED, PR, CMDS, TRIG, OBL_STUB)}
+                 for p in (SPINE, SHARED, PR, CMDS, TRIG, OBL_STUB, GATE_CI)}
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 

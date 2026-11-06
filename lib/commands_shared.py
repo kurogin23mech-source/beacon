@@ -3867,6 +3867,9 @@ def pr_review_obligations(pr_number: str, pr_repo: str = "", *,
             ``provenance`` — 差し引きに使った実施記録 (誰が・いつ・どこで・どの
                 sha に対して)。関門はこれを開示する —— 台帳はローカルのファイルで
                 手で書けるので、防げるのは「黙って外れること」だけ。
+            ``passed`` — **関門を通るか**。呼び出し側はこれを読むだけにする
+                (``owed`` / ``resolved`` / ``pr_state`` から自分で再計算しない ——
+                新しい呼び出し元が判定の一部を写し忘れる経路を構造的に閉じる)。
         純粋側の ``owed`` / ``satisfied`` / ``legacy_no_sha`` / ``unpinned`` /
         ``stale`` / ``skipped`` はそのまま通る (意味は
         ``review_spine.derive_pr_review_obligations`` が所管)。
@@ -3914,7 +3917,146 @@ def pr_review_obligations(pr_number: str, pr_repo: str = "", *,
     out["provenance"] = provenance
     out["pr_number"] = pr_number
     out["pr_repo"] = pr_repo
+    # **関門を通るか / 通らないかの判定は、ここが唯一の場所** (ms-119 e-6859、
+    # 独立 AX レビュー 2 周目 high)。
+    #
+    # 初版は呼び出し側がそれぞれ ``owed`` / ``resolved`` / ``pr_state`` を見て
+    # **自分で再計算** していた。その結果、新しく足した読み取り専用の
+    # ``beacon review status`` が本物の関門 (``_review_gate_check``) と 2 点で
+    # 食い違った (judge が実機で両方再現):
+    #
+    # * ``--json`` を付けると ``owed`` 非空でも exit 0 (判定より前に return して
+    #   いた)。README には「Exits 2 while anything is owed」と自分で書いてあった
+    #   のに、テキストモードにしか実装されていなかった。**同じ問いに、出力形式
+    #   だけで違う答えが返る。**
+    # * merge / close 済み PR の早期 return が関門側にしか無く、``review status``
+    #   はマージ済み PR に「未実施、approve/merge は止まります」と言った。
+    #
+    # どちらも「共有の口を変えたのに、新しい呼び出し元が判定の一部を受け取って
+    # いない」型 —— この課題が主題にしている「2 つの口が同じ問いに違う答えを
+    # 返す」欠陥を、この課題が新設したコマンド自身の中で作っていた。
+    #
+    # だから **判定を呼び出し側に再計算させない**。呼び出し側は ``passed`` を
+    # 読むだけにする (文面の選び分けには ``resolved`` / ``owed`` を使ってよいが、
+    # 通す / 止めるの決定はここ 1 箇所)。
+    out["passed"] = _review_gate_passed(out)
     return out
+
+
+def _review_gate_passed(ob: dict) -> bool:
+    """関門を通るか (ms-119 e-6859)。``pr_review_obligations`` の結果だけから決める。
+
+    * merge / close 済みの PR → 通す。これから課す義務が無いので、独立レビューの
+      名前で止めると本当の理由 (もう解決済み) を隠すことになる。
+    * head を確かめられない → **止める**。「現在の差分に対して実施済み」と言えない
+      状態で通すと偽の緑になり、緑の関門は信頼されるので無ガードより悪い。
+    * それ以外 → まだ要る種別がゼロなら通す。
+    """
+    if str(ob.get("pr_state") or "") in ("MERGED", "CLOSED"):
+        return True
+    if not ob.get("resolved"):
+        return False
+    return not (ob.get("owed") or [])
+
+
+def decide_review_done_report(ob: dict, *, remaining: list, owed_before: list,
+                             reviewed_sha: str, already_recorded: bool,
+                             where: str) -> dict:
+    """``review done`` が **何を出し、どの終了コードで終わるか** を決める。純粋。
+
+    ms-119 e-6859 (独立保守性レビュー 2 周目): 文面の組み立ては既に純粋な builder
+    (``format_review_*``) に切り出してあったが、**どの条件でどの行を出すか** の
+    分岐は ``cmd_review_done`` に残っており、279 行の中で 8 個の局所状態変数
+    (``_reviewed_sha`` / ``_sha_source`` / ``_owed_before`` / ``_already_recorded``
+    / ``remaining`` / ``_gate_owed`` / ``_recorded_for_an_older_diff`` /
+    ``_ledger_state``) を介して絡み合っていた。ある分岐の条件だけ直したい人も、
+    他の 7 個とどう絡むかを確認しないと別の分岐を黙って壊していないか確信できない。
+
+    そこで **決める** 段を純粋関数に出す (測る → 決める → 書く の「決める」)。
+    呼び出し側は返り値の指示どおりに print するだけ。
+
+    Args:
+        ob: ``pr_review_obligations`` の結果 (= いまの head に対する関門の状態)。
+        remaining: ナッジ (トリガーファイル) の残り。関門ではない。
+        owed_before: この実行が始まる前に、この (リポジトリ, 番号) に義務が
+            在ったか。空なら「元から義務が無かった」= --repo の取り違えが疑わしい。
+        reviewed_sha: この実行が記録した差分 (空 = pin できなかった)。
+        already_recorded: 台帳に同じ (種別, PR) の記録が既に在ったか (= 冪等な
+            打ち直し)。
+        where: 表示用の対象名 (``owner/repo#N`` か ``PR #N``)。
+
+    Returns:
+        dict:
+            ``lines`` — ``[(stream, text), ...]``。``stream`` は ``"out"`` /
+                ``"err"``。順に出すだけでよい。
+            ``stamp_marker`` — ナッジ抑止マーカーを書くか (= ナッジが出切ったか)。
+            ``flip_gate`` — CI の印を押しに行くか。
+            ``exit_code`` — ``None`` なら正常終了、整数ならその値で終える。
+    """
+    gate_owed = ob.get("owed") or []
+    resolved = bool(ob.get("resolved"))
+    head = str(ob.get("head_sha") or "")
+    # 記録した差分が、いまの head と違うか (= 正直に過去の sha を記録した場合)。
+    recorded_for_an_older_diff = bool(reviewed_sha and resolved
+                                      and head != reviewed_sha)
+
+    lines = []
+    if remaining:
+        lines.append(("out", f"  残りの未実施レビュー (ナッジ): "
+                             f"{', '.join(remaining)}"))
+    if gate_owed:
+        _h = head[:12] if resolved else "いまの head (不明)"
+        lines.append(("out", f"  関門がまだ要求している種別 ({_h} に対して): "
+                             f"{', '.join(gate_owed)}"))
+        for line in format_pr_review_obligation_disclosure(ob):
+            lines.append(("out", line))
+
+    if remaining:
+        # ナッジがまだ残っている = 他の種別の促しが出続ける。マーカーは書かない。
+        return {"lines": lines, "stamp_marker": False, "flip_gate": False,
+                "exit_code": None}
+
+    if not owed_before:
+        # 元から義務が無かった = この (リポジトリ, 番号) に review-due が発火して
+        # いない。**「全て実施済み」と言ってはいけない** —— 同じ番号の別リポジトリの
+        # PR は依然 block されていることがあり、その gate を通過できるかは何も
+        # 言えていない。--repo の指定間違いが最も疑わしい。
+        #
+        # 終了コードでも言う (独立 AX レビュー medium): 兄弟の ``review skip`` は
+        # 同じ意味で非 0 を返すのに、こちらは 0 を返していた。``$?`` だけを見る
+        # script / AI が「何も起きなかった」を「関門が外れた」と取り違える。
+        #
+        # ただし **冪等な打ち直しは 0 のまま**。台帳に同じ (種別, PR) の記録が
+        # 既にあるなら「さっき実施して解消した」のであって、間違った指定ではない。
+        lines.append(("err", f"  ℹ {where} には未実施のレビューが元から在りません"
+                             f"でした (review-due が発火していない)。この記録は"
+                             f"残りますが、どの PR の gate も新たに外れていません。"
+                             f"--repo の指定が意図と合っているか確認してください "
+                             f"(ms-166 e-6971)。"))
+        return {"lines": lines, "stamp_marker": True,
+                "flip_gate": already_recorded,
+                "exit_code": None if already_recorded else 3}
+
+    if gate_owed:
+        # ナッジが消えたことと関門が開いたことは別の事実。以前これを同一視して
+        # いたために、judge が見ていない差分に対して通過を名乗っていた
+        # (PR #785 / #835)。
+        _h = head[:12] if resolved else "いまの head (不明)"
+        lines.append(("err", f"  ⚠ {where} のナッジは消えましたが、**関門はまだ"
+                             f"開いていません** — {_h} に対して "
+                             f"{', '.join(gate_owed)} が未実施です。"))
+        if recorded_for_an_older_diff:
+            lines.append(("err", f"      (この記録は {reviewed_sha[:12]} に対する"
+                                 f"実施として残ります。いまの head は {head[:12]} "
+                                 f"なので、現在の差分に対しては未実施です)"))
+        return {"lines": lines, "stamp_marker": True, "flip_gate": True,
+                "exit_code": None}
+
+    lines.append(("out", f"  {where} の独立レビューは全て {head[:12] or '?'} に"
+                         f"対して実施済み — approve/merge の gate を通過できます "
+                         f"(この sha の上にコミットを積むと再度要ります)。"))
+    return {"lines": lines, "stamp_marker": True, "flip_gate": True,
+            "exit_code": None}
 
 
 def format_review_head_unresolved_error(ob: dict, *, action: str,

@@ -12,9 +12,15 @@ commands.py — acyclic (SPEC 方針4). This split promoted the review-due trigg
 helpers that the pr handlers share with the `beacon review` family (which stays
 in commands.py) into commands_shared: _fire_review_due_for_pr /
 _fire_pr_open_review_triggers / _clear_review_due_for_pr /
-_pr_open_review_nudge_pending_types / _pr_open_reviewed_marker_path + the
-_REVIEW_DUE_SUFFIX constant. Both sides import them from there (no cmd_pr <->
-commands cycle).
+_pr_open_reviewed_marker_path + the _REVIEW_DUE_SUFFIX constant. Both sides
+import them from there (no cmd_pr <-> commands cycle).
+
+ms-119 e-6859: the review GATE this family runs (`_review_gate_check`) now reads
+the derivation `pr_review_obligations` — specifically its single `passed` field,
+never recomputing the verdict from owed/resolved/pr_state. The nudge face
+(`_pr_open_review_nudge_pending_types`) is deliberately NOT imported here: the
+gate must not read it, and leaving the name in this module would send a reader
+looking for nudge logic that does not exist.
 
 commands.py re-imports the PUBLIC handlers for dispatch + `commands.cmd_pr_*`;
 the family-private helpers (_pr_number_from_url / _review_gate_check /
@@ -67,10 +73,10 @@ from commands_shared import (  # noqa: F401
     _check_ms_status_for_write,
     _clear_pr_open_review_triggers,
     _fire_pr_open_review_triggers,
-    # ms-119 e-6859: 関門は `pr_review_obligations` (導出) を読む。
-    # `_pr_open_review_nudge_pending_types` はナッジ表示の面なので関門では使わない
-    # (その docstring がどちらの面か名乗っている)。
-    _pr_open_review_nudge_pending_types,
+    # ms-119 e-6859: 関門は `pr_review_obligations` (導出) を読む。ナッジの面
+    # (`_pr_open_review_nudge_pending_types`) は **この family では使わない** ので
+    # import しない —— 置いておくと「nudge の処理がこの file に在るはず」と
+    # 探しに来た読み手の時間を奪う (独立保守性レビュー 2 周目)。
     pr_review_obligations,
     # ms-119 e-6859 (独立保守性レビュー): 文面の組み立ては純粋な builder に切り出し、
     # ここは「状態を判定 → builder を呼ぶ → print / exit」だけに保つ。
@@ -122,10 +128,21 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
     """
     ob = pr_review_obligations(pr_number, pr_repo)
 
-    # merge / close 済みの PR に、これから課す義務は無い。open でない PR の
-    # approve/merge を独立レビューの名前で止めると、本当の理由 (もう解決済み) を
-    # 隠すことになる。
-    if ob.get("pr_state") in ("MERGED", "CLOSED"):
+    # **通す / 止めるの判定は `passed` だけを読む** (ms-119 e-6859、独立 AX レビュー
+    # 2 周目 high)。以前はここで `pr_state` / `resolved` / `owed` を見て自分で
+    # 再計算しており、同じ判定を別に書いた `beacon review status` が 2 点で
+    # 食い違った。判定の所有は `pr_review_obligations`、ここは文面を選ぶだけ。
+    if ob.get("passed"):
+        disclosure = format_pr_review_obligation_disclosure(ob)
+        if disclosure and ob.get("resolved"):
+            # 通すが、**何を根拠に差し引いたか** は必ず言う。台帳はローカルの
+            # ファイルで手で書けるので、防げるのは「黙って外れること」だけ
+            # (ms-166 e-6899)。
+            print(f"ℹ PR #{pr_number} の独立レビューは現在の head "
+                  f"({(ob.get('head_sha') or '')[:12]}) に対して充足しています:",
+                  file=sys.stderr)
+            for line in disclosure:
+                print(line, file=sys.stderr)
         return
 
     disclosure = format_pr_review_obligation_disclosure(ob)
@@ -145,17 +162,6 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
         sys.exit(2)
 
     pending = ob.get("owed") or []
-    if not pending:
-        # 通すが、**何を根拠に差し引いたか** は必ず言う。台帳はローカルのファイルで
-        # 手で書けるので、防げるのは「黙って外れること」だけ (ms-166 e-6899)。
-        if disclosure:
-            print(f"ℹ PR #{pr_number} の独立レビューは現在の head "
-                  f"({(ob.get('head_sha') or '')[:12]}) に対して充足しています:",
-                  file=sys.stderr)
-            for line in disclosure:
-                print(line, file=sys.stderr)
-        return
-
     if override:
         print(f"⚠ 独立レビュー未実施のまま PR #{pr_number} を {action} します "
               f"(未実施: {', '.join(pending)}) — この {action} は override であり "

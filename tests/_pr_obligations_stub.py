@@ -30,7 +30,8 @@ def obligations(*, head_sha=DEFAULT_HEAD, owed=None, satisfied=None,
                 pr_number="", pr_repo="", **overrides):
     """``pr_review_obligations`` と同じ形の dict を返す。
 
-    形の土台は **本物の純粋関数から採る** (手書きしない)。
+    形の土台は **本物の純粋関数から採る** (手書きしない)。``passed`` も本物の
+    判定関数 (``commands_shared._review_gate_passed``) に決めさせる。
 
     Args:
         head_sha: いまの差分。``owed`` / ``satisfied`` を省略したときは、この sha に
@@ -87,6 +88,15 @@ def obligations(*, head_sha=DEFAULT_HEAD, owed=None, satisfied=None,
     # 開く)。``owed`` は「実施記録が無い種別」として本物に導出させる —— 上の
     # ``performed`` の組み立てがその入力になっている。
     base.update(overrides)
+    # ``passed`` (= 関門を通るか) も **本物の判定関数に決めさせる** (ms-119 e-6859、
+    # 独立 AX レビュー 2 周目で判定を 1 箇所に畳んだ)。ここで手書きすると、
+    # 判定の規則が変わっても fake は古い答えを返し続け、fake 経由の試験だけが
+    # 偽の緑になる —— この module が閉じようとしている穴そのもの。
+    # ``overrides`` で明示されていればそれを尊重する (「通るはずなのに通らない」
+    # 側を測りたい試験のため)。
+    if "passed" not in overrides:
+        import commands_shared
+        base["passed"] = commands_shared._review_gate_passed(base)
     return base
 
 
@@ -103,3 +113,30 @@ def install(monkeypatch, module, **kwargs):
     monkeypatch.setattr(module, "pr_review_obligations",
                         lambda pr_number, pr_repo="", **kw: ob, raising=False)
     return ob
+
+
+def install_satisfied_at(monkeypatch, module, sha):
+    """「この sha に対してだけ全必須種別が充足」を ``module`` に見せる。
+
+    ``pr_review_obligations`` は呼び出し側が ``head_sha`` を渡せるので、
+    「渡された sha が一致したら充足、違えば全部未実施」を返す fake になる。
+    印を押す条件 (「その sha に対して全必須種別が充足している」) を測る試験が使う。
+
+    ms-119 e-6859 (独立保守性レビュー 2 周目): これは 2 つの試験ファイルに
+    docstring ごと逐語で重複していた。どちらも「手書きすると偽の緑になる」という
+    理由でこの module の factory に委譲していたのに、**どの head_sha なら充足を
+    返すかを決める分岐そのもの** は委譲せず手書きのまま 2 箇所に在った ——
+    この module の docstring が名指しした失敗モードと同じ構造を、その対策コードの
+    隣に作っていた形。分岐も 1 箇所にする。
+    """
+    import review_spine
+
+    def fake(pr_number, pr_repo="", *, head_sha=None):
+        if head_sha == sha:
+            return obligations(head_sha=sha)
+        return obligations(head_sha=head_sha or "", resolved=bool(head_sha),
+                           owed=review_spine.required_pr_open_review_types(),
+                           satisfied=[])
+
+    monkeypatch.setattr(module, "pr_review_obligations", fake)
+    return fake

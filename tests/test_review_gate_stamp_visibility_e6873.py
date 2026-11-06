@@ -61,29 +61,17 @@ import types
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import _pr_obligations_stub  # noqa: E402
 
 
 def _all_types_done_at(monkeypatch, sha):
-    """「全必須種別が この sha に対して実施済み」を導出側に見せる (ms-119 e-6859)。
+    """「全必須種別が この sha に対して実施済み」を導出側に見せる。
 
-    印を押す条件に「その sha に対して全種別が充足している」が加わったので、
-    この file の主題 (= 押す / 断るときに何を言うか) に到達させるために必要。
-
-    形は共有 factory (``tests/_pr_obligations_stub.py``) から採る —— 手書きすると
-    本物のキーが変わっても古い形を返し続け、この試験だけが偽の緑になる
-    (独立保守性レビューが反転実験で実測した形)。
+    分岐も文面も共有 stub に 1 箇所だけ置いてある (ms-119 e-6859、独立保守性
+    レビュー 2 周目: この helper が 2 つの試験ファイルに逐語で重複しており、
+    片方だけ直して「直した」と判断できる形だった)。
     """
-    import review_spine
-    import _pr_obligations_stub
-
-    def fake(pr_number, pr_repo="", *, head_sha=None):
-        if head_sha == sha:
-            return _pr_obligations_stub.obligations(head_sha=sha)
-        return _pr_obligations_stub.obligations(
-            head_sha=head_sha or "", resolved=bool(head_sha),
-            owed=review_spine.required_pr_open_review_types(), satisfied=[])
-
-    monkeypatch.setattr(commands, "pr_review_obligations", fake)
+    return _pr_obligations_stub.install_satisfied_at(monkeypatch, commands, sha)
 
 
 def _run_flip(monkeypatch, capsys, *, env_on=True, remote_sha="aaaa111",

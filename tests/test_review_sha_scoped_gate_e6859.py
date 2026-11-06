@@ -148,12 +148,7 @@ def test_a_reason_bearing_skip_is_credited_and_discloses_when_it_was_made():
     assert ob["skipped"] == [{"review": "ax", "skipped_at_sha": HEAD}]
 
 
-def test_the_required_set_comes_from_the_registry_not_a_literal():
-    """必須種別は registry 由来 (= 新しい pr-open 種別が自動で関門に入る)。
-
-    ``scripts/review-gate-ci.py`` の required check と同じ集合を指すので、
-    ローカルの関門と CI が別のことを言い始めない。
-    """
+def _gate_ci_module():
     import importlib.util
     import os
     spec = importlib.util.spec_from_file_location(
@@ -161,9 +156,44 @@ def test_the_required_set_comes_from_the_registry_not_a_literal():
                                  "scripts", "review-gate-ci.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert (sorted(rs.required_pr_open_review_types())
-            == sorted(mod.required_review_types())), (
-        "関門と CI の required check が別の集合を見ている")
+    return mod
+
+
+def test_the_required_set_comes_from_the_registry_not_a_literal(monkeypatch):
+    """必須種別は registry 由来 (= 新しい pr-open 種別が自動で関門に入る)。
+
+    **substring では測らない** (2026-11-06 に反転ハーネスが捕まえた): 初版は
+    ``inspect.getsource`` に ``batch_review_types_for_node`` が含まれるかを見て
+    いたが、**docstring に同じ語が書いてある** ので、本体を ``return ["ax"]`` に
+    書き換えても緑のままだった = 偽の安全。緩い一致はこのリポジトリが繰り返し
+    踏んでいる形なので、registry を差し替えて出力が追従するかを振る舞いで測る。
+    """
+    assert rs.required_pr_open_review_types(), "必須種別が空"
+    monkeypatch.setattr(
+        rs, "batch_review_types_for_node",
+        lambda node, registry=None: [{"review": "FROM-THE-REGISTRY",
+                                      "judge_run": True}])
+    assert rs.required_pr_open_review_types() == ["FROM-THE-REGISTRY"], (
+        "registry から導出していない (リテラルを返している)")
+
+
+def test_the_ci_required_check_delegates_instead_of_recomputing(monkeypatch):
+    """CI の required check が **同じ 1 関数に委譲** していること。
+
+    独立保守性レビュー 2 周目: 以前は CI 側が同じ式を独立に計算しており、
+    一致は偶然だった (しかも関門側の docstring が「ズレない」と約束していた =
+    何も強制しない約束)。片方で集合を絞ると、もう片方は別の集合を要求し続ける ——
+    このPR自身の欠陥 (judge が見た差分と関門が守る差分がズレる) を必須種別の軸で
+    再生産する形。
+
+    **出力の一致では測れない** (委譲すれば自明に真になり、守る力を失う)。
+    1 箇所を差し替えて、CI 側がそれに追従することを振る舞いで測る。
+    """
+    mod = _gate_ci_module()
+    monkeypatch.setattr(rs, "required_pr_open_review_types",
+                        lambda *a, **k: ["ONLY-FROM-THE-SINGLE-SOURCE"])
+    assert mod.required_review_types() == ["ONLY-FROM-THE-SINGLE-SOURCE"], (
+        "CI 側が独立に計算している — 片方を変えても追従しない")
 
 
 # ---------------------------------------------------------------------------
@@ -628,3 +658,151 @@ def test_review_done_asks_the_real_head_not_the_recorded_sha(tmp_path, monkeypat
     assert "関門はまだ開いていません" in combined, combined
     # どちらの sha の話かを両方言うこと (記録は残る / 現在の差分には未実施)
     assert old_sha[:12] in combined and cur_head[:12] in combined, combined
+
+
+# ===========================================================================
+# 7. 独立レビュー 2 周目 (PR #838) の指摘に対する修正
+#
+# 1 周目の修正コミット自身に 5 件出た (引き継ぎが言っていた「修正コミットこそ
+# 欠陥を作る」の実測。3 周目にあたる)。どれも「新しく足した箇所が判定の一部を
+# 写し忘れる」型で、このPRが主題にしている欠陥と同じ家族。
+# ===========================================================================
+
+def _ob(**kw):
+    import _pr_obligations_stub
+    return _pr_obligations_stub.obligations(**kw)
+
+
+@pytest.mark.parametrize("state,resolved,owed,passed,why", [
+    ("MERGED", True, ["ax"], True, "merge 済みに課す義務は無い"),
+    ("CLOSED", True, ["ax"], True, "close 済みに課す義務は無い"),
+    ("OPEN", False, [], False, "head 不明は止める側に倒す"),
+    ("OPEN", True, ["ax"], False, "未実施が在れば止める"),
+    ("OPEN", True, [], True, "全種別が今の head に対して実施済みなら通す"),
+])
+def test_the_pass_verdict_lives_in_one_place(state, resolved, owed, passed, why):
+    """通す / 止めるの判定は ``passed`` 1 箇所 (ms-119 e-6859、AX 2 周目 high)。
+
+    以前は呼び出し側が ``owed`` / ``resolved`` / ``pr_state`` を見て自分で
+    再計算しており、新しく足した ``beacon review status`` が本物の関門と
+    2 点で食い違った。
+    """
+    ob = {"pr_state": state, "resolved": resolved, "owed": list(owed)}
+    assert cs._review_gate_passed(ob) is passed, why
+
+
+def test_review_status_exits_the_same_way_in_both_output_modes(monkeypatch, capsys):
+    """``--json`` とテキストで **終了コードが一致** すること。
+
+    judge の実測: ``review status --pr 838 --json`` が owed 2 件で exit 0、同じ PR の
+    テキストモードは exit 2。README には自分で「Exits 2 while anything is owed」と
+    書いておきながら、テキストモードにしか実装していなかった。
+    **同じ問いに、出力形式だけで違う答えが返る** 形で、「機械可読が欲しいから
+    --json を付ける」という自然な選択が偽の緑を踏む。
+    """
+    ob = _ob(owed=rs.required_pr_open_review_types(), satisfied=[])
+    monkeypatch.setattr(commands, "pr_review_obligations",
+                        lambda *a, **k: ob)
+    monkeypatch.setattr(commands, "_resolve_review_pr_repo", lambda *a, **k: "o/r")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "838")
+    monkeypatch.setenv("BEACON_PR_REPO", "o/r")
+
+    codes = {}
+    for mode in ("text", "json"):
+        monkeypatch.setenv("BEACON_JSON", "1" if mode == "json" else "")
+        try:
+            commands.cmd_review_status()
+            codes[mode] = 0
+        except SystemExit as e:
+            codes[mode] = e.code if isinstance(e.code, int) else 0
+        capsys.readouterr()
+    assert codes["text"] == codes["json"] == 2, (
+        "出力形式だけで終了コードが違う: " + str(codes))
+
+
+def test_review_status_and_the_gate_agree_about_a_merged_pr(monkeypatch, capsys):
+    """マージ済み PR について ``review status`` と関門が同じことを言うこと。
+
+    judge の実測: 関門 (``_review_gate_check``) は MERGED を素通りさせるのに、
+    ``review status`` は「未実施、approve / merge は止まります」と言い、
+    /beacon-review-run の実行まで促した。同じ ``pr_review_obligations`` を土台に
+    しているのに、早期 return が片方にしか写っていなかった。
+    """
+    import cmd_pr
+    ob = _ob(owed=rs.required_pr_open_review_types(), satisfied=[],
+             pr_state="MERGED")
+    monkeypatch.setattr(commands, "pr_review_obligations", lambda *a, **k: ob)
+    monkeypatch.setattr(cmd_pr, "pr_review_obligations", lambda *a, **k: ob)
+    monkeypatch.setattr(commands, "_resolve_review_pr_repo", lambda *a, **k: "o/r")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "2")
+    monkeypatch.setenv("BEACON_PR_REPO", "o/r")
+    monkeypatch.setenv("BEACON_JSON", "")
+
+    # 関門: 止めない
+    cmd_pr._review_gate_check("2", action="merge", pr_repo="o/r")
+    # status: 同じ判断 (exit 0) で、しかも理由を言う
+    try:
+        commands.cmd_review_status()
+        code = 0
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 0
+    out = capsys.readouterr().out
+    assert code == 0, "関門は通すのに status は止めた"
+    assert "MERGED" in out and "問いません" in out, out
+    assert "/beacon-review-run" not in out, (
+        "マージ済み PR にレビューの実行を促している:\n" + out)
+
+
+def test_the_gate_reads_passed_instead_of_recomputing():
+    """関門が ``owed`` / ``resolved`` / ``pr_state`` から判定を再計算しないこと。
+
+    再計算が復活すると、次に足される 3 つ目の呼び出し元が同じ取り違えをする。
+    """
+    import cmd_pr
+    import inspect
+    src = inspect.getsource(cmd_pr._review_gate_check)
+    assert 'ob.get("passed")' in src, "passed を読んでいない"
+    assert 'pr_state") in ("MERGED"' not in src, (
+        "関門が MERGED/CLOSED の判定を自前で持っている (判定の所有が 2 箇所)")
+
+
+def test_the_report_decision_is_a_pure_function():
+    """``review done`` の「どの行を出すか / どう終わるか」が純粋に決まること。"""
+    ob = _ob(owed=["ax"], satisfied=[])
+    r = cs.decide_review_done_report(
+        ob, remaining=[], owed_before=["ax"], reviewed_sha=HEAD,
+        already_recorded=False, where="o/r#838")
+    assert r["exit_code"] is None
+    assert r["stamp_marker"] is True
+    joined = "\n".join(t for _s, t in r["lines"])
+    assert "関門はまだ開いていません" in joined, joined
+
+    # 元から義務が無かった = 非 0 で終える (冪等な打ち直しは 0)
+    r2 = cs.decide_review_done_report(
+        ob, remaining=[], owed_before=[], reviewed_sha=HEAD,
+        already_recorded=False, where="o/r#838")
+    assert r2["exit_code"] == 3
+    r3 = cs.decide_review_done_report(
+        ob, remaining=[], owed_before=[], reviewed_sha=HEAD,
+        already_recorded=True, where="o/r#838")
+    assert r3["exit_code"] is None
+
+
+def test_the_test_helper_lives_in_one_place():
+    """``_all_types_done_at`` の分岐が共有 stub に 1 箇所だけ在ること。
+
+    独立保守性レビュー 2 周目: この helper が 2 つの試験ファイルに docstring ごと
+    逐語で重複していた。どちらも「手書きすると偽の緑になる」という理由で共有
+    factory に委譲していたのに、**どの head_sha なら充足を返すかを決める分岐** は
+    委譲せず手書きのままだった = 対策コードの隣に同じ失敗モードを作っていた。
+    """
+    import _pr_obligations_stub
+    assert hasattr(_pr_obligations_stub, "install_satisfied_at")
+    import inspect
+    for mod_name in ("test_review_gate_ci", "test_review_gate_stamp_visibility_e6873"):
+        mod = __import__(mod_name)
+        src = inspect.getsource(mod._all_types_done_at)
+        assert "install_satisfied_at" in src, (
+            f"{mod_name} が分岐を手書きしている")
+        assert "def fake(" not in src, (
+            f"{mod_name} に fake の分岐が残っている")
