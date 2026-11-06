@@ -172,3 +172,78 @@ def test_no_ui_entrance_in_either_copy():
                 "again, so every 'nothing can create or open one' claim in "
                 "this repo is now false for the UI axis."
             )
+
+
+# ---------------------------------------------------------------------------
+# ms-185 e-7325 follow-up (PR #839 2 周目の独立保守性レビュー, medium / AX, misleading)
+# ---------------------------------------------------------------------------
+
+UI_COPIES = (
+    pathlib.Path("server/static/index.html"),
+    pathlib.Path("desktop/dist/index.html"),
+)
+
+
+def test_the_dead_toast_helper_stays_removed_in_both_copies():
+    """``_beaconShowToast`` と ``.beacon-toast`` が両コピーから消えたままである。
+
+    **なぜ試験が要るか**: e-7325 でこの helper を削除したとき、根拠は「唯一の
+    呼び出し元 (``copy-trek-sid`` handler) ごと消したので呼び出し元ゼロ」という
+    **コメントの中にしか無かった**。コメントは実行されないので、履歴から古いコードを
+    戻す操作 (rebase / cherry-pick / 古い branch からの取り込み) で黙って復活しても
+    CI は何も言わない —— この file の ``test_no_ui_entrance_in_either_copy`` が
+    「コメントだけが閉じていた」として足された、まったく同じ形。
+
+    しかも e-7325 の時点では、**残す理由として書いた注記自体が誤っていた**
+    (「clipboard コピーの通知として使われ続けている」= 実際は呼び出し元ゼロ)。
+    独立レビューが実測で見つけ、2 周目で削除した。削除の根拠を試験に移す。
+    """
+    for path in UI_COPIES:
+        src = (REPO / path).read_text(encoding="utf-8")
+        for marker in ("function _beaconShowToast", "_beaconToastTimer",
+                       ".beacon-toast {", "id = 'beacon-toast'"):
+            assert marker not in src, (
+                f"{path} に {marker!r} が戻っています。呼び出し元ゼロで落とした"
+                f"配線なので、戻すなら**呼び出し元と一緒に**戻すこと "
+                f"(e-7325 では『使われ続けている』と誤って書いて残していた)")
+
+
+def test_the_list_treks_rationale_has_exactly_one_owner():
+    """``list_treks`` 削除の経緯が 1 箇所にだけ在り、参照先が実在する。
+
+    **直した穴**: 同じ説明が 4 ファイルへ verbatim で写されており (しかもその内容が
+    「説明の重複が 1 つだけ古くなる」問題を正すものだった)、1 本化したときに
+    **同じファイルの数百行違いに在った 5 つ目を見落とした**。残っていたのは
+    「``list_treks`` stays because cmd_bus still reaches it」= 偽の根拠で、同じ
+    ファイルの前半と矛盾していた。目視で数えたのが間違いで、機械で列挙すべきだった。
+
+    測るのは 3 つ: 正本の目印が 1 箇所だけ在る / 参照している 3 ファイルがその正本を
+    指している / **偽の根拠を現在形で述べている箇所がどこにも無い**。3 つ目が
+    5 つ目のコピー (および 6 つ目) を捕まえる面。
+    """
+    OWNER = pathlib.Path("lib/store.py")
+    REFS = (pathlib.Path("lib/store_api.py"),
+            pathlib.Path("lib/store_local.py"),
+            pathlib.Path("lib/store_sqlite.py"))
+    MARKER = "LIST-TREKS-RATIONALE-OWNER"
+
+    owner_src = (REPO / OWNER).read_text(encoding="utf-8")
+    assert owner_src.count(MARKER) == 1, (
+        f"{OWNER} の正本の目印が {owner_src.count(MARKER)} 個です (1 個であるべき)。"
+        f"消えたなら参照している 3 ファイルの『lib/store.py を見よ』が宙に浮きます")
+
+    for path in REFS:
+        src = (REPO / path).read_text(encoding="utf-8")
+        assert "lib/store.py" in src, (
+            f"{path} が正本 ({OWNER}) を指していません")
+        assert MARKER not in src, (
+            f"{path} に正本の目印が在ります — 経緯の本文が再び写されています")
+
+    # 偽の根拠を**現在形で**述べている箇所はどこにも無い (= 5 つ目/6 つ目の検出面)。
+    FALSE_CLAIM = "still reaches it for the send-budget"
+    for path in (OWNER,) + REFS:
+        src = (REPO / path).read_text(encoding="utf-8")
+        assert FALSE_CLAIM not in src, (
+            f"{path} に『cmd_bus がまだ到達する』という偽の根拠が在ります。"
+            f"cmd_bus には store. の使用が 1 つもありません (実測)。"
+            f"引用するなら、誤りだったと分かる枠付けで書くこと")

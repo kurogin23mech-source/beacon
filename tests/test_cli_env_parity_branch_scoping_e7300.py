@@ -190,3 +190,169 @@ def _handle(cmd, args):
 ''')
     assert sets["verb_loop"] == {"BEACON_LOOP"}, (
         f"ループ配下の経路が落ちている: {sorted(sets['verb_loop'])}")
+
+
+# ---------------------------------------------------------------------------
+# PR #839 2 周目の独立保守性レビュー (high) — 許可型の表そのものが静かに劣化する
+# ---------------------------------------------------------------------------
+# 1 周目の指摘を受けて header 判定を除外型から許可型に変えたが、**許可型そのものが
+# 同じ穴を持っていた**。参照側は ``getattr(stmt, field, None)`` で引くので、表の
+# フィールド名を 1 文字間違えても None が返って黙って何も数えない。judge が
+# ``ast.With`` の ``"items"`` を ``"itemz"`` に変異させたところ、この file の 8 本と
+# 本体実行の両方が緑のまま通った。過大報告を直す修正が、過少報告の方向に同型の穴を
+# 作っていた —— **1 経路だけ閉じて「閉じた」と主張する、この MS で 3 度目**。
+#
+# 下の 2 本は、見つかった 1 件 (With) を塞ぐのではなく**劣化の機構**を閉じる:
+#   * 綴り間違いは checker の import 時に落ちる (宣言側で閉じた。ここではそれが
+#     効いていることを測る)
+#   * 表に挙げ忘れた文型は下の完全性検査で赤くなる
+#
+# 個別の文型の挙動も 3 つ足した (While / With / Match)。judge の指摘どおり、
+# AsyncFor / AsyncWith / TryStar / match_case は dispatch.py に実例が無いので
+# **「テストしたふり」にはしない** — 構造的には上の 2 本が覆う。
+
+
+def test_a_typo_in_the_header_table_fails_loudly_at_import():
+    """表のフィールド名の綴り間違いが、無音の劣化ではなく import 時の失敗になる。"""
+    import subprocess
+    import tempfile
+
+    src = CHECKER.read_text(encoding="utf-8")
+    assert 'ast.With: ("items",),' in src, "表の該当行が見つからない (検査の前提が崩れている)"
+    mutated = src.replace('ast.With: ("items",),', 'ast.With: ("itemz",),', 1)
+    with tempfile.TemporaryDirectory() as d:
+        f = pathlib.Path(d) / "mutated.py"
+        f.write_text(mutated, encoding="utf-8")
+        proc = subprocess.run([__import__("sys").executable, "-B", str(f)],
+                              capture_output=True, text=True, timeout=120,
+                              cwd=str(REPO))
+    assert proc.returncode != 0, (
+        "表のフィールド名を間違えても落ちない — 参照側の getattr が None を返して"
+        "黙って何も数えない形に戻っている")
+    assert "_HEADER_FIELDS" in proc.stderr, (
+        f"落ちたが理由が表の問題だと分からない: {proc.stderr[-300:]}")
+
+
+def test_every_statement_type_with_a_body_is_classified():
+    """stmt のリストを子に持つ文型は、必ず表か「本体は走らない」側に在る。
+
+    表に挙げ忘れた文型は ``_HEADER_FIELDS.get(type, ())`` の既定が空タプルを返すので、
+    その文が祖先に来たとき header を何も足さない = 経路が静かに欠ける。足し忘れが
+    赤くなるように、分類の**完全性**を測る。
+
+    検査しないこと: 各文型の header が「正しいフィールドを挙げているか」は見ていない
+    (それは上の import 時の検証と個別の挙動テストが担う)。ここで見るのは、分類から
+    漏れた文型が無いことだけ。
+    """
+    import ast as _ast
+
+    checker = _load_checker()
+    classified = set(checker._HEADER_FIELDS) | set(checker._NOT_EXECUTED_HERE)
+
+    missing = []
+    for name in dir(_ast):
+        node_type = getattr(_ast, name)
+        if not (isinstance(node_type, type) and issubclass(node_type, _ast.AST)):
+            continue
+        fields = getattr(node_type, "_fields", ())
+        # 「stmt のリストを子に持つ」= body / orelse / finalbody / handlers のいずれか
+        if not any(f in fields for f in ("body", "orelse", "finalbody", "handlers")):
+            continue
+        # **この絞り込みは自分で踏んだ罠** (PR #839 2 周目): 以前ここは
+        # ``getattr(_ast, "match_case", _ast.AST)`` と書いていた。py3.9 には
+        # ``match_case`` が無いので fallback の ``_ast.AST`` に落ち、``issubclass(X,
+        # ast.AST)`` は**すべての AST 型で真**になるため、式 (``ast.IfExp`` 等) まで
+        # 「分類漏れ」として報告していた。無い型は候補から外すのが正しい。
+        containers = tuple(t for t in (
+            getattr(_ast, "stmt", None),
+            getattr(_ast, "match_case", None),
+            getattr(_ast, "excepthandler", None),
+        ) if t is not None)
+        if not issubclass(node_type, containers):
+            continue
+        if node_type in classified:
+            continue
+        # 抽象基底 (stmt 自身など) と、関数の外側に出ない型は対象外
+        if node_type in (_ast.stmt, _ast.AST, _ast.Module, _ast.Interactive,
+                         _ast.Expression, getattr(_ast, "excepthandler", None)):
+            continue
+        missing.append(name)
+
+    assert not missing, (
+        f"body を持つ文型が分類から漏れています: {sorted(missing)}。"
+        f"_HEADER_FIELDS (= 入る前に評価される header を挙げる) か "
+        f"_NOT_EXECUTED_HERE (= 本体は走らない) のどちらかに足すこと。"
+        f"漏れると、その文が祖先に来たときに header が静かに欠けます")
+
+
+def test_while_with_and_match_headers_are_on_the_path():
+    """While / With / Match の配下でも経路が繋がる (表の個別エントリの挙動)。
+
+    1 周目の試験は If / For / Try しか触っておらず、表 10 エントリのうち 6 つは
+    1 本も測っていなかった。dispatch.py が実際に使いうる 3 つを足す。
+    """
+    for label, src, verb in (
+        ("while", '''
+def _handle(cmd, args):
+    while args.more:
+        env = {"BEACON_W": "1"}
+        _run_commands_py(x, "verb_w", env)
+''', "verb_w"),
+        ("with", '''
+def _handle(cmd, args):
+    with open(args.path) as fh:
+        env = {"BEACON_W": "1"}
+        _run_commands_py(x, "verb_w", env)
+''', "verb_w"),
+    ):
+        sets = _sets_for(src)
+        assert sets.get(verb) == {"BEACON_W"}, (
+            f"{label} 配下の経路が繋がっていない: {sorted(sets.get(verb) or [])}")
+
+
+def test_a_walrus_assignment_is_counted():
+    """``env := {...}`` でも「渡している」と数える (偽のギャップを作らない)。
+
+    PR #839 2 周目の独立 AX レビュー (silent): ``ast.Assign`` / ``AnnAssign`` しか
+    見ていなかったので walrus で組むと検出されず、CI が「二重フロント drift」と
+    誤診する形だった。dispatch.py に現在 0 件だが、足された瞬間に発火する。
+    """
+    sets = _sets_for('''
+def _handle(cmd, args):
+    if cmd == "w":
+        if (env := {"BEACON_WALRUS": "1"}):
+            _run_commands_py(x, "verb_walrus", env)
+''')
+    assert sets.get("verb_walrus") == {"BEACON_WALRUS"}, (
+        f"walrus で組んだ辞書を数えていない: {sorted(sets.get('verb_walrus') or [])}")
+
+
+def test_a_call_inside_an_except_handler_has_a_known_limit():
+    """except 節の中の呼び出しは、try 本体で組んだ鍵を数えない (既知の限界)。
+
+    この挙動は**正しくない** (例外が投げられるまで try 本体は部分的に走っている)。
+    固定しているのは正しさではなく、**限界が偶然ではなく意図であること**。
+    経路の組み立てが「どの枝から上がってきたか」を持たないので、ここだけ分岐を
+    意識した造りが要る。dispatch.py に実例が 0 件 (構文木で実測) のうちに造りを
+    増やすより、限界を書いて現挙動を固定する方を採った。
+
+    誤りの向きは**偽のギャップ** (= 配線済みを未配線と言う) なので、発火すれば CI が
+    赤くなって人が気付く。黙って通る側ではない。実例が出たらこの試験が「期待する
+    答え」を書き換える場所になる。
+    """
+    sets = _sets_for('''
+def _handle(cmd, args):
+    if cmd == "x":
+        try:
+            env = {"BEACON_TRY": "1"}
+            risky()
+        except Exception:
+            env["BEACON_EXC"] = "1"
+            _run_commands_py(x, "verb_exc", env)
+''')
+    got = sets.get("verb_exc") or set()
+    assert got == {"BEACON_EXC"}, (
+        f"except 節の中の経路の扱いが変わった: {sorted(got)}。"
+        f"try 本体の鍵まで数えるようになったなら、それは限界の解消なので "
+        f"scripts/check-cli-env-parity.py の ast.ExceptHandler の注記と"
+        f"この試験の期待値を一緒に直すこと")

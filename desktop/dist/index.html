@@ -7962,17 +7962,9 @@ document.addEventListener('wheel', _markUserScrolling, { passive: true });
 document.addEventListener('touchmove', _markUserScrolling, { passive: true });
 
 function renderOnDataChange() {
-  // ms-185 e-7325 (PR #839 の独立保守性レビュー, medium): ここには ms-86 / e-2270 の
-  // 説明が在った — Trek detail を開いている間は WS 由来の再レンダーを止める、という
-  // ガードと、それが ``state.openTrekScope`` を読む理由。ガードと state の両方を
-  // e-7325 で落としたので、説明も消してある。
-  //
-  // 最初はガード行だけ消して説明を残し、文を途中で分断する形になっていた。
-  // server/app.py では自分で「列挙を現在形で書くと、後に訂正が続いてもその訂正より
-  // 前が現在の内容として読まれる」と診断して過去形に直したのに、同じ diff の
-  // このファイルでその罠に落ちていた (独立 judge が指摘)。
-  //
-  // ms-43 e-3746 — 文書 / 振り返りの閲覧中も同じ理屈で再レンダーを止める。
+  // ms-43 e-3746 — 文書 / 振り返りの閲覧中は WS 由来の再レンダーを止める。
+  // (ms-185 e-7325 まで、Trek detail を開いている間も同じ理由で止めていた。
+  //  その経緯はコミット a17a2966 / ff5fb606 と判断記録に在る。)
   // While the user is reading a doc (or a retro),
   // ``renderDocumentsSection`` replaces #main-content with the viewer, and a
   // project_changed WS frame carries only milestone / task / entry deltas —

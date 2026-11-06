@@ -174,7 +174,8 @@ class Store(Protocol):
         """
         ...
     # ms-185 e-7322: ここに Trek の読み出し passthrough (``list_treks``) が在った。
-    # **この段落が経緯の正本** — 他の 3 実装 (store_api / store_local / store_sqlite)
+    # **この段落が経緯の正本** (目印: LIST-TREKS-RATIONALE-OWNER) — 他の 3 実装
+    # (store_api / store_local / store_sqlite)
     # は 1 行でここを指す (PR #839 の独立保守性レビュー, low: 同じ説明を 4 ファイルへ
     # verbatim で写しており、しかもその内容が『説明が複数箇所にコピーされて 1 つだけ
     # 古くなる』問題を正すものだった)。

@@ -218,12 +218,46 @@ _HEADER_FIELDS = {
     ast.With: ("items",),
     ast.AsyncWith: ("items",),
     ast.Try: (),          # body へ直接入る。handlers / orelse / finalbody は経路外
+    # except 節の中に呼び出しが在る場合。``type`` / ``name`` (= except 節の見出し) は
+    # その節に入る前に評価されるので経路上。
+    #
+    # **既知の限界** (PR #839 2 周目の完全性検査で露出、dispatch.py に実例 0 件):
+    # 呼び出しが except 節の中に在るとき、**try 本体で組んだ鍵は数えない**。例外が
+    # 投げられるまで try 本体は部分的に走っているので、本当は数えるのが正しい。
+    # 経路の組み立てが「どの枝から上がってきたか」を持っていないため、ここだけ
+    # 分岐を意識した造りが要る。実例が 0 件のうちに造りを増やすより、限界を書いて
+    # 現挙動を試験で固定する方を採った (``test_a_call_inside_an_except_handler_has_a
+    # _known_limit``)。この向きの誤りは**偽のギャップ** (= 配線済みを未配線と言う)
+    # なので、CI が赤くなって人が気付く側に転ぶ。黙って通る側ではない。
+    ast.ExceptHandler: ("type", "name"),
 }
 if hasattr(ast, "TryStar"):          # py3.11+
     _HEADER_FIELDS[ast.TryStar] = ()
 if hasattr(ast, "match_case"):       # py3.10+ (match 文)
     _HEADER_FIELDS[ast.Match] = ("subject",)
     _HEADER_FIELDS[ast.match_case] = ("guard",)
+
+# **表の打ち間違いを無音の劣化にしない** (PR #839 2 周目の独立保守性レビュー, high)。
+#
+# 許可型に変えたのは、除外型が新しい構文のたびに静かに穴を開けるからだった。ところが
+# 許可型そのものが同じ穴を持っていた: 参照側は ``getattr(stmt, field, None)`` で引くので、
+# フィールド名を 1 文字間違えても None が返り ``_walk_executed`` が黙って何も返さない。
+# judge が ``ast.With`` の ``"items"`` を ``"itemz"`` に変異させたところ、**8 本の試験と
+# 本体実行の両方が緑のまま**通った。過大報告を直した修正が、過少報告の方向に同型の穴を
+# 作っていた形 (= 1 経路だけ閉じて「閉じた」と主張する、この MS で 3 度目)。
+#
+# ここで ``_fields`` と突き合わせるので、打ち間違いは **import した瞬間に落ちる**。
+# 参照側を直すのではなく宣言側で閉じるのは、読み手 (次に表を触る AI) が間違えた場所で
+# すぐ分かるのが肝だから。
+for _node_type, _fields in _HEADER_FIELDS.items():
+    _known = set(getattr(_node_type, "_fields", ()))
+    _unknown = [f for f in _fields if f not in _known]
+    if _unknown:
+        raise AssertionError(
+            f"_HEADER_FIELDS[{_node_type.__name__}] が持たないフィールドを挙げています: "
+            f"{_unknown} (実在するのは {sorted(_known)})。"
+            f"綴りを間違えると参照側の getattr が None を返して黙って何も数えなくなり、"
+            f"配線されている鍵を『渡していない』と誤判定します")
 
 # 関数 / クラス / lambda の**定義**は、その本体を実行しない。
 _NOT_EXECUTED_HERE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
@@ -366,6 +400,12 @@ def _locals_along(nodes):
             for tgt in node.targets:
                 _record(tgt, node.value)
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            _record(node.target, node.value)
+        # walrus (``env := {...}``)。PR #839 2 周目の独立 AX レビュー (silent):
+        # ``ast.Assign`` / ``AnnAssign`` しか見ていなかったので、walrus で組むと
+        # 検出されず**偽のギャップ**になる。dispatch.py に現在 0 件だが、足された
+        # 瞬間に CI が「二重フロント drift」と誤診する形だった。
+        elif isinstance(node, ast.NamedExpr):
             _record(node.target, node.value)
         if (isinstance(node, ast.Call)
                 and getattr(node.func, "attr", None) == "update"
