@@ -65,6 +65,26 @@ jobs:
         run: go build -o viewer ./...
         working-directory: viewer
 
+      # ms-185 e-7352: Node, for the same reason Go is installed above — a
+      # toolchain the runner lacks does not fail the parity tests, it makes them
+      # SKIP, and a skip is as green as a pass. Measured on 2026-11-06: 25 test
+      # files / 303 tests guard themselves with ``skipif(shutil.which("node") is
+      # None)`` and every one of them was skipping on CI. They cover the bridge's
+      # JS side (envelope tiers, heartbeat body, qualgate, autonomous content,
+      # budget asymmetry) and the Python↔JS parity checks that are the only thing
+      # holding the two implementations together.
+      #
+      # The step below runs ``channel/*.test.mjs`` as well. Those are node's own
+      # test runner, never invoked by pytest, and they were not in CI at all —
+      # ``channel/bus-state-marker.test.mjs`` had been failing since ms-159 e-6488
+      # added ``stateDetail`` to the reader without updating two expectations
+      # (``assert/strict``'s deepEqual is deepStrictEqual, so a present-but-
+      # undefined key is not equal to an absent one). PR #835 passed every CI
+      # check while carrying that failure.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install package with dev + server runtime deps
         # `-e .[dev]` pulls pytest + ruff from pyproject.toml's dev extra.
         # Cloud extras (google-auth*) are pulled in from requirements.txt.
@@ -138,6 +158,23 @@ jobs:
                  "Load-sensitive tests may flake; see the comment on this step."
           fi
           pytest tests/ -n 4 -q
+
+      - name: Run the bridge's node tests
+        # ms-185 e-7352. Measure the exit code WITHOUT a pipe: piping through
+        # ``tail`` / ``grep`` replaces the status with the pipe's last stage and
+        # a failing suite reads as 0 (the parent session misjudged this file that
+        # way once). The loop below keeps each file's own rc and fails the step if
+        # any is non-zero, naming which.
+        run: |
+          rc=0
+          for f in channel/*.test.mjs; do
+            node "$f"
+            if [ $? -ne 0 ]; then
+              echo "::error::node test failed: $f"
+              rc=1
+            fi
+          done
+          exit $rc
 
   frontend-drift:
     # ms-160 e-5808: make the Web/Tauri frontend-drift guard a hard CI stop.

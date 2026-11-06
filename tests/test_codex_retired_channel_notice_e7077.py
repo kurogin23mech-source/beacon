@@ -371,7 +371,7 @@ class TestBothHooksShareOneAdviceSource:
 
     SENTINEL = "SENTINEL-ADVICE-7ca91f (試験中だけ差し替えた値)"
 
-    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("channel", sorted(bd.GATED_PROVENANCE_CHANNELS))
     def test_claude_hook_follows_the_shared_source(self, claude, channel,
                                                    monkeypatch):
         """真値源を差し替えると Claude 側の出力も変わる (= 委譲している)。"""
@@ -383,7 +383,7 @@ class TestBothHooksShareOneAdviceSource:
             "(= 独自コピーを持っている)。"
         )
 
-    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("channel", sorted(bd.GATED_PROVENANCE_CHANNELS))
     def test_codex_hook_follows_the_shared_source(self, codex, channel,
                                                   monkeypatch):
         """真値源を差し替えると Codex 側の出力も変わる (= 委譲している)。
@@ -401,7 +401,7 @@ class TestBothHooksShareOneAdviceSource:
             "(= 独自コピーを持っているか、整形が割れている)。"
         )
 
-    @pytest.mark.parametrize("channel", sorted(bd.SYSTEM_PROVENANCE_CHANNELS))
+    @pytest.mark.parametrize("channel", sorted(bd.GATED_PROVENANCE_CHANNELS))
     @pytest.mark.parametrize("reason", [ALLOWLIST_MISS, RETIRED, UNKNOWN])
     def test_claude_hook_does_not_keep_its_own_copy_of_the_other_reasons(
             self, claude, reason, channel):
