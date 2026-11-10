@@ -402,9 +402,25 @@ def classify_auto_execute(
         ``("propose-to-ai", "auto-execute", "")`` (allowlist miss, no reason tag).
       * auto-execute, channel in ``retired_channels`` →
         ``("propose-to-ai", "auto-execute", "retired-provenance-channel")``.
-        Checked BEFORE the provenance gate and regardless of the allowlist,
-        because a retired channel's opt-in is exactly the stale state we must
-        not trust (ms-185 e-7077 — see RETIRED_PROVENANCE_CHANNELS).
+        Checked BEFORE the provenance gate — a retired channel's opt-in is
+        exactly the stale state we must not trust (ms-185 e-7077 — see
+        RETIRED_PROVENANCE_CHANNELS).
+
+        **But AFTER the allowlist**, so a retired channel that was never
+        opted in reports the allowlist miss (reason tag ``""``), not the
+        retirement. That order is deliberate (``test_allowlist_miss_still_wins
+        _over_retired``): the empty reason tag is what the Claude hook branches
+        on when deciding whether to attach ``_downgrade_reason``. This docstring
+        used to claim "regardless of the allowlist", which an independent AX
+        review (PR#840 5 周目) measured as false. The claim is removed rather
+        than the order changed, because changing the order would overturn a
+        recorded decision.
+
+        Consequence the caller must handle: with the default (empty) allowlist,
+        a retired channel is indistinguishable here from a channel awaiting
+        human approval. A consumer that turns the reason tag into advice will
+        say "run ``auto-execute add``" for a channel that must never be opted
+        in. The advice layer is where that has to be told apart — not here.
       * auto-execute, channel is a provenance channel whose per-channel proof
         (``PROVENANCE_REQUIREMENTS``) is absent →
         ``("propose-to-ai", "auto-execute", "non-system-envelope")``.
@@ -431,15 +447,14 @@ def classify_auto_execute(
 def format_operation_trigger_imperative(events: list) -> str:
     """Render the "AUTONOMOUS ACTION" inject for opted-in operation-trigger events.
 
-    Scope boundary (e-5803 review / Maint-3): this module currently shares ONLY
-    the operation-trigger imperative. The trek-channel Level-3 imperatives
-    (trek-trigger / trek-progress-check / trek-task-review / trek-leader-digest)
-    still live as Claude-hook-only formatters in bin/beacon-bus-inbox-hook.py and
-    are NOT rendered by the Codex inbox hook. That is intentional for now (e-5803's
-    scope was operation-trigger + the downgrade gate), not an oversight — a Codex
-    session gets the generic event list for trek DMs, not the forced-invoke block.
-    Extending trek parity to Codex is deliberately deferred to a follow-up so this
-    module isn't a half-migrated home that invites duplicate trek formatters.
+    Scope boundary (e-5803 review / Maint-3): this module shares ONLY the
+    operation-trigger imperative, and that is now the whole set. The trek-channel
+    Level-3 imperatives it used to defer (trek-trigger / trek-progress-check /
+    trek-task-review / trek-leader-digest) are gone with the device (ms-185
+    e-7079), so the "extend trek parity to Codex later" follow-up this docstring
+    used to promise is void — ms-185 decided not to reimplement it. The retired
+    channel names are listed in ``RETIRED_PROVENANCE_CHANNELS``, which is
+    what a received trek-* event meets now.
 
 
     Each event is an opted-in auto-execute event on the ``operation-trigger``

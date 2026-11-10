@@ -567,7 +567,7 @@ design.
 | `beacon resume scoped <target> [--kind ms\|task\|session] [--reason <text>]` | Clear a scoped STOP, allowing targeted session(s) to resume |
 | `beacon resume global [--reason <text>]` | Clear a global STOP |
 | `beacon rollback [--commits N] [--reason <text>] [--dry-run] [--no-record]` | Undo working tree (`git stash`) + N local commits (`--soft` reset); past upstream → report + compensation proposals only |
-| `beacon claim request <kind>:<id> [--intent <text>]` | Announce intent to take a target (`ms`/`task`/`operation`/`trek`/`free`) |
+| `beacon claim request <kind>:<id> [--intent <text>]` | Announce intent to take a target (`ms`/`task`/`operation`/`free`) |
 | `beacon claim respond <claim-id> [--accept\|--reject] [--reason <text>]` | Respond to another session's claim request |
 | `beacon claim post <kind>:<id> [--intent <text>]` | Post-hoc record (no request/response dance) |
 | `beacon claim handoff <claim-id> --to <session> [--reason <text>]` | Transfer an active claim to another session |

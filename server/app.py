@@ -2561,9 +2561,11 @@ async def post_bus_event(
     # receiver's human. This is the symmetric *sender*-side guard: the server
     # refuses to accept a *proven* cross-user new-send whose recipient no human
     # confirmed. It is the one choke point every client path (CLI / MCP reply /
-    # headless / cron) must pass. same-user / reply / Trek / Operation / non-dm
-    # are carved out so armed auto-reply, Trek协奏, and Operation autonomy do
-    # not regress (SPEC FZcvJ5ivhLu0UkEtw7Ew §1/§2/AC5).
+    # headless / cron) must pass. same-user / reply / Operation / non-dm are
+    # carved out so armed auto-reply and Operation autonomy do not regress
+    # (SPEC FZcvJ5ivhLu0UkEtw7Ew §1/§2/AC5). ms-185 removed the Trek carve-out
+    # with the device (e-7068 / e-7078): it was the dangerous half of this list,
+    # exempting a send because sender and recipient shared a workspace.
     #
     # e-3492 (P1 fix): this gate is behind a kill-switch and re-enabled only
     # after the claim-issuing client is distributed. Two failures made the
@@ -2597,8 +2599,9 @@ async def post_bus_event(
         # 発火が運ぶのは人間が承認した T2 封筒なので、carve-out は T2 で足りる。
         consent_operation_env = env_tier == envelope_mod.TIER_T2
         # Cheap classification first (no backend calls). Carve-outs (same-user /
-        # unresolved / reply / Trek-channel / Operation / non-dm) return "not
-        # required" and short-circuit — no claim check, no Trek lookup.
+        # unresolved / reply / Operation / non-dm) return "not required" and
+        # short-circuit — no claim check. (ms-185: the Trek-channel carve-out and
+        # its lookup are gone with the device.)
         consent_required, consent_reason = dm_consent_mod.classify_send_consent(
             sender_user_id=consent_sender_uid,
             recipient_user_id=receiver_uid,
@@ -3076,8 +3079,8 @@ def system_tick_endpoint(
 ):
     """定期発火の入口 (正本、ms-185 e-7065)。
 
-    本番の自律 (Operation の発火 / 締切リマインド / Trek の集約) はすべてこの
-    入口で駆動される。駆動役は ``scripts/vps-tick.sh`` (systemd の
+    本番の自律 (Operation の発火 / 締切リマインド) はすべてこの入口で駆動される
+    (ms-185: Trek の集約もここに在ったが、Trek ごと撤去した)。駆動役は ``scripts/vps-tick.sh`` (systemd の
     ``beacon-tick.timer`` から 1 分毎)。
 
     旧入口 ``POST /api/system/trek-scheduler/tick`` もこの入口へ転送するので、
