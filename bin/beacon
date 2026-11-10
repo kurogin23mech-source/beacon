@@ -2585,7 +2585,7 @@ Usage:
                                     blocks. --target narrows to one target;
                                     omit for every target. (ms-112)
 
-target kind: ms | task | operation | trek | free
+target kind: ms | task | operation | free
 EOF
                 ;;
             *)

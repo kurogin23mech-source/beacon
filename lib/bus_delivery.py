@@ -431,15 +431,14 @@ def classify_auto_execute(
 def format_operation_trigger_imperative(events: list) -> str:
     """Render the "AUTONOMOUS ACTION" inject for opted-in operation-trigger events.
 
-    Scope boundary (e-5803 review / Maint-3): this module currently shares ONLY
-    the operation-trigger imperative. The trek-channel Level-3 imperatives
-    (trek-trigger / trek-progress-check / trek-task-review / trek-leader-digest)
-    still live as Claude-hook-only formatters in bin/beacon-bus-inbox-hook.py and
-    are NOT rendered by the Codex inbox hook. That is intentional for now (e-5803's
-    scope was operation-trigger + the downgrade gate), not an oversight — a Codex
-    session gets the generic event list for trek DMs, not the forced-invoke block.
-    Extending trek parity to Codex is deliberately deferred to a follow-up so this
-    module isn't a half-migrated home that invites duplicate trek formatters.
+    Scope boundary (e-5803 review / Maint-3): this module shares ONLY the
+    operation-trigger imperative, and that is now the whole set. The trek-channel
+    Level-3 imperatives it used to defer (trek-trigger / trek-progress-check /
+    trek-task-review / trek-leader-digest) are gone with the device (ms-185
+    e-7079), so the "extend trek parity to Codex later" follow-up this docstring
+    used to promise is void — ms-185 decided not to reimplement it. The retired
+    channel names are listed in ``RETIRED_PROVENANCE_CHANNELS`` below, which is
+    what a received trek-* event meets now.
 
 
     Each event is an opted-in auto-execute event on the ``operation-trigger``

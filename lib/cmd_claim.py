@@ -61,7 +61,7 @@ def _claim_parse_target_env() -> tuple[str, str]:
     if not tk or not ti:
         print(
             "Error: --target <kind>:<id> is required "
-            "(kind = ms|task|operation|trek|free)",
+            "(kind = ms|task|operation|free)",
             file=sys.stderr,
         )
         sys.exit(1)
