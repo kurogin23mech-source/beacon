@@ -1605,9 +1605,11 @@ def collection_kind(data: dict | None, collection: str, *,
 
 
 def non_claimable_protocol_kinds(data: dict | None = None) -> tuple:
-    """Return the claim-PROTOCOL target kinds (``claims.valid_target_kinds`` — ms /
-    task / operation / trek / free) that the claim VIEW does NOT surface, sorted
-    (ms-109 e-5692 / PR#685 review finding C).
+    """Return the claim-PROTOCOL target kinds (= every member of
+    ``claims.valid_target_kinds()``) that the claim VIEW does NOT surface, sorted
+    (ms-109 e-5692 / PR#685 review finding C). The members are **not** re-listed
+    here: ms-185 removed ``trek`` from that set and a hand-written copy in this
+    docstring kept naming it (PR#840, two independent reviews).
 
     The negative-space twin of ``claim_target_kinds``, kept in the SAME place and
     style as the positive side so the ``beacon claim view`` missing-target hint can
@@ -1617,9 +1619,14 @@ def non_claimable_protocol_kinds(data: dict | None = None) -> tuple:
     Vocabulary bridge (written here once): the claim PROTOCOL kinds are a DIFFERENT
     namespace from target-CLASS kinds. A protocol kind is out-of-scope for the view
     exactly when it has no canonical claimable target-class kind
-    (``canonical_claim_kind`` returns ``""``): ``task`` / ``trek`` / ``free`` are not
-    Targets so the view cannot surface them, while ``ms`` / ``operation`` DO bridge
-    to claimable classes and so are NOT out-of-scope."""
+    (``canonical_claim_kind`` returns ``""``). Concretely: the kinds that are not
+    Targets cannot be surfaced by the view, while the ones that DO bridge to a
+    claimable class are NOT out-of-scope. Which kind falls on which side is
+    decided by ``canonical_claim_kind`` alone — run this function to see the
+    current answer rather than trusting a list written here, and note that a
+    kind removed from ``claims.valid_target_kinds()`` drops out of BOTH sides
+    (it is no longer iterated at all, so its absence from the result does not
+    mean ``canonical_claim_kind`` rejected it)."""
     import claims   # lazy: occupation is a base module, claims a leaf protocol
     return tuple(sorted(k for k in claims.valid_target_kinds()
                         if not canonical_claim_kind(k, data)))

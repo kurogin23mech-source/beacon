@@ -137,8 +137,16 @@ _READABLE_TARGET_KINDS = _VALID_TARGET_KINDS | frozenset({TARGET_TREK})
 
 
 def valid_target_kinds() -> frozenset:
-    """Public accessor for the claim target-kind vocabulary (``ms`` / ``task`` /
-    ``operation`` / ``trek`` / ``free``) — ms-109 e-5692 (PR#685 review finding A).
+    """Public accessor for the kinds a **new** claim may be created for —
+    ms-109 e-5692 (PR#685 review finding A). The set itself is
+    ``_VALID_TARGET_KINDS`` above; this docstring deliberately does **not**
+    re-list its members.
+
+    Listing them here is what broke: ms-185 removed ``trek`` from the set and
+    this sentence went on naming it, so the accessor whose whole job is to be
+    the place you learn the vocabulary told you the opposite of what it returns
+    (two independent reviews of PR#840 caught it). For the wider set a stored
+    payload may be **read** as, see :func:`readable_target_kinds`.
 
     Exposed so a shared surface (the ``beacon claim view`` out-of-scope hint) reads
     this vocabulary WITHOUT reaching into the private ``_VALID_TARGET_KINDS``: an
