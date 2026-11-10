@@ -120,6 +120,24 @@ def test_an_unknown_head_leaves_the_nudge_alone(tmp_path, monkeypatch):
     assert called["n"] == 0
 
 
+def test_leaving_a_nudge_for_an_unknown_head_is_disclosed(tmp_path, monkeypatch,
+                                                          capsys):
+    """head を確かめられずに据え置いたことを **言う** こと (e-7359 AC4)。
+
+    促しを残す側に倒すのは正しいが、「確かめたうえで残した」と「確かめられない
+    ので残した」は読み手にとって別の情報。黙って据え置くと、促しが出ている理由を
+    読み手が取り違える。
+    """
+    import cmd_trigger
+    tdir = _env(tmp_path, monkeypatch)
+    _seed_nudges(tdir)
+    monkeypatch.setattr(cmd_trigger, "pr_review_obligations",
+                        lambda *a, **k: {})
+    cmd_trigger._retire_satisfied_pr_review_nudges(_pr(""))
+    err = capsys.readouterr().err
+    assert "据え置き" in err and "確かめられず" in err, err
+
+
 def test_an_unresolved_obligation_leaves_the_nudge_alone(tmp_path, monkeypatch):
     """導出が成立しない (resolved=False) ときも触らないこと。"""
     import cmd_trigger

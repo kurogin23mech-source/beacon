@@ -723,8 +723,18 @@ def _retire_satisfied_pr_review_nudges(open_prs: list) -> None:
     for pr in open_prs:
         num = str(pr.get("number") or "").strip()
         head = str(pr.get("headRefOid") or "").strip()
-        if not num or not head:
-            continue                     # head 不明 = 触らない
+        if not num:
+            continue
+        if not head:
+            # ms-119 e-7359 AC4: **黙って据え置かない。** 促しを残す側に倒すのは
+            # 正しいが、「確かめたうえで残した」と「確かめられないので残した」は
+            # 読み手にとって別の情報。gh が PR を返したのに headRefOid が無い形は
+            # 稀なので、出ても騒がしくならない。
+            print(f"ℹ {core.extract_pr_repo_from_url(pr.get('url') or '') or 'PR'}"
+                  f"#{num} の促しは据え置きました — いまの差分 (head) を確かめられず、"
+                  f"関門を止めているかを判定できませんでした。",
+                  file=sys.stderr)
+            continue
         repo = core.extract_pr_repo_from_url(pr.get("url") or "")
         try:
             ob = pr_review_obligations(num, repo, head_sha=head)
