@@ -43,6 +43,7 @@ judge が削除されたフィルタを別名で再実装して「検査が通�
 独立レビューがこの穴の受け皿である。
 """
 import importlib.util
+import io
 import os
 import sys
 
@@ -87,7 +88,7 @@ def test_removed_symbols_are_really_gone(hook_module, name):
     )
 
 
-def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
+def test_decision_layer_downgrades_a_retired_channel_with_a_reason_tag():
     """届いた退役 channel が黙って消えないこと —— **実際に通る経路で**測る。
 
     初版はソースに `elif channel in TREK_RETIRED_CHANNELS:` の文字列が在ることで
@@ -98,8 +99,18 @@ def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
     いる」と報告しうる形だった。
 
     なので測るのは挙動にする: 退役 channel の event が降格され、降格理由が付くこと。
-    降格印 (`downgraded_from`) が立つことが、フック側で一覧に乗って AI に見える条件
-    そのものである (`if downgraded_from:` の経路)。
+
+    **この試験が測る層 (名前を実態に合わせた、ms-185 e-7396 項目 4)**: ここで測るのは
+    判定層 `lib/bus_delivery.classify_auto_execute` の戻り値 **だけ** である。旧名
+    (`test_retired_channel_is_still_disclosed_via_the_downgrade_path`) は「開示される」
+    = 受信フックの保証を名乗っていたが、フックは一度も走らせていない。実測: フック側で
+    理由をイベントに載せる配線 (`bin/beacon-bus-inbox-hook.py` の
+    `ev["_downgrade_reason"] = downgrade_reason`) を無効化してもこのファイルは全件緑に
+    なる。緑のガードは信頼されるので、名前が保証を過大に名乗る状態そのものが害だった。
+
+    フック側の配線は
+    `test_hook_surfaces_the_retired_channel_advice_end_to_end` が測る (そちらは配線を
+    壊すと赤くなる)。
     """
     import bus_delivery
 
@@ -115,6 +126,67 @@ def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
     assert delivery == "propose-to-ai", delivery
     assert downgraded_from == "auto-execute", downgraded_from
     assert reason == "retired-provenance-channel", reason
+
+
+def test_hook_surfaces_the_retired_channel_advice_end_to_end(
+        hook_module, tmp_path, monkeypatch, capsys):
+    """受信フックを **実際に流して**、退役 channel の案内が AI 向けの出力に出ること。
+
+    ms-185 e-7396 項目 4: 兄弟の
+    `test_decision_layer_downgrades_a_retired_channel_with_a_reason_tag` は判定層の
+    戻り値だけを測る。「開示が生きている」という**フック側の保証**は、フックを流さない
+    限り測れていない —— 実測で、理由をイベントに載せる配線を無効化しても兄弟の試験は
+    緑のままだった。ここがその配線を測る受け皿で、壊すと赤くなる。
+
+    測るのは挙動 (出力に案内が出るか) で、ソースの文字列ではない (このファイル冒頭の
+    「測り方について」を参照)。
+    """
+    import json as _json
+
+    root = tmp_path / "proj-retired"
+    (root / ".beacon").mkdir(parents=True, exist_ok=True)
+    # 退役 channel を **許可リストに入れた** 状態 (= 人間が昔 opt-in した残り) で
+    # 降格されるのが「退役」の意味。
+    (root / ".beacon" / "project.json").write_text(
+        _json.dumps({"bus_auto_execute_channels": ["trek-trigger"]}))
+    (root / ".beacon" / "session.json").write_text(
+        _json.dumps({"session_id": "sess-X"}))
+    (root / ".beacon" / "cloud.json").write_text(
+        _json.dumps({"api_url": "https://api.test", "project_id": "proj-1"}))
+
+    ev = {
+        "event_id": "ev-retired-1",
+        "channel": "trek-trigger",
+        "sender_session_id": "sv-other",
+        "created_at": "2026-11-10T00:00:00Z",
+        "payload": {"trek_id": "tk-1"},
+        "delivery": "auto-execute",
+    }
+
+    monkeypatch.setattr(hook_module, "_load_id_token", lambda: "fake-token")
+    monkeypatch.setattr(hook_module, "_list_unread", lambda *a, **kw: [ev])
+    monkeypatch.setattr(hook_module, "_ack_cursor", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(_json.dumps({"cwd": str(root), "session_id": "sess-X",
+                                 "hook_event_name": "UserPromptSubmit"})))
+    hook_module.main()
+    out = capsys.readouterr().out
+
+    assert "ev-retired-1" in out, (
+        "退役 channel の event が出力から消えています。扱いは「落とす」ではなく "
+        "「開示する」(e-7079)"
+    )
+    assert "downgraded from" in out, (
+        "降格の印が出ていません (フック側の `if downgraded_from:` の配線)"
+    )
+    # 回復手段が案内に出ること。trek-* は署名を要求する集合には居らず退役扱いなので、
+    # 直し方は「許可リストから外す」である (e-7396 項目 3)。
+    assert "auto-execute remove" in out, (
+        "回復手段の案内 (許可リストから外す) が出ていません。フック側で "
+        "`_downgrade_reason` をイベントに載せる配線が外れると、理由タグが落ちて "
+        "案内が別物になります"
+    )
 
 
 def test_hook_still_parses():

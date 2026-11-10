@@ -493,9 +493,10 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
 # has_required_provenance / classify_auto_execute) so the Codex inbox hook shares
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
-# Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
-# injected text — for the operation channels still as a command, for the
-# retired Trek channels only as the disclosed event id. Even after the
+# Payload-derived ids (task_id / op_id) are interpolated into the injected
+# text as a command, for the operation channels. (The retired channels have no
+# interpolation site any more: ms-185 removed their disclosure block, so there
+# is no id to splice.) Even after the
 # provenance gate, defend the f-string against a malformed id (newline / markdown / shell metacharacter)
 # leaking into the injected instruction by restricting to the id charset Beacon
 # actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
@@ -608,10 +609,17 @@ def _downgrade_advice(reason: str, channel: str = "") -> str:
     降格理由タグ ``non-system-envelope`` は、#812 が証拠の要求を channel ごとに
     張り替えた後、**2 つの別の世界**を指すようになった。``operation-trigger`` は
     「人間がその op_id を承認した封筒」を要求し、満たしていなければ
-    ``beacon operation approve <op-id>`` で**直せる**。``trek-*`` はサーバ署名を
-    要求し、operator には直せない。タグだけで分岐していた以前の実装は後者の文言
-    (「偽装の恐れ」「opt-in し直しても直りません」) を前者にも返し、**実在する
-    回復手段を隠して「直らない」と断定**していた。
+    ``beacon operation approve <op-id>`` で**直せる**。タグだけで分岐していた
+    以前の実装は、当時 ``trek-*`` に向けて書かれていた文言 (「偽装の恐れ」
+    「opt-in し直しても直りません」) を前者にも返し、**実在する回復手段を隠して
+    「直らない」と断定**していた。
+
+    **``trek-*`` の現在の扱い (ms-185 で変わった)**: これらは署名を要求する集合
+    (``GATED_PROVENANCE_CHANNELS``) には **居ない** —— 居るのは
+    ``operation-trigger`` だけで、``trek-*`` は ``RETIRED_PROVENANCE_CHANNELS``
+    (= サーバがもう発行しない channel) に移った。だから案内は「直せない」ではなく
+    「古い opt-in が残っているので ``beacon bus auto-execute remove --channel
+    <名前>`` で外す」になる。operator に回復手段が **在る**。
 
     **なぜ説明文をこの hook に持たせないか**: 同じ説明文が Codex 側の受信 hook
     (``scripts/codex-inbox-hook.py``) にも別コピーで在り、#812 の張り替えに
