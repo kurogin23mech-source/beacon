@@ -122,3 +122,42 @@ def test_hook_still_parses():
     import ast
     with open(HOOK, encoding="utf-8") as f:
         ast.parse(f.read())
+
+def test_the_per_event_loop_has_no_direct_network_call():
+    """event ごとのループが、その場でネットワークを叩かないこと。
+
+    撤去した層の実害は「event 1 件ごとに `GET /api/treks/{id}` を往復する」ことだった。
+    上の属性検査は **別名での再実装を捕まえられない** (そう明記した) が、独立レビューの
+    5 周目が「*形* なら安く測れる」と指摘した: event を回すループの中に I/O 呼び出しが
+    在るかどうかは AST で見える。現状の件数は 0 なので誤検知の土台が無い。
+
+    ## この検査が約束しないこと
+
+    **呼び出し先までは追わない。** ループが `_helper(ev)` を呼び、その helper が中で
+    往復するなら、この検査は素通りする。到達可能性の解析はまさに 4 周のレビューで
+    私が繰り返し失敗した「賢い検査」の側で、同じ轍は踏まない。ここが約束するのは
+    「ループ本体に I/O の呼び出しが直接書かれていない」という 1 つの形だけ。
+    """
+    import ast
+
+    with open(HOOK, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    main_fn = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+    loops = [n for n in ast.walk(main_fn)
+             if isinstance(n, ast.For) and "unread" in ast.unparse(n.iter)]
+    assert loops, (
+        "main に `for ... in unread:` のループが見つかりません。"
+        "この検査はそのループを対象にしているので、形が変わったら検査も見直してください"
+    )
+    io_names = ("_api_get", "urlopen", "urlretrieve", "Request")
+    offenders = []
+    for loop in loops:
+        for call in (n for n in ast.walk(loop) if isinstance(n, ast.Call)):
+            name = ast.unparse(call.func)
+            if any(tok in name for tok in io_names):
+                offenders.append(name)
+    assert not offenders, (
+        f"event ごとのループの中で直接ネットワークを叩いています: {offenders}。"
+        f"撤去した archived-trek フィルタの実害はこの形 (event 1 件ごとの往復) でした"
+    )

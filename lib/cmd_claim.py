@@ -62,10 +62,10 @@ def _claim_parse_target_env() -> tuple[str, str]:
         # 語彙は手書きしない: 正本 (claims._VALID_TARGET_KINDS) から組み立てる。
         # ms-185 (PR#840) まではここが hard-coded で、集合から trek を外したときに
         # 手で直す面が 4 つあった。導出なら直す面が 1 つ減る。
-        import claims as _c  # noqa: PLC0415
+        import claims as _claims  # noqa: PLC0415
         print(
             "Error: --target <kind>:<id> is required "
-            f"(kind = {'|'.join(sorted(_c.valid_target_kinds()))})",
+            f"(kind = {'|'.join(sorted(_claims.valid_target_kinds()))})",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -402,9 +402,25 @@ def classify_auto_execute(
         ``("propose-to-ai", "auto-execute", "")`` (allowlist miss, no reason tag).
       * auto-execute, channel in ``retired_channels`` →
         ``("propose-to-ai", "auto-execute", "retired-provenance-channel")``.
-        Checked BEFORE the provenance gate and regardless of the allowlist,
-        because a retired channel's opt-in is exactly the stale state we must
-        not trust (ms-185 e-7077 — see RETIRED_PROVENANCE_CHANNELS).
+        Checked BEFORE the provenance gate — a retired channel's opt-in is
+        exactly the stale state we must not trust (ms-185 e-7077 — see
+        RETIRED_PROVENANCE_CHANNELS).
+
+        **But AFTER the allowlist**, so a retired channel that was never
+        opted in reports the allowlist miss (reason tag ``""``), not the
+        retirement. That order is deliberate (``test_allowlist_miss_still_wins
+        _over_retired``): the empty reason tag is what the Claude hook branches
+        on when deciding whether to attach ``_downgrade_reason``. This docstring
+        used to claim "regardless of the allowlist", which an independent AX
+        review (PR#840 5 周目) measured as false. The claim is removed rather
+        than the order changed, because changing the order would overturn a
+        recorded decision.
+
+        Consequence the caller must handle: with the default (empty) allowlist,
+        a retired channel is indistinguishable here from a channel awaiting
+        human approval. A consumer that turns the reason tag into advice will
+        say "run ``auto-execute add``" for a channel that must never be opted
+        in. The advice layer is where that has to be told apart — not here.
       * auto-execute, channel is a provenance channel whose per-channel proof
         (``PROVENANCE_REQUIREMENTS``) is absent →
         ``("propose-to-ai", "auto-execute", "non-system-envelope")``.
