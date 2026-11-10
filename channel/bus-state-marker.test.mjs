@@ -29,6 +29,12 @@ test('reads a well-formed marker', () => {
     declaredState: 'awaiting_human',
     declaredAt: '2026-09-07T00:05:00.000Z',
     stateSince: '2026-09-07T00:00:00.000Z',
+    // ms-185 e-7352: stateDetail was added to the reader in ms-159 e-6488 and
+    // these two expectations were never updated. `assert/strict`'s deepEqual is
+    // deepStrictEqual, so a present-but-undefined key is NOT equal to an absent
+    // one — both tests had been failing ever since. Nobody saw it because CI ran
+    // pytest only and never these node tests.
+    stateDetail: undefined,
   })
 })
 
@@ -44,7 +50,42 @@ test('marker without state_since passes through undefined (server owns fallback,
     declaredState: 'idle',
     declaredAt: '2026-09-07T00:00:00.000Z',
     stateSince: undefined,
+    stateDetail: undefined,
   })
+})
+
+test('marker with state_detail passes it through (ms-159 e-6488)', () => {
+  // ms-185 e-7352: stateDetail had NO test of its own — which is why the two
+  // expectations above could go stale unnoticed. A field that only ever appears
+  // as `undefined` in the expectations is a field nobody is actually measuring.
+  // The hook writes state_detail only for awaiting_human (the wait detail, e.g.
+  // the Notification permission message), so that is the shape pinned here.
+  const p = tmpFile(JSON.stringify({
+    declared_state: 'awaiting_human',
+    declared_at: '2026-09-07T00:05:00.000Z',
+    state_since: '2026-09-07T00:00:00.000Z',
+    state_detail: 'Claude needs your permission to use Bash',
+    source_event: 'Notification',
+  }))
+  assert.deepEqual(readStateMarker(p), {
+    declaredState: 'awaiting_human',
+    declaredAt: '2026-09-07T00:05:00.000Z',
+    stateSince: '2026-09-07T00:00:00.000Z',
+    stateDetail: 'Claude needs your permission to use Bash',
+  })
+})
+
+test('non-string state_detail is dropped to undefined (never forwarded raw)', () => {
+  // The reader type-checks before passing through; a number / object / empty
+  // string must not reach the heartbeat as-is.
+  for (const bad of [42, {}, [], '', null]) {
+    const p = tmpFile(JSON.stringify({
+      declared_state: 'idle',
+      declared_at: '2026-09-07T00:00:00.000Z',
+      state_detail: bad,
+    }))
+    assert.equal(readStateMarker(p).stateDetail, undefined)
+  }
 })
 
 test('absent marker → null (back-compat common path)', () => {

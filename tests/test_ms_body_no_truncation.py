@@ -13,7 +13,9 @@ These tests pin the fix so future "simplify the CSS" edits cannot
 silently re-introduce a clamp.
 
 They are deliberately CSS-text-grep tests (same pattern as
-test_treks_tab_ui.py) so they run with zero browser dependency.
+test_url_axis_and_header_e7325.py) so they run with zero browser dependency.
+(ms-185 e-7325 まではここに test_treks_tab_ui.py を挙げていたが、Trek 画面ごと
+退避した。)
 
 ACs covered:
   AC #1 — ms-43 (and any) MS surface lets all entries reach DOM without

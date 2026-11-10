@@ -94,8 +94,9 @@ def normalize_profession(profession: str | None) -> str:
 # Scope note (honest limitation, not silent): the shared-frame path
 # (project_targets / iter_target_records / owned_target_classes) and the
 # storage decomposition / narrowing LOOKUPS are descriptor-aware here. The
-# server MySQL child-table DDL (server/mysql_client.py) and Trek scope
-# narrowing (trek.py) still consult the built-in seed at import time; wiring
+# server MySQL child-table DDL (server/mysql_client.py) still consults the
+# built-in seed at import time (Trek scope narrowing in trek.py was the other
+# such reader until ms-185 e-7070 removed it); wiring
 # THOSE to descriptors for a new occupation is a follow-up (descriptor targets
 # ride additively in the document store meanwhile, per the compat contract).
 # ---------------------------------------------------------------------------
@@ -3001,7 +3002,8 @@ def iter_deadline_candidates(data: dict):
 # invariant), and a Trek can span a development and a sales project at once. A
 # scope entry carries only ``{project, <kind>: ref}`` — not the occupation —
 # so the recognised vocabulary is the UNION across occupations. Registering a
-# new occupation's kinds HERE (not editing trek.py) is what keeps Trek from
+# new occupation's kinds HERE (rather than in the since-removed trek.py) is
+# what kept Trek from
 # hardcoding development vocabulary — the exact L1 domain-leak fable B-2 caught.
 NARROWING_KINDS = {
     "dev": ("milestone", "operation", "task"),
@@ -3015,7 +3017,8 @@ def all_narrowing_kinds(data: dict | None = None) -> tuple:
     identity/target_kind resolution order — milestone, operation, task — is
     unchanged for existing dev Treks; sales kinds append after). With ``data``,
     descriptor-defined kinds append after the built-ins (ms-122 e-3957); without
-    it, only the built-in seed (keeps trek.py's import-time call unchanged)."""
+    it, only the built-in seed (this shape was chosen to keep trek.py's
+    import-time call unchanged; that caller is gone — ms-185 e-7070)."""
     out: list = []
     for kinds in NARROWING_KINDS.values():
         for k in kinds:

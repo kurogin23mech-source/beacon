@@ -366,17 +366,25 @@ def set_root_archived(data: dict, archived: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Trek — the cross-project root variant (ms-153 e-5551 / SPEC 方針5 + 受入条件8;
-# DESIGN PATH ONLY, not implemented in this MS — spine §7 / migration ledger C8).
+# The cross-project root variant (ms-153 e-5551 / SPEC 方針5 + 受入条件8;
+# DESIGN PATH ONLY, never implemented — spine §7 / migration ledger C8).
+#
+# **ms-185 e-7071 — read this as a record, not as deferred work.** The motivating
+# case was Trek, and Trek is gone (e-7070). What is kept here is the mapping
+# itself: if a cross-project root is ever wanted again under some other name,
+# this is how it lands on the arms below, and that reasoning does not depend on
+# Trek. Nothing here is waiting to be built, and ``trek_store`` / ``trek_status``
+# (named below as "its own mechanism") are not a live alternative to migrate off
+# — ``trek_status`` no longer exists and ``trek_store`` is a read-only remnant.
 #
 # A ``project`` is the root of ONE project's target hierarchy. A ``Trek`` (the
-# 缶詰の徹夜作業部屋 / 事前承認スコープ) is the root over SEVERAL projects and
+# 缶詰の徹夜作業部屋 / 事前承認スコープ) was the root over SEVERAL projects and
 # sessions at once — i.e. the SAME root-target abstraction, but its child
-# collection spans projects rather than living inside a single project.json.
-# Today Trek rides its own mechanism (``trek_store`` / ``trek_status``), which is
-# why it "floats" beside the root abstraction (問題 P4).
+# collection spanned projects rather than living inside a single project.json.
+# It rode its own mechanism, which is why it "floated" beside the root
+# abstraction (問題 P4).
 #
-# Migration path when Trek is later re-homed onto this root-target abstraction:
+# How a cross-project root would have been re-homed onto this abstraction:
 #   1. work-item arm — a Trek's children are its member Targets across projects,
 #      enumerated through a cross-project analogue of
 #      ``occupation.iter_target_records`` (walk each joined project's records)

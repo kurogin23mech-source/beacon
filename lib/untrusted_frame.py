@@ -121,7 +121,7 @@ def _is_kept_authorized_imperative(ev: dict) -> bool:
         # Without the provenance definitions we cannot confirm the opt-in
         # exception, so fail closed: treat as untrusted.
         return False
-    if channel not in bd.SYSTEM_PROVENANCE_CHANNELS:
+    if channel not in bd.GATED_PROVENANCE_CHANNELS:
         return False
     # Per-channel proof — see PROVENANCE_REQUIREMENTS, NOT one fixed envelope
     # shape (the set's name still says "SYSTEM" for wire-compatibility reasons

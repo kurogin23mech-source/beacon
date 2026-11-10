@@ -247,31 +247,9 @@ class LocalStore:
             if meta.get(k):
                 result[k] = meta[k]
         return result
-
-    def list_treks(self, *, actor_id: str | None = None,
-                   status: str = "", include_archived: bool = False,
-                   all_actors: bool = False) -> list[dict]:
-        """List trek docs from the local trek_store directory.
-
-        ``all_actors`` is honored by the cloud backend (= admin view) and
-        ignored locally because there is no remote registry to broaden
-        beyond the actor filter.
-        """
-        import trek_store
-        return trek_store.list_treks(
-            actor_id=actor_id,
-            status=status or None,
-            include_archived=include_archived,
-        )
-
-    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
-    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
-    # which went with the CLI in e-7069. ``list_treks`` stays because
-    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
-    # bypass is removed in e-7080, and this passthrough goes with it.
-
-    # ms-118 / e-4231 — Organizations (local file store, ~/.beacon/orgs/)
-
+    # ms-185 e-7322: ここに Trek の読み出し passthrough (``list_treks``) が在った。
+    # 落とした経緯と「残置の根拠が誤りだった」話は ``lib/store.py`` の同じ箇所に
+    # 1 本だけ書いてある (写しを増やすと 1 つだけ古くなるので、そちらが正本)。
     def create_org(self, *, name: str, creator_user_id: str = "",
                    creator_email: str = "") -> dict:
         """Build a team org doc and persist it to the local org_store."""
@@ -511,11 +489,16 @@ class LocalStore:
 
     # ms-84 Phase 2 — trek read passthrough.
 
-    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
-    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
-    # which went with the CLI in e-7069. ``list_treks`` stays because
-    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
-    # bypass is removed in e-7080, and this passthrough goes with it.
+    # ms-185 e-7070 / e-7322: ``get_trek`` と ``list_treks`` の passthrough は
+    # どちらもここから落ちた。経緯は ``lib/store.py`` の同じ箇所に 1 本だけ書いて
+    # ある (そちらが正本)。
+    #
+    # **この注記は 5 つ目の重複だった** (PR #839 2 周目の独立 AX レビュー,
+    # misleading)。4 ファイルの重複を 1 本化したとき、同じファイルの数百行違いに
+    # 在ったこのコピーを見落としており、「``list_treks`` stays because cmd_bus
+    # still reaches it」= **偽の根拠**を現在形で述べたまま残っていた。同じファイルの
+    # 前半が「それは誤りだった」と書いているので、読む人は矛盾する 2 つの根拠を
+    # 突き合わせる羽目になる。目視で数えたのが間違いで、機械で列挙すべきだった。
 
     def _file_hash(self) -> str | None:
         try:

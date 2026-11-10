@@ -144,8 +144,22 @@ def _derive_action(method: str, path: str) -> str:
     # being confused with project member ops.
     if path.startswith("/api/treks"):
         # ms-185 e-7070: the member / scope / halt / leader / start / summary
-        # sub-branches named write endpoints that no longer exist. Only the
-        # read routes survive (= GET), so one arm is all that can be reached.
+        # sub-branches named write endpoints that no longer exist, so they
+        # collapsed into this one arm.
+        #
+        # ms-185 e-7071 — **no arm here is reachable today, including this one.**
+        # The earlier note said "one arm is all that can be reached", which
+        # overstated it: this function is only called for ``_AUDIT_METHODS``
+        # (POST/PUT/PATCH/DELETE) and ``routers_treks.py`` now mounts GET only,
+        # so nothing routed can arrive here at all.
+        #
+        # It is kept rather than deleted because it is the fail-safe side: if a
+        # mutating /api/treks route ever comes back, this names it ``trek.*``
+        # instead of letting it fall through to ``project.*`` with an empty
+        # project_id — a misfiled audit record is harder to notice than a
+        # missing feature. ``/api/treks`` stays in ``_AUDIT_PATHS`` for the same
+        # reason. The creation route not coming back is pinned by
+        # ``tests/test_trek_removal_pinned_e7079.py``.
         return f"trek.{method.lower()}"
     for plural, singular in _RESOURCE_SINGULAR.items():
         if f"/{plural}" in path:
@@ -1538,7 +1552,8 @@ def require_envelope_for_action(action_name: str):
 # ms-109 e-3699 (fable B-2): opportunity/account narrow a sales Trek scope, the
 # same way milestone/operation/task narrow a dev one. Both models carry the full
 # occupation-agnostic vocabulary; the endpoints copy whichever keys are present
-# via trek_mod.NARROWING_KEYS rather than naming them one by one.
+# via trek_mod.NARROWING_KEYS rather than naming them one by one (trek_mod was
+# removed in ms-185 e-7070; this note records how the body used to resolve them).
 
 
 # ms-99 / e-2830 — Trek slot schema v2 body models. Slot-specific verbs
@@ -1648,7 +1663,8 @@ def _load_org_for_member(org_id: str, user: dict) -> dict:
 
 # ---------------------------------------------------------------------------
 # ms-97 / Phase 7-C / AC24, e-2603 — blanket scope approval endpoints.
-# Leader-only. The category string is validated by trek_mod helpers.
+# Leader-only. The category string was validated by trek_mod helpers (removed
+# in ms-185 e-7070 with the rest of the body).
 # ---------------------------------------------------------------------------
 
 
@@ -2856,14 +2872,19 @@ class SystemTickRequest(BaseModel):
 
     **Not trek-only — do not delete this with Trek (ms-185 e-7065 review,
     raised independently by both the AX and the maintainability judge).**
-    This model is the body of the one entry point that drives three things:
+    This model is the body of the one entry point that drives production
+    autonomy. Today that is two things, both target-agnostic:
 
       1. **Operation firing** (= recurring operational work) and
       2. **deadline reminders** (ms-139 e-4953) — both via the
          target-agnostic ``lib/tick_scheduler`` seam, which has nothing to
-         do with Trek and must survive ms-185, and
-      3. the **Trek aggregation** (``_run_trek_tick``) — the part ms-185
-         folds away.
+         do with Trek and must survive ms-185.
+
+    A third item used to sit here — the Trek aggregation (``_run_trek_tick``) —
+    and ms-185 e-7070 deleted it. It is named in the past tense on purpose: an
+    enumeration written in the present tense is read as the current contents
+    even when a correction follows further down, which is how a folded
+    mechanism keeps being described as live.
 
     The previous name said "trek" while the endpoint had already been
     re-addressed to the trek-neutral path, so an AI folding Trek could grep
@@ -2962,16 +2983,16 @@ def _require_scheduler_key(request) -> None:
 def _run_system_tick(body) -> dict:
     """定期発火を 1 回走らせる (ms-185 e-7065)。
 
-    この関数が**本番の自律の全駆動**である。中身は 2 つ:
+    この関数が**本番の自律の全駆動**である。中身は 1 つ:
 
-      1. **Trek の集約** (``_run_trek_tick``) — 畳む対象 (ms-185)。
-      2. **ターゲットに依存しない定期発火** (``_fire_due_scheduled``) —
-         Operation の発火と締切リマインド。``lib/tick_scheduler`` の
-         「対象を問わない周期発火」の部品に載っており、Trek とは無関係に残る。
+      **ターゲットに依存しない定期発火** (``_fire_due_scheduled``) —
+      Operation の発火と締切リマインド。``lib/tick_scheduler`` の
+      「対象を問わない周期発火」の部品に載っており、Trek とは無関係に残る。
 
-    2 を 1 の中から取り出したのがこの分離の目的。Trek を畳むときに 2 を一緒に
-    落とさないよう、住所を Trek 非依存にしてある (入口も
-    ``POST /api/system/tick``)。
+    かつてはここに **Trek の集約** (``_run_trek_tick``) が同居しており、上の 1 つを
+    その中から取り出したのがこの分離の目的だった。ms-185 e-7070 で Trek の集約は
+    削除済みで、残っているのは取り出した側だけである。住所も Trek 非依存にしてある
+    (入口は ``POST /api/system/tick``)。
     """
     now = _scheduler_now()
     # ms-66 fix: bind now_iso UNCONDITIONALLY here. It is read below by

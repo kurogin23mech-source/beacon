@@ -61,17 +61,29 @@ OPERATION_TRIGGER_CHANNEL = "operation-trigger"
 # production. The tests were green because they pinned ``operation-trigger``
 # against a synthetic T1-system envelope, a shape production cannot produce.
 # So the proof was re-pointed from "the server signed it (for a Trek)" to "the
-# human approved it (for this Operation)". The set name is kept because the
-# downgrade reason tag ``non-system-envelope`` is a wire value the inbox hooks
-# branch on to choose which fix to advise (e-5803 review); renaming the vocabulary
-# is a separate change from re-pointing the gate.
+# human approved it (for this Operation)".
+#
+# ms-185 e-7157 — **the set was renamed from ``SYSTEM_PROVENANCE_CHANNELS``.**
+# After the re-pointing above, that name asserted something false about
+# ``operation-trigger``: the evidence it demands is a human's approval, not a
+# server signature. The long comment here disclosed that, which is why the
+# rename was deferred twice — but two independent reviews raised it in a row,
+# and a name that has to be corrected by the comment under it is a name that
+# misleads anyone who only greps. The predicate had already been neutralised
+# (``has_system_provenance`` → ``has_required_provenance``), so the set name was
+# the last surface still claiming "system".
+#
+# **The downgrade reason tag ``non-system-envelope`` was NOT renamed**, and must
+# not be: it is a wire value the inbox hooks branch on to choose which fix to
+# advise (e-5803 review). Renaming the vocabulary a receiver reads off the wire
+# is a different, breaking change from renaming a Python identifier.
 #
 # Kept as a literal (not derived from ``PROVENANCE_REQUIREMENTS.keys()``) because
 # ``classify_auto_execute`` binds it as a default argument at def time, and the
 # map cannot be built until its predicates exist. The two are held in agreement
 # by ``test_gated_channels_match_their_requirements``, which fails if a name sits
 # in one and not the other — a structural check instead of fragile init order.
-SYSTEM_PROVENANCE_CHANNELS = frozenset({
+GATED_PROVENANCE_CHANNELS = frozenset({
     "operation-trigger",
 })
 
@@ -84,7 +96,7 @@ SYSTEM_PROVENANCE_CHANNELS = frozenset({
 # That is sound while "opted in" and "server-minted" are decided independently.
 #
 # It stops being sound the moment a channel is REMOVED from
-# ``SYSTEM_PROVENANCE_CHANNELS`` while stale opt-ins for it still sit in some
+# ``GATED_PROVENANCE_CHANNELS`` while stale opt-ins for it still sit in some
 # project's ``bus_auto_execute_channels``. The channel then silently changes
 # class — from "signature required" to "trusted on the opt-in alone" — and an
 # unsigned ``delivery=auto-execute`` event on it is executed. Measured on
@@ -99,7 +111,7 @@ SYSTEM_PROVENANCE_CHANNELS = frozenset({
 # opt-ins) is still done — this is defence in depth, not a substitute, because
 # allowlists live in every project's own record and we cannot reach them all.
 #
-# **Do not just delete a name from SYSTEM_PROVENANCE_CHANNELS — move it here.**
+# **Do not just delete a name from GATED_PROVENANCE_CHANNELS — move it here.**
 # ``tests/test_retired_provenance_channels_e7077.py`` fails if a known
 # server-minted channel family member is in neither set.
 #
@@ -212,7 +224,7 @@ def has_approved_operation_envelope(ev: dict) -> bool:
 
 
 # What each gated channel accepts as proof of human authority. A channel may only
-# appear in SYSTEM_PROVENANCE_CHANNELS if it names a predicate here, which is what
+# appear in GATED_PROVENANCE_CHANNELS if it names a predicate here, which is what
 # structurally prevents the state ms-185 e-7078 found: a gate whose proof no issuer
 # can mint (the judgment stays in the code, always fails, and nobody notices
 # because the failure looks like ordinary caution).
@@ -288,7 +300,7 @@ def has_required_provenance(ev: dict) -> bool:
     **Fail-closed on an undeclared channel.** A channel with no entry in
     ``PROVENANCE_REQUIREMENTS`` has no proof it could present, so this returns
     False. Callers reach this only for channels they are gating (membership in
-    ``SYSTEM_PROVENANCE_CHANNELS``), and for a gated channel "we never said what
+    ``GATED_PROVENANCE_CHANNELS``), and for a gated channel "we never said what
     counts as proof" must mean "not proven", never "nothing required".
 
     That is not the unsatisfiable judgment ms-185 e-7078 set out to remove: the
@@ -379,7 +391,7 @@ def classify_auto_execute(
     # 引数の順から優先順位を類推して逆に取る。優先順位が逆になっても降格自体は
     # 変わらないが理由タグが変わり、消費側の案内が反転する。
     retired_channels=RETIRED_PROVENANCE_CHANNELS,
-    provenance_channels=SYSTEM_PROVENANCE_CHANNELS,
+    provenance_channels=GATED_PROVENANCE_CHANNELS,
 ) -> tuple:
     """Resolve one event's effective delivery + downgrade metadata.
 
@@ -477,7 +489,7 @@ __all__ = [
     "PROPOSE_TO_AI",
     "NOTIFY_USER_ONLY",
     "OPERATION_TRIGGER_CHANNEL",
-    "SYSTEM_PROVENANCE_CHANNELS",
+    "GATED_PROVENANCE_CHANNELS",
     "DOWNGRADE_NON_SYSTEM_ENVELOPE",
     "OPERATION_ENVELOPE_TIER",
     "PROVENANCE_REQUIREMENTS",

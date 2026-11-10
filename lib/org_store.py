@@ -6,7 +6,8 @@ project を束ねる) なので、どの ``project.json`` の中にも入れな�
 **cloud mode** では CLI は server の HTTP API (``/api/orgs``) 経由で
 ``server/store_router`` (= firestore_client / mysql_client) に届く (= StoreApi)。
 
-本モジュールは local mode のみを担う (= trek_store と同型の分離)。cloud mode は
+本モジュールは local mode のみを担う (= local 専用モジュールとして分ける形。
+同型だった trek_store は ms-185 e-7322 で呼び出し元ゼロになり退避した)。cloud mode は
 StoreApi + api_client が担当する。純関数の org doc 組み立ては lib/org.py。
 
 Test override: ``BEACON_ORGS_DIR`` を tmp dir に向ければ差し替えられる。

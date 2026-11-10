@@ -493,33 +493,9 @@ class StoreApi:
             if "404" in str(e):
                 raise ValueError(f"Milestone '{ms_id}' not found") from e
             raise
-
-    # ms-84 Phase 2 — trek read passthrough.
-
-    def list_treks(self, *, actor_id: str | None = None,
-                   status: str = "", include_archived: bool = False,
-                   all_actors: bool = False) -> list[dict]:
-        """List trek docs via the cloud API.
-
-        ``actor_id`` is ignored on cloud (= server filters by auth token's
-        user); ``all_actors`` requires admin role server-side (non-admin
-        gets 403 as RuntimeError, which propagates up to the CLI for
-        display, matching legacy cloud branch behavior).
-        """
-        return self._client.list_treks(
-            status=status or "",
-            include_archived=include_archived,
-            all_actors=all_actors,
-        )
-
-    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
-    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
-    # which went with the CLI in e-7069. ``list_treks`` stays because
-    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
-    # bypass is removed in e-7080, and this passthrough goes with it.
-
-    # ms-118 / e-4231 — Organizations (cloud API, /api/orgs)
-
+    # ms-185 e-7322: ここに Trek の読み出し passthrough (``list_treks``) が在った。
+    # 落とした経緯と「残置の根拠が誤りだった」話は ``lib/store.py`` の同じ箇所に
+    # 1 本だけ書いてある (写しを増やすと 1 つだけ古くなるので、そちらが正本)。
     def create_org(self, *, name: str, creator_user_id: str = "",
                    creator_email: str = "") -> dict:
         """Create a team org via the cloud API.

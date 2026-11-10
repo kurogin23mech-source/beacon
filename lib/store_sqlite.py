@@ -122,16 +122,9 @@ class SqliteStore:
 
     def get_document(self, doc_id: str) -> dict:
         return self._files.get_document(doc_id)
-
-    def list_treks(self, **kwargs):
-        return self._files.list_treks(**kwargs)
-
-    # ms-185 e-7070: ``get_trek`` (single-doc read) was removed here. Its only
-    # callers were ``beacon trek show`` / ``timeline`` / ``aggregate``, all of
-    # which went with the CLI in e-7069. ``list_treks`` stays because
-    # ``lib/cmd_bus.py`` still reaches it for the send-budget bypass; that
-    # bypass is removed in e-7080, and this passthrough goes with it.
-
+    # ms-185 e-7322: ここに Trek の読み出し passthrough (``list_treks``) が在った。
+    # 落とした経緯と「残置の根拠が誤りだった」話は ``lib/store.py`` の同じ箇所に
+    # 1 本だけ書いてある (写しを増やすと 1 つだけ古くなるので、そちらが正本)。
     def create_org(self, **kwargs) -> dict:
         return self._files.create_org(**kwargs)
 

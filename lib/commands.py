@@ -68,7 +68,7 @@ from commands_shared import (  # noqa: F401  (re-exported for import-path stabil
     _refuse_if_bus_origin,
     _get_notes_path,
     # ms-127 e-4318-foundation: cross-family identity / cloud-project helpers
-    # (used by org/member + deploy/cloud/trek/bus). Re-exported so the callers
+    # (used by org/member + deploy/cloud/bus). Re-exported so the callers
     # remaining in commands.py and external `commands.X` keep resolving them.
     _project_id_for_ops,
     _read_credentials_for_identity,
@@ -275,8 +275,9 @@ from cmd_operation import (  # noqa: F401
 
 # ms-127 e-4803: bus family moved to cmd_bus.py, plus its budget/recipient/
 # identity leaf helpers promoted to commands_shared (foundation). Re-export only
-# the 5 promoted helpers that commands.py callers still use by bare name
-# (_arm_for_trek / cmd_acquisition_attack_list_send / _check_recipient_live_health);
+# the promoted helpers that commands.py callers still use by bare name
+# (cmd_acquisition_attack_list_send / _check_recipient_live_health; the list said
+# 5 and led with _arm_for_trek, which ms-185 e-7070 removed with cmd_trek.py);
 # the 6 identity/swap/budget-path helpers those pull in transitively live in
 # commands_shared but are NOT referenced by commands.py, so they are not
 # re-exported. Bus-handler callers resolve all of these inside cmd_bus, so tests

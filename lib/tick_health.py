@@ -67,7 +67,7 @@ from typing import Optional
 # cadences (10 x 1 min) without any tick means the driver itself is dead.
 # Ten rather than two to avoid flapping on a single slow tick / deploy restart.
 # (ms-185 e-7066: this used to be justified by the Trek progress-check cadence.
-# Trek is being folded away, and a liveness threshold must not rest on the
+# Trek has since been folded away, and a liveness threshold must not rest on the
 # cadence of one particular workload — the driver's own cadence is the honest
 # basis, and it is the thing this watchdog actually watches.)
 DEFAULT_STALE_AFTER_SECONDS = 600

@@ -1203,7 +1203,8 @@ def cmd_pr_request_changes():
     #   - PR review STATE machine → ``changes_requested`` (GitHub-aligned:
     #     pending → changes_requested → approved; see cmd_pr.py:297).
     #   - decision-arm VERDICT enum → ``re-work`` (approve / re-work / reject, shared
-    #     with the Trek leader-review verdict; see server/decision_event.py:377).
+    #     with what was the Trek leader-review verdict until ms-185 removed it;
+    #     the enum itself stays — see server/decision_event.py).
     # They are NOT unified: the state machine and the verdict vocabulary are separate
     # axes. This mapping is the one point they meet, so it is named here explicitly.
     _record_review_decision(entry_id, "re-work", rationale,
@@ -1271,15 +1272,16 @@ def cmd_pr_merge():
         print("Error: entry ID required", file=sys.stderr)
         sys.exit(1)
     # ms-92 / e-2169 — AI-session merge ban. Refuses the call when the
-    # 3 escape hatches (Trek-finalize consent / user override / human
-    # session kind) are all absent. The error message names every escape
+    # 2 escape hatches (user override / human session kind) are all absent.
+    # (A third, a Trek-finalize consent, existed until ms-185 e-7079.)
+    # The error message names every escape
     # so a stuck user can pick the right one for their context.
     if _ai_session_merge_ban_active():
         print(
             "Error: individual PR merge from an AI session is refused "
             "(ms-92 / e-2169 structural ban).\n"
             "  See CORE doc `pr-review-autonomy-boundary` for the role "
-            "split (= AI approves, Trek-unit user merges, user releases).\n"
+            "split (= AI approves, the user merges, the user releases).\n"
             "  Bypass paths (= one of these makes the merge proceed):\n"
             # ms-185 e-7079: there used to be a third path, a Trek-unit
             # collective confirmation. The Skill that minted it was deleted in
@@ -1303,7 +1305,7 @@ def cmd_pr_merge():
         sys.exit(1)
     # ms-119 e-4060: refuse to merge while independent reviews are still owed for
     # this PR (same gate as approve). BEFORE save_project so a blocked merge
-    # persists nothing. The Trek-finalize / user-override escape hatches above
+    # persists nothing. The user-override / human-session escape hatches above
     # are orthogonal (they gate the AI-merge-autonomy boundary, not the review).
     _review_gate_check(_pr_number_from_url(entry.get("meta", {}).get("url", "")),
                        pr_repo=_recorded_pr_repo(entry),

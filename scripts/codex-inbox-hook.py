@@ -247,6 +247,29 @@ def render_provenance_advice_lines(channels, *, bd) -> str:
     )
 
 
+def render_retired_advice(*, bd) -> str:
+    """引退した channel の降格について「原因と直し方」の 1 句を共有層から取る。
+
+    **直した穴 (ms-185 e-7308)**: 証拠欠落の理由は #812 のレビュー後に
+    ``render_provenance_advice_lines`` へ切り出して共有層へ委譲したが、**引退理由は
+    凍結コピーのまま** ``main()`` の中に残っていた。実測すると、共有層の文言を別物に
+    差し替えても Codex 側の出力は変わらなかった (= 委譲していない)。Claude 側には
+    4 理由すべてを共有層と等値比較する検査 (``test_claude_hook_does_not_keep_its_own
+    _copy_of_the_other_reasons``) が在ったので、同じ非対称がこの理由だけ残っていた。
+
+    e-7071 で 4 つの channel を実際に引退させたため、この経路が初めて実運用に乗った。
+    2 つの文言は同じことを言っていたが、守るものが無いので片方だけ直した瞬間に黙って
+    ズレる形だった。
+
+    ``bd`` が None (= lib が読めない環境) のときは**回復手段を推測で名乗らない**
+    (e-7077 の教訓。``render_provenance_advice_lines`` と同じ姿勢)。
+    """
+    if bd is None:
+        return ("channel は allowlist 済だが、サーバが発行する channel では "
+                "なくなっています (共有層を読めないため回復手段を提示できません)")
+    return bd.downgrade_advice(bd.DOWNGRADE_RETIRED_CHANNEL, "")
+
+
 def tally_downgrade_reasons(reasons, *, bd) -> dict:
     """降格理由のリストを、理由ごとの件数に畳む (ms-185 e-7077 / 保守性レビュー)。
 
@@ -478,13 +501,12 @@ def main() -> int:
             "  上の一覧に通常イベントとして出ています。自動実行はしないでください。\n"
         )
     if downgraded_retired:
+        # ms-185 e-7308: 文言は lib/bus_delivery.downgrade_advice が唯一の所有者。
+        # 以前はここに凍結コピーが在り、共有層を差し替えても追従しなかった。
         parts.append(
             f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
-            f"{downgraded_retired} 件 — channel は allowlist 済だが、"
-            "サーバが発行する channel ではなくなっています (= 古い opt-in が残った "
-            "状態、ms-185 e-7077)。opt-in し直しても直りません。直すには "
-            "`beacon bus auto-execute remove --channel <名前>` で古い opt-in を "
-            "外してください。上の一覧に通常イベントとして出ています。自動実行は "
+            f"{downgraded_retired} 件 — {render_retired_advice(bd=bd)}。"
+            "上の一覧に通常イベントとして出ています。自動実行は "
             "しないでください。\n"
         )
     if downgraded_other:
