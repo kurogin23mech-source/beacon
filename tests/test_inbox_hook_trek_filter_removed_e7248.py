@@ -180,13 +180,41 @@ def test_hook_surfaces_the_retired_channel_advice_end_to_end(
     assert "downgraded from" in out, (
         "降格の印が出ていません (フック側の `if downgraded_from:` の配線)"
     )
-    # 回復手段が案内に出ること。trek-* は署名を要求する集合には居らず退役扱いなので、
-    # 直し方は「許可リストから外す」である (e-7396 項目 3)。
-    assert "auto-execute remove" in out, (
-        "回復手段の案内 (許可リストから外す) が出ていません。フック側で "
-        "`_downgrade_reason` をイベントに載せる配線が外れると、理由タグが落ちて "
-        "案内が別物になります"
+
+    # ここから先は **何を測れるか** を厳密に合わせる (PR#842 独立保守性レビュー,
+    # medium)。初版は `assert "auto-execute remove" in out` という部分一致で、
+    # 失敗文には「回復手段の案内が出ていません」と書いていた。judge が共有層の
+    # 文面を「絶対に `beacon bus auto-execute remove --channel <名前>` を実行し
+    # ないでください」(= 部分文字列は保ったまま意味を反転) に変えて全件緑を実測
+    # した。つまりこの試験は『2 語がどこかに在る』しか見ておらず、文面の正しさを
+    # 保証しているかのように名乗っていた —— この試験の兄弟をまさにその理由で
+    # 改名した直後に、同じ過ちを新しい試験で犯していた。
+    import bus_delivery as _bd
+
+    # (1) 測れること: フックが **共有層の文面をそのまま** 出していること (= 委譲)。
+    #     文面の著者は lib 側なので、ここで測るのは「運んでいるか」だけ。
+    expected = _bd.downgrade_advice(_bd.DOWNGRADE_RETIRED_CHANNEL, "trek-trigger")
+    assert expected in out, (
+        "共有層 (lib/bus_delivery.downgrade_advice) が返す退役の案内が、フックの "
+        "出力にそのまま出ていません。フックが独自の文面を持ち始めたか、理由タグが "
+        "届いていません"
     )
+
+    # (2) 測れること: 退役の案内が **許可リスト漏れの既定文に落ちていない** こと。
+    #     フック側で `_downgrade_reason` をイベントに載せる配線が外れると理由タグが
+    #     空になり、案内が既定文へ退行する。これは挙動の差なので機械で測れる。
+    generic = _bd.downgrade_advice("", "trek-trigger")
+    if generic != expected:
+        assert generic not in out, (
+            "退役した channel に、許可リスト漏れの既定文が出ています = 理由タグが "
+            "落ちて案内が退行しています"
+        )
+
+    # 測れないこと (= この試験が約束しないこと): **文面の意味が正しいか**。
+    # 上の (1) は共有層と一致することしか見ないので、lib 側で意味を反転させれば
+    # 両方が同時に変わり緑のまま通る。散文の正しさを機械で測ろうとする試験は、
+    # このファイル冒頭が記録しているとおり偽の赤と偽の緑を交互に作って発火不能に
+    # 着地した。意味の drift は独立レビューが見る (実際 PR#842 で捕まえた)。
 
 
 def test_hook_still_parses():
