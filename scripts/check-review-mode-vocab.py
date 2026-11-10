@@ -24,9 +24,24 @@ instrument のどこにも無かった。
   機械では測れない。
 - 語が散文のどこに出るかは区別しない (後述の抽出規則の限界)。
 
-**抽出規則**: ``mode`` の文脈でバッククォートに囲まれた語、および
-``**<語> mode**`` の形。``ARTIFACT_MODES`` という識別子そのものや、
-``scripts/`` への参照は語彙の名乗りではないので除く。
+**抽出規則**: ``mode`` の文脈でバッククォートに囲まれた語、``**<語> mode**``
+の形、および **出力スキーマ例の ``"mode": "..."`` 行の値**。
+``ARTIFACT_MODES`` という識別子そのものや、``scripts/`` への参照は語彙の
+名乗りではないので除く。
+
+3 つ目 (JSON の値) は後から足した。初版は散文のバッククォート語だけを見ており、
+instrument が judge に書かせる **出力スキーマ例**は JSON の二重引用符なので
+バッククォートが無く、まるごと死角に入っていた。そしてまさにその死角に
+``"mode": "diff | full"`` が残っていた —— この検査が消すために作られた
+``full`` が、この検査の緑のまま ``maintainability-review`` に居残っていた
+(独立保守性レビュー high, 2026-11-10)。**緑のガードは信頼されるので、
+見えない形で残る名乗りは無ガードより悪い。**
+
+JSON の値は列挙なので ``|`` と ``/`` で割り、**割った断片がまるごと mode の形
+(``[a-z][a-z-]{2,}``) のときだけ**語彙として数える。断片に説明文が混じる形
+(例 ``"bundle の mode の値をそのまま (diff / whole-target / ...)"``) で
+``bundle`` のような非 mode 語を拾わないための形。除外リスト (``_NOT_A_MODE``)
+を育てて黙らせる方向には **しない** —— あれは育つほど本物のズレを隠す。
 
 plain script (pytest 非依存) — `scripts/ci-strict-drift-guards.sh` から呼ばれる。
 終了コード: 揃っていれば 0、ズレていれば 1。
@@ -48,6 +63,17 @@ INSTRUMENTS = ("ax-review", "maintainability-review", "philosophy-review")
 #: ``mode`` の近くでバッククォートに囲まれた語 / ``**<語> mode**`` の形。
 _BACKTICKED = re.compile(r"`([a-z][a-z-]{2,})`")
 _BOLD_MODE = re.compile(r"\*\*`?([a-z][a-z-]{2,})`?\s*mode\*\*")
+
+#: 出力スキーマ例の ``"mode": "..."`` 行。JSON の値はバッククォートが無いので
+#: ``_BACKTICKED`` では見えない (初版の死角 — docstring の抽出規則を参照)。
+_JSON_MODE_VALUE = re.compile(r'"mode"\s*:\s*"([^"]*)"')
+
+#: JSON の値を列挙として割る区切り。
+_MODE_VALUE_SPLIT = re.compile(r"[|/]")
+
+#: 割った断片が **まるごと** これに一致したときだけ mode の名乗りと数える
+#: (説明文が混じる断片から非 mode 語を拾わないため)。
+_MODE_SHAPED = re.compile(r"[a-z][a-z-]{2,}")
 
 #: mode の語彙ではないが、同じ形で現れる語 (除外しないと偽の赤になる)。
 #: ここに足すときは「本当に mode 名ではない」ことを確かめること — 安易に足すと
@@ -72,6 +98,12 @@ def _declared_modes(path: str) -> set:
         if "mode" not in line:
             continue
         found.update(_BACKTICKED.findall(line))
+    # 出力スキーマ例の ``"mode": "..."`` の値 (JSON なのでバッククォートが無い)。
+    for value in _JSON_MODE_VALUE.findall(text):
+        for seg in _MODE_VALUE_SPLIT.split(value):
+            seg = seg.strip().strip("()`'\"").strip()
+            if _MODE_SHAPED.fullmatch(seg):
+                found.add(seg)
     return {m for m in found if m not in _NOT_A_MODE}
 
 

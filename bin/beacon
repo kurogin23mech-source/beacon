@@ -501,17 +501,27 @@ case "${1:-}" in
                 # ms-119 e-6859: 関門の状態を副作用なしで読む。促し
                 # (`beacon trigger check`) は別の面なので、関門を確かめたいときは
                 # こちらを使う (促しの空リストを「関門が開いた」と読ませない)。
-                _rst_pr="" _rst_repo="" _rst_json=""
+                _rst_pr="" _rst_repo="" _rst_json="" _rst_target=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --pr)   _need_flag_value "$#" "$1"; _rst_pr="$2";   shift 2 ;;
                         --repo) _need_flag_value "$#" "$1"; _rst_repo="$2"; shift 2 ;;
+                        # 兄弟 (`review done` / `review skip`) が (--pr | --target) を
+                        # 取るので、この動詞にも --target を転移して打つ呼び出し側が居る
+                        # (独立 AX レビュー, 2026-11-10)。素の _guard_flag に落とすと
+                        # 「'--target' は valid な flag でない」としか出ず、
+                        # **兄弟では在る文法がここでは未対応**だと伝わらない。
+                        # 受け取って commands.py に渡し、**文面の正本は 1 箇所**
+                        # (cmd_review_status) に置く — 両フロントに同じ説明を
+                        # 書き写すと、片方だけ直って黙ってズレる。
+                        --target) _need_flag_value "$#" "$1"; _rst_target="$2"; shift 2 ;;
                         --json) _rst_json="1";                              shift ;;
                         -?*)    _guard_flag "$1" ;;
                         *)      _guard_no_positional "review status" "$1" ;;
                     esac
                 done
                 BEACON_PR_NUMBER="$_rst_pr" BEACON_PR_REPO="$_rst_repo" \
+                    BEACON_TARGET_ID="$_rst_target" \
                     BEACON_JSON="$_rst_json" \
                     python3 "$COMMANDS_PY" review_status ;;
             done)

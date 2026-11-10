@@ -393,8 +393,14 @@ def resolve_the_head_apart_from_the_diff(src: str) -> str:
 
 
 def silently_drop_reviewed_sha_with_target(src: str) -> str:
-    """--target で --reviewed-sha を黙って捨てる = AX 4 周目 high の退行。"""
-    anchor = '    if target_id and os.environ.get("BEACON_REVIEWED_SHA", "").strip():'
+    """--target で --reviewed-sha を黙って捨てる = AX 4 周目 high の退行。
+
+    当て先は ``commands_shared.decide_review_done_argument_error`` (引数の両立規則
+    5 つの置き場)。もとは ``commands.cmd_review_done`` の前置きに直接在ったが、
+    独立保守性レビュー medium (2026-11-10) を受けて純粋関数へ移した。**規則の
+    中身は変えていない** ので、測る対象はそのまま移動先に付け替えるだけでよい。
+    """
+    anchor = "    if target_id and reviewed_sha:"
     assert anchor in src, "anchor not found (silently_drop_reviewed_sha_with_target)"
     return src.replace(anchor, "    if False:", 1)
 
@@ -589,7 +595,7 @@ EXPECT_RED = [
      f"{SHA_T}::test_the_head_is_resolved_where_the_diff_is_collected"),
 
     ("--target で --reviewed-sha を黙って捨てる (AX 4 周目 high / silent)",
-     CMDS, silently_drop_reviewed_sha_with_target,
+     SHARED, silently_drop_reviewed_sha_with_target,
      f"{SHA_T}::test_reviewed_sha_is_refused_with_target_not_silently_dropped"),
 
     ("override 分岐が owed を直読みする (保守性 4 周目 — 分岐単位の見落とし)",

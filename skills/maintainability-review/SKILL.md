@@ -108,7 +108,7 @@ judge が repo を歩かずに確認するための材料。
 
 ```json
 {
-  "mode": "diff | full",
+  "mode": "bundle の mode の値をそのまま (diff / whole-target / full-surface / decision-audit)",
   "target": "PR #479 / ms-119 / ref range",
   "origin_ref": "skills/maintainability-review/principles.md",
   "findings": [

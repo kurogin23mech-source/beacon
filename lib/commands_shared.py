@@ -4036,6 +4036,75 @@ def _review_gate_passed(ob: dict) -> bool:
     return not (ob.get("owed") or [])
 
 
+def decide_review_done_argument_error(*, review_type: str, pr_number: str,
+                                      target_id: str, pr_repo: str,
+                                      reviewed_sha: str, adj_summary: str,
+                                      adjudications: list, no_findings: bool,
+                                      usage_line: str) -> dict:
+    """``review done`` の **引数の両立規則** を 1 箇所で決める。純粋。
+
+    ``{}`` なら引数は妥当。妥当でなければ ``{"lines": [...]}`` を返す
+    (呼び出し側が stderr に出して exit 1 する)。
+
+    **なぜ切り出すか** (独立保守性レビュー medium, 2026-11-10): 規則は 5 つあり、
+    どれも「この組み合わせは黙って捨てられていた」という実害から足されたので
+    長い由来コメントが付く。それが ``cmd_review_done`` の前置きに直接並んでいたため、
+    関数は 273 行・逐次ローカル 12 個に膨らみ、しかも途中の
+    「測る→決める→書く」順序が **コメントで** load-bearing だと宣言されていた。
+    結果、規則を 1 つ足したい次の AI は「引数の両立規則の一覧」を読む場所が無く、
+    関数を線形に全部読んで、3 画面離れた順序の不変条件を壊していないかを
+    自分で確かめる羽目になる。
+
+    規則そのものは **変えていない** (文面・終了コードは従来どおり。
+    ``tests/test_review_done_target_parity_e6918.py`` /
+    ``tests/test_review_done_default_deny_e6997.py`` が stderr の文面で固定している)。
+    ここは置き場所を変えただけで、守る内容は同じ。
+
+    規則の一覧 (ここが唯一の置き場):
+
+    1. ``--pr`` と ``--target`` は排他 (ms-166 e-6918)。
+    2. ``--repo`` は ``--pr`` 専用 — ``--target`` では意味を持たない (同上)。
+    3. ``--reviewed-sha`` は ``--pr`` 専用 — target の節目は差分でなく target 全体を
+       見るので pin する「その差分」が無い (ms-119 e-6859)。
+    4. 種別と対象 (``--pr`` か ``--target``) は必須。文法は help registry を単一
+       ソースにするので、呼び出し側が ``usage_line`` を渡す。
+    5. 採否は **default-deny** (ms-166 e-6997) — ``--no-findings`` と
+       ``--adjudication-summary`` / ``--adjudications`` は排他で、どちらも無ければ
+       関門を開けない。この規則は ``--pr`` / ``--target`` の **分岐より前**に効く
+       (片方だけに関門を置くと兄弟の経路が素通りする)。
+    """
+    if pr_number and target_id:
+        return {"lines": [
+            "Error: --pr と --target は同時に指定できません (どちらか一方)。"]}
+    if pr_repo and target_id:
+        return {"lines": [
+            "Error: --repo は --pr と一緒に使ってください (PR 番号を解決する先を"
+            "指す指定なので、--target では意味を持ちません)。"]}
+    if target_id and reviewed_sha:
+        return {"lines": [
+            "Error: --reviewed-sha は --pr と一緒に使ってください (PR の head を"
+            "指す指定なので、--target では意味を持ちません)。\n"
+            "  target の完了節目は差分ではなく target 全体を見るので、pin する"
+            "「その差分」が存在しません。"]}
+    if not review_type or not (pr_number or target_id):
+        return {"lines": ["Usage: " + usage_line]}
+    if no_findings and (adj_summary or adjudications):
+        return {"lines": [
+            "Error: --no-findings は「findings が 0 件だった」の明示なので、"
+            "--adjudication-summary / --adjudications と同時には使えません "
+            "(どちらが本当かを機械が決められません)。"]}
+    if not no_findings and not adj_summary and not adjudications:
+        return {"lines": [
+            "Error: 採否 (adjudication) が未記録のままでは関門を開けません "
+            "(ms-166 e-6997)。judge の findings をどう採否したかは、最も監査が"
+            "要る AI の判断です。次のどちらかを付けて再実行してください:\n"
+            "  findings があった: --adjudication-summary \"<総括 1 行>\" "
+            "[--adjudications '<json>']\n"
+            "  findings が 0 件だった: --no-findings\n"
+            "関門はまだ開いていません (この呼び出しは何も変えていません)。"]}
+    return {}
+
+
 def decide_review_done_report(ob: dict, *, remaining: list, owed_before: list,
                              reviewed_sha: str, already_recorded: bool,
                              where: str) -> dict:

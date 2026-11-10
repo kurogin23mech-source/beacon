@@ -505,6 +505,7 @@ from commands_shared import (  # noqa: F401
     # ms-119 e-6859 (独立保守性レビュー): 文面は純粋な builder に切り出す。
     format_review_sha_unpinned_warning,
     decide_review_done_report,
+    decide_review_done_argument_error,
     write_reviewed_marker,
     reviewed_marker_sha,
     pr_review_obligations,
@@ -3955,7 +3956,27 @@ def cmd_review_status():
     """
     pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
     pr_repo = os.environ.get("BEACON_PR_REPO", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # 兄弟 (``review done`` / ``review skip``) は ``(--pr | --target)`` を取るので、
+    # その文法を転移して ``review status --target ms-9`` と打つ呼び出し側が居る
+    # (独立 AX レビュー misleading, 2026-11-10)。初版は ``--target`` を読まずに
+    # 捨てていたので、出るのは ``Usage: ... --pr <n>`` だけ ——
+    # **「--target の代わりに --pr を使え」と読めてしまう**。実際は
+    # 「target スコープの読み取り口がまだ無い」のであって、代用ではない
+    # (義務の導出は ``derive_pr_review_obligations`` が PR head の sha に依る
+    # 形しか持たない)。受け取った値を echo して、未対応を名指して落とす。
+    if target_id:
+        print(f"Error: review status は --target を未対応です (--pr 専用)。"
+              f"受け取った値: {target_id!r}。", file=sys.stderr)
+        print("  これは --pr で代用できるという意味ではありません — 義務の導出が"
+              "PR head の sha に依るため、target スコープには読み取り専用の"
+              "状態確認がまだ在りません。", file=sys.stderr)
+        print("  target への記録 (副作用あり) は `beacon review done --target "
+              "<ms-XX|op-X>` / `beacon review skip --target <ms-XX|op-X>`。",
+              file=sys.stderr)
+        sys.exit(1)
 
     if not pr_number:
         print("Usage: " + _registry_usage_line("review status"), file=sys.stderr)
@@ -4470,78 +4491,28 @@ def cmd_review_done():
     # 存在しなかった** (別プロジェクトのセッションが実際に踏み、後から PR を作って
     # 帳尻を合わせた)。gate を扱う 2 兄弟で対象の指定方法が割れていた。
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
-    if pr_number and target_id:
-        print("Error: --pr と --target は同時に指定できません (どちらか一方)。",
-              file=sys.stderr)
-        sys.exit(1)
-    # ms-166 e-6918 (独立 AX レビュー high): --repo は PR 番号を解決する先を指す
-    # 指定なので --target では意味を持たない。初版は受け取って形まで検査しながら
-    # **黙って捨てて成功を名乗っていた** (= silent no-op)。兄弟の `review skip` は
-    # 同じ組み合わせを exit 1 で拒否しており、まさにこの課題が閉じようとした
-    # done/skip の非対称を自分で新しく作っていた。文面も skip と同じにする。
-    if pr_repo and target_id:
-        print("Error: --repo は --pr と一緒に使ってください (PR 番号を解決する先を"
-              "指す指定なので、--target では意味を持ちません)。", file=sys.stderr)
-        sys.exit(1)
-    # ms-119 e-6859 (独立 AX レビュー 4 周目 high): **--target では --reviewed-sha を
-    # 受け取らない。**
-    #
-    # 初版は target 経路が下の `_emit_review_done_for_target` で早期 return するため、
-    # `--reviewed-sha` を読む行 (さらに下) に到達せず、**黙って捨てて成功を名乗って
-    # いた**。judge の実測: 使い捨てプロジェクトで git リポジトリでもない場所に
-    # `--target ms-9 --reviewed-sha deadbeef...` を渡しても、sha への言及が一切無いまま
-    # 「義務を解消しました — 完了の関門を通過できます」と exit 0 で成功した。
-    #
-    # これは同じ関数が 3 行上で --repo について拒否している形と **同型** であり、
-    # しかもその拒否のコメント自身が「黙って捨てて成功を名乗っていた」欠陥を名指して
-    # いる。新しく足した旗に同じ guard を付け忘れたので、文面も exit も揃える。
-    if target_id and os.environ.get("BEACON_REVIEWED_SHA", "").strip():
-        print("Error: --reviewed-sha は --pr と一緒に使ってください (PR の head を"
-              "指す指定なので、--target では意味を持ちません)。\n"
-              "  target の完了節目は差分ではなく target 全体を見るので、pin する"
-              "「その差分」が存在しません。", file=sys.stderr)
-        sys.exit(1)
-    if not review_type or not (pr_number or target_id):
-        # ms-166 e-6918 (独立 AX レビュー medium): 文法を手で再掲しない。
-        # 初版はここと help registry と bin/beacon の 3 箇所に別々に書いており、
-        # しかも registry 側は `--pr` / `--target` を独立した任意旗として並べていて
-        # **排他でも必須でもないように読めた**。文法は registry を単一ソースにする。
-        print("Usage: " + _registry_usage_line("review done"), file=sys.stderr)
-        sys.exit(1)
-    # ms-166 e-6997: **採否を渡さない限り関門を開けない** (= default-deny)。
-    #
-    # 独立思想レビュー high: この溶接は正しい漏斗に在ったが **中身が空でも通った**。
-    # --adjudications は任意旗で、空なら判断記録を書かずに早期 return する一方、
-    # review-due の印は消え「approve/merge の gate を通過できます」と exit 0 で言って
-    # いた。実測 (throwaway project): 採否を一切渡さずに関門が開き、残るのは stderr の
-    # ℹ 1 行だけ。つまり捕獲は「AI が旗を渡すこと」に依存し、依存先は Skill の散文
-    # ——  この MS が消すと宣言した「お願い依存」そのものだった。実践として毎回渡して
-    # いても、それは構造の証明にならない。
-    #
-    # 「findings が無かった」は正当な状態なので、黙って省略させるのではなく
-    # **明示して記録に残す** (--no-findings)。これで decision arm には必ず 1 行載り、
-    # 「レビューを走らせたが findings 0 件だった」と「採否を書き忘れた」が後から
-    # 区別できる (旧: どちらも記録ゼロで見分けが付かなかった)。
-    #
-    # ここは --pr / --target の **分岐より前**。片方だけに関門を置くと、同じ状態
-    # (関門が開く) に到達する兄弟の経路が素通りする —— この MS が何度も直している型。
     _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
     _adjudications = _adjudications_from_env()
     _no_findings = os.environ.get("BEACON_REVIEW_NO_FINDINGS", "") == "1"
-    if _no_findings and (_adj_summary or _adjudications):
-        print("Error: --no-findings は「findings が 0 件だった」の明示なので、"
-              "--adjudication-summary / --adjudications と同時には使えません "
-              "(どちらが本当かを機械が決められません)。", file=sys.stderr)
-        sys.exit(1)
-    if not _no_findings and not _adj_summary and not _adjudications:
-        print("Error: 採否 (adjudication) が未記録のままでは関門を開けません "
-              "(ms-166 e-6997)。judge の findings をどう採否したかは、最も監査が"
-              "要る AI の判断です。次のどちらかを付けて再実行してください:\n"
-              "  findings があった: --adjudication-summary \"<総括 1 行>\" "
-              "[--adjudications '<json>']\n"
-              "  findings が 0 件だった: --no-findings\n"
-              "関門はまだ開いていません (この呼び出しは何も変えていません)。",
-              file=sys.stderr)
+    # 引数の両立規則は **1 箇所** (commands_shared.decide_review_done_argument_error)
+    # が持つ。5 つの規則とその由来 (どれも「黙って捨てて成功を名乗っていた」実害から
+    # 足された) はあちらの docstring に在る。ここに並べていた頃はこの関数が 273 行に
+    # 膨らみ、規則を 1 つ足したい次の AI が「規則の一覧」を読む場所を持てなかった
+    # (独立保守性レビュー medium, 2026-11-10)。
+    #
+    # **採否の default-deny は --pr / --target の分岐より前**に効く必要があり、
+    # それもあちらの規則 5 に含めてある (片方だけに関門を置くと兄弟の経路が
+    # 素通りする —— この MS が何度も直している型)。
+    _argerr = decide_review_done_argument_error(
+        review_type=review_type, pr_number=pr_number, target_id=target_id,
+        pr_repo=pr_repo,
+        reviewed_sha=os.environ.get("BEACON_REVIEWED_SHA", "").strip(),
+        adj_summary=_adj_summary, adjudications=_adjudications,
+        no_findings=_no_findings,
+        usage_line=_registry_usage_line("review done"))
+    if _argerr:
+        for _line in _argerr["lines"]:
+            print(_line, file=sys.stderr)
         sys.exit(1)
     if target_id:
         _emit_review_done_for_target(review_type, target_id,
@@ -7633,7 +7604,7 @@ def _help_registry():
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
         {"command": "beacon pr sync", "flags": ["--dry-run", "--json"], "description": "Align beacon PR entries with GitHub state (merged/closed) — ms-61 / e-2005"},
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
-        {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
+        {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)。**これは促し (トリガーファイルの有無) の面であって関門ではない** — 空配列は「関門が開いている」を意味しない (実施後にコミットを積むと促しは出ないが関門は閉じる)。PR の独立レビュー義務の確定判定は `beacon review status --pr <n>` を使う (ms-119 e-6859)"},
         # ms-178 e-6654: note was absent from this registry, so `--help` missed,
         # fell through to the dispatcher, and `note clear --help` deleted the
         # notes. Registered here so help renders from the single source instead.
