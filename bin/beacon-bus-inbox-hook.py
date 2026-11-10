@@ -748,7 +748,6 @@ def _render_context(events: list[dict], notify_only_count: int,
                     budget: dict | None = None,
                     auto_execute_downgraded_count: int = 0,
                     autonomous_actions: list[dict] | None = None,
-                    trek_retired_events: list[dict] | None = None,
                     cross_user_notices: dict | None = None) -> str:
     """Build the additionalContext markdown for AI inject.
 
@@ -763,16 +762,6 @@ def _render_context(events: list[dict], notify_only_count: int,
     block is emitted ABOVE the generic event list so the AI sees the
     instruction before the noise.
 
-    ``trek_retired_events`` is accepted and ignored (ms-185 / PR#840). It used
-    to feed a dedicated disclosure block for the four retired trek channels.
-    An independent AX review measured that the branch filling it was
-    **unreachable**: ``classify_auto_execute`` downgrades every retired channel
-    to ``propose-to-ai`` before the ``auto-execute`` branch is reached, so a
-    trek event is disclosed by the ordinary downgrade path (with
-    ``_downgrade_reason`` = ``retired-provenance-channel``) and never by that
-    block. The parameter stays so an older caller does not break; the block is
-    gone because a disclosure nobody can see is the dead wiring ms-185 exists
-    to remove.
     """
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
@@ -1062,12 +1051,6 @@ def main() -> None:
     inject: list[dict] = []
     notify_only: list[dict] = []
     autonomous_actions: list[dict] = []
-    # ms-185 e-7079 — one bucket for every retired Trek channel. The opt-in
-    # posture is unchanged (only auto-execute + channel in allowlist lands
-    # here; otherwise the event is downgraded to propose-to-ai with the
-    # standard marker), but the four buckets are one now that they all feed a
-    # single disclosure block.
-    trek_retired_events: list[dict] = []
     downgraded_count = 0
     downgraded_audit: list[dict] = []
     for ev in unread:
@@ -1190,7 +1173,6 @@ def main() -> None:
         monitor_suggested, budget,
         downgraded_count,
         autonomous_actions,
-        trek_retired_events,
         cross_user_notices=cross_user_notices,
     ))
 

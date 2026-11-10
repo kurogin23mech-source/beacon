@@ -8,14 +8,41 @@ main loop に配線したまま残していると指摘した。このフィル�
 
 退役 channel が万一届いた場合の扱いは、落とすのではなく **開示する** (e-7079 が決めた
 受信側の振る舞い)。したがってこの試験が固定するのは 2 つで、**両方そろって初めて意味が
-ある**:
+ある**: 撤去した機構が戻っていないこと / 開示が生きていること。片方だけを測ると
+「フィルタを消したが開示も一緒に落とした」= 受信が黙って消える退行を緑のまま通す。
 
-  - フィルタ層が消えていること (= 無駄な API 往復と、効いているつもりの層が無い)
-  - 開示の分岐が残っていること (= 届いた退役 channel が黙って消えない)
+## 測り方について — ソースの文字列では測らない (PR#840 / 4 周のレビュー)
 
-片方だけを測ると、「フィルタを消したが開示も一緒に落とした」= 受信が黙って消える退行を
-緑のまま通してしまう。
+この試験は当初、フックのソースを文字列で検索していた。4 周の独立レビューがその形を
+3 段階で壊した:
+
+1. 全文から `/api/treks/` を探す → **撤去を説明する自分の退役注記で赤くなった**
+2. `#` で始まる行を除く → docstring 形式の注記では赤くなる (約束より実装が狭い)
+3. `tokenize` で COMMENT と STRING を除く → **URL は定義上 string literal の中にしか
+   無いので、探している対象そのものを捨てた**。違反を入れても緑。judge が削除された
+   フィルタを別名で丸ごと再実装し、全件 pass することを実測した
+
+偽陽性を直すたびに逆側へ振れ、3 手で「絶対に発火しない検査」に着地した。散文の正しさは
+機械で閉じられないので、**ここでは約束しない**。測るのは次の 2 つだけにする:
+
+- **モジュール属性** — 撤去した関数が本当に無いか (コメントに名前が出ても反応しない)
+- **挙動** — 退役 channel の event が実際に降格され、降格理由が付くか
+
+散文の drift は独立レビューが見る。実際に PR#840 ではレビューが 2 回それを捕まえた。
+
+## この試験が捕まえられないこと (約束しない範囲を明記する)
+
+**別名での再実装は捕まらない。** 誰かが `_check_trek_archived` のような別の名前で同じ
+per-event の API 往復を書き直せば、属性の検査は素通りする (実測済み)。文字列で測る形なら
+捕まえられる、とも言えない —— 4 周のレビューがその道は偽の赤と偽の緑を交互に作ると実証
+した (上記 3 段階)。
+
+つまりこの退行を機械で閉じる手段は、いまのところ無い。**無いものを在るように書かない**
+ために、ここに明記しておく。実際にこの型を捕まえたのは独立レビューで、PR#840 では
+judge が削除されたフィルタを別名で再実装して「検査が通ってしまう」ことを示した。節目の
+独立レビューがこの穴の受け皿である。
 """
+import importlib.util
 import os
 import sys
 
@@ -23,79 +50,56 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "bin", "beacon-bus-inbox-hook.py")
+sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 
 @pytest.fixture(scope="module")
-def hook_src():
-    with open(HOOK, encoding="utf-8") as f:
-        return f.read()
+def hook_module():
+    """フックをモジュールとして読む (test_beacon_bus_inbox_hook.py と同じ流儀)。"""
+    spec = importlib.util.spec_from_file_location("bus_inbox_hook_e7248", HOOK)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["bus_inbox_hook_e7248"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.parametrize("name", [
     "_is_trek_scheduler_event",
     "_lookup_trek_status",
     "_filter_archived_trek_events",
+    "_format_trek_retired_block",
     "_TREK_SCHEDULER_CHANNELS",
+    "TREK_RETIRED_CHANNELS",
 ])
-def test_filter_layer_is_gone(hook_src, name):
-    """フィルタ層の 3 helper と、産出者を指す名前の集合が残っていない。"""
-    assert name not in hook_src, (
-        f"{name} が残っています。産出者 (trek scheduler) は e-7070 で撤去済みなので、"
-        f"この判定は相手が居ません"
-    )
+def test_removed_symbols_are_really_gone(hook_module, name):
+    """撤去した関数と定数がモジュールに存在しないこと。
 
-
-def test_no_per_event_trek_lookup(hook_src):
-    """event ごとに trek を API で引く **コード** が無い。
-
-    helper 名の不在だけでは足りない: 同じ往復を別の名前で書き直しても『消えた』と
-    名乗れてしまうので、URL の形そのものを見る。
-
-    ただし **散文は除く** (コメントも docstring も)。この検査の初版は素朴に全文から
-    `/api/treks/` を探し、撤去を説明する自分の退役注記に反応して赤くなった。注記で
-    赤くなる検査は、注記を書かせない圧力になって「何が在ったか」の記録を失わせる。逆に
-    「注記なら許す」と緩めると、言い換えた説明が素通りする (この MS が 5 周戦った形)。
-    そこで主張を **コードに限る** —— 散文が正しいかは機械では閉じられないので、ここでは
-    約束しない。
-
-    除外は `tokenize` で COMMENT と STRING を落とす形にしている。2 版目は `#` で始まる
-    行だけを落としており、**約束 (「コメントは除く」) より実装が狭かった** —— docstring
-    形式の退役注記では赤くなるので、約束を読んで注記を書いた次の AI が理由の分からない
-    赤を踏む (独立レビュー 3 周目の指摘)。
+    ソース文字列ではなく **属性** で測るので、退役注記がその名前を挙げていても
+    反応しない (= 「何が在ったか」の記録を書いても赤くならない)。
+    `TREK_RETIRED_CHANNELS` は `lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS` の
+    写しだったので、正本 1 箇所に寄せて消した。
     """
-    # 散文を **全部** 落とす: `#` のコメントだけでなく docstring も。
-    # 初版は `#` 行だけを落としており、約束 (「コメントは除く」) より実装が狭かった。
-    # このフックの退役注記は現に docstring 形式で書かれている (TREK_RETIRED_CHANNELS
-    # の説明が関数の docstring に入る流儀) ので、次の注記もその形になる可能性が高く、
-    # そこで赤くなると「注記を消す」が最も安い出口になる — この検査が避けたかった圧力
-    # そのもの (独立レビュー 3 周目の指摘)。tokenize なら両方を機械的に落とせる。
-    import io
-    import tokenize
-    pieces = []
-    for tok in tokenize.generate_tokens(io.StringIO(hook_src).readline):
-        if tok.type in (tokenize.COMMENT, tokenize.STRING):
-            continue
-        pieces.append(tok.string)
-    code = "\n".join(pieces)
-    assert "/api/treks/" not in code, (
-        "受信フックのコードが trek を API で引いています。読み出し面はサーバと CLI に"
-        "在り、受信フックが event ごとに引く理由は無くなりました"
+    assert not hasattr(hook_module, name), (
+        f"{name} がフックに戻っています。産出者 (trek scheduler) は e-7070 で撤去済み "
+        f"なのでこの判定は相手が居ません。退役 channel の集合の正本は "
+        f"lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS です"
     )
 
 
 def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
     """届いた退役 channel が黙って消えないこと —— **実際に通る経路で**測る。
 
-    この試験の初版はソースに ``elif channel in TREK_RETIRED_CHANNELS:`` の文字列が
-    在ることで「開示は生きている」と主張していた。独立 AX レビューがその分岐が
-    **到達不能**であることを実測した: ``classify_auto_execute`` は退役 channel を
-    ``auto-execute`` 判定の前に ``propose-to-ai`` へ降格するので、``elif delivery ==
-    "auto-execute":`` の内側に在るあの分岐には一度も入らない。つまり**私が書いた
-    その試験は偽の緑**で、消えた開示を「生きている」と報告しうる形だった。
+    初版はソースに `elif channel in TREK_RETIRED_CHANNELS:` の文字列が在ることで
+    「開示は生きている」と主張していた。独立 AX レビューがその分岐が **到達不能** で
+    あることを実測した: `classify_auto_execute` は退役 channel を `auto-execute` 判定の
+    前に `propose-to-ai` へ降格するので、`elif delivery == "auto-execute":` の内側に
+    在るあの分岐には一度も入らない。つまりその試験は偽の緑で、消えた開示を「生きて
+    いる」と報告しうる形だった。
 
-    なので測るのは文字列ではなく挙動にする: 退役 channel の event が降格され、
-    降格理由が付くこと。これが成り立つ限り event は generic な propose-to-ai の
-    一覧に乗って AI に見える。
+    なので測るのは挙動にする: 退役 channel の event が降格され、降格理由が付くこと。
+    降格印 (`downgraded_from`) が立つことが、フック側で一覧に乗って AI に見える条件
+    そのものである (`if downgraded_from:` の経路)。
     """
     import bus_delivery
 
@@ -105,38 +109,16 @@ def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
         "delivery": "auto-execute",
         "envelope": {"tier": "T2", "scope": "trek:tk-1", "signature": "x"},
     }
-    # allowlist に入れても (= 人間が opt-in しても) 降格されるのが退役の意味。
+    # allowlist に入れても (= 人間が opt-in しても) 降格されるのが「退役」の意味。
     delivery, downgraded_from, reason = bus_delivery.classify_auto_execute(
         ev, allowlist=frozenset({"trek-trigger"}))
     assert delivery == "propose-to-ai", delivery
     assert downgraded_from == "auto-execute", downgraded_from
     assert reason == "retired-provenance-channel", reason
-    # downgraded_from が立つことが「generic 経路で開示される」条件そのもの
-    # (フック側は `if downgraded_from:` で印を付けて一覧に乗せる)。
-    assert downgraded_from, "降格印が付かないと開示されずに消える"
-
-
-def test_the_unreachable_disclosure_branch_is_gone(hook_src):
-    """到達不能だった専用分岐と、その写しの集合が残っていないこと。
-
-    同じ 4 名の literal がフックと ``lib/bus_delivery`` の 2 箇所に在り、片方だけ
-    変えても何も赤くならなかった。正本を lib 1 箇所に寄せたので、フック側に literal が
-    戻っていないことを測る。
-    """
-    assert "TREK_RETIRED_CHANNELS = {" not in hook_src, (
-        "退役 channel の literal がフックに戻っています。正本は "
-        "lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS の 1 箇所です"
-    )
-    assert "elif channel in TREK_RETIRED_CHANNELS:" not in hook_src, (
-        "到達不能な分岐が戻っています (降格が先に起きるので入れません)"
-    )
-    assert "_format_trek_retired_block" not in hook_src, (
-        "誰にも見えない開示ブロックが戻っています"
-    )
 
 
 def test_hook_still_parses():
-    """構文が壊れていない (= 155 行を落としたので形を実際に確かめる)。"""
+    """構文が壊れていない (= 大きく削ったので形を実際に確かめる)。"""
     import ast
     with open(HOOK, encoding="utf-8") as f:
         ast.parse(f.read())

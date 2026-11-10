@@ -119,15 +119,29 @@ def test_help_surfaces_list_exactly_the_write_vocabulary():
         )
 
 
-def test_cmd_claim_error_text_is_derived_not_hand_written():
-    """エラー文が集合から組み立てられていること (= 手書きの面を増やさない)。"""
-    import inspect
+def test_cmd_claim_error_text_matches_the_write_vocabulary(monkeypatch, capsys):
+    """エラー文が **実際に** 作成できる種別を列挙すること。
+
+    初版は `inspect.getsource` に対して `"valid_target_kinds()" in src` を主張して
+    いた。それだと空白を変えて手書きに戻すだけで緑になり、逆に別の正当な導出の形に
+    替えると「導出されていません」という実態と合わない理由で赤になる (PR#840 4 周目の
+    指摘)。この関数は env を読んで stderr に出し終了するだけなので、**出力そのもの**を
+    測れる。
+    """
     import sys as _sys
     _sys.path.insert(0, os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
     import cmd_claim  # noqa: PLC0415
-    src = inspect.getsource(cmd_claim)
-    assert "valid_target_kinds()" in src, (
-        "cmd_claim のエラー文が集合から導出されていません (手書きに戻っている)"
+
+    monkeypatch.delenv("BEACON_CLAIM_TARGET_KIND", raising=False)
+    monkeypatch.delenv("BEACON_CLAIM_TARGET_ID", raising=False)
+    with pytest.raises(SystemExit):
+        cmd_claim._claim_parse_target_env()
+    err = capsys.readouterr().err
+    listed = set(re.findall(
+        r"\b(" + "|".join(re.escape(k) for k in claims.readable_target_kinds())
+        + r")\b", err))
+    assert listed == set(claims.valid_target_kinds()), (
+        f"エラー文が {sorted(listed)} を挙げていますが、作成できる種別は "
+        f"{sorted(claims.valid_target_kinds())} です。出力: {err!r}"
     )
-    assert "kind = ms|task|operation|free" not in src, "語彙が手書きで戻っている"

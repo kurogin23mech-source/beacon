@@ -67,23 +67,8 @@ def test_strict_gate_is_clean_on_current_tree():
     )
 
 
-def test_retired_placeholder_actions_are_not_exempted_any_more():
-    """ms-185 (PR#840): the two Trek placeholder buttons are gone, so their
-    allowlist entries must be gone too — a dead exemption keeps a name the gate
-    subtracts from nothing, which is how these two survived five cleanup rounds.
-
-    This asserts the **absence of the entries**, not the absence of the names in
-    the output: the guard's own message names them when it reddens, so measuring
-    the output text would invert on the very failure we want to see.
-    """
-    import importlib.util
-    # SCRIPT / REPO はこのファイルの既存の流儀 (上で定義済み) に合わせる。
-    spec = importlib.util.spec_from_file_location("_cfd", str(SCRIPT))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    for name in ("trek-resume-noop", "trek-stop-noop"):
-        assert name not in mod.INTENTIONAL_NOOP_ACTIONS, (
-            f"{name} が免除リストに残っています。ボタンは撤去済みなので、"
-            f"この entry は存在しない名前を引き算し続けるだけです"
-        )
-        assert name not in mod.EVENT_LISTENER_ROUTED_ACTIONS, name
+# ms-185 / PR#840: ここに `trek-*-noop` の 2 名が免除リストに無いことを固定する試験が
+# 在ったが落とした。同じ性質は `check_exemptions_are_live` が **固有名に依らず** 汎用に
+# 赤にし (死んだ免除を足すと報告 / 生きた免除では報告しない)、4 周の独立レビューが毎回
+# 実測で確認している。名前固定の側は、別の死んだ免除が足されても無反応で、何も足して
+# いなかった。

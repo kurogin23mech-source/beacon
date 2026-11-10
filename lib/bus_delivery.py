@@ -437,7 +437,7 @@ def format_operation_trigger_imperative(events: list) -> str:
     trek-task-review / trek-leader-digest) are gone with the device (ms-185
     e-7079), so the "extend trek parity to Codex later" follow-up this docstring
     used to promise is void — ms-185 decided not to reimplement it. The retired
-    channel names are listed in ``RETIRED_PROVENANCE_CHANNELS`` below, which is
+    channel names are listed in ``RETIRED_PROVENANCE_CHANNELS``, which is
     what a received trek-* event meets now.
 
 
