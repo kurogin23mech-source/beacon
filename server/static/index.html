@@ -8480,7 +8480,8 @@ function closeMenu() {
 }
 
 async function renderMenu() {
-  // ms-69 / e-1659 v3: sidebar = MENU / PROJECTS / TREKS / ONLINE AGENTS.
+  // ms-69 / e-1659 v3: sidebar = MENU / PROJECTS / ONLINE AGENTS.
+  // (ms-185 e-7325: TREKS がここに並んでいたが、Trek ごと撤去した。)
   // Per mock, Members + Project actions move to the Settings overlay
   // (Projects & Members tab); Account info moves to the avatar dropdown.
 
@@ -8598,12 +8599,8 @@ async function renderMenu() {
     });
   }
 
-  // ms-97 / e-2606 \u2014 Treks list \u3092 hamburger top-level \u306b lazy fill \u3059\u308b\u3002
-  // e-2251 \u3067 project tab bar \u306b\u62bc\u3057\u8fbc\u3081\u3089\u308c\u305f\u914d\u7f6e\u3092 SPEC tnJnByg8Ymw8T3DgPdJD
-  // (= ms-97 SPEC, AC1/AC3/AC4) \u901a\u308a\u623b\u3059: Trek \u306f project \u3068\u72ec\u7acb\u306a first-class
-  // object \u306a\u306e\u3067\u3001 project switcher \u3068\u540c\u3058 menu \u968e\u5c64\u306b\u4e26\u3076\u306e\u304c\u81ea\u7136\u306a\u52d5\u7dda\u3002
-  // /api/treks \u306f include_archived=true \u3067\u5168\u53d6\u5f97\u3057\u3001 list \u5074\u306e filter \u3067 active
-  // \u306e\u307f\u8868\u793a (= active \u304c glance\u3001 archived \u306f detail \u7d4c\u7531\u3067\u306e\u307f\u5230\u9054)\u3002
+  // ms-185 e-7325: ここに Treks list を hamburger top-level に lazy fill する
+  // 説明が残っていたが、その list も /api/treks を引く配線も Trek ごと撤去済み。
   if (!state.onlineSessions || state.onlineSessions.length === 0) {
     dataSource.loadOnlineSessions().then(() => {
       refillSection('menu-sessions-list', renderSessionsSection());
@@ -8827,10 +8824,9 @@ async function selectProject(projectId) {
   // browser Back from project B should leave the app, not silently rebind A.
   // Hash is preserved so deep links (#doc/..., #ms/..., etc.) survive a switch.
   //
-  // ms-86 / e-2250: skip the project param write while a Trek detail is open
-  // (= state.openTrekId set). Trek detail owns the URL with ?trek=<id>, and
-  // overwriting with ?project=<pid> would silently flip the address bar back
-  // to a project-anchored URL while the user is still viewing the Trek.
+  // (ms-185 e-7325: Trek detail が ?trek=<id> で URL を所有していた間、
+  //  この書き込みを state.openTrekId で止めていた。画面ごと無くなったので
+  //  分岐も落としてある。)
   try {
     if (typeof history !== 'undefined' && history.replaceState && projectId) {
       const params = new URLSearchParams(window.location.search);
@@ -8942,17 +8938,10 @@ function toggleMilestone(msId) {
 // Default false preserves the per-fetch render for user-driven expansions
 // (= toggleMilestone) and WS-driven refreshExpandedMilestoneEntries.
 //
-// ms-95 / e-2640 — Trek detail context route: when ``state.openTrekId`` is
-// set, the MS may live in any project the Trek's scope reaches, NOT
-// necessarily the currently selected ``state.projectId``. We resolve the
-// MS's actual project_id from ``state.openTrekScope.milestones`` (= shipped
-// by /api/treks/{id}/milestones with ``project_id`` stamped on each row)
-// and call the per-project endpoint with the correct pid. If the lookup
-// fails (e.g. scope aggregate not loaded yet) we fall back to
-// ``state.projectId`` so the legacy single-project path keeps working.
-// The /api/treks/{id}/scope-entries endpoint also pre-populates the cache
-// (see loadTrekScope above), so this fetch typically short-circuits at
-// the toggle layer's ``state.milestoneEntries[msId] === undefined`` guard.
+// ms-185 e-7325: ここには、Trek detail を開いている間は MS が別 project に
+// 居ることがあるため project_id を Trek の scope から解決する、という説明が
+// 残っていた。その解決は Trek ごと撤去されており、いまこの関数は
+// state.projectId をそのまま使う (= 下の 1 行が全て)。
 async function fetchMilestoneEntries(msId, opts = {}) {
   const pid = state.projectId;
   if (!pid) return;
