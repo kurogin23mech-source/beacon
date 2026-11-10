@@ -15,6 +15,7 @@ Trek は作れなくなったので、新規 claim は拒否されなければ�
 片方だけを測ると、どちらの穴も「直した」と名乗れてしまう。
 """
 import os
+import re
 import sys
 
 import pytest
@@ -72,21 +73,61 @@ def test_pre_ms185_trek_claim_still_parses():
     assert parsed["target"]["kind"] == "trek"
 
 
-def test_help_surfaces_do_not_advertise_trek():
-    """利用者向けの案内 4 面が trek を取れる種別として挙げていないこと。
+def test_help_surfaces_list_exactly_the_write_vocabulary():
+    """利用者向けの案内が、作成できる種別の集合と**一致**すること。
 
-    集合を直しても案内が古いままなら、利用者は通らない呼び出しを教わる。
-    実ファイルを読むのは、案内がコードの定数から生成されていないため
-    (= 二重フロントなので両方を見ないと片方だけ古くなる)。
+    初版は「trek が無いこと」だけを測っていた。それだと次に別の種別を足す / 外す人が
+    集合だけ直して緑のまま終われ、案内 3 面は古いまま残る (独立レビュー 3 周目の指摘)。
+    そこで測るのは一致にする —— trek の不在はその帰結として付いてくる。
+
+    `lib/cmd_claim.py` のエラー文は集合から導出するようにしたのでこの一覧から外した
+    (= 直す面を 1 つ減らした)。残る 3 面は散文なので機械で生成できず、突合で守る。
     """
+    expected = set(claims.valid_target_kinds())
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for rel, needle in (
-        ("README.md", "beacon claim request"),
-        ("lib/cmd_claim.py", "kind = ms"),
-        ("bin/beacon", "target kind: ms"),
-        ("lib/commands.py", "Announce intent to take a target"),
+    # `bin/beacon` は "target kind:" の行を **2 つ** 持つ。もう 1 つは
+    # `beacon stop scoped` のもので語彙が違う (ms | task | session — 正本は
+    # stop_signal._VALID_TARGET_KINDS)。素朴に最初の一致を取ると別コマンドの行を
+    # claim の語彙と比べて偽の赤になる (初版で実際にそうなった)。claim の usage
+    # ブロックに入ってから探す。
+    for rel, needle, after in (
+        ("README.md", "beacon claim request", None),
+        ("bin/beacon", "target kind:", "beacon claim view"),
+        ("lib/commands.py", "Announce intent to take a target", None),
     ):
-        with open(os.path.join(root, rel), encoding="utf-8") as f:
+        path = os.path.join(root, rel)
+        found = None
+        armed = after is None
+        with open(path, encoding="utf-8") as f:
             for line in f:
-                if needle in line:
-                    assert "trek" not in line, f"{rel}: {line.strip()}"
+                if not armed:
+                    armed = after in line
+                    continue
+                if needle not in line:
+                    continue
+                # 括弧 / コロンのあとに並ぶ種別名を拾う (区切りは `/` `|` `,`)。
+                kinds = set(re.findall(
+                    r"\b(" + "|".join(re.escape(k) for k in claims.readable_target_kinds())
+                    + r")\b(?!-\d)", line))
+                if kinds:
+                    found = kinds
+                    break
+        assert found is not None, f"{rel}: 案内の行 ({needle!r}) が見つからない"
+        assert found == expected, (
+            f"{rel} の案内が {sorted(found)} を挙げていますが、作成できる種別は "
+            f"{sorted(expected)} です"
+        )
+
+
+def test_cmd_claim_error_text_is_derived_not_hand_written():
+    """エラー文が集合から組み立てられていること (= 手書きの面を増やさない)。"""
+    import inspect
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+    import cmd_claim  # noqa: PLC0415
+    src = inspect.getsource(cmd_claim)
+    assert "valid_target_kinds()" in src, (
+        "cmd_claim のエラー文が集合から導出されていません (手書きに戻っている)"
+    )
+    assert "kind = ms|task|operation|free" not in src, "語彙が手書きで戻っている"

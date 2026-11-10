@@ -454,18 +454,13 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
     )
 
 
-# ms-185 e-7079 / 残置掃除: the four channels the retired trek scheduler used to
-# write. Named for what they now mean to the RECEIVER — retired, i.e. disclosed
-# and never acted on. There is no producer any more (e-7070 removed the
-# scheduler), so this is only consulted to recognise such an event if one
-# arrives from history and say so; the archived-trek filter that used to look
-# each one up over the API is gone with its producer.
-TREK_RETIRED_CHANNELS = {
-    "trek-progress-check",
-    "trek-task-review",
-    "trek-leader-digest",
-    "trek-trigger",
-}
+# ms-185 / PR#840: 退役した trek-* channel の集合は **ここには持たない**。正本は
+# lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS 1 箇所で、このフックはそれを
+# classify_auto_execute 経由で使う (= 退役 channel は auto-execute に到達せず
+# propose-to-ai へ降格され、降格理由つきで AI に開示される)。かつてここに同じ 4 名の
+# literal を置き、専用の開示ブロックへ振り分ける分岐を持っていたが、独立 AX レビューが
+# その分岐が **到達不能** であることを実測した (降格が先に起きるため)。写しと到達不能な
+# 判定を同時に落としてある。
 
 
 # ms-97 P2 (= review finding H2). HISTORICAL, and it still governs the
@@ -748,81 +743,6 @@ def _format_autonomous_action_block(events: list[dict]) -> str:
     return bd.format_operation_trigger_imperative(events)
 
 
-def _format_trek_retired_block(events: list[dict]) -> str:
-    """Disclose a Trek-channel event WITHOUT naming an action (ms-185 e-7079).
-
-    This replaces four "TREK ACTION" / "TREK LEADER DIGEST" builders that each
-    ended in a launch line naming one of the four Trek Skills, plus the line
-    "Run this autonomously without asking the user first". Those Skills no
-    longer exist: e-7069 deleted all four of them from every place they were
-    installed.
-
-    **ms-185 e-7071 — there is no producer left.** When this was written the
-    producers were live and the note said so. They are not any more: e-7070
-    deleted the server-side aggregation (``_run_trek_tick`` no longer exists as
-    a function anywhere) and nothing in this repository writes the four channel
-    names (measured — the only occurrences are this retirement set and
-    ``lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS``). An event can therefore
-    reach this block only as (a) data written before the fold that is still
-    in flight on some project's bus, or (b) a writer outside this repository
-    using the channel name.
-
-    That is why the block stays rather than being deleted with its producers:
-    data outlives code, and the allowlists that let such an event through live
-    in every project's own record, which we cannot reach. Same reasoning as
-    ``RETIRED_PROVENANCE_CHANNELS`` — retire the channel, keep the net, so
-    stale data stays fail-closed instead of silently becoming sufficient.
-
-    An inject that commands a command that cannot resolve is worse than no
-    inject: the receiving session was being told to act autonomously, without
-    asking a human, on a Skill whose graceful-stop procedure lived inside the
-    very body that was deleted. It had no fallback and no signal that the
-    combination was broken by construction.
-
-    So this keeps the **disclosure** (the event arrived, here is its id) and
-    drops the **operation** (no command, no autonomy claim). Disclosure and
-    suppression of the action are separate layers, and closing only one of them
-    leaves the other misleading.
-
-    Two independent reviewers of PR #827 raised this as the same high finding.
-    """
-    if not events:
-        return ""
-    lines: list[str] = []
-    lines.append("## 引退した作業空間からの通知 (操作は不要)")
-    lines.append("")
-    lines.append(
-        "以下は Trek (= 事前承認スコープを持つ共同作業空間) の channel に "
-        "届いた event です。**この機能は畳まれており、対応する Skill は "
-        "存在しません** (ms-185 e-7069)。起動すべきコマンドはありません。"
-    )
-    lines.append(
-        "自律実行してはいけません。産出側は既に止まっています "
-        "(ms-185 e-7070 で削除)。この通知は、畳んだ後に届いた event を "
-        "隠さないために出しているだけで、受け手に求める action は "
-        "ありません。"
-    )
-    lines.append("")
-    for ev in events:
-        payload = ev.get("payload") or {}
-        trek_id = _sanitize_id(payload.get("trek_id"))
-        eid = ev.get("event_id", "?")
-        ch = ev.get("channel") or payload.get("origin_channel") or "?"
-        lines.append(f"- event_id: {eid}")
-        lines.append(f"  - channel: {_sanitize_id(ch)}")
-        lines.append(f"  - trek_id: {trek_id}")
-    lines.append("")
-    lines.append(
-        "この通知が続く場合、出所はこのリポジトリの中ではありません "
-        "(産出側は削除済み)。畳む前に書かれて滞留している event か、"
-        "外部の書き手が同じ channel 名を使っています。前者は滞留が尽きれば "
-        "止まり、後者は送信元を調べてください。"
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
-
 def _render_context(events: list[dict], notify_only_count: int,
                     monitor_suggested: bool,
                     budget: dict | None = None,
@@ -843,15 +763,16 @@ def _render_context(events: list[dict], notify_only_count: int,
     block is emitted ABOVE the generic event list so the AI sees the
     instruction before the noise.
 
-    ``trek_retired_events`` (ms-185 e-7079) is the subset of ``events`` that
-    arrived on one of ``TREK_RETIRED_CHANNELS``. It used to be four separate
-    parameters feeding four imperative blocks, one per channel, each telling
-    the AI to launch a Trek Skill autonomously. Those Skills are gone and the
-    blocks with them: the four channels now produce ONE disclosure block
-    (:func:`_format_trek_retired_block`) that says an event arrived and names
-    no command. One list, because the consumer does not distinguish them —
-    keeping four parameters would advertise a distinction the code no longer
-    makes.
+    ``trek_retired_events`` is accepted and ignored (ms-185 / PR#840). It used
+    to feed a dedicated disclosure block for the four retired trek channels.
+    An independent AX review measured that the branch filling it was
+    **unreachable**: ``classify_auto_execute`` downgrades every retired channel
+    to ``propose-to-ai`` before the ``auto-execute`` branch is reached, so a
+    trek event is disclosed by the ordinary downgrade path (with
+    ``_downgrade_reason`` = ``retired-provenance-channel``) and never by that
+    block. The parameter stays so an older caller does not break; the block is
+    gone because a disclosure nobody can see is the dead wiring ms-185 exists
+    to remove.
     """
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
@@ -865,10 +786,6 @@ def _render_context(events: list[dict], notify_only_count: int,
     autonomous_block = _format_autonomous_action_block(autonomous_actions or [])
     if autonomous_block:
         parts.append(autonomous_block)
-    # ms-185 e-7079: one disclosure block for all of TREK_RETIRED_CHANNELS.
-    trek_retired_block = _format_trek_retired_block(list(trek_retired_events or []))
-    if trek_retired_block:
-        parts.append(trek_retired_block)
     budget_line = _format_budget_line(budget)
     if budget_line:
         parts.append(budget_line)
@@ -1112,7 +1029,8 @@ def main() -> None:
     # 居ない。産出者ゼロの判定を配線に残すと、1 event ごとに無駄な API 往復をしながら
     # 「効いているつもり」の層だけが残る (SPEC 方針 4 が名指しで避けた形)。
     # 退役 channel が万一届いた場合の扱いは、落とすのではなく開示する
-    # (= TREK_RETIRED_CHANNELS の分岐。e-7079 が決めた受信側の振る舞い)。
+    # (= 降格経路。退役 channel は classify_auto_execute が propose-to-ai へ落とし、
+    #  降格理由つきで AI に開示される。e-7079 が決めた受信側の振る舞い)。
 
     # ms-55 e-1721: process stop-signal channel events first so the
     # halt-request.json is on disk before the PostToolUse hook fires
@@ -1182,16 +1100,6 @@ def main() -> None:
                 # generic event list, so the AI launches
                 # /beacon-operation-execute without scanning the noise.
                 autonomous_actions.append(ev)
-            elif channel in TREK_RETIRED_CHANNELS:
-                # ms-185 e-7079: these four channels used to get four separate
-                # imperative blocks, each telling the AI to launch one of the
-                # Trek Skills autonomously. The Skills are gone (e-7069) and the
-                # blocks with them; what remains is ONE disclosure block that
-                # says an event arrived and names no command.
-                #
-                # The producers are still live until e-7070 folds them, which is
-                # why these channels are still matched at all rather than dropped.
-                trek_retired_events.append(ev)
         if delivery == "notify-user-only":
             notify_only.append(ev)
         else:

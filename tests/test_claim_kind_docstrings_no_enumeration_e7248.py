@@ -43,23 +43,37 @@ ACCESSORS = [
 
 
 def _enumeration_runs(doc: str) -> list:
-    """説明文の中で「種別名が近接して 3 つ以上並ぶ」箇所を返す。
+    """説明文の中で「種別名が区切りだけで 3 種類以上つながっている」箇所を返す。
 
-    近接の定義は『直前の種別名から 40 文字以内に次が現れる』。区切りが `/` でも `,` でも
-    ``ms`` のような装飾付きでも拾えるようにしたいので、区切り文字ではなく距離で測る。
+    測るのは **列挙の形そのもの**: 種別名と種別名の間にあるのが区切り (``/`` ``,``
+    ``|`` 空白 バッククォート ``and`` ``or``) **だけ** のとき、それは語彙を手書きで
+    並べた形である。意味のある語が挟まっていれば散文であって列挙ではない。
+
+    「近さ」で測る形は捨てた。独立レビュー 3 周目が、距離 + 相異なる 3 種では
+    ``differ by exactly the retired ``trek`` kind; a free kind is not a task`` のような
+    **散文が赤くなる**ことを実測した。赤くなる側だけを合わせると、記述を書かせない圧力に
+    なって「何が在ったか」の記録を失わせる —— この試験が守りたいものを壊す。
+
+    ``ms-185`` のようなマイルストーン ID の ``ms`` も数えない (``-数字`` が続く形を除外)。
+    このリポの説明文は ms-ID の引用が慣例で、測定対象の 3 関数自身がそう書いている。
     """
-    hits = [(m.start(), m.group(1)) for m in
-            re.finditer(r"\b(" + "|".join(re.escape(k) for k in ALL_KINDS) + r")\b", doc)]
+    pat = r"\b(" + "|".join(re.escape(k) for k in ALL_KINDS) + r")\b(?!-\d)"
+    hits = [(m.start(), m.end(), m.group(1)) for m in re.finditer(pat, doc)]
+    #: 種別名の間に在ってよい「区切りだけ」の形。これ以外の語が挟まれば散文。
+    sep = re.compile(r"^[\s/,|`'\"()\[\]・、]*(?:and|or|/)?[\s/,|`'\"()\[\]・、]*$")
     runs, cur = [], []
-    for pos, kind in hits:
-        if cur and pos - cur[-1][0] <= 40:
-            cur.append((pos, kind))
+
+    def _flush(group):
+        if len({k for _, _, k in group}) >= 3:
+            runs.append([k for _, _, k in group])
+
+    for h in hits:
+        if cur and sep.match(doc[cur[-1][1]:h[0]]):
+            cur.append(h)
         else:
-            if len(cur) >= 3:
-                runs.append([k for _, k in cur])
-            cur = [(pos, kind)]
-    if len(cur) >= 3:
-        runs.append([k for _, k in cur])
+            _flush(cur)
+            cur = [h]
+    _flush(cur)
     return runs
 
 
@@ -74,16 +88,39 @@ def test_docstring_does_not_hand_enumerate_the_vocabulary(name, fn):
     )
 
 
-def test_the_check_itself_catches_a_real_enumeration():
+@pytest.mark.parametrize("doc", [
+    "Public accessor for the vocabulary (``ms`` / ``task`` / ``operation`` / ``trek`` / ``free``) — see above.",
+    "kinds: ms, task, operation, free",
+    "one of ms|task|operation|free",
+    "ms / task / operation and free",
+    "種別は ms・task・operation・free",
+])
+def test_the_check_itself_catches_a_real_enumeration(doc):
     """test-the-test: 実際に並べた文面なら検知できることを確かめる。
 
-    検査が「何も見つけない」だけなら、壊れた検査と区別がつかない。
+    検査が「何も見つけない」だけなら、壊れた検査と区別がつかない。区切りは `/` `,`
+    `|` `・` と `and` を網羅する (= 1 形だけ測ると別の区切りで素通りする)。
     """
-    bad = "Public accessor for the vocabulary (ms / task / operation / trek / free) — see above."
-    assert _enumeration_runs(bad), "列挙を検知できていない (= 検査が壊れている)"
+    assert _enumeration_runs(doc), f"列挙を検知できていない: {doc!r}"
 
 
 def test_a_single_historical_mention_is_allowed():
     """撤去を説明する歴史の記述 1 件は通る (= 記録を失わせない)。"""
     ok = "ms-185 removed ``trek`` from the set, so this accessor no longer returns it."
     assert not _enumeration_runs(ok), "歴史の記述で誤検知している"
+
+
+@pytest.mark.parametrize("doc", [
+    # 独立レビュー 3 周目が実測した偽陽性。どれも文面に列挙は無い。
+    "ms-185 removed ``trek`` from the set; ms-109 e-5692 introduced the accessor.",
+    "See ms-109, ms-112 and ms-185 for the history",
+    "ms-185 で trek を外した (ms-109 e-5692 の accessor)",
+    "differ by exactly the retired ``trek`` kind; a free kind is not a task",
+])
+def test_history_and_prose_do_not_false_positive(doc):
+    """列挙でない散文で赤くならないこと (= 偽陽性側の固定)。
+
+    赤くなる側だけを測ると、記述を書かせない圧力になって「何が在ったか」の記録を
+    失わせる。この試験の初版は実際にこの 4 例すべてで赤くなった。
+    """
+    assert not _enumeration_runs(doc), f"列挙でない散文で誤検知: {doc!r}"
