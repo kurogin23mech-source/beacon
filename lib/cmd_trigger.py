@@ -43,6 +43,8 @@ from commands_shared import (
     _pr_open_review_nudge_pending_types,
     _pr_open_reviewed_marker_path,
     reviewed_marker_sha,
+    pr_review_obligations,
+    review_blocking_types,
     _get_cloud_config_path,
     _resolve_active_api_url,
     _extract_token,
@@ -689,6 +691,68 @@ def _auto_fire_release_marker_trigger() -> None:
         f.write("\n")
 
 
+def _retire_satisfied_pr_review_nudges(open_prs: list) -> None:
+    """**もう関門を止めていない** 種別の促しを下げる (ms-119 e-7359)。
+
+    促しと関門が同じ意味になるための残り半分。``_auto_fire_...`` が
+    「head が進んだら促しを戻す」側を担い、ここが「もう止めていないなら促しを
+    下げる」側を担う。両方が同じ導出 (``pr_review_obligations``) を真値にする。
+
+    何が困っていたか: 促しは **いまの作業フォルダのトリガーファイル** だけを見るので、
+    fork で ``review done`` を打つと関門は開く (作業フォルダ横断の台帳を読むため) のに、
+    親の ``beacon trigger check`` には促しが出続けた。逆向きのズレ (実施後にコミットを
+    積むと関門は赤に戻るのに促しは出ない) は anchor 側で閉じたが、こちらが残っていた。
+    **向きが逆の 2 つのズレが並ぶと、促しだけ見ている人は「もう要らない」と誤読する。**
+
+    ``trigger check`` ではなく **tick でやる** のが要点。``check`` は安価な読み取りに
+    保つ契約がある (ms-98 e-2764: 以前 check が無条件に cloud を叩き、Skill の各 Step が
+    それを呼んだため 429 の嵐になった)。促しごとに gh を叩くのは同じ轍なので、
+    head は anchor が既に取った ``gh pr list`` の結果を使い回す。
+
+    **下げる側に倒すのは「もう止めていない」と確かめられたときだけ。** head が
+    取れない PR は触らない (促しは出す側に倒す —— 止める力が無いので、過剰に促して
+    煩いのは実害が小さく、促さないのは事故に直結する)。
+    """
+    if not open_prs:
+        return
+    try:
+        triggers_dir = _get_triggers_dir()
+        existing = os.listdir(triggers_dir)
+    except OSError:
+        return
+    for pr in open_prs:
+        num = str(pr.get("number") or "").strip()
+        head = str(pr.get("headRefOid") or "").strip()
+        if not num or not head:
+            continue                     # head 不明 = 触らない
+        repo = core.extract_pr_repo_from_url(pr.get("url") or "")
+        try:
+            ob = pr_review_obligations(num, repo, head_sha=head)
+        except Exception:
+            continue                     # 導出できないなら触らない
+        if not ob.get("resolved"):
+            continue
+        blocking = set(review_blocking_types(ob))
+        for fn in existing:
+            parsed = parse_review_due_filename(fn)
+            if parsed is None:
+                continue
+            rtype, fn_pr, fn_repo = parsed
+            if fn_pr != num:
+                continue
+            if fn_repo and repo and fn_repo != repo:
+                continue
+            if rtype in blocking:
+                continue                 # まだ止めている = 促しは残す
+            try:
+                os.remove(os.path.join(triggers_dir, fn))
+            except OSError:
+                continue
+            print(f"ℹ {repo or 'PR'}#{num} の {rtype} の促しを下げました "
+                  f"({head[:12]} に対して関門を止めていません — 別の作業フォルダで"
+                  f"実施された / 理由付きで免除された)。", file=sys.stderr)
+
+
 def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
     """Anchor firing to the real PR-open event (ms-119 e-4060): scan GitHub's
     OPEN PRs and fire the pr-open review-due triggers for any that lack them.
@@ -718,7 +782,7 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
             return
         open_prs = json.loads(r.stdout)
     except Exception:
-        return
+        return None
     for pr in open_prs:
         num = str(pr.get("number") or "").strip()
         if not num:
@@ -772,6 +836,9 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
             continue
         _fire_pr_open_review_triggers(num, pr.get("title") or "",
                                       pr.get("url") or "", pr_repo=_repo)
+    # ms-119 e-7359: 同じ `gh pr list` の結果を促しの引き下げ側にも渡す
+    # (head をもう一度聞かない)。
+    return open_prs
 
 
 def _reviewed_marker_covers_head(pr_number: str, pr_repo: str,
@@ -1556,7 +1623,9 @@ def cmd_trigger_tick():
     _auto_fire_release_marker_trigger()
     _auto_fire_map_drift_trigger()
     _auto_fire_untriaged_backlog_trigger()  # ms-126
-    _auto_fire_pr_open_review_triggers_for_open_prs()  # ms-119 e-4060 anchor
+    _open_prs = _auto_fire_pr_open_review_triggers_for_open_prs()  # ms-119 e-4060
+    # ms-119 e-7359: 促しと関門を同じ意味にする残り半分 (もう止めていない種別を下げる)。
+    _retire_satisfied_pr_review_nudges(_open_prs or [])
     _cleanup_stale_triggers()
     # Touch the stamp so subsequent ``check`` calls within the TTL window
     # skip the auto-tick gate. Mirrors what ``_maybe_auto_tick`` writes on

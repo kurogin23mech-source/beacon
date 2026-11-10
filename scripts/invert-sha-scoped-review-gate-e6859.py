@@ -42,14 +42,17 @@ CMDS = ROOT / "lib" / "commands.py"
 TRIG = ROOT / "lib" / "cmd_trigger.py"
 OBL_STUB = ROOT / "tests" / "_pr_obligations_stub.py"
 GATE_CI = ROOT / "scripts" / "review-gate-ci.py"
+TARGET = ROOT / "lib" / "cmd_target.py"
 
 GATE_T = "tests/test_review_merge_gate.py"
 SHA_T = "tests/test_review_sha_scoped_gate_e6859.py"
 CI_T = "tests/test_review_gate_ci.py"
 STAMP_T = "tests/test_review_gate_stamp_visibility_e6873.py"
+EV_T = "tests/test_no_evidence_approval_countable_e7247.py"
+NUDGE_T = "tests/test_review_nudge_matches_the_gate_e7359.py"
 
 #: 壊す前に緑であることを確かめる母集団。関門 / 導出 / 印 / 開示の 4 面すべて。
-BASELINE = [GATE_T, SHA_T, CI_T, STAMP_T]
+BASELINE = [GATE_T, SHA_T, CI_T, STAMP_T, EV_T, NUDGE_T]
 
 
 # --- 壊し方 -----------------------------------------------------------------
@@ -403,6 +406,50 @@ def let_the_override_branch_read_owed(src: str) -> str:
     return src.replace(anchor, '    pending = ob.get("owed") or []\n    if override:', 1)
 
 
+# --- backlog (e-7247 / e-7029 / e-7359) への壊し方 --------------------------
+
+def stop_counting_no_evidence_approvals(src: str) -> str:
+    """証拠ゼロ承認のタグを落とす = e-7247 の受入条件 2 の退行。
+
+    記録は残るが数える経路が消えるので、監査する人が「何件あるか」に答えられない。
+    """
+    anchor = "            evidence.append(NO_REVIEW_EVIDENCE_ACK_TAG)"
+    assert anchor in src, "anchor not found (stop_counting_no_evidence_approvals)"
+    return src.replace(anchor, "            pass", 1)
+
+
+def call_the_optin_path_an_ai_approval_again(src: str) -> str:
+    """承認の注記を override の種類を見ない形に戻す = e-7029 の退行。
+
+    人間の正当な opt-in でも「AI セッションが承認」と出て、警告の情報量が
+    実質ゼロになる。
+    """
+    anchor = '    if signal == "ai-session-unguarded":'
+    assert anchor in src, "anchor not found (call_the_optin_path_an_ai_approval_again)"
+    return src.replace(anchor, (
+        '    if signal == "user-override" and kind != "human":\n'
+        '        return ["  \u26a0 AI \u30bb\u30c3\u30b7\u30e7\u30f3\u304c '
+        'override \u3067\u627f\u8a8d\u3057\u307e\u3057\u305f"]\n'
+        '    if signal == "ai-session-unguarded":'), 1)
+
+
+def let_a_satisfied_nudge_keep_nagging(src: str) -> str:
+    """もう止めていない促しを下げるのをやめる = e-7359 の退行。
+
+    fork で実施しても親の促しが出続け、促しと関門の意味が再び割れる。
+    """
+    anchor = "            if rtype in blocking:\n                continue"
+    assert anchor in src, "anchor not found (let_a_satisfied_nudge_keep_nagging)"
+    return src.replace(anchor, "            if True:\n                continue", 1)
+
+
+def retire_a_nudge_even_when_the_head_is_unknown(src: str) -> str:
+    """head 不明でも促しを下げる = 促しを「出す側に倒す」判断を外す。"""
+    anchor = "        if not num or not head:\n            continue"
+    assert anchor in src, "anchor not found (retire_a_nudge_even_when_the_head_is_unknown)"
+    return src.replace(anchor, "        if not num:\n            continue", 1)
+
+
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
 EXPECT_RED = [
     ("関門が導出でなくトリガーファイルを読む (e-6859 の退行そのもの)",
@@ -545,12 +592,29 @@ EXPECT_RED = [
      PR, let_the_override_branch_read_owed,
      f"{GATE_T}::test_the_override_branch_reads_the_blocking_set "
      f"{GATE_T}::test_gate_override_proceeds_with_audit"),
+    # --- backlog (e-7247 / e-7029 / e-7359) ---
+    ("証拠ゼロ承認のタグを落とす (e-7247 — 数える経路が消える)",
+     TARGET, stop_counting_no_evidence_approvals,
+     f"{EV_T}::test_a_no_evidence_approval_is_countable"),
+
+    ("承認の注記を override の種類を見ない形に戻す (e-7029)",
+     TARGET, call_the_optin_path_an_ai_approval_again,
+     f"{EV_T}::test_the_optin_path_is_not_called_an_ai_approval"),
+
+    ("もう止めていない促しを下げるのをやめる (e-7359 — 促しと関門が再び割れる)",
+     TRIG, let_a_satisfied_nudge_keep_nagging,
+     f"{NUDGE_T}::test_a_nudge_is_retired_once_it_no_longer_blocks"),
+
+    ("head 不明でも促しを下げる (促しを出す側に倒す判断を外す)",
+     TRIG, retire_a_nudge_even_when_the_head_is_unknown,
+     f"{NUDGE_T}::test_an_unknown_head_leaves_the_nudge_alone"),
 ]
 
 
 def main() -> int:
     originals = {p: p.read_text(encoding="utf-8")
-                 for p in (SPINE, SHARED, PR, CMDS, TRIG, OBL_STUB, GATE_CI)}
+                 for p in (SPINE, SHARED, PR, CMDS, TRIG, OBL_STUB, GATE_CI,
+                           TARGET)}
     if not ih.check_baseline(BASELINE, ROOT):
         return 1
 
