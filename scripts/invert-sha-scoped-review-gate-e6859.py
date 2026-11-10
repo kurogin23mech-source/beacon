@@ -445,9 +445,13 @@ def let_a_satisfied_nudge_keep_nagging(src: str) -> str:
 
 def retire_a_nudge_even_when_the_head_is_unknown(src: str) -> str:
     """head 不明でも促しを下げる = 促しを「出す側に倒す」判断を外す。"""
-    anchor = "        if not num or not head:\n            continue"
+    # 当て先: head 不明の枝ごと落とす (AC4 の開示を足したときに 2 つの if に
+    # 分かれたので、以前の 1 行の形はもう無い)。
+    anchor = "        if not head:"
     assert anchor in src, "anchor not found (retire_a_nudge_even_when_the_head_is_unknown)"
-    return src.replace(anchor, "        if not num:\n            continue", 1)
+    idx = src.index(anchor)
+    end = src.index("        repo = core.extract_pr_repo_from_url", idx)
+    return src[:idx] + src[end:]
 
 
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
