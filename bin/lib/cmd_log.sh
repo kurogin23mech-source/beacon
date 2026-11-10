@@ -12,6 +12,37 @@
 #   bash resolves them at call time (late binding). Verified by
 #   scripts/check-cli-help-drift.py (collect_requires_drift).
 
+# The single definition of "is this path Beacon's own runtime state?" (ms-160
+# e-7406). Two decisions in this file need it and must not drift apart:
+#
+#   * the dirty-tree gate  — may `beacon log` run at all?
+#   * the beacon-only skip — is this commit worth recording?
+#
+# They used to carry separate copies spelled differently (`^\.beacon/` here,
+# `^\.(beacon)/` there). The spellings were equivalent as regexes but not as
+# text, so `grep -n '\.beacon/' cmd_log.sh` did not find the second one — which
+# is exactly how a later change updates one site and silently leaves the other.
+# ``beacon_cli/dispatch.py`` holds the third copy for the Python frontend;
+# tests/test_log_gate_beacon_churn_e7406.py runs both against one corpus.
+_BEACON_CHURN_PATH_RE='^\.beacon/'
+
+# Read paths on stdin, emit only the ones the USER is responsible for.
+# Blank lines are dropped so an empty input does not read as one dirty path.
+_non_beacon_paths() {
+    grep -v '^$' | grep -vE "$_BEACON_CHURN_PATH_RE" || true
+}
+
+# `git diff` quotes and octal-escapes non-ASCII paths by default
+# (core.quotePath=true), which turns `.beacon/documents/日本語.md` into
+# `".beacon/documents/\343\203..."` — a string starting with a quote character,
+# so the prefix test above misses it and Beacon's own file is blamed on the
+# user. profile-extractor (the repo that reported this bug) tracks 15 such paths
+# under `.beacon/`, so the symptom would have come straight back through that
+# door. Every git call whose output feeds the predicate goes through here.
+_git_paths() {
+    git -C "$_git_cwd" -c core.quotepath=false "$@" 2>/dev/null
+}
+
 cmd_log() {
     ensure_project
     # e-1227 (ms-17): resolve git operations from the *original* invocation
@@ -74,13 +105,12 @@ cmd_log() {
     # dirty-tree side, so one of the two sides was closed and the other open.
     #
     # Whether a repo is affected depends on whether it tracks those files, which
-    # is why this looked repo-specific rather than structural: on 2026-11-10,
-    # profile-extractor (.beacon/project.json, tool-unregistered.json) and
-    # ricordi-sales-ai (changelog.jsonl, project.json, triggers/) were dirty,
-    # while sales-dashboards, life-plan-simulator and beacon's own repo were
-    # clean. Each repo had been adding churn files to .gitignore one at a time as
-    # they got bitten, which cannot converge — the next state file Beacon starts
-    # writing breaks the gate again in whichever repo tracked it.
+    # is why this looked repo-specific rather than structural. Per-repo .gitignore
+    # entries cannot converge on it either: the next state file Beacon starts
+    # writing breaks the gate again in whichever repo tracked it. The survey of
+    # which repos were affected is evidence that does not live in this repo, so it
+    # is recorded in task e-7406 rather than asserted here where no reader can
+    # check it.
     #
     # A git failure must still block. The old `! git diff --quiet HEAD` form
     # treated a non-zero git exit as dirty, so a broken/absent repo stopped the
@@ -90,15 +120,14 @@ cmd_log() {
     # piping would replace the status with grep's.
     if [ "$mode" != "prepare" ]; then
         local changed_all rc user_dirty
-        changed_all=$(git -C "$_git_cwd" diff --name-only HEAD 2>/dev/null)
+        changed_all=$(_git_paths diff --name-only HEAD)
         rc=$?
         if [ "$rc" -ne 0 ]; then
             echo "Error: could not inspect the working tree (git diff failed)."
             echo "Run beacon log from inside a git repository."
             exit 1
         fi
-        user_dirty=$(printf '%s\n' "$changed_all" \
-                     | grep -v '^$' | grep -vE '^\.beacon/' || true)
+        user_dirty=$(printf '%s\n' "$changed_all" | _non_beacon_paths)
         if [ -n "$user_dirty" ]; then
             echo "Error: uncommitted changes detected."
             echo "Commit your changes first, then run beacon log."
@@ -125,14 +154,12 @@ cmd_log() {
     # by Skill, so it should always proceed.
     if [ "$mode" != "finalize" ]; then
         local changed_files
-        changed_files=$(git -C "$_git_cwd" diff-tree --no-commit-id --name-only -r "$target_ref" 2>/dev/null)
-        if echo "$changed_files" | grep -qE '^\.(beacon)/'; then
-            local non_beacon
-            non_beacon=$(echo "$changed_files" | grep -vE '^\.(beacon)/' || true)
-            if [ -z "$non_beacon" ]; then
-                echo "Skipped: commit $hash only changes .beacon/ (avoiding infinite loop)"
-                exit 0
-            fi
+        changed_files=$(_git_paths diff-tree --no-commit-id --name-only -r "$target_ref")
+        local non_beacon
+        non_beacon=$(printf '%s\n' "$changed_files" | _non_beacon_paths)
+        if [ -n "$changed_files" ] && [ -z "$non_beacon" ]; then
+            echo "Skipped: commit $hash only changes .beacon/ (avoiding infinite loop)"
+            exit 0
         fi
     fi
 
