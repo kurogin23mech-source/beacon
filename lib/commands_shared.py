@@ -3378,6 +3378,81 @@ def _pr_open_reviewed_marker_path(pr_number: str, pr_repo: str = "") -> str:
         f"{repo.replace('/', _REVIEW_DUE_OWNER_SEP)}")
 
 
+def _issued_bundle_sha_path(pr_number: str, pr_repo: str = "",
+                            review_type: str = "") -> str:
+    """judge に渡した bundle の head_sha を刻む path。
+
+    住所の形は再発火抑止マーカー (``_pr_open_reviewed_marker_path``) に揃える
+    —— 同じ ``.beacon/triggers/`` 配下の dot-file で、リポジトリが分かるなら
+    分ける。種別まで分けるのは、束 (batch) で 2 種別を同じ差分で発行したあと
+    片方だけ再発行された場合に、もう片方が新しい sha を拾わないため。
+    """
+    repo = str(pr_repo or "").strip()
+    rt = str(review_type or "").strip() or "any"
+    base = f".issued-pr-{pr_number}.{rt}"
+    if not repo:
+        return os.path.join(_get_triggers_dir(), base)
+    return os.path.join(
+        _get_triggers_dir(),
+        f"{base}{_REVIEW_DUE_REPO_SEP}"
+        f"{repo.replace('/', _REVIEW_DUE_OWNER_SEP)}")
+
+
+def write_issued_bundle_sha(pr_number: str, pr_repo: str,
+                            review_type: str, head_sha: str) -> None:
+    """bundle を **発行した** ときに、その差分の sha を刻む (ms-119)。
+
+    **なぜこれが要るか** (独立 AX レビュー 6 周目 silent): この課題の中心的な
+    主張は「judge が見た差分に対してだけ関門が開く」だが、``review done`` の
+    既定の sha は **その時点で gh に聞いた「いまの PR head」** だった。bundle を
+    発行してから done を打つまでに誰かが push すると、judge が一度も見ていない
+    差分に対して関門が緑になる —— PR #785 / #834〜836 で実際に起きた欠陥クラス
+    そのものが、新設した機構を **使わないだけで** 再現する。
+
+    judge を回す唯一の実運用経路 (``/beacon-review-run`` Skill) は
+    ``--reviewed-sha`` を渡す手順を持っていなかったので、**既定経路では必ず
+    この穴を通っていた**。Skill の散文に「渡せ」と書くだけでは、この MS が
+    何度も構造で閉じてきた「お願い依存」をレビュー機構自身に作ることになる。
+    だから **発行した側が刻み、記録する側がそれを既定の供給源にする**。
+
+    これは関門ではなく **測定の補助**。刻めなかった / 読めなかったときは
+    従来どおり gh に問い合わせるので、この印が無い環境でも挙動は退行しない。
+    """
+    sha = str(head_sha or "").strip()
+    if not sha or not pr_number:
+        return
+    try:
+        path = _issued_bundle_sha_path(pr_number, pr_repo, review_type)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(sha + "\n")
+    except OSError:
+        # 刻めなくても発行は止めない (測定の補助なので、落とす価値が無い)。
+        return
+
+
+def issued_bundle_sha(pr_number: str, pr_repo: str = "",
+                      review_type: str = "") -> Optional[str]:
+    """``review done`` が既定で使う「judge に渡した差分」の sha。
+
+    リポジトリ別の住所を先に見て、無ければ旧式 (リポジトリ無し) を見る
+    —— 読み取り側が両方を見るのは ``reviewed_marker_sha`` と同じ約束。
+    見つからなければ ``None`` を返し、呼び出し側は gh に問い合わせる。
+    """
+    if not pr_number:
+        return None
+    for path in (_issued_bundle_sha_path(pr_number, pr_repo, review_type),
+                 _issued_bundle_sha_path(pr_number, "", review_type)):
+        try:
+            with open(path, encoding="utf-8") as f:
+                sha = f.read().strip()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if sha and is_commit_sha_shaped(sha):
+            return sha
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 作業フォルダ横断のレビュー実施台帳 (ms-166 e-6899)
 #

@@ -506,6 +506,8 @@ from commands_shared import (  # noqa: F401
     format_review_sha_unpinned_warning,
     decide_review_done_report,
     decide_review_done_argument_error,
+    write_issued_bundle_sha,
+    issued_bundle_sha,
     write_reviewed_marker,
     reviewed_marker_sha,
     pr_review_obligations,
@@ -2316,6 +2318,13 @@ def cmd_review_context():
         external_references=external_references,
         origin_provenance=origin_provenance,
     )
+    # **発行した差分を刻む** (ms-119、独立 AX レビュー 6 周目 silent)。
+    # ここで刻んだ sha が `review done` の既定の供給源になる。刻まないと done は
+    # 「いまの PR head」を gh に聞き直すので、発行から done までの間に push が
+    # 入ると judge が見ていない差分に対して関門が緑になる (= この MS が閉じたと
+    # 宣言している欠陥クラスの再現)。測定の補助なので、失敗しても発行は止めない。
+    if pr and _head_sha:
+        write_issued_bundle_sha(pr, pr_repo, review_type, _head_sha)
     print(json.dumps(bundle, ensure_ascii=False))
 
 
@@ -2593,6 +2602,11 @@ def cmd_review_batch_context():
             implementer_model=implementer_model,
             external_references=external_references,
             origin_provenance=origin_provenance)
+        # 束でも 1 種別ずつ刻む (ms-119)。同じ差分を 2 種別へ渡すので同じ sha が
+        # 2 つの住所に入るが、あとで片方だけ再発行されたときに、もう片方が
+        # 新しい sha を拾わないために種別ごとに分ける。
+        if pr and _head_sha:
+            write_issued_bundle_sha(pr, _repo, rtype, _head_sha)
         reviews.append({"review_type": rtype, "judge_run": True, "bundle": bundle})
 
     print(json.dumps({
@@ -4577,8 +4591,24 @@ def cmd_review_done():
         _reviewed_sha = _full
         _sha_source = "explicit"
     else:
-        _reviewed_sha, _pr_state, _sha_error = resolve_pr_head(pr_number, pr_repo)
-        _sha_source = "gh"
+        # **judge に渡した差分を既定の供給源にする** (ms-119、独立 AX レビュー
+        # 6 周目 silent)。初版の既定は gh に聞いた「いまの PR head」だったので、
+        # bundle 発行から done までに push が入ると、judge が一度も見ていない
+        # 差分に対して関門が緑になった —— PR #785 / #834〜836 の欠陥クラスが、
+        # 新設した機構を使わないだけで再現する形。しかも judge を回す唯一の
+        # 実運用経路 (/beacon-review-run) は --reviewed-sha を渡す手順を持って
+        # いなかったので、**既定経路では必ずこの穴を通っていた**。
+        #
+        # Skill の散文に「渡せ」と書くだけでは、この MS が何度も構造で閉じて
+        # きた「お願い依存」をレビュー機構自身に作る。だから発行側が刻み、
+        # ここが読む。印が無ければ従来どおり gh に問い合わせる (退行しない)。
+        _issued = issued_bundle_sha(pr_number, pr_repo, review_type)
+        if _issued:
+            _reviewed_sha, _sha_source = _issued, "issued-bundle"
+        else:
+            _reviewed_sha, _pr_state, _sha_error = resolve_pr_head(
+                pr_number, pr_repo)
+            _sha_source = "gh"
     _owed_before = _pr_open_review_nudge_pending_types(pr_number, pr_repo)
     # 「既に台帳に在るか」も **この実行が書く前に** 見る。後で見ると、この実行自身の
     # 記録で必ず真になり、下の「義務が無かったので非 0 で終える」分岐が死ぬ
@@ -4609,8 +4639,14 @@ def cmd_review_done():
     # ここを黙ると、利用者は「PR をレビューした」と読み、関門が後で同じ種別を
     # もう一度要求したときに壊れたと誤解する。
     if _reviewed_sha:
-        _src_txt = ("--reviewed-sha で明示" if _sha_source == "explicit"
-                    else "いまの PR head")
+        # 供給源を正しく名乗る (ms-119)。刻んだ sha を「いまの PR head」と
+        # 呼ぶと、読み手は「done の時点の head を記録した」と読む —— 実際は
+        # 「judge に渡した差分」で、両者がずれている瞬間こそこの印の存在理由
+        # なので、そこを取り違えさせる文面は名乗りと実態のズレそのものになる。
+        _src_txt = {
+            "explicit": "--reviewed-sha で明示",
+            "issued-bundle": "judge に渡した bundle の差分",
+        }.get(_sha_source, "いまの PR head")
         print(f"  対象の差分: {_reviewed_sha[:12]} ({_src_txt})。"
               f"この sha に対する実施として記録しました — 以後コミットを積むと"
               f"この種別は再度要ります (ms-119 e-6859)。")

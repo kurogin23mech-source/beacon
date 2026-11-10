@@ -214,4 +214,7 @@ echo "[go-doc-quotes] OK: 崩れた引用符はありません (この緑は散�
 echo "[ci-strict-drift-guards] レビュー mode の語彙が層をまたいでズレないこと (ms-119 e-4204)…"
 python3 "$ROOT/scripts/check-review-mode-vocab.py"
 
+echo "[ci-strict-drift-guards] judge instrument が逐語共有する節がズレないこと (ms-119)…"
+python3 "$ROOT/scripts/check-instrument-shared-sections.py"
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."
