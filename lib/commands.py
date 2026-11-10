@@ -1835,7 +1835,19 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list,
 
 
 def _pr_diff_collection(pr: str, pr_repo: str, gaps: list) -> tuple:
-    """PR の差分を採るための ``(argv, target_ref, resolved_repo)`` を組む。
+    """PR の差分を採るための ``(argv, target_ref, resolved_repo, head_sha)`` を組む。
+
+    ms-119 e-6859 (独立 AX レビュー 4 周目 high): **head_sha は差分を採るその瞬間に
+    解決する**。judge に渡す bundle が「どの差分を見たか」を sha で名指さないと、
+    judge が読んでいる間に誰かが push した場合、``review done`` は「いまの head」を
+    gh に聞き直して **judge が一度も見ていない sha** を実施済みとして記録する ——
+    この課題が消すと宣言した欠陥クラスが、bundle → done の継ぎ目でそのまま再現する
+    (実際にこの PR 自身の実施記録に、その継ぎ目でズレを起こして手で直した跡が残って
+    いる)。ここで一緒に解決すれば「見た sha」と「記録する sha」が同じ変数の値になる。
+
+    解決は best-effort (取れなければ空)。差分が採れているのに sha が取れないことは
+    ありうる (gh の応答形の違い等) ので、**sha が無いことを理由に bundle を作らない
+    ことはしない** —— 代わりに gaps に 1 行載せて judge に伝える。
 
     ms-166 e-6971: ``gh pr diff <n>`` を **リポジトリ指定なしで** 叩く形が 3 箇所に
     手で書かれていた (review context / review batch context / 目的達成 bundle)。
@@ -1852,7 +1864,14 @@ def _pr_diff_collection(pr: str, pr_repo: str, gaps: list) -> tuple:
     if resolved:
         argv += ["--repo", resolved]
     target_ref = f"{resolved}#{pr}" if resolved else f"PR #{pr} (リポジトリ不明)"
-    return argv, target_ref, resolved
+    head_sha, _state, _err = resolve_pr_head(pr, resolved)
+    if not head_sha:
+        gaps.append(
+            f"この bundle は {target_ref} の差分を運んでいますが、**どの sha の"
+            f"差分か** を記録できませんでした ({_err or '理由不明'})。judge が"
+            f"読んでいる間に push されると、実施の記録が judge の見ていない差分に"
+            f"付きます。`beacon review done --reviewed-sha <sha>` で明示してください。")
+    return argv, target_ref, resolved, head_sha
 
 
 def _resolve_review_pr_repo(explicit: str, gaps: list) -> str:
@@ -1978,7 +1997,7 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
     if pr:
         # ms-166 e-6971: リポジトリ込みで採る (3 箇所に手書きされていた収集を
         # _pr_diff_collection / _collect_change_diff に通す)。
-        argv, pr_ref, _repo = _pr_diff_collection(pr, pr_repo, gaps)
+        argv, pr_ref, _repo, _head_sha = _pr_diff_collection(pr, pr_repo, gaps)
         target_ref = f"{target_id} ({pr_ref})"
         diff_text = _collect_change_diff(argv, pr_ref, gaps, empty_is_error=True)
     elif diff_ref:
@@ -2229,7 +2248,8 @@ def cmd_review_context():
             # 残らない。その上で `beacon review done` が「実施した」と記録して
             # approve / merge の関門を外す = 別のコードを真面目にレビューした結果が
             # 品質の証拠として通る (2026-10-13 実測、別プロジェクトのセッション報告)。
-            argv, target_ref, pr_repo = _pr_diff_collection(pr, pr_repo, gaps)
+            argv, target_ref, pr_repo, _head_sha = _pr_diff_collection(
+                pr, pr_repo, gaps)
             diff_text = _collect_change_diff(argv, target_ref, gaps,
                                              empty_is_error=True)
         elif diff_ref:
@@ -2268,6 +2288,9 @@ def cmd_review_context():
     # ms-119 / e-4096: attach the application-map surface index so the judge can
     # raise accuracy (spot a diff that duplicates an existing surface) WITHOUT
     # reaching into the repo — the sanctioned implementer-independent context.
+    # ms-119 e-6859: pr 経路以外 (--diff-ref / --target) は head sha を持たないので
+    # 空のまま運ぶ (= 不明。推測で埋めない)。
+    _head_sha = locals().get("_head_sha", "") or ""
     external_references = []
     surface_ref = _review_surface_index_reference()
     if surface_ref is not None:
@@ -2284,6 +2307,7 @@ def cmd_review_context():
         diff_text=diff_text,
         mode=mode,
         target_ref=target_ref,
+        head_sha=_head_sha,
         gaps=gaps,
         known_judge_types=set(registry.keys()),
         implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
@@ -2535,7 +2559,7 @@ def cmd_review_batch_context():
     # ms-166 e-6971: batch も同じ収集を通す。ここだけリポジトリ指定なしのままだと、
     # /beacon-review-run が既定で使う経路 (--batch) が取り違えたままになる。
     shared_gaps = []
-    argv, target_ref, _repo = _pr_diff_collection(
+    argv, target_ref, _repo, _head_sha = _pr_diff_collection(
         pr, os.environ.get("BEACON_PR_REPO", "").strip(), shared_gaps)
     diff_text = _collect_change_diff(argv, target_ref, shared_gaps,
                                      empty_is_error=True)
@@ -2562,6 +2586,7 @@ def cmd_review_batch_context():
         bundle = review_spine.assemble_review_context(
             rtype, origin_id=origin_id, origin_content=origin_content,
             diff_text=diff_text, mode="diff", target_ref=target_ref,
+            head_sha=_head_sha,
             gaps=type_gaps,
             known_judge_types=set(review_spine.judge_run_review_types().keys()),
             implementer_model=implementer_model,
@@ -4457,6 +4482,24 @@ def cmd_review_done():
     if pr_repo and target_id:
         print("Error: --repo は --pr と一緒に使ってください (PR 番号を解決する先を"
               "指す指定なので、--target では意味を持ちません)。", file=sys.stderr)
+        sys.exit(1)
+    # ms-119 e-6859 (独立 AX レビュー 4 周目 high): **--target では --reviewed-sha を
+    # 受け取らない。**
+    #
+    # 初版は target 経路が下の `_emit_review_done_for_target` で早期 return するため、
+    # `--reviewed-sha` を読む行 (さらに下) に到達せず、**黙って捨てて成功を名乗って
+    # いた**。judge の実測: 使い捨てプロジェクトで git リポジトリでもない場所に
+    # `--target ms-9 --reviewed-sha deadbeef...` を渡しても、sha への言及が一切無いまま
+    # 「義務を解消しました — 完了の関門を通過できます」と exit 0 で成功した。
+    #
+    # これは同じ関数が 3 行上で --repo について拒否している形と **同型** であり、
+    # しかもその拒否のコメント自身が「黙って捨てて成功を名乗っていた」欠陥を名指して
+    # いる。新しく足した旗に同じ guard を付け忘れたので、文面も exit も揃える。
+    if target_id and os.environ.get("BEACON_REVIEWED_SHA", "").strip():
+        print("Error: --reviewed-sha は --pr と一緒に使ってください (PR の head を"
+              "指す指定なので、--target では意味を持ちません)。\n"
+              "  target の完了節目は差分ではなく target 全体を見るので、pin する"
+              "「その差分」が存在しません。", file=sys.stderr)
         sys.exit(1)
     if not review_type or not (pr_number or target_id):
         # ms-166 e-6918 (独立 AX レビュー medium): 文法を手で再掲しない。

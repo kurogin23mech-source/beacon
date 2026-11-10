@@ -180,7 +180,39 @@ def test_gate_override_proceeds_with_audit(proj, monkeypatch, capsys):
     _ledger(proj, monkeypatch)
     monkeypatch.setenv("BEACON_PR_REVIEW_OVERRIDE", "1")
     cmd_pr._review_gate_check("482", action="merge")  # no raise
-    assert "override" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "override" in err
+    # ms-119 e-6859 (独立保守性レビュー 4 周目): **未実施一覧の中身まで見る**。
+    # 以前は "override" の部分一致だけを見ていたので、監査行が空でも緑だった。
+    # (「blocking を通っているか」は値では測れないので、隣の
+    #  test_the_override_branch_reads_the_blocking_set が導出口の差し替えで測る。)
+    for t in review_spine.required_pr_open_review_types():
+        assert t in err, f"override の監査行が未実施 {t} を列挙していない:\n{err}"
+
+
+def test_the_override_branch_reads_the_blocking_set(proj, monkeypatch, capsys):
+    """override の監査行が ``review_blocking_types`` を **通る** こと。
+
+    値では測れない: いまの規則では ``passed`` が偽のとき ``owed == blocking`` に
+    なるので、直読みでも同じ一覧が出る (独立保守性レビュー 4 周目もそう述べている)。
+    そして ``passed`` を立てると関門が手前で return して override 分岐に到達しない。
+    初版の試験はこの 2 つを取り違えて、壊しても緑だった (反転ハーネスが捕まえた)。
+
+    測れるのは「その分岐が単一の導出口を通っているか」。``cmd_pr`` 名前空間の
+    ``review_blocking_types`` だけを差し替え (``format_review_gate_block_error``
+    は ``commands_shared`` 側の自分のものを呼ぶので影響しない)、override の行に
+    その値が現れることで確かめる。直読みに戻ると現れない。
+    """
+    _gh_head_stub.install(monkeypatch, {"482": HEAD})
+    _ledger(proj, monkeypatch)
+    _fire(proj, "ax", "482")
+    monkeypatch.setenv("BEACON_PR_REVIEW_OVERRIDE", "1")
+    monkeypatch.setattr(cmd_pr, "review_blocking_types",
+                        lambda ob: ["ONLY-FROM-THE-SINGLE-SOURCE"])
+    cmd_pr._review_gate_check("482", action="merge")
+    err = capsys.readouterr().err
+    assert "ONLY-FROM-THE-SINGLE-SOURCE" in err, (
+        "override 分岐が単一の導出口を通っていない (owed 直読み):\n" + err)
 
 
 # ---------------------------------------------------------------------------

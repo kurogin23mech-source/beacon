@@ -231,7 +231,7 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
                             diff_text, mode, target_ref, gaps=None,
                             known_judge_types=None, external_references=None,
                             implementer_model="", artifact=None,
-                            origin_provenance=None):
+                            origin_provenance=None, head_sha=""):
     """Assemble the review-kernel bundle handed to an independent judge subagent.
 
     This is the *structural* enforcement of reviewer independence (ms-119
@@ -259,6 +259,14 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         diff_text: the mechanically-collected unified diff (git / gh pr diff).
         mode: "diff" (change-scoped) or "full-surface" (snapshot audit).
         target_ref: what was reviewed (PR number / ref range / target id).
+        head_sha: **どの差分を judge が見たか** を sha で名指す (ms-119 e-6859、
+            独立 AX レビュー 4 周目 high)。``--reviewed-sha`` に渡すべき値の
+            **唯一の構造的な供給源**。これが無いと、judge が読んでいる間に誰かが
+            push した場合、``review done`` は「いまの head」を gh に聞き直して
+            **judge が一度も見ていない sha** を実施済みとして記録する ——
+            この課題が消すと宣言した欠陥クラスが、bundle → done の継ぎ目で
+            そのまま再現する。judge は冒頭でこの値を自分の作業ツリーと照合できる。
+            取れなければ空 (推測で埋めない)。
         gaps: optional list of gentle gaps to surface (e.g. philosophy review of
             a SPEC-less target — the missing 原典 is itself a finding, 方針5).
         known_judge_types: optional set of allowed judge-run type ids. Defaults
@@ -294,6 +302,11 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         "review_type": review_type,
         "mode": mode,
         "target_ref": target_ref,
+        # ms-119 e-6859 (独立 AX レビュー 4 周目 high): **judge が見た差分の sha**。
+        # `--reviewed-sha` に渡すべき値がここに在ることで、「見た sha」と
+        # 「記録される sha」が同じ変数の値になる (2 回の独立した gh 問い合わせの
+        # 間に起きるドリフトが構造的に閉じる)。空 = 不明。
+        "head_sha": str(head_sha or "").strip(),
         "origin": _origin_slot(origin_id, origin_content, origin_provenance),
         "artifact": artifact,
         "independence_contract": INDEPENDENCE_CONTRACT,

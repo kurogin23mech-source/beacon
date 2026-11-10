@@ -338,15 +338,20 @@ def test_a_lone_undeterminable_record_is_not_called_a_duplicate():
 
 # --- 5. 差分の収集は 3 箇所すべて 1 経路を通る ------------------------------
 
-def test_the_diff_collection_names_the_repository():
+def test_the_diff_collection_names_the_repository(monkeypatch):
     import commands
+    # ms-119 e-6859: 差分を採るのと同じ瞬間に head sha も解決する (4 要素になった)。
+    # この試験の主題は **リポジトリを名指すか** なので、sha の解決は決め打ちにする。
+    monkeypatch.setattr(commands, "resolve_pr_head",
+                        lambda pr, repo="": ("a" * 40, "OPEN", ""))
     gaps: list = []
-    argv, target_ref, repo = commands._pr_diff_collection("3", "o/r", gaps)
+    argv, target_ref, repo, head = commands._pr_diff_collection("3", "o/r", gaps)
     assert argv == ["gh", "pr", "diff", "3", "--repo", "o/r"], argv
     assert target_ref == "o/r#3", (
         "bundle の対象表記にリポジトリが入っていない —— judge も利用者も"
         "どのリポジトリの 3 番か知る術が無い")
     assert repo == "o/r"
+    assert head == "a" * 40
     assert gaps == []
 
 
@@ -358,12 +363,15 @@ def test_an_unresolvable_repository_is_disclosed_not_guessed(monkeypatch):
         stdout = ""
     monkeypatch.setattr(commands.subprocess, "run",
                         lambda *a, **k: _Fail())
+    # sha の解決は決め打ち (主題はリポジトリの解決)。
+    monkeypatch.setattr(commands, "resolve_pr_head",
+                        lambda pr, repo="": ("a" * 40, "OPEN", ""))
     gaps: list = []
-    argv, target_ref, repo = commands._pr_diff_collection("3", "", gaps)
+    argv, target_ref, repo, _head = commands._pr_diff_collection("3", "", gaps)
     assert repo == "", "解決できていないのにリポジトリ名を名乗った"
     assert "--repo" not in argv, argv
     assert "リポジトリ不明" in target_ref, target_ref
-    assert gaps and "e-6971" in gaps[0], gaps
+    assert any("e-6971" in g for g in gaps), gaps
 
 
 def test_every_pr_diff_collection_goes_through_the_one_path():

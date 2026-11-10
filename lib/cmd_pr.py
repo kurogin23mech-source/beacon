@@ -83,6 +83,7 @@ from commands_shared import (  # noqa: F401
     format_pr_review_obligation_disclosure,
     format_review_head_unresolved_error,
     format_review_gate_block_error,
+    review_blocking_types,
     _resolve_session_id,
     load_project,
     save_project,
@@ -161,7 +162,15 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
             file=sys.stderr)
         sys.exit(2)
 
-    pending = ob.get("owed") or []
+    # ms-119 e-6859 (独立保守性レビュー 4 周目): **override 分岐も blocking を読む。**
+    # 3 周目で判定を `passed` / `blocking` に畳んだとき、読み手を *関数単位* で
+    # 列挙したため、**同じ関数の中の override 分岐** を見落としていた (本番コードに
+    # 残る owed の直読みはここ 1 箇所だけ、という状態だった)。いまの規則では
+    # owed == blocking が成り立つので実害は無かったが、`_review_gate_passed` に
+    # 新しい分岐が足されるとここだけ古い答えを返す。しかも既存の override 試験は
+    # 出力に "override" が含まれるかしか見ておらず、ズレても赤くならなかった。
+    # 読み手の列挙は **分岐単位** でやる (4 周連続で同じ家族を踏んだ教訓)。
+    pending = review_blocking_types(ob)
     if override:
         print(f"⚠ 独立レビュー未実施のまま PR #{pr_number} を {action} します "
               f"(未実施: {', '.join(pending)}) — この {action} は override であり "

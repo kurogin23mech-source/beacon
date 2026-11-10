@@ -961,3 +961,69 @@ def test_the_duplicate_comment_paragraph_is_gone():
     needle = '関門は「いまの head」に対して問う'
     assert src.count(needle) == 1, (
         f"同じ見出しのコメントが {src.count(needle)} 箇所ある")
+
+
+# --- 独立レビュー 4 周目 (PR #838) の指摘に対する修正 ---------------------
+
+def test_the_bundle_names_which_diff_the_judge_saw():
+    """bundle が **どの差分を judge が見たか** を sha で名指すこと。
+
+    独立 AX レビュー 4 周目 (high / silent): ``--reviewed-sha`` を新設したのに、
+    その値の唯一の構造的な供給源である bundle が head sha を出していなかった。
+    judge が読んでいる間に誰かが push すると、``review done`` は「いまの head」を
+    gh に聞き直して **judge が一度も見ていない sha** を実施済みとして記録する ——
+    この課題が消すと宣言した欠陥クラスが bundle → done の継ぎ目で再現する。
+    (この PR 自身の実施記録に、その継ぎ目でズレを起こして手で直した跡が残っている。)
+    """
+    b = rs.assemble_review_context(
+        "ax", origin_id="o", origin_content="c", diff_text="d", mode="diff",
+        target_ref="o/r#838", head_sha=HEAD)
+    assert b["head_sha"] == HEAD
+    # 取れなかったときは空 (推測で埋めない)
+    b2 = rs.assemble_review_context(
+        "ax", origin_id="o", origin_content="c", diff_text="d", mode="diff",
+        target_ref="o/r#838")
+    assert b2["head_sha"] == ""
+
+
+def test_the_head_is_resolved_where_the_diff_is_collected(monkeypatch):
+    """head sha を **差分を採るその瞬間に** 解決すること。
+
+    2 回の独立した gh 問い合わせ (context 時 / done 時) の間に起きるドリフトを
+    構造的に閉じる唯一の形。解決できなければ gaps に 1 行載せる (黙らない)。
+    """
+    monkeypatch.setattr(commands, "_resolve_review_pr_repo", lambda *a, **k: "o/r")
+    monkeypatch.setattr(commands, "resolve_pr_head",
+                        lambda pr, repo="": (HEAD, "OPEN", ""))
+    gaps = []
+    argv, ref, repo, head = commands._pr_diff_collection("838", "o/r", gaps)
+    assert head == HEAD and gaps == []
+
+    monkeypatch.setattr(commands, "resolve_pr_head",
+                        lambda pr, repo="": ("", "", "gh が落ちている"))
+    gaps2 = []
+    *_rest, head2 = commands._pr_diff_collection("838", "o/r", gaps2)
+    assert head2 == ""
+    assert gaps2 and "どの sha の差分か" in gaps2[0], gaps2
+
+
+def test_reviewed_sha_is_refused_with_target_not_silently_dropped(monkeypatch, capsys):
+    """``--target`` と ``--reviewed-sha`` の同時指定を **拒否** すること。
+
+    独立 AX レビュー 4 周目 (high / silent): target 経路は早期 return するため
+    ``--reviewed-sha`` を読む行に到達せず、**黙って捨てて成功を名乗っていた**。
+    judge の実測では、git リポジトリでもない場所に無関係な sha を渡しても
+    sha への言及なしに「完了の関門を通過できます」と exit 0 で成功した。
+    同じ関数が 3 行上で ``--repo`` + ``--target`` を拒否している形と同型。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "philosophy")
+    monkeypatch.setenv("BEACON_TARGET_ID", "ms-9")
+    monkeypatch.setenv("BEACON_PR_NUMBER", "")
+    monkeypatch.setenv("BEACON_PR_REPO", "")
+    monkeypatch.setenv("BEACON_REVIEW_NO_FINDINGS", "1")
+    monkeypatch.setenv("BEACON_REVIEWED_SHA", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    with pytest.raises(SystemExit) as e:
+        commands.cmd_review_done()
+    assert e.value.code == 1
+    err = capsys.readouterr().err
+    assert "--reviewed-sha は --pr と一緒に" in err, err

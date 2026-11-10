@@ -371,6 +371,38 @@ def restate_the_stale_fact_in_the_block_error(src: str) -> str:
         '            f"積まれた** ため再度要ります ({_d} / "'), 1)
 
 
+def drop_the_head_sha_from_the_bundle(src: str) -> str:
+    """bundle から head_sha を落とす = 独立 AX レビュー 4 周目 high の退行。
+
+    `--reviewed-sha` に渡すべき値の供給源が消えるので、judge が読んでいる間の
+    push で「見ていない sha」が実施済みとして記録される継ぎ目が戻る。
+    """
+    anchor = '        "head_sha": str(head_sha or "").strip(),'
+    assert anchor in src, "anchor not found (drop_the_head_sha_from_the_bundle)"
+    return src.replace(anchor, "", 1)
+
+
+def resolve_the_head_apart_from_the_diff(src: str) -> str:
+    """head を差分収集と別の瞬間に解決する (= 常に空を返す) 形に戻す。"""
+    anchor = "    head_sha, _state, _err = resolve_pr_head(pr, resolved)"
+    assert anchor in src, "anchor not found (resolve_the_head_apart_from_the_diff)"
+    return src.replace(anchor, '    head_sha, _state, _err = "", "", ""', 1)
+
+
+def silently_drop_reviewed_sha_with_target(src: str) -> str:
+    """--target で --reviewed-sha を黙って捨てる = AX 4 周目 high の退行。"""
+    anchor = '    if target_id and os.environ.get("BEACON_REVIEWED_SHA", "").strip():'
+    assert anchor in src, "anchor not found (silently_drop_reviewed_sha_with_target)"
+    return src.replace(anchor, "    if False:", 1)
+
+
+def let_the_override_branch_read_owed(src: str) -> str:
+    """override 分岐が blocking でなく owed を直読みする = 保守性 4 周目の退行。"""
+    anchor = "    pending = review_blocking_types(ob)\n    if override:"
+    assert anchor in src, "anchor not found (let_the_override_branch_read_owed)"
+    return src.replace(anchor, '    pending = ob.get("owed") or []\n    if override:', 1)
+
+
 #: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
 EXPECT_RED = [
     ("関門が導出でなくトリガーファイルを読む (e-6859 の退行そのもの)",
@@ -496,6 +528,23 @@ EXPECT_RED = [
     ("stale の事実を関門の文面にも書く (同じ事実が 2 回出る)",
      SHARED, restate_the_stale_fact_in_the_block_error,
      f"{SHA_T}::test_the_stale_fact_is_stated_in_exactly_one_place"),
+    # --- 独立レビュー 4 周目 (PR #838) の指摘に対する修正 ---
+    ("bundle から head_sha を落とす (AX 4 周目 high — 供給源が消える)",
+     SPINE, drop_the_head_sha_from_the_bundle,
+     f"{SHA_T}::test_the_bundle_names_which_diff_the_judge_saw"),
+
+    ("head を差分収集と別の瞬間に解決する (ドリフトの継ぎ目が戻る)",
+     CMDS, resolve_the_head_apart_from_the_diff,
+     f"{SHA_T}::test_the_head_is_resolved_where_the_diff_is_collected"),
+
+    ("--target で --reviewed-sha を黙って捨てる (AX 4 周目 high / silent)",
+     CMDS, silently_drop_reviewed_sha_with_target,
+     f"{SHA_T}::test_reviewed_sha_is_refused_with_target_not_silently_dropped"),
+
+    ("override 分岐が owed を直読みする (保守性 4 周目 — 分岐単位の見落とし)",
+     PR, let_the_override_branch_read_owed,
+     f"{GATE_T}::test_the_override_branch_reads_the_blocking_set "
+     f"{GATE_T}::test_gate_override_proceeds_with_audit"),
 ]
 
 
