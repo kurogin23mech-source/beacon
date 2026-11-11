@@ -183,8 +183,16 @@ def sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
     never added ``spec_doc_id``, which one does. Two independent reviews caught
     the same stale list, each time *after* it had just been edited. A copy of the
     caller set cannot be kept honest by hand, so there is no copy: **the call
-    sites are the list.** `grep -n "sanitize_id(" lib/ bin/ scripts/` answers the
-    question in one command, and cannot go stale.
+    sites are the list** — `grep -rn "sanitize_id(" lib/ bin/ scripts/`.
+
+    (The `-r` is load-bearing and was missing when this paragraph was first
+    written: plain `grep -n PATTERN dir/` exits 2 with "Is a directory" on stderr
+    and prints **nothing** to stdout, so a reader who checks only stdout concludes
+    "no callers" — the exact wrong answer, stated confidently. That first version
+    also claimed the command "cannot go stale", which is not a thing a command can
+    promise; the claim is dropped. An independent AX review caught it, and it got
+    past the author because the authoring shell aliased `grep` to a wrapper that
+    recursed by default — measuring one's own shell is not measuring the reader's.)
     """
     cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
     return cleaned or fallback
