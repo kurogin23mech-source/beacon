@@ -12,9 +12,15 @@ commands.py — acyclic (SPEC 方針4). This split promoted the review-due trigg
 helpers that the pr handlers share with the `beacon review` family (which stays
 in commands.py) into commands_shared: _fire_review_due_for_pr /
 _fire_pr_open_review_triggers / _clear_review_due_for_pr /
-_pending_review_types_for_pr / _pr_open_reviewed_marker_path + the
-_REVIEW_DUE_SUFFIX constant. Both sides import them from there (no cmd_pr <->
-commands cycle).
+_pr_open_reviewed_marker_path + the _REVIEW_DUE_SUFFIX constant. Both sides
+import them from there (no cmd_pr <-> commands cycle).
+
+ms-119 e-6859: the review GATE this family runs (`_review_gate_check`) now reads
+the derivation `pr_review_obligations` — specifically its single `passed` field,
+never recomputing the verdict from owed/resolved/pr_state. The nudge face
+(`_pr_open_review_nudge_pending_types`) is deliberately NOT imported here: the
+gate must not read it, and leaving the name in this module would send a reader
+looking for nudge logic that does not exist.
 
 commands.py re-imports the PUBLIC handlers for dispatch + `commands.cmd_pr_*`;
 the family-private helpers (_pr_number_from_url / _review_gate_check /
@@ -67,7 +73,17 @@ from commands_shared import (  # noqa: F401
     _check_ms_status_for_write,
     _clear_pr_open_review_triggers,
     _fire_pr_open_review_triggers,
-    _pending_review_types_for_pr,
+    # ms-119 e-6859: 関門は `pr_review_obligations` (導出) を読む。ナッジの面
+    # (`_pr_open_review_nudge_pending_types`) は **この family では使わない** ので
+    # import しない —— 置いておくと「nudge の処理がこの file に在るはず」と
+    # 探しに来た読み手の時間を奪う (独立保守性レビュー 2 周目)。
+    pr_review_obligations,
+    # ms-119 e-6859 (独立保守性レビュー): 文面の組み立ては純粋な builder に切り出し、
+    # ここは「状態を判定 → builder を呼ぶ → print / exit」だけに保つ。
+    format_pr_review_obligation_disclosure,
+    format_review_head_unresolved_error,
+    format_review_gate_block_error,
+    review_blocking_types,
     _resolve_session_id,
     load_project,
     save_project,
@@ -84,35 +100,89 @@ def _pr_number_from_url(url: str) -> str:
 
 def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> None:
     """Refuse ``action`` (approve / merge) while independent reviews are still
-    owed for this PR, unless BEACON_PR_REVIEW_OVERRIDE=1 (which proceeds but
-    prints an audit line). Exits 2 on block. ms-119 e-4060.
+    owed for **the current diff** of this PR, unless BEACON_PR_REVIEW_OVERRIDE=1
+    (which proceeds but prints an audit line). Exits 2 on block. ms-119 e-4060.
+
+    ms-119 e-6859 — 判定を **導出** に替えた。以前はレビュー未実施トリガーの
+    ファイルが在るかで判定していたので、``beacon review done`` が消した後は
+    どれだけコミットを積んでも「実施済み」のままだった (= 削除と復活の状態遷移で
+    義務を表していた。復活させる経路が無かった)。実測 PR #785 / #834 / #835 /
+    #836 で、judge が一度も見ていない差分に対して関門が緑になり、#835 では
+    **AX の findings を直したコミット自身が未レビュー** のまま帳簿上レビュー済み
+    だった。いまは:
+
+        owed = registry の pr-open 必須種別
+             − 「いまの head sha に対する実施記録」
+             − 「理由付きの免除 (review-skips.jsonl)」
+
+    なので head が動いた瞬間に全種別が owed に戻る (忘れる経路が構造的に無い)。
+
+    **head を確かめられなければ関門は閉じたまま** (2026-11-05 user 決定)。
+    「現在の差分に対して実施済み」と言えない状態で通すと偽の緑になり、緑の
+    ガードは信頼されるので無ガードより悪い。offline / gh 不在のときは merge に
+    一手 (override か skip) 増えるが、それは意図した代償。
 
     ``pr_repo`` (ms-166 e-6971): which repository this number belongs to, so a
     review recorded for a DIFFERENT repository's PR#N does not lift this PR's
     gate. Pass it from the entry being gated (``_recorded_pr_repo(entry)``) —
     the gate reads the same identity the record carries.
     """
-    pending = _pending_review_types_for_pr(pr_number, pr_repo)
-    if not pending:
+    ob = pr_review_obligations(pr_number, pr_repo)
+
+    # **通す / 止めるの判定は `passed` だけを読む** (ms-119 e-6859、独立 AX レビュー
+    # 2 周目 high)。以前はここで `pr_state` / `resolved` / `owed` を見て自分で
+    # 再計算しており、同じ判定を別に書いた `beacon review status` が 2 点で
+    # 食い違った。判定の所有は `pr_review_obligations`、ここは文面を選ぶだけ。
+    if ob.get("passed"):
+        disclosure = format_pr_review_obligation_disclosure(ob)
+        if disclosure and ob.get("resolved"):
+            # 通すが、**何を根拠に差し引いたか** は必ず言う。台帳はローカルの
+            # ファイルで手で書けるので、防げるのは「黙って外れること」だけ
+            # (ms-166 e-6899)。
+            print(f"ℹ PR #{pr_number} の独立レビューは現在の head "
+                  f"({(ob.get('head_sha') or '')[:12]}) に対して充足しています:",
+                  file=sys.stderr)
+            for line in disclosure:
+                print(line, file=sys.stderr)
         return
-    if os.environ.get("BEACON_PR_REVIEW_OVERRIDE") == "1":
+
+    disclosure = format_pr_review_obligation_disclosure(ob)
+    override = os.environ.get("BEACON_PR_REVIEW_OVERRIDE") == "1"
+
+    if not ob.get("resolved"):
+        # head が不明 = 「現在の差分に対して実施済み」と言えない。止める側に倒す。
+        if override:
+            print(f"⚠ PR #{pr_number} の head を確かめられないまま {action} します "
+                  f"({ob.get('head_error') or '理由不明'}) — この {action} は "
+                  f"override であり監査対象です。現在の差分がレビュー済みである"
+                  f"保証はありません。", file=sys.stderr)
+            return
+        print(format_review_head_unresolved_error(
+            ob, action=action, pr_number=pr_number, pr_repo=pr_repo),
+            file=sys.stderr)
+        sys.exit(2)
+
+    # ms-119 e-6859 (独立保守性レビュー 4 周目): **override 分岐も blocking を読む。**
+    # 3 周目で判定を `passed` / `blocking` に畳んだとき、読み手を *関数単位* で
+    # 列挙したため、**同じ関数の中の override 分岐** を見落としていた (本番コードに
+    # 残る owed の直読みはここ 1 箇所だけ、という状態だった)。いまの規則では
+    # owed == blocking が成り立つので実害は無かったが、`_review_gate_passed` に
+    # 新しい分岐が足されるとここだけ古い答えを返す。しかも既存の override 試験は
+    # 出力に "override" が含まれるかしか見ておらず、ズレても赤くならなかった。
+    # 読み手の列挙は **分岐単位** でやる (4 周連続で同じ家族を踏んだ教訓)。
+    pending = review_blocking_types(ob)
+    if override:
         print(f"⚠ 独立レビュー未実施のまま PR #{pr_number} を {action} します "
               f"(未実施: {', '.join(pending)}) — この {action} は override であり "
               f"監査対象です。", file=sys.stderr)
+        for line in disclosure:
+            print(line, file=sys.stderr)
         return
-    runs = "\n".join(
-        f"    /beacon-review-run --type {t} --pr {pr_number}" for t in pending)
-    print(
-        f"Error: PR #{pr_number} は独立レビューが未実施のため {action} できません "
-        f"(未実施: {', '.join(pending)})。\n"
-        f"  ms-119 e-4060: レビューは PR-open の節目で発火し、実行するまで "
-        f"approve/merge を構造的に塞ぎます (発火だけで消費されない穴の是正)。\n"
-        f"  文脈ゼロの独立 judge に原典+差分を渡して実行:\n{runs}\n"
-        f"  実行後は `beacon review done --type <type> --pr {pr_number}` で解消 "
-        f"(/beacon-review-run が最後に自動で叩きます)。\n"
-        f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
-        f"(監査痕跡が残ります)。",
-        file=sys.stderr)
+
+    print(format_review_gate_block_error(ob, action=action, pr_number=pr_number),
+          file=sys.stderr)
+    for line in disclosure:
+        print(line, file=sys.stderr)
     sys.exit(2)
 
 def _fetch_gh_pr_info(url: str) -> dict:

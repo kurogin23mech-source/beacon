@@ -236,6 +236,15 @@ def _decided_by_for_gate() -> str:
     return decided_by_for_gate()
 
 
+#: 証拠ゼロで意識的に承認したことを **数えられる形** で判断記録に残すタグ
+#: (ms-119 e-7247)。``beacon decision list --json`` の evidence にこの語が在る
+#: 件数が「証拠なしで通った承認」の件数。
+#:
+#: 語を変えるときは、数える側 (運用 / 監査) が過去の記録を引けなくなることに注意
+#: (追記のみの記録なので、過去分は旧い語のまま残る)。
+NO_REVIEW_EVIDENCE_ACK_TAG = "no-review-evidence-ack"
+
+
 def _record_completion_verdict_decision(target_id, verdict, entry, approval_rationale):
     """ms-154 e-5651 — record a target completion verdict (attainment) on the
     decision arm, carrying the transition-approval's RICH rationale.
@@ -288,6 +297,25 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
             src = (r.get("source") or "").strip()
             if src and f"review:{src}" not in evidence:
                 evidence.append(f"review:{src}")
+        # ms-119 e-7247: **証拠ゼロで承認したことを数えられるようにする。**
+        #
+        # 承認の口は既に「証拠が 1 件も無ければ拒否する」(e-4205、choke point の
+        # EvidenceRequiredError) を持ち、意識的な bypass には
+        # BEACON_ACK_NO_EVIDENCE=1 を要求して ``approval_gate.no_evidence_ack`` を
+        # 刻む。つまり **記録は残っていた**。足りなかったのは「後から数えられる」
+        # 側で、この印の読み手は表示の 1 行だけだった (e-7247 の受入条件 2)。
+        #
+        # 専用の問い合わせ動詞は増やさない。判断記録は追記のみで、`evidence` は
+        # 既に検索可能なタグの語彙なので、ここに 1 つ載せれば
+        # `beacon decision list` で数えられる (review done の `sha:` と同じ手筋)。
+        # 「証拠が空」だけを手掛かりにしない —— 空は「書き込み順の都合で載らなかった」
+        # とも読めるので、**意識的に bypass した** ことを明示の語で言う。
+        _gate = meta.get("approval_gate") or {}
+        if _gate.get("no_evidence_ack"):
+            evidence.append(NO_REVIEW_EVIDENCE_ACK_TAG)
+            parts.append("⚠ 独立レビューの証拠ゼロのまま意識的に承認 "
+                         "(BEACON_ACK_NO_EVIDENCE=1)")
+            rationale = " / ".join(parts) or None
         client, config = _get_api_client()
         project_id = config.get("project_id", "")
         if not project_id:
@@ -402,8 +430,8 @@ def cmd_target_approve():
     if _gate:
         _es = f", evidence={_gate['evidence_source']}" if _gate.get("evidence_source") else ""
         print(f"  gate: {_gate.get('signal')} (session_kind={_gate.get('session_kind')}{_es})")
-        if _gate.get("signal") == "user-override" and _gate.get("session_kind") != "human":
-            print("  ⚠ AI セッションが override で承認しました — この遷移は監査対象です。")
+        for _line in format_approval_gate_notice(_gate):
+            print(_line)
         if _gate.get("no_evidence_ack"):
             print("  ⚠ 独立レビュー証拠なしで承認されました "
                   "(--acknowledge-no-evidence) — この遷移は監査対象です (ms-119 / e-4205)。")
@@ -1988,6 +2016,51 @@ def _ai_session_attainment_approve_ban_active() -> bool:
     if os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1":
         return False
     return not _session_kind_is_human()
+
+
+def format_approval_gate_notice(gate: dict) -> list:
+    """承認がどの signal で通ったかの注記を組む (ms-119 e-7029)。純粋。
+
+    **断定できないことを断定しない。**
+
+    初版は ``signal == "user-override" and session_kind != "human"`` のとき
+    「⚠ AI セッションが override で承認しました」と出していた。だが
+    ``user-override`` (= ``BEACON_TARGET_APPROVE_USER_OVERRIDE=1``) は **人間が
+    明示的に opt-in するための経路** であり、Claude Code の ``!`` 経路 (人間が
+    ターミナルから直接打つ正規の経路) では ``session_kind`` が宣言されないまま
+    ``unset`` で残る。つまり **人間の正当な承認でも同じ警告が出ていた**。
+
+    実例 (2026-10-15, profile-extractor の ms-43)::
+
+        gate: user-override (session_kind=unset, evidence=independent-judge:fable)
+        ⚠ AI セッションが override で承認しました — この遷移は監査対象です。
+
+    1 行目が ``user-override`` と正しくラベル付けしているのに、2 行目が同じ出力の中で
+    それと矛盾することを言っている。e-4006 の guard の狙いは「AI の自己承認を
+    隠せなくする」ことだが、**警告が常に出るなら監査する側は区別が付かず、警告としての
+    情報量が実質ゼロになる**。
+
+    そこで記録から言えることだけを言う:
+
+    * ``ai-session-unguarded`` —— guard をすり抜けている。これが本当に怪しい形なので
+      強い警告を出す。
+    * ``user-override`` + ``session_kind == "human"`` —— 人間が宣言して opt-in した。
+      注記は出さない (gate 行だけで足りる)。
+    * ``user-override`` + 宣言なし —— **事実の記述**。「opt-in 経路で通った / 誰が
+      打ったかは記録から断定できない」と言う。AI とも人間とも決めつけない。
+    """
+    signal = str((gate or {}).get("signal") or "")
+    kind = str((gate or {}).get("session_kind") or "")
+    if signal == "ai-session-unguarded":
+        return ["  ⚠ セッション種別の guard をすり抜けて承認されました "
+                "— AI セッションの自己承認の可能性が高く、この遷移は監査対象です。"]
+    if signal == "user-override" and kind != "human":
+        return ["  ℹ 人間の明示的 opt-in の経路 "
+                "(BEACON_TARGET_APPROVE_USER_OVERRIDE=1) で承認されました。"
+                "このセッションは種別を宣言していないため、**打ったのが人間か AI かは"
+                "記録から断定できません** — 記録には signal と session_kind が"
+                "そのまま残ります。"]
+    return []
 
 
 def _approval_gate_record() -> dict:

@@ -54,7 +54,10 @@ def test_the_gate_script_is_called_by_at_least_one_workflow():
 @pytest.mark.parametrize(
     "guard",
     ["check-single-skill-parser.py", "check-tests-dont-mutate-repo.py",
-     "check-tool-subcommand-flag-parity.py", "check-mandated-tools.py"])
+     "check-tool-subcommand-flag-parity.py", "check-mandated-tools.py",
+     # ms-119: judge instrument の逐語共有節。ガードを足しても gate script に
+     # 繋がなければ「書いただけ」になるので、繋がっていることをここで固定する。
+     "check-instrument-shared-sections.py"])
 def test_each_guard_is_called_by_the_gate_script(guard):
     """One end: the script runs the guard."""
     assert guard in GATE_SCRIPT.read_text(encoding="utf-8"), (

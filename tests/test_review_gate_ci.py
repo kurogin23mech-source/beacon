@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "review-gate-ci.py"
 sys.path.insert(0, str(ROOT / "lib"))
 import commands  # noqa: E402
+import _pr_obligations_stub  # noqa: E402
 
 
 def _load_script_module():
@@ -78,23 +79,104 @@ def test_ci_flip_is_noop_by_default(monkeypatch):
     assert called["n"] == 0
 
 
-def test_ci_flip_attempts_gh_when_enabled(monkeypatch):
-    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+SHA = "abc123sha"
+
+
+def _stub_subprocess(monkeypatch, local_head=SHA):
+    """``git rev-parse HEAD`` を決め打ちし、呼ばれた argv を集める。"""
     calls = []
 
     class R:
-        stdout = "abc123sha\n"
         returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout=""):
+            self.stdout = stdout
 
     def rec(argv, *a, **k):
         calls.append(argv)
-        return R()
+        if "rev-parse" in argv:
+            return R(local_head + "\n")
+        return R("")
 
     monkeypatch.setattr(commands.subprocess, "run", rec)
-    commands._ci_flip_review_gate_success("42")
-    # first call resolves the head sha, second invokes the gate script set.
-    assert any("headRefOid" in " ".join(c) for c in calls)
-    assert any("review-gate-ci.py" in " ".join(c) and "success" in c for c in calls)
+    return calls
+
+
+def _all_types_done_at(monkeypatch, sha):
+    """「全必須種別が この sha に対して実施済み」を導出側に見せる。
+
+    分岐も文面も共有 stub に 1 箇所だけ置いてある (ms-119 e-6859、独立保守性
+    レビュー 2 周目: この helper が 2 つの試験ファイルに逐語で重複しており、
+    片方だけ直して「直した」と判断できる形だった)。
+    """
+    return _pr_obligations_stub.install_satisfied_at(monkeypatch, commands, sha)
+
+
+def test_ci_flip_pushes_the_mark_to_the_reviewed_sha(monkeypatch):
+    """印は **レビューした差分** に押す (ms-119 e-6859)。
+
+    以前は「いまの PR head」に押していたので、別種別が古い sha しか見ていなくても
+    1 つの ``review done`` が今の head を緑にできた (PR #785 の事故)。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    _all_types_done_at(monkeypatch, SHA)
+    calls = _stub_subprocess(monkeypatch)
+    commands._ci_flip_review_gate_success("42", "o/r", SHA)
+    pushes = [c for c in calls
+              if "review-gate-ci.py" in " ".join(c) and "success" in c]
+    assert pushes, f"印を押していない: {calls}"
+    assert SHA in pushes[0], f"レビューした sha に押していない: {pushes[0]}"
+
+
+def test_ci_flip_targets_the_reviewed_sha_not_the_local_head(monkeypatch, capsys):
+    """押す先は **レビューした sha**。手元 HEAD を流用しないこと。
+
+    **反転ハーネスが捕まえた偽の緑** (2026-11-05): 上の試験は stub の手元 HEAD と
+    レビューした sha を同じ値にしていたので、``--sha reviewed_sha`` を
+    ``--sha local_sha`` に書き換えても通った = 2 つを区別していなかった。
+
+    区別が出るのは ``git rev-parse HEAD`` が **空を返す** とき (commit が 1 つも
+    無いリポジトリ等。非 0 終了でも例外は飛ばないのでここに到達する)。手元 HEAD を
+    流用していると空の sha に押しに行く。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    _all_types_done_at(monkeypatch, SHA)
+    calls = _stub_subprocess(monkeypatch, local_head="")
+    commands._ci_flip_review_gate_success("42", "o/r", SHA)
+    pushes = [c for c in calls
+              if "review-gate-ci.py" in " ".join(c) and "success" in c]
+    assert pushes, f"印を押していない: {calls}"
+    i = pushes[0].index("--sha")
+    assert pushes[0][i + 1] == SHA, (
+        f"手元 HEAD (空) を押す先に流用した: {pushes[0]}")
+
+
+def test_ci_flip_refuses_without_a_reviewed_sha(monkeypatch, capsys):
+    """どの差分に対する実施か pin できていないなら押さない。
+
+    押すと「judge が見ていない差分」を緑にする。印は sha 単位なので、
+    pin できない状態の success は構造的に嘘になる。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    calls = _stub_subprocess(monkeypatch)
+    commands._ci_flip_review_gate_success("42", "o/r", "")
+    assert not any("review-gate-ci.py" in " ".join(c) for c in calls), calls
+    assert "pin できていません" in capsys.readouterr().err
+
+
+def test_ci_flip_refuses_while_another_type_is_still_owed(monkeypatch, capsys):
+    """**全必須種別が同じ差分に対して** 実施されるまで緑にしない。
+
+    1 種別の実施で緑を押せてしまう形が PR #785 の事故だった (AX が古い sha しか
+    見ていないのに、保守性の ``review done`` が今の head を success にした)。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    _all_types_done_at(monkeypatch, "some-other-sha")   # この sha では未充足
+    calls = _stub_subprocess(monkeypatch)
+    commands._ci_flip_review_gate_success("42", "o/r", SHA)
+    assert not any("review-gate-ci.py" in " ".join(c) for c in calls), calls
+    assert "未実施です" in capsys.readouterr().err
 
 
 # --- activation plan builders (ms-160 e-5805) ------------------------------
