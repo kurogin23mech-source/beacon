@@ -340,7 +340,8 @@ def has_required_provenance(ev: dict) -> bool:
     return requirement.predicate(ev)
 
 
-def downgrade_advice(reason: str, channel: str = "") -> str:
+def downgrade_advice(reason: str, channel: str = "", *,
+                     retired_channels=RETIRED_PROVENANCE_CHANNELS) -> str:
     """降格 1 件につき「何が起きて、どう直すか」の 1 句を返す唯一の場所。
 
     両方の受信 hook (Claude = ``bin/beacon-bus-inbox-hook.py`` / Codex =
@@ -350,10 +351,23 @@ def downgrade_advice(reason: str, channel: str = "") -> str:
     誰も見ていなかった)。説明は「何を証拠として要求したか」から導かれるべきもの
     なので、要求を宣言している ``PROVENANCE_REQUIREMENTS`` と同じ場所に置く。
 
-    ``channel`` を受け取るのが要点。``non-system-envelope`` という理由タグ 1 つが
-    ``operation-trigger`` (人間の承認が要る = 回復手段が在る) と ``trek-*``
-    (サーバ署名が要る = operator には直せない) の**両方**を指すので、タグだけで
-    分岐すると必ず片方に誤った案内を出す。
+    ``channel`` を受け取るのが要点。理由タグ 1 つが複数の世界を指すので、タグだけで
+    分岐すると必ずどれかに誤った案内を出す。
+
+    * ``non-system-envelope``: 証拠の封筒が無い。要求を宣言している channel
+      (``PROVENANCE_REQUIREMENTS``) なら回復手段が在り (``operation-trigger`` は
+      人間の承認)、宣言が無い channel では**推測で名乗らない**。
+    * 理由タグ無し (= 許可リスト漏れ): 「人間がまだ許可していない」が既定の意味
+      だが、**引退した channel では意味が逆**になる。引退した channel は許可して
+      も自律実行にならないので、「許可してください」と案内すると二度と使わない
+      channel を登録させる誤誘導になる (ms-185 e-7395)。判定
+      (``classify_auto_execute``) は許可リストを先に見る順序が固定されている
+      ため、この区別は**案内層で付けるしかない** —— それがここ。
+
+    ``trek-*`` は署名を要求する集合 (``GATED_PROVENANCE_CHANNELS``) には **居ない**。
+    居るのは ``operation-trigger`` だけで、``trek-*`` は
+    ``RETIRED_PROVENANCE_CHANNELS`` (= サーバがもう発行しない) に移った
+    (ms-185)。だから回復手段は「許可リストから外す」で、operator に手段が在る。
 
     **タグだけで分岐していた頃の実害**: 当時 ``trek-*`` 向けに書かれていた文言
     (「偽装の恐れ」「opt-in し直しても直りません」) を ``operation-trigger`` にも
@@ -364,11 +378,28 @@ def downgrade_advice(reason: str, channel: str = "") -> str:
     保守性レビュー)。散文同士の一致を機械検査で強制するのは、このリポジトリが
     両方向の失敗を実証した道なので取らない —— 複製を比べるのではなく複製を無くす。
 
+    ``retired_channels`` は ``classify_auto_execute`` と対称にした差し替え口
+    (試験が引退集合を注入して両者を揃えて動かせる)。**デフォルト値は定義時に
+    束縛される**ので、``bus_delivery.RETIRED_PROVENANCE_CHANNELS`` をモジュール
+    変数として差し替えてもこの関数には効かない —— 差し替えたいときは引数で渡すこと
+    (PR#844 2 周目の独立保守性レビュー: 試験されていない継ぎ目は「在るのに効かない」
+    と誤解されるので、注入を実証する試験を添えた)。
+
     提示の仕方 (1 件ずつ inline に添えるか、件数つきの塊にまとめるか) は hook
     ごとに違うので、ここは**原因と回復手段の 1 句だけ**を返し、前後の飾りは
     呼び出し側に委ねる。
     """
     if not reason:
+        if str(channel or "") in retired_channels:
+            # ms-185 e-7395: 引退した channel が許可リストに無いとき、判定は
+            # 「許可リスト漏れ」と同じ空タグを返す (評価順が allowlist → retired で
+            # 固定されており、順序を変えると記録済みの決定を覆す)。既定の案内
+            # 「人間が許可する前」をそのまま出すと、人間が `auto-execute add` で
+            # 登録し、次の通知で「外してください」と**逆のことを言われる**。
+            # 1 往復の手間と、二度と使わない channel を許可させる誤誘導になる。
+            return ("この channel は引退済みで、サーバはもう発行しません "
+                    "(許可リストにも入っていません)。`beacon bus auto-execute add` "
+                    "で許可しても自律実行にはならないので、登録しないでください")
         # 文言は従来のまま。既存の読み手 (人間 / AI) と
         # ``test_allowlist_miss_output_keeps_the_original_wording`` が
         # この literal を見ている。

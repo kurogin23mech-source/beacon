@@ -340,9 +340,16 @@ def test_hook_passes_through_auto_execute_when_channel_in_allowlist(
     # explaining what downgrade means stays out of scope of this assertion.
     event_block = ctx.split("ev-1", 1)[1].split("--- 取り扱いガイド ---")[0]
     assert "auto-execute downgraded" not in event_block
-    # The summary count line ("X 件 降格") also must not appear when nothing
-    # was downgraded.
-    assert "件 — channel が" not in ctx
+    # 降格が 0 件なら集計行そのものが出ないこと。
+    #
+    # **測り方を直した (ms-185 e-7395 / PR#844 独立保守性レビュー, high)**: 以前は
+    # 旧文面の中間断片 `"件 — channel が"` の不在を見ていた。集計行の文面が変わった
+    # 瞬間にこの断片は構造的に現れなくなり、**この assert は空振りになった** —
+    # judge が `if auto_execute_downgraded_count:` を `if True:` に変異させて
+    # (= 0 件でも集計行が常に出るバグ) 両方 PASS することを実測した。
+    # いまは集計行の見出しトークンで測る。文面の言い換えでは消えず、集計行が
+    # 出るかどうかだけに反応する。
+    assert "安全側降格" not in ctx
 
 
 def test_hook_records_downgrade_in_inbox_log(hook_module, fake_project,
@@ -422,8 +429,8 @@ def test_hook_propose_to_ai_events_untouched_by_allowlist(hook_module,
     # (the static guide section can still discuss downgrades in general).
     event_block = ctx.split("ev-p", 1)[1].split("--- 取り扱いガイド ---")[0]
     assert "downgraded" not in event_block
-    # And the summary count line must be absent.
-    assert "件 — channel が" not in ctx
+    # 集計行そのものが出ないこと (測り方の経緯は上の同種 assert のコメント参照)。
+    assert "安全側降格" not in ctx
 
 
 def test_render_context_surfaces_downgraded_count(hook_module):

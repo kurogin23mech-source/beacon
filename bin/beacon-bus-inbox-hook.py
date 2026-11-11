@@ -600,8 +600,19 @@ def _downgrade_advice(reason: str, channel: str = "") -> str:
     if bd is None:
         # lib が読めない環境 (fail-closed 側に倒す設計)。知らない定数名で分岐した
         # ふりをするより、生のタグを見せる方が誤診を招かない。
+        #
+        # **空タグで「許可してください」と言わない (ms-185 e-7395 / PR#844 の独立
+        # AX + 保守性が一致で指摘)**: 空タグは「現役 channel の承認待ち」と「引退
+        # channel」の 2 つを指すが、見分ける材料 (RETIRED_PROVENANCE_CHANNELS) は
+        # lib 側にしか無い。以前はここで常に「人間が許可する前」を返しており、
+        # **lib が読めるかどうかという無関係な事情だけで案内が反転**していた
+        # (judge が実測: 引退 channel でも「まだ許可されていません」が出る)。
+        # それはこの課題がまさに消しに来た誤誘導を fail-closed 経路に残すこと。
+        # 材料が無いときは推測で名乗らない —— Codex 側の render_* と同じ作法。
         if not reason:
-            return "channel not in bus_auto_execute_channels (= 人間が許可する前)"
+            return ("降格の理由を解決できません (bus_delivery を読めないため、"
+                    "引退した channel か人間の承認待ちかを見分けられません)。"
+                    "`beacon bus auto-execute add` を自己判断で実行しないでください")
         return (f"理由タグ '{reason}' (bus_delivery を読めないため説明を "
                 "解決できません)")
     return bd.downgrade_advice(reason, channel)
@@ -764,9 +775,17 @@ def _render_context(events: list[dict], notify_only_count: int,
         )
     if auto_execute_downgraded_count:
         parts.append(
+            # ms-185 e-7395: ここは **件数しか知らない**。以前は理由を
+            # 「channel が allowlist に無いため」と 1 つ名乗っていたが、降格の
+            # 理由は 4 通りある (許可リスト漏れ / 引退した channel / 証拠の封筒
+            # 欠落 / 未知のタグ) ので、証拠欠落や引退の降格にも許可リスト漏れだと
+            # 誤った理由を付けていた。引退した channel では実害があり、読んだ人が
+            # `auto-execute add` で登録して次の通知で「外してください」と逆を
+            # 言われる。理由は event ごとのマーカーが channel 別に正しく持っている
+            # ので、ここは数えるだけにして理由の主張をやめる。
             f"(安全側降格: auto-execute → propose-to-ai に変換された event: "
-            f"{auto_execute_downgraded_count} 件 — channel が "
-            "`bus_auto_execute_channels` allowlist に無いため)"
+            f"{auto_execute_downgraded_count} 件 — 理由は各 event の "
+            "`[auto-execute downgraded ...]` マーカーを参照)"
         )
     parts.append("")
     # ms-169 e-6235: the generic event list is free-text received from other
