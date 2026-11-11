@@ -309,3 +309,58 @@ def test_the_stamp_sweep_covers_retired_review_types(tmp_path, monkeypatch):
 
     assert not cs.issued_bundle_sha_paths("838"), (
         "引退した種別の印が取り残された (registry から組み立てている)")
+
+
+# ---------------------------------------------------------------------------
+# 5. 発行側の配線 (独立保守性レビュー 8 周目 medium の本体)
+# ---------------------------------------------------------------------------
+
+def test_issuing_a_pr_bundle_carries_the_head_and_writes_the_stamp(tmp_path,
+                                                                   monkeypatch):
+    """``review context --pr`` が head を bundle に載せ、印を書くこと。
+
+    **なぜ変数ではなく挙動で測るか**: 8 周目の指摘は「``_head_sha`` を
+    ``locals().get()`` で読み直しているので、収集分岐でリネームすると silent に
+    無効化できる」だった。その指摘の構造的直し (``locals()`` を外して普通の
+    初期化にする) を入れたが、**反転で測ると赤くならなかった** —— 関数スコープで
+    ``""`` に初期化してあるので、リネームしても NameError にはならず空文字が
+    黙って通る。つまり指摘が約束した「リネームは NameError で落ちる」は成立せず、
+    得られたのは可読性 (grep 一発で束縛箇所が分かる) だけだった。
+
+    silent を本当に閉じるのは **配線を挙動で固定すること**。pr 経路で head が
+    bundle に載り、印が書かれることをここで固定すれば、収集分岐のリネームでも
+    既定値の空文字でも赤くなる。
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    tdir = _triggers(tmp_path, monkeypatch)
+    head = "7" * 40
+    monkeypatch.setattr(
+        commands, "_pr_diff_collection",
+        lambda pr, pr_repo, gaps: (["git", "diff"], "o/r#838", "o/r", head))
+    monkeypatch.setattr(commands, "_collect_change_diff",
+                        lambda *a, **k: "diff --git a/x b/x\n")
+    monkeypatch.setenv("BEACON_REVIEW_TYPE", "ax")
+    monkeypatch.setenv("BEACON_PR", "838")
+    monkeypatch.setenv("BEACON_PR_REPO", "o/r")
+    monkeypatch.delenv("BEACON_DIFF_REF", raising=False)
+    monkeypatch.delenv("BEACON_TARGET_ID", raising=False)
+    monkeypatch.delenv("BEACON_MODE", raising=False)
+
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            commands.cmd_review_context()
+    except SystemExit:
+        pass
+    raw = buf.getvalue().strip()
+    assert raw, "bundle が出ていない"
+    bundle = json.loads(raw.splitlines()[-1])
+
+    assert bundle.get("head_sha") == head, (
+        "bundle が head を載せていない (収集分岐の束縛が届いていない): %r"
+        % (bundle.get("head_sha"),))
+    assert cs.issued_bundle_sha("838", "o/r", "ax") == head, (
+        "発行したのに印が書かれていない (review done が既定で gh に戻る)")
+    assert tdir.exists()

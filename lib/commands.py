@@ -2162,6 +2162,20 @@ def cmd_review_context():
     # the data-driven registry (skills/*/review-type.json), not a hardcoded
     # if/elif whitelist. A new judge-run review type is added by dropping a
     # descriptor + 原典 + SKILL — this command needs no edit.
+    # ms-119 e-6859: head sha を持つのは pr 経路だけ (--diff-ref / --target /
+    # full-surface は持たないので空のまま運ぶ = 不明。推測で埋めない)。
+    #
+    # **`locals()` を経由しない** (独立保守性レビュー 8 周目 medium)。初版は後段で
+    # `_head_sha = locals().get("_head_sha", "") or ""` と動的に読み直していたので、
+    # 収集の分岐で変数名を変える・削るだけで Python は NameError を出さず、既定値の
+    # 空文字が黙って通った —— 「judge が見た差分を pin する」この課題の中心機構が、
+    # 遠い分岐のリネームで silent に無効化できた。
+    #
+    # 置き場は **関数スコープ** (どの収集分岐より前)。最初は `if pr:` の直前に
+    # 置いたが、あれは収集ブロックの内側なので full-surface 経路が通らず
+    # UnboundLocalError になった (試験が捕まえた)。初期化は、読む場所から見て
+    # 必ず通る高さに置く。
+    _head_sha = ""
     registry = review_spine.judge_run_review_types()
     desc = registry.get(review_type)
     if not desc:
@@ -2292,9 +2306,6 @@ def cmd_review_context():
     # ms-119 / e-4096: attach the application-map surface index so the judge can
     # raise accuracy (spot a diff that duplicates an existing surface) WITHOUT
     # reaching into the repo — the sanctioned implementer-independent context.
-    # ms-119 e-6859: pr 経路以外 (--diff-ref / --target) は head sha を持たないので
-    # 空のまま運ぶ (= 不明。推測で埋めない)。
-    _head_sha = locals().get("_head_sha", "") or ""
     external_references = []
     surface_ref = _review_surface_index_reference()
     if surface_ref is not None:
@@ -7474,7 +7485,7 @@ def _help_registry():
         # `beacon review done --help` が「`beacon review --help` を見よ」と案内し、
         # その `review --help` は context の 1 行しか出さない **閉じたループ** に
         # なっていた (案内に従うと情報が無い場所に着く)。
-        {"command": "beacon review status --pr <n> [--repo <owner/name>] [--json]", "flags": [], "description": "独立レビューの関門がいま何を要求しているかを **副作用なしで** 読む (ms-119 e-6859)。必須種別・いまの差分 (head) に対して実施済みの種別・まだ要る種別・差し引いた根拠 (旧形式の記録 / 理由付き免除) を出す。未実施が在れば exit 2。`beacon trigger check` は促し (トリガーファイルの有無) の面で関門ではないため、関門の状態を確かめるにはこちらを使う"},
+        {"command": "beacon review status --pr <n> [--repo <owner/name>] [--json]", "flags": [], "description": "独立レビューの関門がいま何を要求しているかを **副作用なしで** 読む (ms-119 e-6859)。必須種別・いまの差分 (head) に対して実施済みの種別・まだ要る種別・差し引いた根拠 (旧形式の記録 / 理由付き免除) を出す。まだ **止めている** 種別が在れば exit 2 (`owed` は生の内訳で、merge/close 済みの PR では非空でも何も止めないので、読むのは `blocking` か終了コード)。`beacon trigger check` は促し (トリガーファイルの有無) の面で関門ではないため、関門の状態を確かめるにはこちらを使う"},
         {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings) [--reviewed-sha <sha>]", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。記録は **どの差分に対する実施か** を持つ — 既定は gh に聞いた「いまの PR head」で、`--reviewed-sha` で明示できる。実施後にコミットを積むとその種別は再度「要る」側に戻る (ms-119 e-6859: 以前は PR 単位だったので、judge が見ていない差分に対して関門が緑になった)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
         {"command": "beacon review skip --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason <text>", "flags": ["--json"], "description": "人間が意図的にレビューを省く一級経路。--reason 必須で監査ログ (.beacon/review-skips.jsonl) に理由を残す (ms-119 e-4124)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
