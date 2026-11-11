@@ -763,6 +763,44 @@ def _retire_satisfied_pr_review_nudges(open_prs: list) -> None:
                   f"実施された / 理由付きで免除された)。", file=sys.stderr)
 
 
+def nudge_types_to_fire_for_pr(pr_number: str, pr_repo: str, head_sha: str,
+                               present_types: set):
+    """この PR で **促しを足すべき** 種別と表示名を返す (ms-119)。
+
+    返り値は ``[(review_type, label), ...]``。導出が使えなかったときだけ
+    ``None`` を返し、呼び出し側は旧経路 (全か無か + マーカー検査) に退く。
+
+    **なぜ切り出すか** (独立 AX レビュー 7 周目 の skill_gap): 促しは 2 方向
+    (足す / 下げる) で維持される派生状態なのに、**下げる方向にしか専用の試験が
+    無かった**。足す側は発火元の anchor 関数が ``PYTEST_CURRENT_TEST`` で即
+    return するため、そのままでは試験から駆動できない —— 試験できない形だった
+    ことが、非対称 (1 種別だけ実施済みのとき、もう片方の促しが二度と復活しない)
+    を 7 周目まで生かしていた。判定だけを独立に呼べる形にして、両方向に試験を
+    置けるようにする。
+
+    判定は **関門が読むのと同じ導出** (``pr_review_obligations``) を使う。
+    促し側で独立に「実施済みか」を計算すると、同じ問いに 2 つの答えが生まれる
+    (このリポジトリが繰り返し踏んでいる型)。``head_sha`` は呼び出し側が
+    ``gh pr list`` で得た値をそのまま渡す (gh を二度聞かない)。空文字なら
+    「確かめられない」として扱われ、促しは **出す側に倒れる**。
+    """
+    num = str(pr_number or "").strip()
+    if not num:
+        return None
+    try:
+        ob = pr_review_obligations(num, pr_repo, head_sha=head_sha)
+        owed = set(ob.get("owed") or [])
+    except Exception:
+        return None
+    missing = owed - set(present_types or ())
+    if not missing:
+        return []
+    import review_spine
+    descs = review_spine.judge_run_review_types()
+    return [(tid, (descs.get(tid) or {}).get("label", tid))
+            for tid in sorted(missing)]
+
+
 def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
     """Anchor firing to the real PR-open event (ms-119 e-4060): scan GitHub's
     OPEN PRs and fire the pr-open review-due triggers for any that lack them.
@@ -824,12 +862,41 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
         # 自分の repo 付きと旧式の両方を消すので 1 回の `review done` で解消する
         # (= 二重の義務は残らない)。既にレビュー済みの PR は下のマーカー検査で止まる。
         _repo = core.extract_pr_repo_from_url(pr.get("url") or "")
-        if any((lambda p: p is not None and p[1] == num and p[2] == _repo)(
-                    parse_review_due_filename(fn))
-               for fn in existing):
-            continue
-        # Fresh open PR with no review-due yet → fire the pr-open set.
+        # **促しは種別ごとに揃える** (独立 AX レビュー 7 周目, 2026-11-10)。
         #
+        # 初版はここで「この PR のトリガーが 1 件でも在れば何もしない」という
+        # 全か無かの判定をしていた (下の docstring が『Fresh open PR with no
+        # review-due yet』と言っているのがそれ)。その結果、**1 種別だけ実施済みで
+        # 別種別が未実施のまま head が進む**と、実施済み側の促しが二度と復活
+        # しなかった: 関門は種別ごとに sha を比べるので両方を要求するのに、
+        # 促しは残っている 1 件しか出さない。
+        #
+        # 下げる方向 (`_retire_satisfied_pr_review_nudges`) は head を見て種別
+        # ごとに判定していたので、**上げる方向だけが非対称**だった。足す側も
+        # 同じ導出 (関門が読む `pr_review_obligations`) から種別単位で決める。
+        # head は `gh pr list` が返した値をそのまま渡すので gh を二度聞かない
+        # (空文字なら「確かめられない」扱い = 促しは出す側に倒れる)。
+        _head = str(pr.get("headRefOid") or "").strip()
+        _present = set()
+        for fn in existing:
+            _p = parse_review_due_filename(fn)
+            if _p is not None and _p[1] == num and _p[2] == _repo:
+                _present.add(_p[0])
+        _to_fire = nudge_types_to_fire_for_pr(num, _repo, _head, _present)
+        if _to_fire is not None:
+            # 要るのに促しが無い種別だけを個別に発火する。
+            # `_fire_review_due_for_pr` は 1 種別 1 ファイルで冪等なので、
+            # 残っている種別には触らない。
+            for _tid, _label in _to_fire:
+                _fire_review_due_for_pr(
+                    _tid, _label, num, pr.get("title") or "",
+                    pr.get("url") or "", pr_repo=_repo)
+            continue
+
+        # --- 旧経路 (導出が使えないときだけ) ---
+        # 全か無か: この PR の促しが 1 件でも在れば触らない。
+        if _present:
+            continue
         # ms-119 e-6859: 抑止は **見た差分に限る**。以前はマーカーが在れば永久に
         # 抑止していたので、`review done` の後にコミットを積んでも促しが出ず、
         # 「促しが消えた」を「関門が開いた」と読ませた (独立 AX レビューが実機で
@@ -841,7 +908,6 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
         # **促しは出す側に倒す**: sha が分からない (gh が返さない / 旧形式の
         # マーカー) ときは抑止しない。促しは止める力を持たないので、過剰に出て
         # 煩いのは実害が小さく、出ないのは事故に直結する。
-        _head = str(pr.get("headRefOid") or "").strip()
         if _reviewed_marker_covers_head(num, _repo, _head):
             continue
         _fire_pr_open_review_triggers(num, pr.get("title") or "",

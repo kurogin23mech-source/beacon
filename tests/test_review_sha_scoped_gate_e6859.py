@@ -661,7 +661,10 @@ def test_review_done_asks_the_real_head_not_the_recorded_sha(tmp_path, monkeypat
                         lambda *a, **k: None)
     # この試験の sha は架空なので、git への解決は差し替える (主題は「名乗りが
     # いまの head を見ているか」であって sha の実在検査ではない)。
-    monkeypatch.setattr(commands, "resolve_full_commit_sha",
+    # ms-119: 供給源の決定が commands_shared.resolve_reviewed_sha_for_done へ
+    # 切り出されたので、この名前は cs の globals で解決される (主題は「名乗りが
+    # いまの head を見ているか」なので、差し替え先の住所だけ追従させる)。
+    monkeypatch.setattr(cs, "resolve_full_commit_sha",
                         lambda v: (v, ""))
     # いまの head は cur_head (= 記録する sha とは別物)
     import _gh_head_stub

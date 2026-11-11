@@ -104,7 +104,11 @@ def _run_done(tmp_path, monkeypatch, *, stamp=None, explicit=None,
     monkeypatch.setattr(commands, "_ci_flip_review_gate_success",
                         lambda *a, **k: None)
     # 架空の sha なので git への解決は差し替える (主題は供給源の選択)。
-    monkeypatch.setattr(commands, "resolve_full_commit_sha", lambda v: (v, ""))
+    # **差し替え先は cs** —— 供給源の決定を commands_shared へ切り出した結果、
+    # この名前は commands_shared の globals で解決される。`commands` 側に当てても
+    # 効かず、本物の git が架空 sha に走って落ちる (切り出しで stub の住所が
+    # 動く、の実例)。
+    monkeypatch.setattr(cs, "resolve_full_commit_sha", lambda v: (v, ""))
 
     # **canonical な stub 位置を使う** (tests/_gh_head_stub.install)。
     # 初版は adapter を手で差し替え、しかも `gh_port.set_adapter` を monkeypatch を
@@ -195,3 +199,113 @@ def test_without_a_stamp_it_falls_back_to_gh(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# 3. 明示した sha が PR の履歴から辿れるか (独立 AX レビュー 7 周目 silent)
+# ---------------------------------------------------------------------------
+
+class _FakeRun:
+    """``git merge-base --is-ancestor`` の終了コードだけを演じる。"""
+
+    def __init__(self, code):
+        self.code = code
+
+    def __call__(self, argv, **kw):
+        import types
+        return types.SimpleNamespace(returncode=self.code, stdout="", stderr="")
+
+
+@pytest.mark.parametrize("code,expected", [
+    (0, True),     # 辿れる
+    (1, False),    # 辿れない
+    (128, None),   # 比較できない (fetch していない / 浅いクローン)
+    (2, None),     # その他のエラーも「比較できない」に倒す
+])
+def test_is_ancestor_translates_exit_codes_into_three_values(monkeypatch, code,
+                                                             expected):
+    """終了コードを **事実に翻訳** する。1 と 128 を畳まないことが要点。
+
+    畳むと、fetch していないだけの環境で「無関係な sha だ」と断定してしまう。
+    """
+    import subprocess as _sp
+    monkeypatch.setattr(_sp, "run", _FakeRun(code))
+    assert cs.sha_is_ancestor_of("a" * 40, "b" * 40) is expected
+
+
+def test_an_unreachable_explicit_sha_is_disclosed_not_refused(monkeypatch,
+                                                              tmp_path):
+    """辿れない sha は **拒否せず、言う**。
+
+    関門は完全一致で比べるので辿れない sha で関門が開くことはない (害は記録の
+    誤りだけ)。拒否にすると rebase 後の履歴や PR head でない範囲の正当な記録を
+    塞ぐので、この MS の原則どおり「隠せなくする」側で閉じる。
+    """
+    monkeypatch.setattr(cs, "resolve_full_commit_sha", lambda v: (v, ""))
+    monkeypatch.setattr(cs, "resolve_pr_head",
+                        lambda *a, **k: ("c" * 40, "OPEN", ""))
+    monkeypatch.setattr(cs, "sha_is_ancestor_of", lambda *a, **k: False)
+    out = cs.resolve_reviewed_sha_for_done(
+        explicit=EXPLICIT, pr_number="838", pr_repo="o/r", review_type="ax")
+    assert not out["fatal"], "辿れないだけで拒否している: %r" % (out["fatal"],)
+    assert out["sha"] == EXPLICIT and out["source"] == "explicit"
+    assert any("辿れません" in n for n in out["notes"]), out["notes"]
+
+
+def test_an_undeterminable_ancestry_says_nothing(monkeypatch):
+    """比較できないときは **黙る** (断定できないことを断定しない)。"""
+    monkeypatch.setattr(cs, "resolve_full_commit_sha", lambda v: (v, ""))
+    monkeypatch.setattr(cs, "resolve_pr_head",
+                        lambda *a, **k: ("c" * 40, "OPEN", ""))
+    monkeypatch.setattr(cs, "sha_is_ancestor_of", lambda *a, **k: None)
+    out = cs.resolve_reviewed_sha_for_done(
+        explicit=EXPLICIT, pr_number="838", pr_repo="o/r", review_type="ax")
+    assert not any("辿れません" in n for n in out["notes"]), (
+        "比較できていないのに「辿れません」と断定した: %r" % (out["notes"],))
+
+
+# ---------------------------------------------------------------------------
+# 4. 印の寿命 (独立保守性レビュー 7 周目 medium)
+# ---------------------------------------------------------------------------
+
+def test_the_stamps_are_cleared_when_the_pr_is_resolved(tmp_path, monkeypatch):
+    """PR が merge / close されたら印も片付く。
+
+    初版は新しい永続状態を足しておきながら、兄弟 (reviewed marker) の寿命管理の
+    **真横**でそこに繋いでいなかった。読み手は「PR スコープの印はここで片付く」と
+    正しく読むので、片方だけ漏れていると気づけない (ms-80 e-1829 で
+    release-marker が蓄積した前例と同じ型)。
+    """
+    tdir = _triggers(tmp_path, monkeypatch)
+    monkeypatch.setattr(cs, "forget_review_done_across_worktrees",
+                        lambda *a, **k: None)
+    cs.write_issued_bundle_sha("838", "o/r", "ax", ISSUED)
+    cs.write_issued_bundle_sha("838", "o/r", "maintainability", ISSUED)
+    cs.write_reviewed_marker("838", "o/r", ISSUED)
+    assert cs.issued_bundle_sha_paths("838"), "前提: 印が在る"
+
+    cs._clear_pr_open_review_triggers("838", "o/r")
+
+    leftover = {p for p in cs.issued_bundle_sha_paths("838")}
+    assert not leftover, (
+        "PR が解決したのに印が残っている (trigger dir が育ち続ける): %r"
+        % (sorted(leftover),))
+
+
+def test_the_stamp_sweep_covers_retired_review_types(tmp_path, monkeypatch):
+    """台帳に無い (= 引退した) 種別の印も片付ける。
+
+    片付けの網羅性を『いま必須の種別』から組み立てると、種別を増減したあとに
+    古い印が取り残される —— しかも誰も参照しないので気づけない。だから住所は
+    ディレクトリの接頭辞で拾う。
+    """
+    tdir = _triggers(tmp_path, monkeypatch)
+    monkeypatch.setattr(cs, "forget_review_done_across_worktrees",
+                        lambda *a, **k: None)
+    cs.write_issued_bundle_sha("838", "o/r", "a-retired-review-type", ISSUED)
+    assert cs.issued_bundle_sha_paths("838"), "前提: 引退種別の印が在る"
+
+    cs._clear_pr_open_review_triggers("838", "o/r")
+
+    assert not cs.issued_bundle_sha_paths("838"), (
+        "引退した種別の印が取り残された (registry から組み立てている)")

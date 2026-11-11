@@ -506,6 +506,7 @@ from commands_shared import (  # noqa: F401
     format_review_sha_unpinned_warning,
     decide_review_done_report,
     decide_review_done_argument_error,
+    resolve_reviewed_sha_for_done,
     write_issued_bundle_sha,
     issued_bundle_sha,
     write_reviewed_marker,
@@ -4554,61 +4555,21 @@ def cmd_review_done():
     # 関門は「現在の差分に対して全種別が実施済みか」を問うので、この sha が
     # 記録の本体になる。明示の --reviewed-sha が在ればそれを使う (judge に
     # 渡した bundle が古い head のものだった、と正直に記録できるようにする)。
-    _reviewed_sha = os.environ.get("BEACON_REVIEWED_SHA", "").strip()
-    _sha_error = ""
-    # ms-119 e-6859 (独立 AX レビュー): 明示された sha は **形を検査してから** 使う。
-    # 検査が無いと、桁を欠損した値や無意味な文字列でも「この sha に対する実施として
-    # 記録しました」と即座に成功を名乗り、読み手は正しく記録できたと信じて終える。
-    # 形が違うなら受け取らない —— 誤った確信を与えるより、何が違うかを言う。
-    if _reviewed_sha and not is_commit_sha_shaped(_reviewed_sha):
-        print(f"Error: --reviewed-sha は git の commit sha の形で渡してください "
-              f"(受け取った値: {_reviewed_sha!r})。16 進で 7〜64 桁です。\n"
-              f"  形を検査するのは、桁を欠損した値でも「記録しました」と成功を"
-              f"名乗ってしまい、記録が無意味だと気づけないためです。\n"
-              f"  いまの PR head を使うなら --reviewed-sha を省いてください "
-              f"(既定で gh に問い合わせます)。", file=sys.stderr)
+    # 供給源の決定は commands_shared に 1 箇所 (明示 > 発行時に刻んだ印 > gh)。
+    # ここに直接書くと、2 周目のレビューで切り出した直後の関数が再び膨らむ
+    # (実測: 273 → 223 → 245 行。独立保守性レビュー 7 周目 medium)。
+    _shares = resolve_reviewed_sha_for_done(
+        explicit=os.environ.get("BEACON_REVIEWED_SHA", ""),
+        pr_number=pr_number, pr_repo=pr_repo, review_type=review_type)
+    if _shares["fatal"]:
+        for _line in _shares["fatal"]:
+            print(_line, file=sys.stderr)
         sys.exit(1)
-    if _reviewed_sha:
-        # **短縮 sha を伸ばす** (ms-119 e-6859、ドッグフーディングで踏んだ)。
-        # 関門は head と完全一致で比べるので、人が普通にコピーする短縮 sha を
-        # そのまま入れると **永久に一致しない** 記録になる (記録は残るのに関門は
-        # 一生開かない = 正直に記録した人が黙って損をする)。比較を前方一致に
-        # 緩めるのではなく、入口で伸ばして比較は 1 つに保つ。
-        _full, _resolve_err = resolve_full_commit_sha(_reviewed_sha)
-        if not _full:
-            print(f"Error: --reviewed-sha を完全な sha に解決できませんでした "
-                  f"({_reviewed_sha!r}: {_resolve_err})。\n"
-                  f"  関門は差分を **完全一致** で突き合わせるので、短縮や"
-                  f"間違った sha をそのまま記録すると、記録は残るのに関門が"
-                  f"一生開かない状態になります。\n"
-                  f"  このリポジトリに在る sha を渡してください。いまの PR head を"
-                  f"使うなら --reviewed-sha を省けば既定で gh に問い合わせます。",
-                  file=sys.stderr)
-            sys.exit(1)
-        if _full != _reviewed_sha:
-            print(f"  (--reviewed-sha {_reviewed_sha} を完全な sha "
-                  f"{_full[:12]}… に解決しました)")
-        _reviewed_sha = _full
-        _sha_source = "explicit"
-    else:
-        # **judge に渡した差分を既定の供給源にする** (ms-119、独立 AX レビュー
-        # 6 周目 silent)。初版の既定は gh に聞いた「いまの PR head」だったので、
-        # bundle 発行から done までに push が入ると、judge が一度も見ていない
-        # 差分に対して関門が緑になった —— PR #785 / #834〜836 の欠陥クラスが、
-        # 新設した機構を使わないだけで再現する形。しかも judge を回す唯一の
-        # 実運用経路 (/beacon-review-run) は --reviewed-sha を渡す手順を持って
-        # いなかったので、**既定経路では必ずこの穴を通っていた**。
-        #
-        # Skill の散文に「渡せ」と書くだけでは、この MS が何度も構造で閉じて
-        # きた「お願い依存」をレビュー機構自身に作る。だから発行側が刻み、
-        # ここが読む。印が無ければ従来どおり gh に問い合わせる (退行しない)。
-        _issued = issued_bundle_sha(pr_number, pr_repo, review_type)
-        if _issued:
-            _reviewed_sha, _sha_source = _issued, "issued-bundle"
-        else:
-            _reviewed_sha, _pr_state, _sha_error = resolve_pr_head(
-                pr_number, pr_repo)
-            _sha_source = "gh"
+    for _line in _shares["notes"]:
+        print(_line)
+    _reviewed_sha = _shares["sha"]
+    _sha_source = _shares["source"]
+    _sha_error = _shares["sha_error"]
     _owed_before = _pr_open_review_nudge_pending_types(pr_number, pr_repo)
     # 「既に台帳に在るか」も **この実行が書く前に** 見る。後で見ると、この実行自身の
     # 記録で必ず真になり、下の「義務が無かったので非 0 で終える」分岐が死ぬ

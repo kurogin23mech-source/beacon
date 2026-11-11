@@ -3156,8 +3156,16 @@ def _clear_pr_open_review_triggers(pr_number: str, pr_repo: str = "",
     forget_review_done_across_worktrees(pr_number)
     # ms-119 e-4060: PR resolved (merged/closed) → drop the reviewed done-marker
     # too, so the trigger dir does not accumulate stale markers.
+    #
+    # ms-119 (独立保守性レビュー 7 周目 medium): **発行した差分の印も同じ扱い**。
+    # 新しく永続状態を足したとき、兄弟 (reviewed marker) の寿命管理の隣に置いた
+    # のに繋ぎ忘れていた —— 上のコメントが「育ち続けないように」と明言している
+    # 場所の真横で、繋がっていない状態を作っていた。読み手は「PR スコープの印は
+    # ここで片付く」と正しく読むので、片方だけ漏れていると気づけない
+    # (ms-80 e-1829 で release-marker が蓄積した前例と同じ型)。
     try:
-        for marker in reviewed_marker_paths(pr_number, pr_repo):
+        for marker in (reviewed_marker_paths(pr_number, pr_repo)
+                       | issued_bundle_sha_paths(pr_number)):
             if os.path.exists(marker):
                 os.remove(marker)
     except OSError:
@@ -3429,6 +3437,31 @@ def write_issued_bundle_sha(pr_number: str, pr_repo: str,
     except OSError:
         # 刻めなくても発行は止めない (測定の補助なので、落とす価値が無い)。
         return
+
+
+def issued_bundle_sha_paths(pr_number: str) -> set:
+    """この PR の「発行した差分」の印の **全ての住所** を返す (ms-119)。
+
+    **なぜ種別の台帳から組み立てないのか** (独立保守性レビュー 7 周目 medium):
+    片付けは「いま必須の種別」ではなく「過去に刻まれた全部」を対象にしたい。
+    registry から列挙すると、種別を増減した後に **古い種別の印が取り残される**
+    (しかも誰も参照しないので気づけない)。だからディレクトリを見て接頭辞で
+    拾う —— 片付けの網羅性は、現在の設定ではなく実際に在るファイルで決める。
+
+    兄弟の ``reviewed_marker_paths`` が住所を 2 つ手で並べているのに対し、
+    こちらは数が種別数 × リポジトリ有無で増えるため、集合を作る側を 1 箇所に
+    寄せる方を選んだ。
+    """
+    num = str(pr_number or "").strip()
+    if not num:
+        return set()
+    prefix = f".issued-pr-{num}."
+    try:
+        tdir = _get_triggers_dir()
+        return {os.path.join(tdir, name) for name in os.listdir(tdir)
+                if name.startswith(prefix)}
+    except OSError:
+        return set()
 
 
 def issued_bundle_sha(pr_number: str, pr_repo: str = "",
@@ -4109,6 +4142,124 @@ def _review_gate_passed(ob: dict) -> bool:
     if not ob.get("resolved"):
         return False
     return not (ob.get("owed") or [])
+
+
+def sha_is_ancestor_of(candidate: str, head: str) -> Optional[bool]:
+    """``candidate`` が ``head`` から辿れるか。**3 値**で返す (ms-119)。
+
+    ``True`` = 辿れる / ``False`` = 辿れない / ``None`` = **比較できなかった**
+    (git が無い / どちらかの commit がローカルに無い / 浅いクローン 等)。
+
+    3 値にするのが要点: ``--is-ancestor`` は「辿れない」に 1、「比較できない」に
+    128 を使う。この 2 つを畳むと、**fetch していないだけ**の環境で「無関係な
+    sha だ」と断定してしまう (``lib/fork_cleanup.py`` が同じ翻訳を先にやっており、
+    その docstring が畳んではいけない理由を書いている)。断定できないことは
+    断定しない。
+    """
+    a, b = str(candidate or "").strip(), str(head or "").strip()
+    if not a or not b:
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", a, b],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode == 0:
+        return True
+    if out.returncode == 1:
+        return False
+    return None
+
+
+def resolve_reviewed_sha_for_done(*, explicit: str, pr_number: str,
+                                  pr_repo: str, review_type: str) -> dict:
+    """``review done`` が **どの差分に対する実施として記録するか** を決める。
+
+    返り値 (すべてのキーが常に在る):
+
+    * ``sha`` — 記録する完全な sha (決められなければ空文字)
+    * ``source`` — ``explicit`` / ``issued-bundle`` / ``gh``
+    * ``fatal`` — 空でなければ呼び出し側が stderr に出して exit 1 する行
+    * ``notes`` — stdout に出す補足 (短縮 sha を伸ばしたとき等)
+    * ``sha_error`` — gh に聞いて確かめられなかったときの理由
+
+    **純粋ではない** (git / gh に問い合わせる)。それでも切り出す理由
+    (独立保守性レビュー 7 周目 medium): この優先順位は 3 段 (明示 > 発行時に
+    刻んだ印 > gh) で、各段に検査と文面が付く。``cmd_review_done`` の本体に
+    直接書くと、同じ関数が 2 周目のレビューで「273 行・局所変数 12 個で規則の
+    一覧を読む場所が無い」と指摘されて引数検証とレポート分岐を切り出した直後に、
+    **また 245 行へ戻っていた**。供給源の決定もここに寄せ、呼び出し側は
+    「決める → 出す」だけにする。IO は呼び出し側が行う (print / exit)。
+    """
+    out = {"sha": "", "source": "", "fatal": [], "notes": [], "sha_error": ""}
+    value = str(explicit or "").strip()
+
+    if value:
+        # 形を検査してから使う (ms-119 e-6859、独立 AX レビュー): 検査が無いと、
+        # 桁を欠損した値や無意味な文字列でも「この sha に対する実施として記録
+        # しました」と即座に成功を名乗り、読み手は正しく記録できたと信じて終える。
+        if not is_commit_sha_shaped(value):
+            out["fatal"] = [
+                f"Error: --reviewed-sha は git の commit sha の形で渡してください "
+                f"(受け取った値: {value!r})。16 進で 7〜64 桁です。\n"
+                f"  形を検査するのは、桁を欠損した値でも「記録しました」と成功を"
+                f"名乗ってしまい、記録が無意味だと気づけないためです。\n"
+                f"  いまの PR head を使うなら --reviewed-sha を省いてください "
+                f"(既定で、発行時に刻んだ差分か gh のいまの head を使います)。"]
+            return out
+        # **短縮 sha を伸ばす** (ドッグフーディングで踏んだ)。関門は head と完全
+        # 一致で比べるので、人が普通にコピーする短縮 sha をそのまま入れると
+        # **永久に一致しない** 記録になる。比較を前方一致に緩めるのではなく、
+        # 入口で伸ばして比較は 1 つに保つ。
+        full, resolve_err = resolve_full_commit_sha(value)
+        if not full:
+            out["fatal"] = [
+                f"Error: --reviewed-sha を完全な sha に解決できませんでした "
+                f"({value!r}: {resolve_err})。\n"
+                f"  関門は差分を **完全一致** で突き合わせるので、短縮や"
+                f"間違った sha をそのまま記録すると、記録は残るのに関門が"
+                f"一生開かない状態になります。\n"
+                f"  このリポジトリに在る sha を渡してください。いまの PR head を"
+                f"使うなら --reviewed-sha を省けば既定で解決します。"]
+            return out
+        if full != value:
+            out["notes"] = [f"  (--reviewed-sha {value} を完全な sha "
+                            f"{full[:12]}… に解決しました)"]
+        out["sha"], out["source"] = full, "explicit"
+        # **この PR の履歴から辿れない sha は、記録する前に言う**
+        # (独立 AX レビュー 7 周目 silent)。形と存在だけを見ていたので、別 PR や
+        # 別ブランチの sha を貼っても「この sha に対する実施として記録しました」と
+        # 成功を名乗った。判断記録の evidence に `sha:<無関係な sha>` が永久に
+        # 残り、後から「このレビューは本当にどの差分を見たのか」を辿る監査者を
+        # 誤らせる。
+        #
+        # **拒否ではなく開示にする**理由: 関門は完全一致で比べるので、無関係な
+        # sha が関門を開けることはない (害は記録の誤りだけ)。一方で拒否にすると、
+        # rebase / force-push 後の履歴や、PR head ではない範囲をレビューした
+        # 正当な記録を塞ぐ。この MS の原則は「やれなくする」ではなく
+        # 「隠せなくする」なので、断定できたときだけ warn を添える。
+        head, _state, _err = resolve_pr_head(pr_number, pr_repo)
+        if head and sha_is_ancestor_of(full, head) is False:
+            out["notes"].append(
+                f"  ⚠ この sha は PR の head ({head[:12]}) から辿れません — "
+                f"別の PR / ブランチの sha を渡していないか確認してください。\n"
+                f"    記録は残します (関門は完全一致で比べるので、辿れない sha で"
+                f"関門が開くことはありません) が、判断記録には「どの差分を見たか」"
+                f"として この sha が残ります。")
+        return out
+
+    # **judge に渡した差分を既定の供給源にする** (独立 AX レビュー 6 周目 silent)。
+    # 初版の既定は gh に聞いた「いまの PR head」だったので、bundle 発行から done
+    # までに push が入ると judge が一度も見ていない差分に対して関門が緑になった。
+    issued = issued_bundle_sha(pr_number, pr_repo, review_type)
+    if issued:
+        out["sha"], out["source"] = issued, "issued-bundle"
+        return out
+
+    sha, _state, err = resolve_pr_head(pr_number, pr_repo)
+    out["sha"], out["source"], out["sha_error"] = sha, "gh", err
+    return out
 
 
 def decide_review_done_argument_error(*, review_type: str, pr_number: str,
