@@ -196,6 +196,29 @@ def cmd_target_review_request():
         session_id=_resolve_session_id() or "")
     save_project(data, op={"op": "target_transition_approval_add",
                            "target_id": target_id, "entry_id": eid})
+    # ms-119 e-7440: **ここでも節目のレビュー義務を立てる**。
+    #
+    # 兄弟の `beacon milestone done <id> --review` (= cmd_milestone の
+    # `_route_completion_to_review`) は同じ承認依頼を作った直後に review-due を
+    # 発火するが、この入口だけ発火していなかった。結果、**同じ完了主張に 2 つの
+    # 非等価な入口** が在り、こちらから入ると:
+    #   * 思想レビューの促しが立たない (= 撃つべき節目だと誰も言わない)
+    #   * その後に実際に思想レビューを実施しても `beacon review done --type
+    #     philosophy --target <id>` が「レビュー未実施トリガーがありません」で
+    #     拒否され、**実施したレビューを記録する口が無い**
+    # 2026-11-11 に実踏し、実施した思想レビュー 7 件の findings を台帳ではなく
+    # report doc に退避する羽目になった (トリガーを手で捏造すれば通るが、それは
+    # 記録の意味を壊す)。発火側を揃えるのが構造的な修正。
+    #
+    # `gated=True`: 承認依頼はいま作ったので目的達成の促しは重ねない (兄弟と同じ
+    # 判断)。has_spec は下の criteria gap と **同じ値** を使う (2 箇所で別々に
+    # 数えると、促しと gap が違う前提で喋る形が作れる)。
+    _has_spec = (_spec_exists_for_ms(target_id) if kind == "milestone"
+                 else _spec_exists_for_op(target_id) if kind == "operation"
+                 else False)
+    _fire_review_due_trigger(target_id, kind, old_state, new_state,
+                             target_title=work_model.target_label(target),
+                             has_spec=_has_spec, gated=True)
     print(f"目的達成レビュー依頼を作成: {eid}")
     print(f"  {target_id}: {old_state} -> {new_state} (人間承認待ち)")
     if intent:
@@ -207,8 +230,7 @@ def cmd_target_review_request():
     # 承認前に確認するよう促す forcing function。
     _gap = _ta.format_criteria_gap(
         _ta.assess_completion_criteria(
-            has_spec=_spec_exists_for_ms(target_id) if kind == "milestone"
-            else _spec_exists_for_op(target_id) if kind == "operation" else False,
+            has_spec=_has_spec,
             objective=target.get("objective", ""),
             acceptance=target.get("acceptance_criteria", ""),
             intent=intent),
