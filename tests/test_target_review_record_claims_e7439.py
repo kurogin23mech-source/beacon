@@ -133,3 +133,59 @@ def test_the_single_sentence_reaches_the_runtime_print(monkeypatch, capsys):
         no_findings=True)
     out = capsys.readouterr().out
     assert TARGET_REVIEW_RECORD_EFFECT in out, out
+
+
+# --- 3 番目の面 (README) と、受け取る旗が help に出ているか ---
+#
+# 2 周目の独立 AX レビューが、上の 2 面を揃えた直後に **3 番目の面** を見つけた:
+# README.md の CLI 表が「clearing the approve/merge (or completion) gate /
+# 関門を解消」のまま残っていた。修正前は 3 面すべてが (揃って誤って) 同じ主張で、
+# 2 面だけ直したので新しい不一致が生まれていた —— 「足した」≠「全域に効く」。
+#
+# 同じ周で `beacon review context --help` が、**bash が実際に受け取る 9 旗のうち
+# 3 つ (--target / --judge-model / --batch) を出していない** ことも見つかった。
+# SKILL と trigger message が `--target` を使えと言う一方で、裏取りに --help を
+# 見た AI は「この旗は無い」という手がかりを得る。
+
+def test_the_single_sentence_reaches_the_readme_table():
+    """唯一の文が README の CLI 表にも届いていること (3 番目の面)。"""
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+    from commands_shared import TARGET_REVIEW_RECORD_EFFECT
+    readme = (pathlib.Path(__file__).resolve().parents[1] / "README.md"
+              ).read_text(encoding="utf-8")
+    assert TARGET_REVIEW_RECORD_EFFECT in readme, (
+        "README の CLI 表が唯一の文を運んでいません。`review done --target` の "
+        "効き目を述べる面は 3 つ (実行時 print / --help / README) あり、"
+        "2 面だけ直すと新しい不一致が生まれます (ms-119 e-7439 2 周目の指摘)。\n"
+        f"期待する文: {TARGET_REVIEW_RECORD_EFFECT}")
+
+
+def _bash_flags_for_review_context():
+    """`cmd_review_context` の bash arm が受け取る旗を実装から読む。"""
+    import re
+    src = (pathlib.Path(__file__).resolve().parents[1] / "bin" / "lib"
+           / "cmd_review.sh").read_text(encoding="utf-8")
+    body = src[src.index("cmd_review_context()"):]
+    return set(re.findall(r'^\s*(--[a-z-]+)\)', body, re.M))
+
+
+def test_review_context_help_advertises_every_flag_it_accepts():
+    """受け取る旗が 1 つも help から漏れていないこと。
+
+    集合で測るので、旗を足して help を直し忘れた瞬間に赤くなる (= この finding が
+    生まれた経路そのもの)。help が受け取らない旗を宣伝する逆方向も同時に拒否する。
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+    import commands
+    entries = [e for e in commands._help_registry()
+               if e.get("command", "").startswith("beacon review context")]
+    assert len(entries) == 1, entries
+    advertised_text = entries[0]["command"] + " " + " ".join(entries[0].get("flags") or [])
+    accepted = _bash_flags_for_review_context()
+    missing = {f for f in accepted if f not in advertised_text}
+    assert not missing, (
+        f"`beacon review context` が受け取るのに help に出ていない旗: {sorted(missing)}。"
+        "受け取る旗を help に出さないと、裏取りに --help を見た AI が「この旗は無い」"
+        "と誤解します (ms-119 e-7439 2 周目の独立 AX レビュー)。")
