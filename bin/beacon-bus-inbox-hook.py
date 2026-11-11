@@ -493,13 +493,11 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
 # has_required_provenance / classify_auto_execute) so the Codex inbox hook shares
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
-# Payload-derived ids (task_id / op_id) are interpolated into the injected
-# text as a command, for the operation channels. (The retired channels have no
-# interpolation site any more: ms-185 removed their disclosure block, so there
-# is no id to splice.) Even after the
-# provenance gate, defend the f-string against a malformed id (newline / markdown / shell metacharacter)
-# leaking into the injected instruction by restricting to the id charset Beacon
-# actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
+# **どの id が命令文に補間されるか** は ``lib/bus_delivery.sanitize_id`` の
+# docstring が唯一の説明 — ここに列挙を写さない。以前この列挙が 2 箇所に在り、
+# 片方だけ直して双子が古いまま残った (PR#842 独立レビュー 2 体が一致で指摘)。
+# ここが担うのは、整形済みでない id が注入文へ漏れるのを防ぐ文字集合の定義だけ
+# (Beacon が実際に発行する形: ``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``)。
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
