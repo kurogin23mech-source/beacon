@@ -16,36 +16,10 @@ try/except around these calls.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from typing import Protocol
 
-
-def _git_cwd():
-    """どのディレクトリで git を読むか。``BEACON_INVOCATION_CWD`` を優先する。
-
-    ``bin/beacon`` は commands.py を呼ぶ前にプロジェクトのルート (= ``.beacon/`` が
-    在る親リポジトリ) へ移動する。そのため **worktree から叩いても、この port は親の
-    ブランチ・HEAD を読んでいた**。実測 (2026-11-10): worktree で
-    ``fix/log-gate-ignores-beacon-churn`` の f163f2cc を push した直後に
-    ``beacon push record`` を叩いたら、別セッションが作業中の
-    ``ms-185-residue-cleanup 0a3ba117..0a3ba117 (0 commits)`` が記録された。
-
-    ``bin/beacon`` は呼び出し元の cwd を ``BEACON_INVOCATION_CWD`` に export して
-    いて、``bin/lib/cmd_log.sh`` は ``git -C "$_git_cwd"`` でそれを使っている
-    (e-1227 / ms-17)。python 側の読み取りだけがその規約から外れていた。
-
-    ここで 1 回決めるのは、この port の 6 メソッド全部と、それを呼ぶ 12 箇所
-    (push / pr / deploy / rollback / 台帳) が同じ答えを見る必要があるため。
-    呼び出し側ごとに ``-C`` を足す形にすると、足し忘れた口だけが親を読み続ける。
-
-    未設定なら None を返す = プロセスの cwd を継承する (bin/beacon を経由しない
-    直接 import や試験では、現在の挙動を変えない)。
-    """
-    cwd = (os.environ.get("BEACON_INVOCATION_CWD") or "").strip()
-    if cwd and os.path.isdir(cwd):
-        return cwd
-    return None
+from git_cwd import git_cwd as _git_cwd  # 「どこで git を叩くか」の唯一の定義
 
 
 class GitReadAdapter(Protocol):
