@@ -191,24 +191,43 @@ def test_hook_surfaces_the_retired_channel_advice_end_to_end(
     # 改名した直後に、同じ過ちを新しい試験で犯していた。
     import bus_delivery as _bd
 
-    # (1) 測れること: フックが **共有層の文面をそのまま** 出していること (= 委譲)。
-    #     文面の著者は lib 側なので、ここで測るのは「運んでいるか」だけ。
-    expected = _bd.downgrade_advice(_bd.DOWNGRADE_RETIRED_CHANNEL, "trek-trigger")
-    assert expected in out, (
-        "共有層 (lib/bus_delivery.downgrade_advice) が返す退役の案内が、フックの "
-        "出力にそのまま出ていません。フックが独自の文面を持ち始めたか、理由タグが "
-        "届いていません"
-    )
-
-    # (2) 測れること: 退役の案内が **許可リスト漏れの既定文に落ちていない** こと。
+    # (0) 測れること: 退役の案内が **許可リスト漏れの既定文に落ちていない** こと。
     #     フック側で `_downgrade_reason` をイベントに載せる配線が外れると理由タグが
     #     空になり、案内が既定文へ退行する。これは挙動の差なので機械で測れる。
-    generic = _bd.downgrade_advice("", "trek-trigger")
-    if generic != expected:
-        assert generic not in out, (
+    retired_text = _bd.downgrade_advice(_bd.DOWNGRADE_RETIRED_CHANNEL, "trek-trigger")
+    generic_text = _bd.downgrade_advice("", "trek-trigger")
+    if generic_text != retired_text:
+        assert generic_text not in out, (
             "退役した channel に、許可リスト漏れの既定文が出ています = 理由タグが "
             "落ちて案内が退行しています"
         )
+
+    # (1) 測れること: フックが **共有層を呼んでいる** こと (= 委譲の機構そのもの)。
+    #
+    #     **なぜ今日の文面との一致では足りないか (PR#842 2 周目の保守性レビュー, high)**:
+    #     初版は `expected = _bd.downgrade_advice(...)` をその場で計算して
+    #     `assert expected in out` していた。judge が委譲を止めて **今の lib の文面と
+    #     byte 一致する** 文字列を hook にハードコードする変異を当て、緑のままを実測した。
+    #     凍結はまさに「今の値と同じ」瞬間に起きるので、今日の値との一致を見る限り
+    #     委譲が切れたことを永久に検知できない。drift が表に出るのは後日 lib 側の文面を
+    #     変える別のコミットで、その作業者はこの試験の存在も委譲の欠落も知らない。
+    #
+    #     このファイル以外の兄弟 (`TestBothHooksShareOneAdviceSource`) は既に同じ
+    #     結論に達して sentinel 差し替えを使っている。その流儀を写していなかった。
+    sentinel = "SENTINEL-ADVICE-e7396 (試験中だけ差し替えた値)"
+    monkeypatch.setattr(_bd, "downgrade_advice", lambda *a, **kw: sentinel)
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(_json.dumps({"cwd": str(root), "session_id": "sess-X",
+                                 "hook_event_name": "UserPromptSubmit"})))
+    hook_module.main()
+    out_sentinel = capsys.readouterr().out
+    assert sentinel in out_sentinel, (
+        "共有層 (lib/bus_delivery.downgrade_advice) を差し替えても、フックの出力が "
+        "追随しません = フックが独自の文面を持っています (委譲が切れている)。"
+        "今日の文面と一致するかでは、凍結した瞬間を検知できません"
+    )
+
 
     # 測れないこと (= この試験が約束しないこと): **文面の意味が正しいか**。
     # 上の (1) は共有層と一致することしか見ないので、lib 側で意味を反転させれば
