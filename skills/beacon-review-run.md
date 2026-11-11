@@ -46,9 +46,17 @@ triggers:
   `maintainability` (= AX の兄弟、AI がコードを**変更する**体験) は AX と同じく
   `--pr` / `--diff-ref` を取り、原典は固定 (principles.md)。PR 作成時に AX と並んで
   自動発火する (fires_on=pr-open)。
-- `target`: `--pr <n>` または `--diff-ref <base...head>` (ax/philosophy でどちらか
-  必須)。`attainment` では `--target <ms-XX|op-X>` が必須 (原典 = その target の
+- `target`: artifact 源 (= judge に渡す変更) を 1 つ必ず指定する。`ax` /
+  `maintainability` / `philosophy` は `--pr <n>` または `--diff-ref <base...head>`。
+  **`philosophy` はさらに `--target <ms-XX|op-X>` を取る** (= whole-target mode、
+  e-4196)。close 節目は 1 変更でなく target 全体を見るので、その target の
+  commit 台帳が artifact になり、bundle の `mode` は `whole-target` になる
+  (`--pr` / `--diff-ref` との同時指定は拒否 = scope が黙って狭まらない)。
+  `attainment` では `--target <ms-XX|op-X>` が必須 (原典 = その target の
   SPEC を自動解決)、`--pr` / `--diff-ref` は任意の補助差分。
+  ※ `philosophy` は **原典 (`--origin-doc`) と artifact 源の両方**が必要で、
+  どちらかを欠くと rc=1 で落ちる (e-7438: 節目の 3 入口がこれを欠いた
+  命令を指示していたため、思想レビューが実質実行不能だった)。
 - `--origin-doc <doc-id>`: 思想レビューの原典 (対象 target の SPEC doc)。`philosophy`
   / `both` で必須。AX では不要 (原典は principles.md 固定)。
 - `--models <m1,m2,...>`: 判定サブエージェントのモデル。**既定は type ごとに記述子の
@@ -103,9 +111,17 @@ fi
 ```bash
 # AX:
 beacon review context --type ax --pr <n>            # or --diff-ref <base...head>
-# 思想:
+# 思想 (1 変更を見る):
 beacon review context --type philosophy --origin-doc <spec-doc-id> --pr <n>
+# 思想 (close 節目 = target 全体を見る / whole-target):
+beacon review context --type philosophy --origin-doc <spec-doc-id> --target <ms-XX|op-X>
 ```
+
+思想の close 節目では、**review-due trigger の message がそのまま実行できる
+完全な命令を持っている** (発火時に target も SPEC doc-id も分かっているので、
+`lib/commands_shared.py` が埋めた形で書く)。`beacon trigger check` の message に
+`/beacon-review-run --type philosophy ...` の行があれば、**自分で組み直さず
+そのまま使う** (e-7438)。
 
 stdout に 1 行 JSON が返る (`origin` / `artifact` / `independence_contract` /
 `mode` / `external_references` / `gaps`)。`both` の場合は 2 回叩いて 2 bundle を得る。

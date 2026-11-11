@@ -146,7 +146,15 @@ elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close|observe)|operati
   # fire nothing, so `trigger check` just shows no review-due — no false nag.
   # `milestone observe` is included because observing is a completion claim in
   # this codebase (運用改善フェーズ = 基本目的達成が前提), not a reversible pause.
-  emit "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + 目的達成(attainment) review may be due. まず 'beacon trigger check' を実行する。<type>-review-due トリガーが出ていれば、その message に対象 target-id が入っている。出ていれば 2 つを実行する: (1) /beacon-review-run --type philosophy --target <target-id> で思想レビュー、続けて (2) 'beacon target review-request <target-id>' で目的達成の証拠を集めて人間承認へ (SPEC 方針2: attainment verdict は人間所有)。review-due トリガーが無ければ何もしなくてよい (close 失敗 / 誤マッチ含む)。"
+  # ms-119 e-7438: 思想レビューの呼び出しを **ここで綴らない**。原典 (SPEC doc-id)
+  # は shell からは解決できないので、ここで綴れるのは必ず placeholder 混じりの
+  # 不完全な呼び出しになる。実際に以前は `/beacon-review-run --type philosophy
+  # --target <target-id>` と指示しており、そのとおり実行すると rc=1
+  # ("needs --origin-doc") だった。呼び出しを綴る唯一の場所は review-due trigger
+  # の message (= 発火時に target も SPEC doc も知っている、
+  # lib/commands_shared.py _fire_review_due_trigger) に寄せ、ここは「その message
+  # のとおりに実行せよ」とだけ言う。
+  emit "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + 目的達成(attainment) review may be due. まず 'beacon trigger check' を実行する。<type>-review-due トリガーが出ていれば、その message に **そのまま実行できる完全な思想レビューの呼び出し** (原典 doc-id と対象 target-id が埋まった /beacon-review-run の行) と対象 target-id が入っている。出ていれば 2 つを実行する: (1) message に書かれた /beacon-review-run の行をそのままコピーして実行し思想レビュー、続けて (2) 'beacon target review-request <target-id>' で目的達成の証拠を集めて人間承認へ (SPEC 方針2: attainment verdict は人間所有)。review-due トリガーが無ければ何もしなくてよい (close 失敗 / 誤マッチ含む)。"
   SKILL="/beacon-review-run"
   NODE="target-close"
 elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/deploy\.sh'; then

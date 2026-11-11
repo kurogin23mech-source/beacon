@@ -1195,11 +1195,43 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
                     f"独立 judge に振り返り証拠を作らせ、次からは `beacon milestone done "
                     f"{target_id} --review` でゲート経由に。")
         elif b["review"] == review_spine.REVIEW_PHILOSOPHY:
-            parts.append(
-                f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
-                f"blocking): `/beacon-review-run --type philosophy --origin-doc "
-                f"<spec-doc-id>` で文脈ゼロの独立 judge に SPEC を渡し {target_id} の"
-                f"実装 drift を確認してください。")
+            # ms-119 e-7438: **ここが思想レビューの呼び出しを綴る唯一の場所**。
+            # 発火時点でこの関数は target_id も (binding が立つ前提である) SPEC
+            # doc も知っているので、**そのままコピーして実行できる完全な呼び出し**
+            # を組み立てる。
+            #
+            # 以前は `--origin-doc <spec-doc-id>` だけを綴っていた。原典は埋まって
+            # いない placeholder、artifact 源 (--pr / --diff-ref / --target) は
+            # 一言も無い —— つまり **この message のとおりに実行すると必ず rc=1**
+            # だった (2026-11-11 実測: "pass --pr <n> or --diff-ref ... or
+            # --target ... to collect the artifact")。節目から思想レビューを撃つ
+            # 入口は hook / この message / Skill の 3 つで、3 つすべてが落ちる
+            # 呼び出しを指示していたので、**kernel のコードを読んで自分で組み立て
+            # た場合だけ実行できる**状態だった (独立思想レビュー medium)。
+            #
+            # close 節目は 1 変更ではなく target 全体を見るので artifact 源は
+            # `--target` (whole-target、e-4196)。SPEC doc の解決は
+            # `_spec_doc_for_target` (走査規則の唯一の持ち主) に委ねる。
+            spec_doc = _spec_doc_for_target(target_id, target_kind)
+            doc_id = (spec_doc or {}).get("doc_id", "")
+            if doc_id:
+                parts.append(
+                    f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                    f"blocking): `/beacon-review-run --type philosophy --origin-doc "
+                    f"{doc_id} --target {target_id}` で文脈ゼロの独立 judge に SPEC を"
+                    f"渡し {target_id} の実装 drift を確認してください。")
+            else:
+                # 原典 doc を解決できなかった (= cloud 不通、または descriptor
+                # target で doc の紐付け field が milestone / operation のどちらでも
+                # ない)。**placeholder を綴って「実行できる呼び出し」を名乗らない** —
+                # 何が足りないかと、それをどう埋めるかだけを言う。
+                parts.append(
+                    f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                    f"blocking): {target_id} の SPEC doc を解決できなかったため完全な"
+                    f"呼び出しを組み立てられません。`beacon doc list --scope spec` で"
+                    f"原典の doc-id を確認し、`/beacon-review-run --type philosophy "
+                    f"--origin-doc <その doc-id> --target {target_id}` を実行して"
+                    f"ください。")
     import datetime
     trigger_data = {
         "name": f"review-due-{target_id}",
