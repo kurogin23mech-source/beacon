@@ -170,17 +170,21 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 def sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
     """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
 
-    Payload-derived ids (op_id / task_id) are interpolated into the imperative
-    command strings; this defends the injected instruction against a malformed id
-    (newline / markdown / shell metacharacter) leaking in. Returns ``fallback``
-    when nothing survives so the block never emits an empty command.
+    The contract: **every payload-derived id that reaches an imperative command
+    string goes through here first.** That defends the injected instruction
+    against a malformed id (newline / markdown / shell metacharacter) leaking in.
+    Returns ``fallback`` when nothing survives, so a block never emits an empty
+    command.
 
-    ms-185: ``trek_id`` used to be in that list. The retired channels no longer
-    have an interpolation site (their disclosure block was removed), so there is
-    no trek id to splice — verified by grep, not by assumption. This docstring is
-    the single place that says which ids reach a command string; callers point
-    here rather than restating the list (PR#842 独立レビュー 2 体が一致で指摘:
-    片方のコメントだけ直して双子が古いまま残っていた)。
+    **No list of id names lives in this docstring** (ms-185, PR#842 rounds 3-4).
+    It used to enumerate them, and every edit of that list got one entry wrong:
+    round 3 dropped ``trek_id`` (correctly — the retired channels lost their
+    interpolation site) but left ``task_id`` in, which no caller ever passes, and
+    never added ``spec_doc_id``, which one does. Two independent reviews caught
+    the same stale list, each time *after* it had just been edited. A copy of the
+    caller set cannot be kept honest by hand, so there is no copy: **the call
+    sites are the list.** `grep -n "sanitize_id(" lib/ bin/ scripts/` answers the
+    question in one command, and cannot go stale.
     """
     cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
     return cleaned or fallback

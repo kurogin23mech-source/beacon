@@ -493,25 +493,13 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
 # has_required_provenance / classify_auto_execute) so the Codex inbox hook shares
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
-# **どの id が命令文に補間されるか** は ``lib/bus_delivery.sanitize_id`` の
-# docstring が唯一の説明 — ここに列挙を写さない。以前この列挙が 2 箇所に在り、
-# 片方だけ直して双子が古いまま残った (PR#842 独立レビュー 2 体が一致で指摘)。
-# ここが担うのは、整形済みでない id が注入文へ漏れるのを防ぐ文字集合の定義だけ
-# (Beacon が実際に発行する形: ``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``)。
-_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
-
-
-def _sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
-    """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
-
-    Delegates to ``lib/bus_delivery.sanitize_id`` (single source, shared with the
-    Codex hook); the inline regex is the fail-safe fallback if that import fails.
-    """
-    bd = _import_bus_delivery()
-    if bd is not None:
-        return bd.sanitize_id(raw, fallback=fallback, maxlen=maxlen)
-    cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
-    return cleaned or fallback
+# id の整形 (命令文へ補間する前に注入の足場を落とす) は
+# ``lib/bus_delivery.sanitize_id`` が行う。以前ここに薄いラッパ ``_sanitize_id`` と
+# 正規表現の並行コピーが在ったが、**製品コードから一度も呼ばれていなかった**
+# (PR#842 4 周目の独立保守性レビューが削除して実測: 落ちるのはそのラッパ自身の
+# 単体試験 1 件だけ)。「ここに在るから倣って呼べば守られる」と読める形は、
+# 呼んだつもりで呼ばれていない誤判断を招くので外した。この file で id を扱う
+# 必要が出たら ``bus_delivery.sanitize_id`` を直接呼ぶ。
 
 
 def _ensure_cursor_primed(api_url: str, project_id: str, recipient_id: str,
