@@ -591,27 +591,11 @@ def _downgrade_advice(reason: str, channel: str = "") -> str:
     実体は ``lib/bus_delivery.downgrade_advice`` に 1 つだけ置いてある。この関数は
     そこへの薄い委譲 + lib が読めない環境の fallback だけを担う。
 
-    **なぜ channel を取るか (ms-185 / #812 の独立レビュー 2 体が一致で指摘)**:
-    降格理由タグ ``non-system-envelope`` は、#812 が証拠の要求を channel ごとに
-    張り替えた後、**2 つの別の世界**を指すようになった。``operation-trigger`` は
-    「人間がその op_id を承認した封筒」を要求し、満たしていなければ
-    ``beacon operation approve <op-id>`` で**直せる**。タグだけで分岐していた
-    以前の実装は、当時 ``trek-*`` に向けて書かれていた文言 (「偽装の恐れ」
-    「opt-in し直しても直りません」) を前者にも返し、**実在する回復手段を隠して
-    「直らない」と断定**していた。
-
-    **``trek-*`` の現在の扱い (ms-185 で変わった)**: これらは署名を要求する集合
-    (``GATED_PROVENANCE_CHANNELS``) には **居ない** —— 居るのは
-    ``operation-trigger`` だけで、``trek-*`` は ``RETIRED_PROVENANCE_CHANNELS``
-    (= サーバがもう発行しない channel) に移った。だから案内は「直せない」ではなく
-    「古い opt-in が残っているので ``beacon bus auto-execute remove --channel
-    <名前>`` で外す」になる。operator に回復手段が **在る**。
-
-    **なぜ説明文をこの hook に持たせないか**: 同じ説明文が Codex 側の受信 hook
-    (``scripts/codex-inbox-hook.py``) にも別コピーで在り、#812 の張り替えに
-    どちらも追従していなかった。レビューは Claude 側しか見ておらず、片方だけ直す
-    形になりかけた。「何を証拠として要求したか」を宣言している
-    ``PROVENANCE_REQUIREMENTS`` と同じ場所に説明を置けば、2 度と割れない。
+    **どの channel が何を要求し、どう直すか** (= ``channel`` を引数に取る理由、
+    ``trek-*`` の現在の扱い、#812 の経緯と実害) は
+    ``lib/bus_delivery.downgrade_advice`` の docstring が唯一の説明である。
+    ここには写しを置かない —— 以前この説明は両 hook に別コピーで在り、#812 の
+    張り替えにどちらも追従していなかった (ms-185 e-7395 / PR#842 独立保守性レビュー)。
     """
     bd = _import_bus_delivery()
     if bd is None:

@@ -402,13 +402,9 @@ def main() -> int:
     downgraded_retired = 0
     downgraded_other = 0
     downgraded_other_reasons: set = set()
-    # ms-185 / #812 レビュー: 署名欠落の降格は **channel ごとに回復手段が違う**
-    # ので channel を集める。件数だけ数えていた以前の形では、どちらの案内を出すか
-    # 決められず、当時 trek- 向けに書かれた固定文を全件に出していた。
-    # 現在の分かれ方: operation-trigger は署名を要求する唯一の channel で、人間が
-    # beacon operation approve で直せる。trek-* は署名を要求する集合には居らず、
-    # サーバがもう発行しない退役 channel なので、回復手段は許可リストから外すこと
-    # (beacon bus auto-execute remove --channel <名前>)。
+    # 署名欠落の降格は channel ごとに回復手段が違うので channel を集める。
+    # どの channel が何を要求し、どう直すかは lib/bus_delivery.downgrade_advice の
+    # docstring が唯一の説明 — ここには写しを置かない (ms-185 e-7395)。
     downgraded_provenance_channels: set = set()
     gate_unavailable_autoexec = 0
     if bd is not None:
