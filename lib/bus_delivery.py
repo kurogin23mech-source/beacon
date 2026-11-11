@@ -170,10 +170,29 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 def sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
     """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
 
-    Payload-derived ids (op_id / trek_id / task_id) are interpolated into the
-    imperative command strings; this defends the injected instruction against a
-    malformed id (newline / markdown / shell metacharacter) leaking in. Returns
-    ``fallback`` when nothing survives so the block never emits an empty command.
+    The contract: **every payload-derived id that reaches an imperative command
+    string goes through here first.** That defends the injected instruction
+    against a malformed id (newline / markdown / shell metacharacter) leaking in.
+    Returns ``fallback`` when nothing survives, so a block never emits an empty
+    command.
+
+    **No list of id names lives in this docstring** (ms-185, PR#842 rounds 3-4).
+    It used to enumerate them, and every edit of that list got one entry wrong:
+    round 3 dropped ``trek_id`` (correctly — the retired channels lost their
+    interpolation site) but left ``task_id`` in, which no caller ever passes, and
+    never added ``spec_doc_id``, which one does. Two independent reviews caught
+    the same stale list, each time *after* it had just been edited. A copy of the
+    caller set cannot be kept honest by hand, so there is no copy: **the call
+    sites are the list** — `grep -rn "sanitize_id(" lib/ bin/ scripts/`.
+
+    (The `-r` is load-bearing and was missing when this paragraph was first
+    written: plain `grep -n PATTERN dir/` exits 2 with "Is a directory" on stderr
+    and prints **nothing** to stdout, so a reader who checks only stdout concludes
+    "no callers" — the exact wrong answer, stated confidently. That first version
+    also claimed the command "cannot go stale", which is not a thing a command can
+    promise; the claim is dropped. An independent AX review caught it, and it got
+    past the author because the authoring shell aliased `grep` to a wrapper that
+    recursed by default — measuring one's own shell is not measuring the reader's.)
     """
     cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
     return cleaned or fallback
@@ -335,6 +354,15 @@ def downgrade_advice(reason: str, channel: str = "") -> str:
     ``operation-trigger`` (人間の承認が要る = 回復手段が在る) と ``trek-*``
     (サーバ署名が要る = operator には直せない) の**両方**を指すので、タグだけで
     分岐すると必ず片方に誤った案内を出す。
+
+    **タグだけで分岐していた頃の実害**: 当時 ``trek-*`` 向けに書かれていた文言
+    (「偽装の恐れ」「opt-in し直しても直りません」) を ``operation-trigger`` にも
+    返しており、**実在する回復手段を隠して「直らない」と断定**していた。読んだ AI が
+    人間に「直りません」と誤報告する。だから案内は必ず channel から導く。
+
+    **両 hook 側はここへの 1 行ポインタだけを持つ** (ms-185 e-7395 / PR#842 独立
+    保守性レビュー)。散文同士の一致を機械検査で強制するのは、このリポジトリが
+    両方向の失敗を実証した道なので取らない —— 複製を比べるのではなく複製を無くす。
 
     提示の仕方 (1 件ずつ inline に添えるか、件数つきの塊にまとめるか) は hook
     ごとに違うので、ここは**原因と回復手段の 1 句だけ**を返し、前後の飾りは

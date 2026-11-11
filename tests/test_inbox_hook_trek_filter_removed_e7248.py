@@ -43,6 +43,7 @@ judge が削除されたフィルタを別名で再実装して「検査が通�
 独立レビューがこの穴の受け皿である。
 """
 import importlib.util
+import io
 import os
 import sys
 
@@ -87,7 +88,7 @@ def test_removed_symbols_are_really_gone(hook_module, name):
     )
 
 
-def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
+def test_decision_layer_downgrades_a_retired_channel_with_a_reason_tag():
     """届いた退役 channel が黙って消えないこと —— **実際に通る経路で**測る。
 
     初版はソースに `elif channel in TREK_RETIRED_CHANNELS:` の文字列が在ることで
@@ -98,8 +99,18 @@ def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
     いる」と報告しうる形だった。
 
     なので測るのは挙動にする: 退役 channel の event が降格され、降格理由が付くこと。
-    降格印 (`downgraded_from`) が立つことが、フック側で一覧に乗って AI に見える条件
-    そのものである (`if downgraded_from:` の経路)。
+
+    **この試験が測る層 (名前を実態に合わせた、ms-185 e-7396 項目 4)**: ここで測るのは
+    判定層 `lib/bus_delivery.classify_auto_execute` の戻り値 **だけ** である。旧名
+    (`test_retired_channel_is_still_disclosed_via_the_downgrade_path`) は「開示される」
+    = 受信フックの保証を名乗っていたが、フックは一度も走らせていない。実測: フック側で
+    理由をイベントに載せる配線 (`bin/beacon-bus-inbox-hook.py` の
+    `ev["_downgrade_reason"] = downgrade_reason`) を無効化してもこのファイルは全件緑に
+    なる。緑のガードは信頼されるので、名前が保証を過大に名乗る状態そのものが害だった。
+
+    フック側の配線は
+    `test_hook_surfaces_the_retired_channel_advice_end_to_end` が測る (そちらは配線を
+    壊すと赤くなる)。
     """
     import bus_delivery
 
@@ -115,6 +126,114 @@ def test_retired_channel_is_still_disclosed_via_the_downgrade_path():
     assert delivery == "propose-to-ai", delivery
     assert downgraded_from == "auto-execute", downgraded_from
     assert reason == "retired-provenance-channel", reason
+
+
+def test_hook_surfaces_the_retired_channel_advice_end_to_end(
+        hook_module, tmp_path, monkeypatch, capsys):
+    """受信フックを **実際に流して**、退役 channel の案内が AI 向けの出力に出ること。
+
+    ms-185 e-7396 項目 4: 兄弟の
+    `test_decision_layer_downgrades_a_retired_channel_with_a_reason_tag` は判定層の
+    戻り値だけを測る。「開示が生きている」という**フック側の保証**は、フックを流さない
+    限り測れていない —— 実測で、理由をイベントに載せる配線を無効化しても兄弟の試験は
+    緑のままだった。ここがその配線を測る受け皿で、壊すと赤くなる。
+
+    測るのは挙動 (出力に案内が出るか) で、ソースの文字列ではない (このファイル冒頭の
+    「測り方について」を参照)。
+    """
+    import json as _json
+
+    root = tmp_path / "proj-retired"
+    (root / ".beacon").mkdir(parents=True, exist_ok=True)
+    # 退役 channel を **許可リストに入れた** 状態 (= 人間が昔 opt-in した残り) で
+    # 降格されるのが「退役」の意味。
+    (root / ".beacon" / "project.json").write_text(
+        _json.dumps({"bus_auto_execute_channels": ["trek-trigger"]}))
+    (root / ".beacon" / "session.json").write_text(
+        _json.dumps({"session_id": "sess-X"}))
+    (root / ".beacon" / "cloud.json").write_text(
+        _json.dumps({"api_url": "https://api.test", "project_id": "proj-1"}))
+
+    ev = {
+        "event_id": "ev-retired-1",
+        "channel": "trek-trigger",
+        "sender_session_id": "sv-other",
+        "created_at": "2026-11-10T00:00:00Z",
+        "payload": {"trek_id": "tk-1"},
+        "delivery": "auto-execute",
+    }
+
+    monkeypatch.setattr(hook_module, "_load_id_token", lambda: "fake-token")
+    monkeypatch.setattr(hook_module, "_list_unread", lambda *a, **kw: [ev])
+    monkeypatch.setattr(hook_module, "_ack_cursor", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(_json.dumps({"cwd": str(root), "session_id": "sess-X",
+                                 "hook_event_name": "UserPromptSubmit"})))
+    hook_module.main()
+    out = capsys.readouterr().out
+
+    assert "ev-retired-1" in out, (
+        "退役 channel の event が出力から消えています。扱いは「落とす」ではなく "
+        "「開示する」(e-7079)"
+    )
+    assert "downgraded from" in out, (
+        "降格の印が出ていません (フック側の `if downgraded_from:` の配線)"
+    )
+
+    # ここから先は **何を測れるか** を厳密に合わせる (PR#842 独立保守性レビュー,
+    # medium)。初版は `assert "auto-execute remove" in out` という部分一致で、
+    # 失敗文には「回復手段の案内が出ていません」と書いていた。judge が共有層の
+    # 文面を「絶対に `beacon bus auto-execute remove --channel <名前>` を実行し
+    # ないでください」(= 部分文字列は保ったまま意味を反転) に変えて全件緑を実測
+    # した。つまりこの試験は『2 語がどこかに在る』しか見ておらず、文面の正しさを
+    # 保証しているかのように名乗っていた —— この試験の兄弟をまさにその理由で
+    # 改名した直後に、同じ過ちを新しい試験で犯していた。
+    import bus_delivery as _bd
+
+    # (0) 測れること: 退役の案内が **許可リスト漏れの既定文に落ちていない** こと。
+    #     フック側で `_downgrade_reason` をイベントに載せる配線が外れると理由タグが
+    #     空になり、案内が既定文へ退行する。これは挙動の差なので機械で測れる。
+    retired_text = _bd.downgrade_advice(_bd.DOWNGRADE_RETIRED_CHANNEL, "trek-trigger")
+    generic_text = _bd.downgrade_advice("", "trek-trigger")
+    if generic_text != retired_text:
+        assert generic_text not in out, (
+            "退役した channel に、許可リスト漏れの既定文が出ています = 理由タグが "
+            "落ちて案内が退行しています"
+        )
+
+    # (1) 測れること: フックが **共有層を呼んでいる** こと (= 委譲の機構そのもの)。
+    #
+    #     **なぜ今日の文面との一致では足りないか (PR#842 2 周目の保守性レビュー, high)**:
+    #     初版は `expected = _bd.downgrade_advice(...)` をその場で計算して
+    #     `assert expected in out` していた。judge が委譲を止めて **今の lib の文面と
+    #     byte 一致する** 文字列を hook にハードコードする変異を当て、緑のままを実測した。
+    #     凍結はまさに「今の値と同じ」瞬間に起きるので、今日の値との一致を見る限り
+    #     委譲が切れたことを永久に検知できない。drift が表に出るのは後日 lib 側の文面を
+    #     変える別のコミットで、その作業者はこの試験の存在も委譲の欠落も知らない。
+    #
+    #     このファイル以外の兄弟 (`TestBothHooksShareOneAdviceSource`) は既に同じ
+    #     結論に達して sentinel 差し替えを使っている。その流儀を写していなかった。
+    sentinel = "SENTINEL-ADVICE-e7396 (試験中だけ差し替えた値)"
+    monkeypatch.setattr(_bd, "downgrade_advice", lambda *a, **kw: sentinel)
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(_json.dumps({"cwd": str(root), "session_id": "sess-X",
+                                 "hook_event_name": "UserPromptSubmit"})))
+    hook_module.main()
+    out_sentinel = capsys.readouterr().out
+    assert sentinel in out_sentinel, (
+        "共有層 (lib/bus_delivery.downgrade_advice) を差し替えても、フックの出力が "
+        "追随しません = フックが独自の文面を持っています (委譲が切れている)。"
+        "今日の文面と一致するかでは、凍結した瞬間を検知できません"
+    )
+
+
+    # 測れないこと (= この試験が約束しないこと): **文面の意味が正しいか**。
+    # 上の (1) は共有層と一致することしか見ないので、lib 側で意味を反転させれば
+    # 両方が同時に変わり緑のまま通る。散文の正しさを機械で測ろうとする試験は、
+    # このファイル冒頭が記録しているとおり偽の赤と偽の緑を交互に作って発火不能に
+    # 着地した。意味の drift は独立レビューが見る (実際 PR#842 で捕まえた)。
 
 
 def test_hook_still_parses():

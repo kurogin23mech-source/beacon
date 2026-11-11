@@ -402,10 +402,9 @@ def main() -> int:
     downgraded_retired = 0
     downgraded_other = 0
     downgraded_other_reasons: set = set()
-    # ms-185 / #812 レビュー: 署名欠落の降格は **channel ごとに回復手段が違う**
-    # (operation-trigger = 人間の承認で直せる / trek-* = operator には直せない)。
-    # 件数だけ数えていた以前の形では、どちらの案内を出すか決められず、trek の
-    # 世界観の固定文を全件に出していた。だから channel を集める。
+    # 署名欠落の降格は channel ごとに回復手段が違うので channel を集める。
+    # どの channel が何を要求し、どう直すかは lib/bus_delivery.downgrade_advice の
+    # docstring が唯一の説明 — ここには写しを置かない (ms-185 e-7395)。
     downgraded_provenance_channels: set = set()
     gate_unavailable_autoexec = 0
     if bd is not None:

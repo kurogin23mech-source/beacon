@@ -63,7 +63,6 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -493,26 +492,13 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
 # has_required_provenance / classify_auto_execute) so the Codex inbox hook shares
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
-# Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
-# injected text — for the operation channels still as a command, for the
-# retired Trek channels only as the disclosed event id. Even after the
-# provenance gate, defend the f-string against a malformed id (newline / markdown / shell metacharacter)
-# leaking into the injected instruction by restricting to the id charset Beacon
-# actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
-_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
-
-
-def _sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
-    """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
-
-    Delegates to ``lib/bus_delivery.sanitize_id`` (single source, shared with the
-    Codex hook); the inline regex is the fail-safe fallback if that import fails.
-    """
-    bd = _import_bus_delivery()
-    if bd is not None:
-        return bd.sanitize_id(raw, fallback=fallback, maxlen=maxlen)
-    cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
-    return cleaned or fallback
+# id の整形 (命令文へ補間する前に注入の足場を落とす) は
+# ``lib/bus_delivery.sanitize_id`` が行う。以前ここに薄いラッパ ``_sanitize_id`` と
+# 正規表現の並行コピーが在ったが、**製品コードから一度も呼ばれていなかった**
+# (PR#842 4 周目の独立保守性レビューが削除して実測: 落ちるのはそのラッパ自身の
+# 単体試験 1 件だけ)。「ここに在るから倣って呼べば守られる」と読める形は、
+# 呼んだつもりで呼ばれていない誤判断を招くので外した。この file で id を扱う
+# 必要が出たら ``bus_delivery.sanitize_id`` を直接呼ぶ。
 
 
 def _ensure_cursor_primed(api_url: str, project_id: str, recipient_id: str,
@@ -604,20 +590,11 @@ def _downgrade_advice(reason: str, channel: str = "") -> str:
     実体は ``lib/bus_delivery.downgrade_advice`` に 1 つだけ置いてある。この関数は
     そこへの薄い委譲 + lib が読めない環境の fallback だけを担う。
 
-    **なぜ channel を取るか (ms-185 / #812 の独立レビュー 2 体が一致で指摘)**:
-    降格理由タグ ``non-system-envelope`` は、#812 が証拠の要求を channel ごとに
-    張り替えた後、**2 つの別の世界**を指すようになった。``operation-trigger`` は
-    「人間がその op_id を承認した封筒」を要求し、満たしていなければ
-    ``beacon operation approve <op-id>`` で**直せる**。``trek-*`` はサーバ署名を
-    要求し、operator には直せない。タグだけで分岐していた以前の実装は後者の文言
-    (「偽装の恐れ」「opt-in し直しても直りません」) を前者にも返し、**実在する
-    回復手段を隠して「直らない」と断定**していた。
-
-    **なぜ説明文をこの hook に持たせないか**: 同じ説明文が Codex 側の受信 hook
-    (``scripts/codex-inbox-hook.py``) にも別コピーで在り、#812 の張り替えに
-    どちらも追従していなかった。レビューは Claude 側しか見ておらず、片方だけ直す
-    形になりかけた。「何を証拠として要求したか」を宣言している
-    ``PROVENANCE_REQUIREMENTS`` と同じ場所に説明を置けば、2 度と割れない。
+    **どの channel が何を要求し、どう直すか** (= ``channel`` を引数に取る理由、
+    ``trek-*`` の現在の扱い、#812 の経緯と実害) は
+    ``lib/bus_delivery.downgrade_advice`` の docstring が唯一の説明である。
+    ここには写しを置かない —— 以前この説明は両 hook に別コピーで在り、#812 の
+    張り替えにどちらも追従していなかった (ms-185 e-7395 / PR#842 独立保守性レビュー)。
     """
     bd = _import_bus_delivery()
     if bd is None:
