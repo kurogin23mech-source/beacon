@@ -80,19 +80,19 @@ class TestCodexTallyIsWiredToTheRightCounter:
     @pytest.mark.parametrize("reason,expected_key", [
         (ALLOWLIST_MISS, "allowlist"),
         (PROVENANCE, "provenance"),
-        (RETIRED, "retired"),
+        (RETIRED, "retired_still_allowlisted"),
         (UNKNOWN, "other"),
     ])
     def test_each_reason_lands_in_its_own_counter(self, codex, reason, expected_key):
         # ms-185 e-7395: channel も渡す形になった。ここは **現役** channel を渡す
-        # (引退 channel だと許可リスト漏れが retired_unapproved へ行くのが正しい
+        # (引退 channel だと許可リスト漏れが retired_not_allowlisted へ行くのが正しい
         # 挙動で、それは TestRetiredUnapprovedIsCountedApart が測る)。
         counts = codex.tally_downgrade_reasons([(reason, "dm")], bd=bd)
         assert counts[expected_key] == 1, (
             "理由 %r が %s に積まれていません: %r" % (reason, expected_key, counts)
         )
         # 他は 0 — 「どれかに入った」ではなく「正しいものだけに入った」を見る
-        for key in ("allowlist", "retired_unapproved", "provenance", "retired",
+        for key in ("allowlist", "retired_not_allowlisted", "provenance", "retired_still_allowlisted",
                     "other"):
             if key != expected_key:
                 assert counts[key] == 0, (
@@ -105,7 +105,7 @@ class TestCodexTallyIsWiredToTheRightCounter:
             [(RETIRED, "trek-trigger"), (PROVENANCE, "operation-trigger"),
              (ALLOWLIST_MISS, "dm"), (RETIRED, "trek-trigger"),
              (UNKNOWN, "dm")], bd=bd)
-        assert counts["retired"] == 2
+        assert counts["retired_still_allowlisted"] == 2
         assert counts["provenance"] == 1
         assert counts["allowlist"] == 1
         assert counts["other"] == 1
@@ -124,10 +124,10 @@ class TestCodexTallyIsWiredToTheRightCounter:
     def test_empty_input_is_all_zero(self, codex):
         counts = codex.tally_downgrade_reasons([], bd=bd)
         assert all(counts[k] == 0 for k in
-                   ("allowlist", "retired_unapproved", "provenance", "retired",
+                   ("allowlist", "retired_not_allowlisted", "provenance", "retired_still_allowlisted",
                     "other"))
         assert counts["other_reasons"] == set()
-        assert counts["retired_unapproved_channels"] == set()
+        assert counts["retired_not_allowlisted_channels"] == set()
 
 
 class TestCodexNoticeTextTellsTheRightFix:
@@ -311,31 +311,31 @@ class TestRetiredUnapprovedIsCountedApart:
     def test_retired_channel_without_optin_does_not_land_in_allowlist(self, codex):
         counts = codex.tally_downgrade_reasons(
             [(ALLOWLIST_MISS, "trek-trigger")], bd=bd)
-        assert counts["retired_unapproved"] == 1, counts
+        assert counts["retired_not_allowlisted"] == 1, counts
         assert counts["allowlist"] == 0, (
             "引退した channel の許可リスト漏れを allowlist に畳んでいます = "
             "「opt-in してください」という誤案内になります: %r" % (counts,)
         )
-        assert counts["retired_unapproved_channels"] == {"trek-trigger"}
+        assert counts["retired_not_allowlisted_channels"] == {"trek-trigger"}
 
     def test_live_channel_without_optin_still_lands_in_allowlist(self, codex):
         counts = codex.tally_downgrade_reasons([(ALLOWLIST_MISS, "dm")], bd=bd)
         assert counts["allowlist"] == 1, counts
-        assert counts["retired_unapproved"] == 0, counts
+        assert counts["retired_not_allowlisted"] == 0, counts
 
     def test_mixed_batch_splits_the_two_states(self, codex):
         counts = codex.tally_downgrade_reasons(
             [(ALLOWLIST_MISS, "trek-trigger"), (ALLOWLIST_MISS, "dm"),
              (ALLOWLIST_MISS, "trek-progress-check")], bd=bd)
-        assert counts["retired_unapproved"] == 2, counts
+        assert counts["retired_not_allowlisted"] == 2, counts
         assert counts["allowlist"] == 1, counts
-        assert counts["retired_unapproved_channels"] == \
+        assert counts["retired_not_allowlisted_channels"] == \
             {"trek-trigger", "trek-progress-check"}
 
     def test_advice_lines_are_byte_equal_to_the_shared_layer(self, codex):
         """案内は共有層と **等値** (部分一致ではない)。"""
         chans = {"trek-trigger", "trek-task-review"}
-        got = codex.render_retired_unapproved_advice_lines(chans, bd=bd)
+        got = codex.render_retired_not_allowlisted_advice_lines(chans, bd=bd)
         want = "".join(
             f"\n    - channel={ch}: {bd.downgrade_advice('', ch)}"
             for ch in sorted(chans))
@@ -345,7 +345,7 @@ class TestRetiredUnapprovedIsCountedApart:
         """lib が読めない / channel 不明のときは回復手段を推測で名乗らない。"""
         for args in (({"trek-trigger"}, None), (set(), bd)):
             chans, mod = args
-            out = codex.render_retired_unapproved_advice_lines(chans, bd=mod)
+            out = codex.render_retired_not_allowlisted_advice_lines(chans, bd=mod)
             assert "auto-execute" not in out, out
             assert "特定できない" in out, out
 
@@ -462,7 +462,7 @@ class TestRetiredChannelAwaitingApprovalIsNotToldToOptIn:
         # Codex 側は専用の整形関数を通す。**等値** で測る (部分一致だと、今日の
         # 文言を凍結したコピーを埋め込んでも緑のままになる — #812 の judge が
         # 実測した経路)。
-        line = codex.render_retired_unapproved_advice_lines(
+        line = codex.render_retired_not_allowlisted_advice_lines(
             {self.RETIRED_CH}, bd=bd)
         assert line == f"\n    - channel={self.RETIRED_CH}: {expected}", (
             "Codex 側が共有層の案内を運んでいません: " + repr(line)

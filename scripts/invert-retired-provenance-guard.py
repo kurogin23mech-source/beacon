@@ -127,7 +127,7 @@ def codex_folds_retired_into_allowlist_miss(src: str) -> str:
     「足した」≠「全域に効く」になる。
     """
     anchor = ('        elif retired_tag is not None and reason == retired_tag:\n'
-              '            counts["retired"] += 1\n')
+              '            counts["retired_still_allowlisted"] += 1\n')
     assert anchor in src, "anchor not found (codex_folds_retired_into_allowlist_miss)"
     return src.replace(anchor, "", 1)
 
@@ -143,12 +143,32 @@ def codex_swaps_the_counter_wiring(src: str) -> str:
     old = ('        if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:\n'
            '            counts["provenance"] += 1\n'
            '        elif retired_tag is not None and reason == retired_tag:\n'
-           '            counts["retired"] += 1\n')
+           '            counts["retired_still_allowlisted"] += 1\n')
     new = ('        if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:\n'
-           '            counts["retired"] += 1\n'
+           '            counts["retired_still_allowlisted"] += 1\n'
            '        elif retired_tag is not None and reason == retired_tag:\n'
            '            counts["provenance"] += 1\n')
     assert old in src, "anchor not found (codex_swaps_the_counter_wiring)"
+    return src.replace(old, new, 1)
+
+
+def codex_swaps_retired_and_live_awaiting_approval(src: str) -> str:
+    """引退 + 未許可 と 現役 + 未許可 の判定を入れ替える。
+
+    PR#844 2 周目の独立 AX レビュー (medium): この PR の核心は「理由タグが空のとき、
+    channel が引退集合に居れば retired_not_allowlisted、居なければ allowlist」という
+    新しい分岐である。既存 2 件のアンカー追従だけを直し、**この分岐そのものを
+    取り違える変異がカタログに無かった**。「リストに在るものは全部守られている」と
+    いう安心感と実際の守備範囲の差になるので、この PR が主張する性質を自分の
+    カタログに入れる。
+
+    壊すと「引退した channel に『許可してください』と案内し、現役 channel に
+    『引退済み』と案内する」状態になる = この課題がまさに消しに来た誤誘導の鏡像。
+    """
+    old = '            if str(channel or "") in retired_channels:\n'
+    new = '            if str(channel or "") not in retired_channels:\n'
+    assert old in src, ("anchor not found "
+                        "(codex_swaps_retired_and_live_awaiting_approval)")
     return src.replace(old, new, 1)
 
 
@@ -159,16 +179,16 @@ def codex_folds_unknown_into_allowlist_miss(src: str) -> str:
     # other カウンタを届かなくする = 将来の理由が黙って誤案内される状態)。
     old = ('        elif not reason:\n'
            '            if str(channel or "") in retired_channels:\n'
-           '                counts["retired_unapproved"] += 1\n'
-           '                retired_unapproved_channels.add(str(channel or ""))\n'
+           '                counts["retired_not_allowlisted"] += 1\n'
+           '                retired_not_allowlisted_channels.add(str(channel or ""))\n'
            '            else:\n'
            '                counts["allowlist"] += 1\n'
            '        else:\n'
            '            counts["other"] += 1\n')
     new = ('        else:\n'
            '            if str(channel or "") in retired_channels:\n'
-           '                counts["retired_unapproved"] += 1\n'
-           '                retired_unapproved_channels.add(str(channel or ""))\n'
+           '                counts["retired_not_allowlisted"] += 1\n'
+           '                retired_not_allowlisted_channels.add(str(channel or ""))\n'
            '            else:\n'
            '                counts["allowlist"] += 1\n'
            '        if False:\n'
@@ -456,6 +476,9 @@ CASES = [
     ("配線だけを逆転させる (トークンは一切変えない)", CODEX,
      codex_swaps_the_counter_wiring,
      CONSUMER_TEST + "::TestCodexTallyIsWiredToTheRightCounter"),
+    ("引退+未許可 と 現役+未許可 の判定を入れ替える", CODEX,
+     codex_swaps_retired_and_live_awaiting_approval,
+     CONSUMER_TEST + "::TestRetiredUnapprovedIsCountedApart"),
     ("未知の理由を allowlist-miss に畳む", CODEX,
      codex_folds_unknown_into_allowlist_miss,
      CONSUMER_TEST + "::TestCodexTallyIsWiredToTheRightCounter::"

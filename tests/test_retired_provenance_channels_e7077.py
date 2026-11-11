@@ -174,6 +174,38 @@ class TestRetiredChannelIsDowngraded:
             "古い opt-in を外すべきことが伝わらない。"
         )
 
+    def test_advice_honours_an_injected_retired_set(self):
+        """``downgrade_advice`` の ``retired_channels`` が実際に効くこと。
+
+        PR#844 2 周目の独立保守性レビュー (low): この引数は
+        ``classify_auto_execute`` と対称に足したが、明示的に渡す呼び出しが
+        リポジトリに 1 件も無く「在るのに効かない継ぎ目」と誤解されうる状態だった。
+        注入を実証して継ぎ目を本物にする。
+
+        あわせて **デフォルト値が定義時に束縛される**ことも固定する: モジュール変数を
+        差し替えても関数には効かないので、差し替えは引数で行う。
+        """
+        # 引退扱いでない channel を、注入した集合では引退扱いにする
+        advice_injected = bd.downgrade_advice(
+            "", "dm", retired_channels=frozenset({"dm"}))
+        advice_default = bd.downgrade_advice("", "dm")
+        assert "引退" in advice_injected, (
+            "注入した引退集合が効いていません: " + repr(advice_injected))
+        assert "引退" not in advice_default, (
+            "既定では dm は引退扱いでないはずです: " + repr(advice_default))
+
+    def test_module_level_substitution_does_not_reach_the_default(self, monkeypatch):
+        """モジュール変数の差し替えは既定値に届かない (定義時束縛)。
+
+        これは罠だが**挙動として固定しておく** —— 届くと思って monkeypatch した人が
+        「効かない」で止まるより、届かないことが試験に書いてある方が速い。
+        """
+        monkeypatch.setattr(bd, "RETIRED_PROVENANCE_CHANNELS", frozenset({"dm"}))
+        assert "引退" not in bd.downgrade_advice("", "dm"), (
+            "モジュール変数の差し替えが既定値に届いています。届くようになったなら "
+            "docstring の注記 (定義時束縛なので引数で渡す) を直すこと"
+        )
+
     def test_allowlist_miss_still_wins_over_retired(self):
         """許可リストに無ければ、従来どおり理由タグ無しの降格 (= 既存の形を変えない)。
 

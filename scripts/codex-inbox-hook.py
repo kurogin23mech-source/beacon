@@ -218,6 +218,17 @@ def _hook_output(context: str, hook_event_name: str = "UserPromptSubmit") -> dic
     }
 
 
+#: 降格の集計バンドの見出し語。**ここ 1 箇所**に置く (PR#844 2 周目の独立保守性
+#: レビュー, medium): 以前は理由ごとのバンド 4 つ + 本受信側で合計 5 箇所に写しが在り、
+#: 1 つだけ表記を変えても他が緑のままで気付けない形だった。
+#:
+#: 試験はこの定数を**読まない** —— 試験がコードと同じ定数を参照すると、文言を変えても
+#: 全部緑で通り、観測可能な出力に対する検査でなくなる。試験はリテラルを独立に固定し、
+#: 文言を変えたら落ちるのが正しい (judge は試験側もこの定数から組み立てる案を出したが、
+#: その半分は採らなかった)。
+_DOWNGRADE_BAND = "安全側降格"
+
+
 def _render_channel_advice_lines(channels, *, bd, reason, no_channel_fallback) -> str:
     """channel 群を「1 行ずつその channel の案内」に畳む整形規則 —— **ここ 1 箇所**。
 
@@ -227,10 +238,16 @@ def _render_channel_advice_lines(channels, *, bd, reason, no_channel_fallback) -
     忘れても壊れたことに気付きにくい。整形規則をここに 1 つ置き、公開関数は
     **理由タグと「channel が無いときの文」だけを渡す薄い口**にする。
 
-    公開関数のシグネチャは変えない。``scripts/invert-retired-provenance-guard.py``
-    が ``def render_provenance_advice_lines(channels, *, bd) -> str:`` を文字列
-    アンカーにしているので、署名を変えると反転ハーネスが当たらなくなって SKIP
-    (= 偽の安全) になる —— この PR がまさにその事故を 1 件直したところである。
+    **この関数の本体は反転ハーネスの当て先である**:
+    ``scripts/invert-retired-provenance-guard.py`` が下の f-string に忠実な欠陥を
+    注入して「守る対象を壊すと赤くなるか」を測る。本体を書き換えるときはハーネスを
+    走らせて **SKIP 0 件 / exit 0** を確かめること (アンカーが外れるとハーネスは
+    SKIP を出し、それは緑と同じ害である)。
+
+    どの文字列を当て先にしているかはここに**写さない** —— 初版はここに当て先の
+    リテラルを書き、しかも同じコミットがその当て先を移したので、着地した時点で
+    既に嘘になっていた (PR#844 2 周目の独立 AX レビューが実測)。写しは持たず、
+    ハーネス側を唯一の宣言にする。
 
     ``bd`` が None (= lib が読めない) / channel 不明のときは **推測で名乗らない**。
     知らないのに「直せます」と言う方が、言わないより害が大きい (e-7077 の教訓)。
@@ -270,7 +287,7 @@ def render_provenance_advice_lines(channels, *, bd) -> str:
             "(channel を特定できないため回復手段を提示できません)"))
 
 
-def render_retired_unapproved_advice_lines(channels, *, bd) -> str:
+def render_retired_not_allowlisted_advice_lines(channels, *, bd) -> str:
     """引退した channel が **まだ許可されていない** 件を、1 行ずつ案内に畳む。
 
     **なぜ専用の口が要るか (ms-185 e-7395)**: 判定 (``classify_auto_execute``) は
@@ -341,35 +358,49 @@ def tally_downgrade_reasons(entries, *, bd) -> dict:
     見分けられないので channel が要る。以前は理由タグだけを受け取っており、
     引退した channel も ``allowlist`` に畳んで誤案内していた。
 
-    戻り値のキーは 5 つで固定: ``allowlist`` (= 現役 channel の承認待ち) /
-    ``retired_unapproved`` (= 引退 channel が許可リストに無い) / ``provenance`` /
-    ``retired`` (= 引退 channel が許可リストに残っている) / ``other``。
-    ``other_reasons`` は未知のタグの集合、``retired_unapproved_channels`` は
-    案内を channel ごとに出すための集合 (どちらも開示用)。**未知のタグを
-    ``allowlist`` に畳まない** — 畳むと「opt-in しろ」という誤案内になる。
+    Returns (**型が 2 種類混ざるので明示する**, PR#844 2 周目の独立 AX レビュー):
+
+    * 件数 (``int``) — 5 キー固定:
+      ``allowlist`` (現役 channel の承認待ち) /
+      ``retired_not_allowlisted`` (引退 channel が許可リストに無い) /
+      ``retired_still_allowlisted`` (引退 channel が許可リストに残っている) /
+      ``provenance`` (証拠の封筒が無い) / ``other`` (未知のタグ)
+    * 開示用の集合 (``set``) — 2 キー:
+      ``other_reasons`` (未知のタグそのもの) /
+      ``retired_not_allowlisted_channels`` (案内を channel ごとに出すため)
+
+    **``sum(counts.values())`` は TypeError になる** (int と set が混ざる)。総件数が
+    要るなら件数キーだけを足すこと。``json.dumps`` も同じ理由で落ちる。
+
+    引退 channel 絡みは ``retired_not_allowlisted`` と ``retired_still_allowlisted``
+    の **2 キーに分かれる**。以前は後者が ``retired`` という名前で前者と接頭辞を
+    共有しており、「``retired`` が引退の全件数」と誤読できた (同レビューの指摘)。
+    対称な名前に変えたので、片方だけを合計に使う形にはなりにくい。
+
+    **未知のタグを ``allowlist`` に畳まない** — 畳むと「opt-in しろ」という誤案内になる。
     """
-    counts = {"allowlist": 0, "retired_unapproved": 0, "provenance": 0,
-              "retired": 0, "other": 0}
+    counts = {"allowlist": 0, "retired_not_allowlisted": 0, "provenance": 0,
+              "retired_still_allowlisted": 0, "other": 0}
     other_reasons: set = set()
-    retired_unapproved_channels: set = set()
+    retired_not_allowlisted_channels: set = set()
     retired_tag = getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None)
     retired_channels = getattr(bd, "RETIRED_PROVENANCE_CHANNELS", frozenset())
     for reason, channel in entries:
         if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
             counts["provenance"] += 1
         elif retired_tag is not None and reason == retired_tag:
-            counts["retired"] += 1
+            counts["retired_still_allowlisted"] += 1
         elif not reason:
             if str(channel or "") in retired_channels:
-                counts["retired_unapproved"] += 1
-                retired_unapproved_channels.add(str(channel or ""))
+                counts["retired_not_allowlisted"] += 1
+                retired_not_allowlisted_channels.add(str(channel or ""))
             else:
                 counts["allowlist"] += 1
         else:
             counts["other"] += 1
             other_reasons.add(str(reason))
     counts["other_reasons"] = other_reasons
-    counts["retired_unapproved_channels"] = retired_unapproved_channels
+    counts["retired_not_allowlisted_channels"] = retired_not_allowlisted_channels
     return counts
 
 
@@ -465,8 +496,8 @@ def main() -> int:
     op_trigger_events: list[dict] = []
     downgrade_entries: list = []
     downgraded_allowlist = 0
-    downgraded_retired_unapproved = 0
-    downgraded_retired_unapproved_channels: set = set()
+    downgraded_retired_not_allowlisted = 0
+    downgraded_retired_not_allowlisted_channels: set = set()
     downgraded_provenance = 0
     downgraded_retired = 0
     downgraded_other = 0
@@ -499,11 +530,11 @@ def main() -> int:
                 op_trigger_events.append(ev)
         _tally = tally_downgrade_reasons(downgrade_entries, bd=bd)
         downgraded_allowlist = _tally["allowlist"]
-        downgraded_retired_unapproved = _tally["retired_unapproved"]
-        downgraded_retired_unapproved_channels = \
-            _tally["retired_unapproved_channels"]
+        downgraded_retired_not_allowlisted = _tally["retired_not_allowlisted"]
+        downgraded_retired_not_allowlisted_channels = \
+            _tally["retired_not_allowlisted_channels"]
         downgraded_provenance = _tally["provenance"]
-        downgraded_retired = _tally["retired"]
+        downgraded_retired = _tally["retired_still_allowlisted"]
         downgraded_other = _tally["other"]
         downgraded_other_reasons = _tally["other_reasons"]
     else:
@@ -555,23 +586,23 @@ def main() -> int:
                 + "\n".join(notices) + "\n")
     if downgraded_allowlist:
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_allowlist} 件 — channel が bus_auto_execute_channels "
             "allowlist に無い (= 人間 opt-in 前) ため。上の一覧に通常イベントとして "
             "出ています。自動実行はしないでください。\n"
         )
-    if downgraded_retired_unapproved:
+    if downgraded_retired_not_allowlisted:
         # ms-185 e-7395: 許可リスト漏れのうち **引退した channel** は、上の
         # 「人間 opt-in 前」バンドに混ぜてはいけない。混ぜると人間が
         # `auto-execute add` で登録し、次の通知で「外してください」と逆を
         # 言われる。文言は lib/bus_delivery.downgrade_advice が唯一の所有者で、
-        # 整形は render_retired_unapproved_advice_lines (純粋関数) が持つ
+        # 整形は render_retired_not_allowlisted_advice_lines (純粋関数) が持つ
         # — inline に書くと共有層との等値をテストで守れない。
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
-            f"{downgraded_retired_unapproved} 件 — 引退した channel です "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
+            f"{downgraded_retired_not_allowlisted} 件 — 引退した channel です "
             f"(許可リストにも入っていません)。"
-            f"{render_retired_unapproved_advice_lines(downgraded_retired_unapproved_channels, bd=bd)}\n"
+            f"{render_retired_not_allowlisted_advice_lines(downgraded_retired_not_allowlisted_channels, bd=bd)}\n"
             "  上の一覧に通常イベントとして出ています。自動実行はしないでください。\n"
         )
     if downgraded_provenance:
@@ -583,7 +614,7 @@ def main() -> int:
         advice_lines = render_provenance_advice_lines(
             downgraded_provenance_channels, bd=bd)
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_provenance} 件 — channel は allowlist 済だが、"
             f"要求された証拠の封筒が付いていないため。{advice_lines}\n"
             "  上の一覧に通常イベントとして出ています。自動実行はしないでください。\n"
@@ -592,14 +623,14 @@ def main() -> int:
         # ms-185 e-7308: 文言は lib/bus_delivery.downgrade_advice が唯一の所有者。
         # 以前はここに凍結コピーが在り、共有層を差し替えても追従しなかった。
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_retired} 件 — {render_retired_advice(bd=bd)}。"
             "上の一覧に通常イベントとして出ています。自動実行は "
             "しないでください。\n"
         )
     if downgraded_other:
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_other} 件 — この hook が知らない理由タグです "
             f"({', '.join(sorted(downgraded_other_reasons))})。降格自体は効いて "
             "いますが、理由をここで説明できません (= bus_delivery 側に理由が "
