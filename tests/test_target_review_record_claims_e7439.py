@@ -170,12 +170,21 @@ def _bash_flags_for_review_context():
     return set(re.findall(r'^\s*(--[a-z-]+)\)', body, re.M))
 
 
-def test_review_context_help_advertises_every_flag_it_accepts():
-    """受け取る旗が 1 つも help から漏れていないこと。
+def test_review_context_help_advertises_exactly_the_flags_it_accepts():
+    """help が宣伝する旗と、bash arm が受け取る旗が **一致** すること。
 
-    集合で測るので、旗を足して help を直し忘れた瞬間に赤くなる (= この finding が
-    生まれた経路そのもの)。help が受け取らない旗を宣伝する逆方向も同時に拒否する。
+    **両方向を測る** (ms-119 / 独立保守性レビュー 3 周目 medium)。初版はこの
+    docstring で「逆方向も同時に拒否する」と書いておきながら、assertion は
+    `accepted ⊆ advertised` の一方向しか見ていなかった —— judge が help に
+    `--totally-fake-flag` を足したら **緑のまま**だった。緑のガードは信頼されるので、
+    主張より狭く測るガードは無ガードより害になる (原典 §『偽の安全』)。いまは
+    対称差分で測るので、どちら向きの食い違いも赤になる:
+
+    * 受け取るのに出していない → 裏取りに --help を見た AI が「この旗は無い」と
+      誤解する (2 周目に実在した欠陥)。
+    * 出しているのに受け取らない → 案内どおり打つと「無効な旗」で落ちる。
     """
+    import re
     import sys as _sys
     _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
     import commands
@@ -183,9 +192,11 @@ def test_review_context_help_advertises_every_flag_it_accepts():
                if e.get("command", "").startswith("beacon review context")]
     assert len(entries) == 1, entries
     advertised_text = entries[0]["command"] + " " + " ".join(entries[0].get("flags") or [])
+    advertised = set(re.findall(r"--[a-z][a-z-]*", advertised_text))
     accepted = _bash_flags_for_review_context()
-    missing = {f for f in accepted if f not in advertised_text}
-    assert not missing, (
-        f"`beacon review context` が受け取るのに help に出ていない旗: {sorted(missing)}。"
-        "受け取る旗を help に出さないと、裏取りに --help を見た AI が「この旗は無い」"
-        "と誤解します (ms-119 e-7439 2 周目の独立 AX レビュー)。")
+    assert advertised == accepted, (
+        "`beacon review context` の help と bash arm で旗が食い違っています。\n"
+        f"  受け取るのに help に無い: {sorted(accepted - advertised)}\n"
+        f"  help に在るのに受け取らない: {sorted(advertised - accepted)}\n"
+        "前者は『この旗は無い』と誤解させ (ms-119 e-7439 2 周目)、後者は案内どおり"
+        "打つと落ちます。どちらも案内と実装のズレです。")
