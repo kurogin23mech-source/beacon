@@ -2197,6 +2197,23 @@ def cmd_review_context():
         sys.exit(1)
     origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
     origin_kind = origin_spec.get("kind", "")
+    # 原典の出所 (= どのファイルから解決したか) は **repo-file 原典にしか無い**。
+    # doc 原典 (思想レビューの SPEC / vision) には解決元のパスが存在しないので、
+    # `None` が正しい値 (review_spine.assemble_review_context の既定も None、
+    # docstring も optional と明記)。
+    #
+    # **なぜ分岐の前で初期化するか** (2026-11-11): 初版は repo-file 分岐の中だけで
+    # 束縛し、下の assemble 呼び出しで無条件に読んでいた。doc 分岐はこれを設定
+    # しないので、**思想レビューはどの経路 (--target / --pr / --diff-ref) からも
+    # UnboundLocalError で落ちていた** —— SPEC が「Advisory クラスの第 2 instance」
+    # と宣言している機構が、一度も実行できない状態だった。
+    #
+    # これは直前に同じ関数の `_head_sha` で直した型とまったく同じ形で、3 行隣に
+    # 在った。あのとき **同型の兄弟を列挙しなかった** ので見落とした。assemble に
+    # 渡す名前のうち分岐内でしか束縛されないものを機械的に洗い直し、到達可能な
+    # 全経路で束縛されるのは `target_ref` (4 経路すべてで設定) と確認済み。
+    # 残る穴はこの 1 つだった。
+    origin_provenance = None
     if origin_kind == "repo-file":
         # 原典 is a fixed repo file that travels with the capability (Layer 3).
         # --origin-doc does not apply; silently ignoring it would let the caller
