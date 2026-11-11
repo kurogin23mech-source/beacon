@@ -117,11 +117,17 @@ beacon review context --type philosophy --origin-doc <spec-doc-id> --pr <n>
 beacon review context --type philosophy --origin-doc <spec-doc-id> --target <ms-XX|op-X>
 ```
 
-思想の close 節目では、**review-due trigger の message がそのまま実行できる
-完全な命令を持っている** (発火時に target も SPEC doc-id も分かっているので、
-`lib/commands_shared.py` が埋めた形で書く)。`beacon trigger check` の message に
-`/beacon-review-run --type philosophy ...` の行があれば、**自分で組み直さず
-そのまま使う** (e-7438)。
+思想の close 節目では、**review-due trigger の message が呼び出しを綴る唯一の場所**
+(発火時に target も SPEC doc-id も分かっているので、`lib/commands_shared.py` が埋めた
+形で書く)。`beacon trigger check` の message に `/beacon-review-run --type philosophy ...`
+の行があれば、**自分で組み直さずそのまま使う** (e-7438)。
+
+ただし **常に穴の無い行が入るとは限らない**。message は、綴る前に「その呼び出しが
+通るか」を collector と同じ関数で確かめている (ms-119 e-7438 / 独立 AX レビュー 最終周)。
+`--target` で差分を集められない種類の target (data 定義 descriptor target-class 等) では、
+原典 doc-id は伝えるが **`<base...head>` のようなプレースホルダ入りの案内**になる ——
+その場合は artifact 源 (`--pr` / `--diff-ref`) を自分で選ぶ。穴の無い行だけが
+「そのままコピーして実行してよい」もの。
 
 stdout に 1 行 JSON が返る (`origin` / `artifact` / `independence_contract` /
 `mode` / `external_references` / `gaps`)。`both` の場合は 2 回叩いて 2 bundle を得る。

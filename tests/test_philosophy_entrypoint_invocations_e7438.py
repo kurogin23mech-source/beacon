@@ -206,3 +206,144 @@ def test_hook_close_branch_spells_no_philosophy_invocation_of_its_own():
     assert close_emits, "target-close の emit 行が見つからない"
     for ln in close_emits:
         assert philosophy_invocations(ln) == [], ln
+
+
+# --- data 定義 (descriptor) target も同じ保証を受ける (独立 AX レビュー 最終周) ---
+#
+# 上の試験は milestone で測っていた。最終周の独立 AX レビューが、**descriptor
+# target-class** (職種中立の `beacon target close --class <kind>` 経路) では
+# 同じ message が **100% 決定的に** placeholder 入りの fallback に落ちることを
+# 実測した。真因は「SPEC は在るか」に 2 つの関数が別の field 規約で答えていたこと:
+# descriptor の has_spec 判定は汎用 `target` field を見るのに、呼び出しを組み立てる
+# 側は `milestone` / `operation` しか知らなかった。
+#
+# hook と Skill は「message には必ずそのまま実行できる呼び出しが入っている」と
+# **断定** しているので、1 つの target 種で偽なら断定そのものが偽になる。種を
+# またいで同じ保証が成り立つことを、ここで固定する。
+
+DESCRIPTOR_SPEC_DOC = "test-e7438-descriptor-spec"
+DESCRIPTOR_TARGET = "rel-1"
+
+
+@pytest.fixture
+def fired_descriptor(tmp_path, monkeypatch):
+    """descriptor target (kind=release) の完了節目を発火させ、message を返す。"""
+    (tmp_path / ".beacon").mkdir()
+    proj_file = tmp_path / ".beacon" / "project.json"
+    proj_file.write_text(json.dumps({
+        "name": "t", "milestones": [], "operations": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(proj_file))
+
+    class _Store:
+        def load_project(self):
+            return json.loads(proj_file.read_text(encoding="utf-8"))
+
+        def list_documents(self):
+            # 紐づけは **汎用 target field** (descriptor の規約)。
+            return [{"doc_id": DESCRIPTOR_SPEC_DOC, "scope": "spec",
+                     "target": DESCRIPTOR_TARGET,
+                     "updated_at": "2026-11-11T00:00:00"}]
+
+        def get_document(self, doc_id):
+            if doc_id != DESCRIPTOR_SPEC_DOC:
+                return None
+            return {"content": "# SPEC\n\n## 設計方針\n\n1. 構造で閉じる。\n"}
+
+    monkeypatch.setattr(cs, "get_store", lambda: _Store())
+    monkeypatch.setattr(commands, "get_store", lambda: _Store())
+    # descriptor の完了は is_completion=True で binding を直接束ねる経路。
+    cs._fire_review_due_trigger(
+        DESCRIPTOR_TARGET, "release", "open", "done",
+        target_title="テスト release", has_spec=True, is_completion=True)
+    path = tmp_path / ".beacon" / "triggers" / f"review-due-{DESCRIPTOR_TARGET}.json"
+    assert path.exists(), "descriptor target で review-due が発火していない"
+    return json.loads(path.read_text(encoding="utf-8"))["message"]
+
+
+def _has_placeholder(flags):
+    """旗の値に `<...>` が残っていれば「自分で埋めろ」の案内 (コピペ命令でない)。"""
+    return any(v.startswith("<") for v in flags.values() if v)
+
+
+def test_descriptor_target_surfaces_the_doc_but_does_not_claim_runnable(fired_descriptor):
+    """descriptor target では「そのまま実行できる」と名乗らない。
+
+    原典の解決は直った (汎用 ``target`` field も引けるようにした) が、
+    `--target` で whole-target 差分を集める経路は `core._find_approval_target` が
+    引けない種類を支えていないので、**原典が在っても実行は落ちる**。だから message は
+    解決済み doc-id を伝えつつ、穴 (プレースホルダ) を残して「artifact 源は自分で
+    選べ」と言う —— 実行できない命令をコピペ可能な形で綴らない。
+    """
+    calls = philosophy_invocations(fired_descriptor)
+    assert len(calls) == 1, fired_descriptor
+    # 役に立つ情報 (解決済み原典) は落とさない。
+    assert calls[0]["--origin-doc"] == DESCRIPTOR_SPEC_DOC, calls[0]
+    # が、穴を残して「そのまま実行できる行」には見せない。
+    assert _has_placeholder(calls[0]), calls[0]
+
+
+@pytest.mark.parametrize("fixture_name", ["fired", "fired_descriptor"])
+def test_every_placeholder_free_invocation_is_executable(fixture_name, request,
+                                                         monkeypatch):
+    """**種をまたぐ唯一の不変条件**: 穴の無い呼び出しは必ず実行して bundle になる。
+
+    hook と Skill が「穴の無い行ならそのままコピーして実行してよい」と言う根拠が
+    これ。milestone (穴なし = 実行できる) と descriptor target (穴あり = コピペ
+    させない) の両方に同じ 1 本を当てるので、新しい target 種が増えても「綴ったのに
+    落ちる」形を作れない。
+    """
+    message = request.getfixturevalue(fixture_name)
+    runnable = [f for f in philosophy_invocations(message)
+                if not _has_placeholder(f)]
+    for flags in runnable:
+        bundle = run_invocation(flags, monkeypatch)
+        assert (bundle.get("origin") or {}).get("id"), bundle
+
+
+def test_the_three_link_field_conventions_all_resolve():
+    """「SPEC は在るか」に答える 3 経路が、同じ 1 つの走査規約を共有すること。
+
+    別々の規約を持つと「片方が在ると答え、もう片方が見つけられない」が起きる
+    (= この finding の真因)。各 field 規約で紐づけた doc が、対応する kind で
+    引けることを 1 本で突き合わせる。
+    """
+    import cmd_target
+
+    docs = [
+        {"doc_id": "d-ms", "scope": "spec", "milestone": "ms-1"},
+        {"doc_id": "d-op", "scope": "spec", "operation": "op-1"},
+        {"doc_id": "d-desc", "scope": "spec", "target": "rel-1"},
+    ]
+
+    class _S:
+        def list_documents(self):
+            return docs
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _store():
+        old_cs, old_ct = cs.get_store, getattr(cmd_target, "get_store", None)
+        cs.get_store = lambda: _S()
+        cmd_target.get_store = lambda: _S()
+        try:
+            yield
+        finally:
+            cs.get_store = old_cs
+            if old_ct is not None:
+                cmd_target.get_store = old_ct
+
+    with _store():
+        assert (cs._spec_doc_for_target("ms-1", "milestone") or {}).get("doc_id") == "d-ms"
+        assert (cs._spec_doc_for_target("op-1", "operation") or {}).get("doc_id") == "d-op"
+        assert (cs._spec_doc_for_target("rel-1", "release") or {}).get("doc_id") == "d-desc"
+        # kind を知らない呼び出し元 (推測せず全部試す)
+        for tid, want in (("ms-1", "d-ms"), ("op-1", "d-op"), ("rel-1", "d-desc")):
+            assert (cs._spec_doc_for_target(tid, None) or {}).get("doc_id") == want, tid
+        # 存在判定の 3 経路も同じ答えを出す
+        assert cs._spec_exists_for_ms("ms-1") is True
+        assert cs._spec_exists_for_op("op-1") is True
+        assert cmd_target._spec_exists_for_descriptor_target("rel-1") is True
+        # 種を跨いだ誤一致はしない (milestone の doc を descriptor として引かない)
+        assert cs._spec_doc_for_target("ms-1", "release") is None

@@ -2001,17 +2001,20 @@ def _spec_exists_for_descriptor_target(target_id: str) -> bool:
     Descriptor targets are not milestones/operations, so they don't carry the
     ``milestone`` / ``operation`` doc field; a SPEC is linked via the generic
     ``target`` field. This lets the 思想 (philosophy) review bind at a descriptor
-    target's completion when it has a written 原典, mirroring milestones."""
-    if not target_id:
-        return False
-    try:
-        docs = get_store().list_documents()
-    except Exception:
-        return False
-    for doc in docs:
-        if doc.get("scope") == "spec" and doc.get("target") == target_id:
-            return True
-    return False
+    target's completion when it has a written 原典, mirroring milestones.
+
+    **走査は `_spec_doc_for_target` に委譲する** (ms-119 e-7438 / 独立 AX レビュー
+    最終周 misleading)。以前はここが自前で ``target`` field を走査し、兄弟の
+    ``_spec_doc_for_target`` は ``milestone`` / ``operation`` しか知らなかった ——
+    **同じ問い (SPEC は在るか) に 2 つの関数が別の field 規約で答えていた**。その
+    ため「ここが True と答えた descriptor target の doc を、あちらは必ず見つけ
+    られない」状態になり、思想レビューの呼び出しを組み立てる経路が descriptor
+    target では常に placeholder 入りの fallback に落ちていた。規約を 1 箇所に
+    畳んだので、新しい descriptor kind が増えても両者が食い違わない。"""
+    from commands_shared import _spec_doc_for_target as _scan
+    # kind は "milestone" / "operation" 以外なら何でも descriptor 扱い (= 汎用
+    # ``target`` field)。この関数は descriptor 専用なので sentinel を渡す。
+    return _scan(target_id, "descriptor") is not None
 
 
 def _ai_session_attainment_approve_ban_active() -> bool:

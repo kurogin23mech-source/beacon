@@ -154,7 +154,7 @@ elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close|observe)|operati
   # の message (= 発火時に target も SPEC doc も知っている、
   # lib/commands_shared.py _fire_review_due_trigger) に寄せ、ここは「その message
   # のとおりに実行せよ」とだけ言う。
-  emit "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + 目的達成(attainment) review may be due. まず 'beacon trigger check' を実行する。<type>-review-due トリガーが出ていれば、その message に **そのまま実行できる完全な思想レビューの呼び出し** (原典 doc-id と対象 target-id が埋まった /beacon-review-run の行) と対象 target-id が入っている。出ていれば 2 つを実行する: (1) message に書かれた /beacon-review-run の行をそのままコピーして実行し思想レビュー、続けて (2) 'beacon target review-request <target-id>' で目的達成の証拠を集めて人間承認へ (SPEC 方針2: attainment verdict は人間所有)。review-due トリガーが無ければ何もしなくてよい (close 失敗 / 誤マッチ含む)。"
+  emit "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + 目的達成(attainment) review may be due. まず 'beacon trigger check' を実行する。<type>-review-due トリガーが出ていれば、その message に対象 target-id と、思想レビューの案内が入っている。案内が **穴の無い (プレースホルダを含まない) /beacon-review-run の行** ならそれをそのままコピーして実行する; 穴がある場合は message が何を自分で埋めるべきか言うので、それに従う (例: 差分を集められない種類の target では artifact 源を自分で選ぶ)。出ていれば 2 つを実行する: (1) 上のとおり思想レビュー、続けて (2) 'beacon target review-request <target-id>' で目的達成の証拠を集めて人間承認へ (SPEC 方針2: attainment verdict は人間所有)。review-due トリガーが無ければ何もしなくてよい (close 失敗 / 誤マッチ含む)。"
   SKILL="/beacon-review-run"
   NODE="target-close"
 elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/deploy\.sh'; then
