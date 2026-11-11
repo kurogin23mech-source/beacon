@@ -68,6 +68,31 @@ def _flag_to_env():
     return mapping
 
 
+def review_run_invocations(message: str):
+    """message が命令として綴っている **全種別** の呼び出しの flag dict 一覧。
+
+    契約 (「穴の無い行はそのままコピーして実行してよい」) は `/beacon-review-run`
+    の行すべてに掛かるので、種別で絞らずに拾う。初版は philosophy だけを見ていた
+    ので、**同じ message の目的達成行が穴なしで綴られたまま実行は落ちる**状態を
+    検知できなかった (独立 AX レビュー 収束周)。
+    """
+    out = []
+    for m in _INVOCATION.finditer(message):
+        toks = (m.group(1) or "").split()
+        flags = {}
+        i = 0
+        while i < len(toks):
+            if toks[i].startswith("--"):
+                val = toks[i + 1] if i + 1 < len(toks) and not toks[i + 1].startswith("--") else ""
+                flags[toks[i]] = val
+                i += 2 if val else 1
+            else:
+                i += 1
+        if flags.get("--type"):
+            out.append(flags)
+    return out
+
+
 def philosophy_invocations(message: str):
     """message が命令として綴っている philosophy 呼び出しの flag dict 一覧。"""
     out = []
@@ -142,6 +167,48 @@ def fired(tmp_path, monkeypatch):
     cs._fire_review_due_trigger(
         TARGET, "milestone", "in_progress", "observing",
         target_title="テスト target", has_spec=True, gated=True)
+    path = tmp_path / ".beacon" / "triggers" / f"review-due-{TARGET}.json"
+    assert path.exists(), "review-due trigger が発火していない"
+    return json.loads(path.read_text(encoding="utf-8"))["message"]
+
+
+@pytest.fixture
+def fired_ungated(tmp_path, monkeypatch):
+    """ゲートを経ない milestone 完了 (= 目的達成の促し + 思想) の message。
+
+    この fixture が覆うのは **目的達成行も穴なしで綴られ、かつ実行できる** こと。
+    収束周の独立 AX レビューが、思想行だけ実行可能性を確かめていて目的達成行は
+    確かめていなかった (= 契約を書いた側が 2 行のうち 1 行しか守っていなかった)
+    のを見つけたので、両方を 1 本で測る。
+    """
+    (tmp_path / ".beacon").mkdir()
+    proj_file = tmp_path / ".beacon" / "project.json"
+    proj_file.write_text(json.dumps({
+        "name": "t",
+        "milestones": [{"id": TARGET, "title": "テスト target",
+                        "status": "in_progress", "entries": []}],
+        "operations": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(proj_file))
+
+    class _Store:
+        def load_project(self):
+            return json.loads(proj_file.read_text(encoding="utf-8"))
+
+        def list_documents(self):
+            return [{"doc_id": SPEC_DOC, "scope": "spec", "milestone": TARGET,
+                     "updated_at": "2026-11-11T00:00:00"}]
+
+        def get_document(self, doc_id):
+            if doc_id != SPEC_DOC:
+                return None
+            return {"content": "# SPEC\n\n## 設計方針\n\n1. 構造で閉じる。\n"}
+
+    monkeypatch.setattr(cs, "get_store", lambda: _Store())
+    monkeypatch.setattr(commands, "get_store", lambda: _Store())
+    cs._fire_review_due_trigger(
+        TARGET, "milestone", "in_progress", "done",
+        target_title="テスト target", has_spec=True, gated=False)
     path = tmp_path / ".beacon" / "triggers" / f"review-due-{TARGET}.json"
     assert path.exists(), "review-due trigger が発火していない"
     return json.loads(path.read_text(encoding="utf-8"))["message"]
@@ -283,9 +350,20 @@ def test_descriptor_target_surfaces_the_doc_but_does_not_claim_runnable(fired_de
     assert _has_placeholder(calls[0]), calls[0]
 
 
-@pytest.mark.parametrize("fixture_name", ["fired", "fired_descriptor"])
-def test_every_placeholder_free_invocation_is_executable(fixture_name, request,
-                                                         monkeypatch):
+@pytest.mark.parametrize("fixture_name,expected_runnable", [
+    # gated な milestone (承認依頼が在る文面): 目的達成 + 思想の 2 行。
+    # `gated` は目的達成行の **文面** を変えるだけで、binding の有無は変えない
+    # (初版はここを 1 行と見積もって外した —— 本数を固定していたから気づけた)。
+    ("fired", 2),
+    # ゲートを経ない milestone 完了 (別の目的達成文面): こちらも 2 行。
+    ("fired_ungated", 2),
+    # data 定義 (descriptor) target: どちらの行も承認/収集の経路が引けないので、
+    # **穴の無い行は 0 本** (= コピペさせない) が正しい状態。
+    ("fired_descriptor", 0),
+])
+def test_every_placeholder_free_invocation_is_executable(fixture_name,
+                                                         expected_runnable,
+                                                         request, monkeypatch):
     """**種をまたぐ唯一の不変条件**: 穴の無い呼び出しは必ず実行して bundle になる。
 
     hook と Skill が「穴の無い行ならそのままコピーして実行してよい」と言う根拠が
@@ -294,11 +372,20 @@ def test_every_placeholder_free_invocation_is_executable(fixture_name, request,
     落ちる」形を作れない。
     """
     message = request.getfixturevalue(fixture_name)
-    runnable = [f for f in philosophy_invocations(message)
+    # **種別で絞らない** — 契約は message が綴る全ての `/beacon-review-run` の行に
+    # 掛かる (思想も目的達成も `--target` を取り、どちらも実行側は同じ resolver を
+    # 通る)。philosophy だけ見ていたので目的達成行の穴が見逃されていた。
+    runnable = [f for f in review_run_invocations(message)
                 if not _has_placeholder(f)]
+    # **本数を固定する**。「全ての穴の無い行は実行できる」は 0 本でも真になるので、
+    # 期待本数を添えないと、綴るのをやめただけで緑になる形 (空集合で通る検査) が
+    # 作れる。種ごとの期待本数は上の parametrize に書いてある。
+    assert len(runnable) == expected_runnable, (
+        f"穴の無い行の本数が期待と違う (期待 {expected_runnable} / 実際 "
+        f"{len(runnable)}): {message}")
     for flags in runnable:
         bundle = run_invocation(flags, monkeypatch)
-        assert (bundle.get("origin") or {}).get("id"), bundle
+        assert bundle, flags
 
 
 def test_the_three_link_field_conventions_all_resolve():

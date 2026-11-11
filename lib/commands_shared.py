@@ -1210,13 +1210,40 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
         return
     triggers_dir = _get_triggers_dir()
     os.makedirs(triggers_dir, exist_ok=True)
+    # **呼び出しを綴る前に、その呼び出しが通るかを確かめる** (ms-119 e-7438 /
+    # 独立 AX レビュー)。`--target` を取る経路 (思想の whole-target 収集・目的達成の
+    # 証拠生成) はどちらも `core._find_approval_target` で target を引くので、
+    # **それが引けない種類 (data 定義 descriptor target-class 等) では実行が rc=1
+    # になる**。hook と Skill は「穴の無い /beacon-review-run の行はそのまま
+    # コピーして実行してよい」と言うので、穴を開けずに綴れるのは実行できる行だけ。
+    #
+    # 判定は **実行側と同じ関数に訊く** (支持する種類の表をここに写すと、実行側が
+    # 対応を広げたときに片方だけ古くなる)。ループの前で 1 回だけ計算し、
+    # **message が綴る全種別がこれを共有する** —— 初版は思想分岐の中だけで確かめて
+    # いたので、同じ message の目的達成行は穴なしで綴られたまま実行は落ちた
+    # (独立 AX レビュー 収束周。契約を書いた側が 2 行のうち 1 行しか守っていなかった)。
+    addressable = True
+    try:
+        core._find_approval_target(load_project(), target_id)
+    except BaseException:
+        addressable = False
     parts = []
     for b in bindings:
         if b["review"] == review_spine.REVIEW_ATTAINMENT:
             # ms-119 e-4005: the 目的達成 review auto-fires at the close 節目 and
             # points at the INDEPENDENT evidence generation (a context-zero judge
             # verifies the SPEC against real code); the human owns the verdict.
-            if b.get("gated"):
+            if not addressable:
+                # 承認の経路が引けない種類の target (data 定義 descriptor 等)。
+                # `--type attainment --target <id>` は実行すると rc=1 になるので、
+                # **穴の無い行として綴らない** (綴ると「そのままコピーして実行して
+                # よい」の契約を破る)。
+                parts.append(
+                    f"目的達成レビュー: {target_id} は目的達成レビューの承認経路が"
+                    f"引けない種類の target なので、`/beacon-review-run --type "
+                    f"attainment --target <この種類に対応したら使えます>` は今は"
+                    f"実行できません (完了主張の記録は残っています)。")
+            elif b.get("gated"):
                 parts.append(
                     f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
                     f"verdict は人間): {target_id} の完了は承認待ちです。"
@@ -1259,11 +1286,6 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
             #
             # 判定は **collector と同じ関数に訊く** (支持する種類の表をここに写すと、
             # collector が対応を広げたときに片方だけ古くなる)。
-            addressable = True
-            try:
-                core._find_approval_target(load_project(), target_id)
-            except BaseException:
-                addressable = False
             if doc_id and addressable:
                 parts.append(
                     f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
