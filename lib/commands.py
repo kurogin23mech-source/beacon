@@ -261,6 +261,9 @@ from commands_shared import (  # noqa: F401
     _get_triggers_dir, _spec_doc_for_target, _spec_exists_for_op,
     _fire_review_due_trigger, _session_kind_is_human,
     _ai_session_direct_completion_ban_active, _gate_target_class,
+    # ms-119 e-7439: target 側の記録が何をするかを述べる唯一の文。実行時の print と
+    # `beacon review done --help` の両面がこれを参照する (片面だけ直せない形)。
+    TARGET_REVIEW_RECORD_EFFECT,
 )
 # Public operation handlers only (family-private _fetch_active_operation_envelope
 # stays canonical in cmd_operation, patched there — see the e-4320 rule above).
@@ -4508,8 +4511,8 @@ def _emit_review_done_for_target(review_type: str, target_id: str, *,
     # (README が review status の契約を偽って書いていた件と同じ family)。
     print(f"  {target_id} の {review_type} の義務を解消しました "
           f"— 促し (review-due) は消えます。")
-    print(f"  ※ これは助言としての記録です: {target_id} の完了 / 承認は この記録を"
-          f"読みません (完了を止める関門は目的達成レビューの人間承認だけ)。")
+    # 文面の正本は commands_shared.TARGET_REVIEW_RECORD_EFFECT (help と共有)。
+    print(f"  ※ {TARGET_REVIEW_RECORD_EFFECT}。")
 
 
 def cmd_review_done():
@@ -7522,7 +7525,7 @@ def _help_registry():
         # その `review --help` は context の 1 行しか出さない **閉じたループ** に
         # なっていた (案内に従うと情報が無い場所に着く)。
         {"command": "beacon review status --pr <n> [--repo <owner/name>] [--json]", "flags": [], "description": "独立レビューの関門がいま何を要求しているかを **副作用なしで** 読む (ms-119 e-6859)。必須種別・いまの差分 (head) に対して実施済みの種別・まだ要る種別・差し引いた根拠 (旧形式の記録 / 理由付き免除) を出す。まだ **止めている** 種別が在れば exit 2 (`owed` は生の内訳で、merge/close 済みの PR では非空でも何も止めないので、読むのは `blocking` か終了コード)。`beacon trigger check` は促し (トリガーファイルの有無) の面で関門ではないため、関門の状態を確かめるにはこちらを使う"},
-        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings) [--reviewed-sha <sha>]", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。記録は **どの差分に対する実施か** を持つ — 既定は gh に聞いた「いまの PR head」で、`--reviewed-sha` で明示できる。実施後にコミットを積むとその種別は再度「要る」側に戻る (ms-119 e-6859: 以前は PR 単位だったので、judge が見ていない差分に対して関門が緑になった)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
+        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings) [--reviewed-sha <sha>]", "flags": [], "description": "レビュー実施を記録する (ms-119 e-4060)。--pr 側は approve/merge の関門を解消する。" + TARGET_REVIEW_RECORD_EFFECT + " (ms-119 e-7439)。記録は **どの差分に対する実施か** を持つ — 既定は gh に聞いた「いまの PR head」で、`--reviewed-sha` で明示できる。実施後にコミットを積むとその種別は再度「要る」側に戻る (ms-119 e-6859: 以前は PR 単位だったので、judge が見ていない差分に対して関門が緑になった)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
         {"command": "beacon review skip --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason <text>", "flags": ["--json"], "description": "人間が意図的にレビューを省く一級経路。--reason 必須で監査ログ (.beacon/review-skips.jsonl) に理由を残す (ms-119 e-4124)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac-verdict <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac-verdict を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},

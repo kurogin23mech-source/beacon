@@ -3582,6 +3582,23 @@ RECORDED_SHARED = "shared"
 RECORDED_CWD_ONLY = "cwd-only"
 RECORDED_FAILED = "failed"
 
+#: target 側のレビュー実施記録が **何をするか** を述べる唯一の文 (ms-119 e-7439 /
+#: 独立 AX レビュー misleading)。
+#:
+#: `review done` は同じ主張を **2 つの面** で述べる —— 実行時の print と
+#: `beacon review done --help` (= `_help_registry`)。e-7439 で print と docstring
+#: だけを「助言としての記録」に直したところ、help 側が「approve/merge (または完了)
+#: の関門を解消する」という旧い主張のまま残り、**同じコマンドの 2 面が矛盾する新しい
+#: 状態**を作った (独立 AX レビューが実測。--pr では真だが --target では偽)。
+#:
+#: 文字列で一致を測る検査を足すのではなく、**文を 1 つにして両面から参照する**
+#: (原則2 = 単一の真実源)。こうすると片面だけ直す形が物理的に作れない。
+TARGET_REVIEW_RECORD_EFFECT = (
+    "--target 側は **助言としての記録** で、消えるのは促し (review-due) だけ "
+    "—— 完了 / 承認はこの記録を読まない (完了を止める関門は目的達成レビューの"
+    "人間承認だけ)"
+)
+
 
 def _worktree_shared_dir() -> Optional[str]:
     """1 つのリポジトリの全 worktree で同じになるディレクトリを返す。無ければ None。

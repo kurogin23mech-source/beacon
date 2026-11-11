@@ -83,3 +83,53 @@ def test_completion_and_approval_paths_are_not_among_the_readers():
         assert gate not in reader_names, (
             f"{gate} が target の review-due を読むようになりました。"
             "文面 (助言としての記録) が偽になるので、両方を直してください。")
+
+
+# --- 同じ主張をする 2 面が揃っていること (ms-119 e-7439 / 独立 AX レビュー misleading) ---
+#
+# 上の集合比較は「コードの読み手」を測る。だが同じ主張は **2 つの文字列面** でも
+# 述べられる —— 実行時の print と `beacon review done --help`。初版は print と
+# docstring だけを直し、help 側が「approve/merge (または完了) の関門を解消する」の
+# ままだったので、**同じコマンドの 2 面が矛盾する**状態を作った (独立 AX レビューが
+# 実測で検出: --pr では真だが --target では偽)。
+#
+# 文字列の一致を測る検査を発明するのではなく、文を 1 つにして両面から参照する形に
+# した。ここで固定するのは「その 1 つの文が、実際に rendered な面へ届いているか」
+# —— 定数を定義しただけで参照が外れていれば、単一真実源は名前だけになる。
+
+def test_the_single_sentence_reaches_the_rendered_help():
+    """唯一の文が `beacon review done --help` の描画結果に実際に出ること。"""
+    import subprocess
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+    from commands_shared import TARGET_REVIEW_RECORD_EFFECT
+    beacon = pathlib.Path(__file__).resolve().parents[1] / "bin" / "beacon"
+    proc = subprocess.run([str(beacon), "review", "done", "--help"],
+                          capture_output=True, text=True,
+                          cwd=str(pathlib.Path(__file__).resolve().parents[1]))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert TARGET_REVIEW_RECORD_EFFECT in proc.stdout, (
+        "help が唯一の文を参照していません (片面だけ直した形に戻っています)。\n"
+        f"期待する文: {TARGET_REVIEW_RECORD_EFFECT}\n"
+        f"実際の help:\n{proc.stdout}")
+
+
+def test_the_single_sentence_reaches_the_runtime_print(monkeypatch, capsys):
+    """同じ文が、実施を記録したときの実行時出力にも出ること。"""
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+    import commands
+    from commands_shared import TARGET_REVIEW_RECORD_EFFECT
+    monkeypatch.setattr(commands, "_target_review_due_state",
+                        lambda *a, **k: "owed")
+    monkeypatch.setattr(commands, "_remove_binding_from_target_review_due",
+                        lambda *a, **k: True)
+    monkeypatch.setattr(commands, "_record_review_adjudication_decision",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(commands, "record_review_done_across_worktrees",
+                        lambda *a, **k: commands.RECORDED_CWD_ONLY)
+    commands._emit_review_done_for_target(
+        "philosophy", "ms-9", adj_summary="", adjudications=[],
+        no_findings=True)
+    out = capsys.readouterr().out
+    assert TARGET_REVIEW_RECORD_EFFECT in out, out
