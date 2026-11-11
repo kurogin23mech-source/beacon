@@ -1102,27 +1102,63 @@ def _get_triggers_dir():
     return os.path.join(project_dir, "triggers")
 
 
-def _spec_doc_for_target(target_id: str, kind: str) -> Optional[dict]:
+#: SPEC doc が target に紐づくときの field 名 —— **target の種類ごとに違う**。
+#: milestone は ``milestone``、operation は ``operation``、data 定義 (descriptor)
+#: target-class は職種中立の ``target`` を使う。
+_SPEC_LINK_FIELDS = {"milestone": "milestone", "operation": "operation"}
+_SPEC_LINK_FIELD_DESCRIPTOR = "target"
+
+
+def _spec_doc_for_target(target_id: str, kind: "Optional[str]") -> Optional[dict]:
     """Return the first spec-scoped document attached to a target, or None.
 
     Single source of truth for the "spec doc attached to a target" scan (ms-119 —
-    maintainability finding §2): both ``_spec_exists_for_ms`` / ``_spec_exists_for_op``
-    delegate here so the scan rule (scope=="spec" + milestone/operation field
-    match, transport failure swallowed) lives in exactly one place.
+    maintainability finding §2): ``_spec_exists_for_ms`` / ``_spec_exists_for_op``
+    / ``_spec_exists_for_descriptor_target`` all delegate here so the scan rule
+    (scope=="spec" + the right link field, transport failure swallowed) lives in
+    exactly one place.
 
-    Milestones carry a ``milestone`` field on the doc; operations carry
-    ``operation``. Best-effort: transport failure → None (StoreApi rounds cloud
-    transport failure to []).
+    ``kind`` decides **which field** carries the link:
+
+    * ``"milestone"`` → ``milestone`` / ``"operation"`` → ``operation``
+    * anything else (= a data 定義 descriptor target-class name such as
+      ``release`` / ``contract``) → the profession-neutral ``target``
+    * ``None`` → try all three, for the callers that genuinely cannot know the
+      kind (only the id, which does not say whether ``rel-1`` is a descriptor
+      target or a milestone).
+
+    **なぜ kind ごとに分かれるか** (ms-119 e-7438 / 独立 AX レビュー 最終周 misleading):
+    初版は ``"milestone" if kind == "milestone" else "operation"`` の 2 値だけを
+    知っていた。descriptor target の has_spec 判定は別関数
+    (``_spec_exists_for_descriptor_target``) が **汎用 ``target`` field** で答えて
+    いたので、「SPEC が在る」と判定された descriptor target の doc を、この関数は
+    ``operation`` field で探して **必ず見つけられなかった**。その結果、思想レビューの
+    呼び出しを組み立てる経路 (``_fire_review_due_trigger``) が descriptor target では
+    **100% 決定的に** placeholder 入りの fallback 文へ落ち、hook と Skill が
+    「message には必ずそのまま実行できる呼び出しが入っている」と断定していたのが
+    偽になっていた。**同じ問い (SPEC は在るか) に 2 つの関数が別の規約で答えていた**
+    のが真因なので、規約をここへ畳んで両方の呼び出し元を委譲させた (hook の文面に
+    「descriptor では fallback になることがあります」と書き足す形は、原因を隠した
+    まま新しい descriptor kind が増えるたびに同じ穴を開ける)。
+
+    Best-effort: transport failure → None (StoreApi rounds cloud transport
+    failure to []).
     """
     if not target_id:
         return None
-    field = "milestone" if kind == "milestone" else "operation"
+    if kind is None:
+        fields = (_SPEC_LINK_FIELDS["milestone"], _SPEC_LINK_FIELDS["operation"],
+                  _SPEC_LINK_FIELD_DESCRIPTOR)
+    else:
+        fields = (_SPEC_LINK_FIELDS.get(kind, _SPEC_LINK_FIELD_DESCRIPTOR),)
     try:
         docs = get_store().list_documents()
     except Exception:
         return None
     for doc in docs:
-        if doc.get("scope") == "spec" and doc.get(field) == target_id:
+        if doc.get("scope") != "spec":
+            continue
+        if any(doc.get(f) == target_id for f in fields):
             return doc
     return None
 
@@ -1174,13 +1210,40 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
         return
     triggers_dir = _get_triggers_dir()
     os.makedirs(triggers_dir, exist_ok=True)
+    # **呼び出しを綴る前に、その呼び出しが通るかを確かめる** (ms-119 e-7438 /
+    # 独立 AX レビュー)。`--target` を取る経路 (思想の whole-target 収集・目的達成の
+    # 証拠生成) はどちらも `core._find_approval_target` で target を引くので、
+    # **それが引けない種類 (data 定義 descriptor target-class 等) では実行が rc=1
+    # になる**。hook と Skill は「穴の無い /beacon-review-run の行はそのまま
+    # コピーして実行してよい」と言うので、穴を開けずに綴れるのは実行できる行だけ。
+    #
+    # 判定は **実行側と同じ関数に訊く** (支持する種類の表をここに写すと、実行側が
+    # 対応を広げたときに片方だけ古くなる)。ループの前で 1 回だけ計算し、
+    # **message が綴る全種別がこれを共有する** —— 初版は思想分岐の中だけで確かめて
+    # いたので、同じ message の目的達成行は穴なしで綴られたまま実行は落ちた
+    # (独立 AX レビュー 収束周。契約を書いた側が 2 行のうち 1 行しか守っていなかった)。
+    addressable = True
+    try:
+        core._find_approval_target(load_project(), target_id)
+    except BaseException:
+        addressable = False
     parts = []
     for b in bindings:
         if b["review"] == review_spine.REVIEW_ATTAINMENT:
             # ms-119 e-4005: the 目的達成 review auto-fires at the close 節目 and
             # points at the INDEPENDENT evidence generation (a context-zero judge
             # verifies the SPEC against real code); the human owns the verdict.
-            if b.get("gated"):
+            if not addressable:
+                # 承認の経路が引けない種類の target (data 定義 descriptor 等)。
+                # `--type attainment --target <id>` は実行すると rc=1 になるので、
+                # **穴の無い行として綴らない** (綴ると「そのままコピーして実行して
+                # よい」の契約を破る)。
+                parts.append(
+                    f"目的達成レビュー: {target_id} は目的達成レビューの承認経路が"
+                    f"引けない種類の target なので、`/beacon-review-run --type "
+                    f"attainment --target <この種類に対応したら使えます>` は今は"
+                    f"実行できません (完了主張の記録は残っています)。")
+            elif b.get("gated"):
                 parts.append(
                     f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
                     f"verdict は人間): {target_id} の完了は承認待ちです。"
@@ -1195,11 +1258,64 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
                     f"独立 judge に振り返り証拠を作らせ、次からは `beacon milestone done "
                     f"{target_id} --review` でゲート経由に。")
         elif b["review"] == review_spine.REVIEW_PHILOSOPHY:
-            parts.append(
-                f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
-                f"blocking): `/beacon-review-run --type philosophy --origin-doc "
-                f"<spec-doc-id>` で文脈ゼロの独立 judge に SPEC を渡し {target_id} の"
-                f"実装 drift を確認してください。")
+            # ms-119 e-7438: **ここが思想レビューの呼び出しを綴る唯一の場所**。
+            # 発火時点でこの関数は target_id も (binding が立つ前提である) SPEC
+            # doc も知っているので、**そのままコピーして実行できる完全な呼び出し**
+            # を組み立てる。
+            #
+            # 以前は `--origin-doc <spec-doc-id>` だけを綴っていた。原典は埋まって
+            # いない placeholder、artifact 源 (--pr / --diff-ref / --target) は
+            # 一言も無い —— つまり **この message のとおりに実行すると必ず rc=1**
+            # だった (2026-11-11 実測: "pass --pr <n> or --diff-ref ... or
+            # --target ... to collect the artifact")。節目から思想レビューを撃つ
+            # 入口は hook / この message / Skill の 3 つで、3 つすべてが落ちる
+            # 呼び出しを指示していたので、**kernel のコードを読んで自分で組み立て
+            # た場合だけ実行できる**状態だった (独立思想レビュー medium)。
+            #
+            # close 節目は 1 変更ではなく target 全体を見るので artifact 源は
+            # `--target` (whole-target、e-4196)。SPEC doc の解決は
+            # `_spec_doc_for_target` (走査規則の唯一の持ち主) に委ねる。
+            spec_doc = _spec_doc_for_target(target_id, target_kind)
+            doc_id = (spec_doc or {}).get("doc_id", "")
+            # **呼び出しを綴る前に、その呼び出しが通るかを確かめる** (ms-119 e-7438 /
+            # 独立 AX レビュー 最終周)。`--target` で whole-target artifact を集める
+            # 経路は `core._find_approval_target` で target を引くので、**それが
+            # 引けない種類 (data 定義 descriptor target-class 等) では、原典が
+            # 解決できても実行は rc=1 になる**。「そのまま実行できる」と断定する
+            # 文面を出す条件は「原典が在る」だけでは足りない。
+            #
+            # 判定は **collector と同じ関数に訊く** (支持する種類の表をここに写すと、
+            # collector が対応を広げたときに片方だけ古くなる)。
+            if doc_id and addressable:
+                parts.append(
+                    f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                    f"blocking): `/beacon-review-run --type philosophy --origin-doc "
+                    f"{doc_id} --target {target_id}` で文脈ゼロの独立 judge に SPEC を"
+                    f"渡し {target_id} の実装 drift を確認してください。")
+            elif not doc_id:
+                # 原典 doc を解決できなかった (= cloud 不通など)。**placeholder を
+                # 綴って「実行できる呼び出し」を名乗らない** — 何が足りないかと、
+                # それをどう埋めるかだけを言う。
+                parts.append(
+                    f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                    f"blocking): {target_id} の SPEC doc を解決できなかったため完全な"
+                    f"呼び出しを組み立てられません。`beacon doc list --scope spec` で"
+                    f"原典の doc-id を確認し、`/beacon-review-run --type philosophy "
+                    f"--origin-doc <その doc-id> --target {target_id}` を実行して"
+                    f"ください。")
+            else:
+                # 原典は在るが、この target は `--target` で差分を集められない
+                # (whole-target collector が引けない種類)。原典 doc-id は分かって
+                # いるので伝えるが、**「そのまま実行できる」とは言わない** — 代わりに
+                # artifact 源を自分で選ぶ必要があることを言う。
+                parts.append(
+                    f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                    f"blocking): 原典は {doc_id} ですが、{target_id} は `--target` で"
+                    f"差分を集められない種類の target なので、そのまま実行できる"
+                    f"呼び出しを組み立てられません。artifact 源を自分で選んで "
+                    f"`/beacon-review-run --type philosophy --origin-doc {doc_id} "
+                    f"--diff-ref <base...head>` のように実行してください "
+                    f"(whole-target 収集の対応種類を広げるのは別の作業)。")
     import datetime
     trigger_data = {
         "name": f"review-due-{target_id}",
@@ -2882,13 +2998,19 @@ def _spec_updated_at_for_target(target_id: str) -> Optional[str]:
     """The SPEC doc's ``updated_at`` for a target, or None (ms-119 / e-4597).
 
     Evidence for the task↔SPEC last-written-intent tie-breaker in the attainment
-    disposition gate: reuses the single-source _spec_doc_for_target scan, inferring the
-    kind from the id prefix (op- → operation, else milestone). Best-effort — no spec /
-    transport failure → None (the tie-breaker is simply omitted, never wrong)."""
+    disposition gate: reuses the single-source _spec_doc_for_target scan.
+    Best-effort — no spec / transport failure → None (the tie-breaker is simply
+    omitted, never wrong).
+
+    **kind は推測しない** (ms-119 e-7438 / 独立 AX レビュー 最終周)。以前は id の
+    接頭辞から当てていた (``op-`` → operation、それ以外は milestone)。id は
+    descriptor target (``rel-1`` / ``ctr-2`` 等) かどうかを語らないので、descriptor
+    target はすべて milestone と誤って扱われ、その SPEC は見つからなかった (= この
+    tie-breaker が黙って効かない)。``kind=None`` は「3 つの link field すべてを
+    試す」の意味で、推測の代わりに全部見る。"""
     if not target_id:
         return None
-    kind = "operation" if str(target_id).startswith("op-") else "milestone"
-    doc = _spec_doc_for_target(target_id, kind)
+    doc = _spec_doc_for_target(target_id, None)
     if not doc:
         return None
     return doc.get("updated_at") or None
@@ -3549,6 +3671,23 @@ _REVIEW_DONE_DIR = "beacon-review-done"
 RECORDED_SHARED = "shared"
 RECORDED_CWD_ONLY = "cwd-only"
 RECORDED_FAILED = "failed"
+
+#: target 側のレビュー実施記録が **何をするか** を述べる唯一の文 (ms-119 e-7439 /
+#: 独立 AX レビュー misleading)。
+#:
+#: `review done` は同じ主張を **2 つの面** で述べる —— 実行時の print と
+#: `beacon review done --help` (= `_help_registry`)。e-7439 で print と docstring
+#: だけを「助言としての記録」に直したところ、help 側が「approve/merge (または完了)
+#: の関門を解消する」という旧い主張のまま残り、**同じコマンドの 2 面が矛盾する新しい
+#: 状態**を作った (独立 AX レビューが実測。--pr では真だが --target では偽)。
+#:
+#: 文字列で一致を測る検査を足すのではなく、**文を 1 つにして両面から参照する**
+#: (原則2 = 単一の真実源)。こうすると片面だけ直す形が物理的に作れない。
+TARGET_REVIEW_RECORD_EFFECT = (
+    "--target 側は **助言としての記録** で、消えるのは促し (review-due) だけ "
+    "—— 完了 / 承認はこの記録を読まない (完了を止める関門は目的達成レビューの"
+    "人間承認だけ)"
+)
 
 
 def _worktree_shared_dir() -> Optional[str]:

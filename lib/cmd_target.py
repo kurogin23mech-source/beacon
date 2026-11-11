@@ -196,6 +196,29 @@ def cmd_target_review_request():
         session_id=_resolve_session_id() or "")
     save_project(data, op={"op": "target_transition_approval_add",
                            "target_id": target_id, "entry_id": eid})
+    # ms-119 e-7440: **ここでも節目のレビュー義務を立てる**。
+    #
+    # 兄弟の `beacon milestone done <id> --review` (= cmd_milestone の
+    # `_route_completion_to_review`) は同じ承認依頼を作った直後に review-due を
+    # 発火するが、この入口だけ発火していなかった。結果、**同じ完了主張に 2 つの
+    # 非等価な入口** が在り、こちらから入ると:
+    #   * 思想レビューの促しが立たない (= 撃つべき節目だと誰も言わない)
+    #   * その後に実際に思想レビューを実施しても `beacon review done --type
+    #     philosophy --target <id>` が「レビュー未実施トリガーがありません」で
+    #     拒否され、**実施したレビューを記録する口が無い**
+    # 2026-11-11 に実踏し、実施した思想レビュー 7 件の findings を台帳ではなく
+    # report doc に退避する羽目になった (トリガーを手で捏造すれば通るが、それは
+    # 記録の意味を壊す)。発火側を揃えるのが構造的な修正。
+    #
+    # `gated=True`: 承認依頼はいま作ったので目的達成の促しは重ねない (兄弟と同じ
+    # 判断)。has_spec は下の criteria gap と **同じ値** を使う (2 箇所で別々に
+    # 数えると、促しと gap が違う前提で喋る形が作れる)。
+    _has_spec = (_spec_exists_for_ms(target_id) if kind == "milestone"
+                 else _spec_exists_for_op(target_id) if kind == "operation"
+                 else False)
+    _fire_review_due_trigger(target_id, kind, old_state, new_state,
+                             target_title=work_model.target_label(target),
+                             has_spec=_has_spec, gated=True)
     print(f"目的達成レビュー依頼を作成: {eid}")
     print(f"  {target_id}: {old_state} -> {new_state} (人間承認待ち)")
     if intent:
@@ -207,8 +230,7 @@ def cmd_target_review_request():
     # 承認前に確認するよう促す forcing function。
     _gap = _ta.format_criteria_gap(
         _ta.assess_completion_criteria(
-            has_spec=_spec_exists_for_ms(target_id) if kind == "milestone"
-            else _spec_exists_for_op(target_id) if kind == "operation" else False,
+            has_spec=_has_spec,
             objective=target.get("objective", ""),
             acceptance=target.get("acceptance_criteria", ""),
             intent=intent),
@@ -1979,17 +2001,20 @@ def _spec_exists_for_descriptor_target(target_id: str) -> bool:
     Descriptor targets are not milestones/operations, so they don't carry the
     ``milestone`` / ``operation`` doc field; a SPEC is linked via the generic
     ``target`` field. This lets the 思想 (philosophy) review bind at a descriptor
-    target's completion when it has a written 原典, mirroring milestones."""
-    if not target_id:
-        return False
-    try:
-        docs = get_store().list_documents()
-    except Exception:
-        return False
-    for doc in docs:
-        if doc.get("scope") == "spec" and doc.get("target") == target_id:
-            return True
-    return False
+    target's completion when it has a written 原典, mirroring milestones.
+
+    **走査は `_spec_doc_for_target` に委譲する** (ms-119 e-7438 / 独立 AX レビュー
+    最終周 misleading)。以前はここが自前で ``target`` field を走査し、兄弟の
+    ``_spec_doc_for_target`` は ``milestone`` / ``operation`` しか知らなかった ——
+    **同じ問い (SPEC は在るか) に 2 つの関数が別の field 規約で答えていた**。その
+    ため「ここが True と答えた descriptor target の doc を、あちらは必ず見つけ
+    られない」状態になり、思想レビューの呼び出しを組み立てる経路が descriptor
+    target では常に placeholder 入りの fallback に落ちていた。規約を 1 箇所に
+    畳んだので、新しい descriptor kind が増えても両者が食い違わない。"""
+    from commands_shared import _spec_doc_for_target as _scan
+    # kind は "milestone" / "operation" 以外なら何でも descriptor 扱い (= 汎用
+    # ``target`` field)。この関数は descriptor 専用なので sentinel を渡す。
+    return _scan(target_id, "descriptor") is not None
 
 
 def _ai_session_attainment_approve_ban_active() -> bool:
