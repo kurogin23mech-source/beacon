@@ -19,6 +19,8 @@ from __future__ import annotations
 import subprocess
 from typing import Protocol
 
+from git_cwd import git_cwd as _git_cwd  # 「どこで git を叩くか」の唯一の定義
+
 
 class GitWriteAdapter(Protocol):
     """Outward-effect git interface Beacon declares."""
@@ -35,15 +37,18 @@ class SubprocessGitWriteAdapter:
     failure; the caller owns any best-effort / retry policy."""
 
     def tag(self, name: str) -> None:
-        subprocess.run(["git", "tag", name], check=True, capture_output=True)
+        subprocess.run(["git", "tag", name], check=True, capture_output=True,
+                       cwd=_git_cwd())
 
     def tag_force(self, name: str, rev: str, timeout: int = 10) -> None:
         subprocess.run(["git", "tag", "-f", name, rev],
-                       check=True, capture_output=True, text=True, timeout=timeout)
+                       check=True, capture_output=True, text=True, timeout=timeout,
+                       cwd=_git_cwd())
 
     def push_tag_force(self, remote: str, name: str, timeout: int = 30) -> None:
         subprocess.run(["git", "push", "-f", remote, name],
-                       check=True, capture_output=True, text=True, timeout=timeout)
+                       check=True, capture_output=True, text=True, timeout=timeout,
+                       cwd=_git_cwd())
 
 
 _adapter: GitWriteAdapter = SubprocessGitWriteAdapter()

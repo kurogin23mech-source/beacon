@@ -114,6 +114,23 @@ def _run_commands_py(
     env.setdefault("BEACON_PROJECT_FILE", ".beacon/project.json")
     env["BEACON_DIR"] = str(root)
 
+    # Carry the caller's cwd to the child (ms-160 e-7423). `bin/beacon` exports
+    # BEACON_INVOCATION_CWD before it relocates into the project root, and
+    # lib/git_cwd.py reads it so the git ports act on the directory the user
+    # actually invoked from — the worktree, not the parent repo that holds
+    # `.beacon/`. This frontend had no equivalent: an independent maintainability
+    # review verified that `BEACON_INVOCATION_CWD` never reached the child here,
+    # so on a pipx / Windows install (where this is the only frontend) `beacon
+    # push record` and `beacon deploy record` from a worktree kept recording the
+    # parent's branch — the very bug e-7423 set out to fix.
+    #
+    # Set once here rather than per handler: every subcommand goes through this
+    # function, so a new verb cannot forget it. This is also what folds the two
+    # sources of truth into one — the module-level `get_invocation_cwd()` (used
+    # by `_handle_log` for its own `git -C`) and the env var the bash frontend
+    # exports now agree, because the former feeds the latter.
+    env.setdefault("BEACON_INVOCATION_CWD", str(get_invocation_cwd()))
+
     # #19 follow-up: main.py reconfigures sys.stdout in *this* process at
     # import time, but commands.py runs in a fresh child process where that
     # reconfigure never executes. Force PYTHONUTF8 + PYTHONIOENCODING so
