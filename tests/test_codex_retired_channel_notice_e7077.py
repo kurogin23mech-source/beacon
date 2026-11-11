@@ -84,12 +84,16 @@ class TestCodexTallyIsWiredToTheRightCounter:
         (UNKNOWN, "other"),
     ])
     def test_each_reason_lands_in_its_own_counter(self, codex, reason, expected_key):
-        counts = codex.tally_downgrade_reasons([reason], bd=bd)
+        # ms-185 e-7395: channel も渡す形になった。ここは **現役** channel を渡す
+        # (引退 channel だと許可リスト漏れが retired_unapproved へ行くのが正しい
+        # 挙動で、それは TestRetiredUnapprovedIsCountedApart が測る)。
+        counts = codex.tally_downgrade_reasons([(reason, "dm")], bd=bd)
         assert counts[expected_key] == 1, (
             "理由 %r が %s に積まれていません: %r" % (reason, expected_key, counts)
         )
-        # 他の 3 つは 0 — 「どれかに入った」ではなく「正しいものだけに入った」を見る
-        for key in ("allowlist", "provenance", "retired", "other"):
+        # 他は 0 — 「どれかに入った」ではなく「正しいものだけに入った」を見る
+        for key in ("allowlist", "retired_unapproved", "provenance", "retired",
+                    "other"):
             if key != expected_key:
                 assert counts[key] == 0, (
                     "理由 %r が %s にも積まれています (配線の取り違え): %r"
@@ -98,7 +102,9 @@ class TestCodexTallyIsWiredToTheRightCounter:
 
     def test_mixed_batch_is_counted_independently(self, codex):
         counts = codex.tally_downgrade_reasons(
-            [RETIRED, PROVENANCE, ALLOWLIST_MISS, RETIRED, UNKNOWN], bd=bd)
+            [(RETIRED, "trek-trigger"), (PROVENANCE, "operation-trigger"),
+             (ALLOWLIST_MISS, "dm"), (RETIRED, "trek-trigger"),
+             (UNKNOWN, "dm")], bd=bd)
         assert counts["retired"] == 2
         assert counts["provenance"] == 1
         assert counts["allowlist"] == 1
@@ -110,7 +116,7 @@ class TestCodexTallyIsWiredToTheRightCounter:
         畳むと「channel を opt-in してください」という**誤案内**になる。
         将来 5 つ目の理由が足されたとき、黙って誤分類されないことを見る。
         """
-        counts = codex.tally_downgrade_reasons([UNKNOWN], bd=bd)
+        counts = codex.tally_downgrade_reasons([(UNKNOWN, "dm")], bd=bd)
         assert counts["allowlist"] == 0
         assert counts["other"] == 1
         assert counts["other_reasons"] == {UNKNOWN}
@@ -118,8 +124,10 @@ class TestCodexTallyIsWiredToTheRightCounter:
     def test_empty_input_is_all_zero(self, codex):
         counts = codex.tally_downgrade_reasons([], bd=bd)
         assert all(counts[k] == 0 for k in
-                   ("allowlist", "provenance", "retired", "other"))
+                   ("allowlist", "retired_unapproved", "provenance", "retired",
+                    "other"))
         assert counts["other_reasons"] == set()
+        assert counts["retired_unapproved_channels"] == set()
 
 
 class TestCodexNoticeTextTellsTheRightFix:
@@ -225,8 +233,21 @@ class TestClaudeHookRendersPerReasonAdvice:
         )
 
     def test_allowlist_miss_output_keeps_the_original_wording(self, claude):
-        """許可リスト漏れの文言は従来どおり (= 既存の読み手を壊さない)。"""
-        out = self._render(claude, ALLOWLIST_MISS)
+        """許可リスト漏れの文言は従来どおり (= 既存の読み手を壊さない)。
+
+        **channel を明示するようになった理由 (ms-185 e-7395)**: この試験は
+        ``_render`` の既定 channel (``trek-trigger``) を使っていたが、それは
+        **引退した channel** である。引退した channel が許可リストに無い場合の
+        案内は e-7395 で「引退済みなので登録しないでください」に変わった
+        (以前は現役 channel と同じ「人間が許可する前」で、人間が案内に従って
+        登録すると次の通知で「外してください」と逆を言われる誤誘導だった)。
+
+        この試験が守りたいのは「**許可リスト漏れ**の文言が従来どおり」であって
+        「引退した channel の文言が従来どおり」ではない。だから引退していない
+        channel を明示して渡す。引退側の案内は
+        ``TestRetiredChannelAwaitingApprovalIsNotToldToOptIn`` が測る。
+        """
+        out = self._render(claude, ALLOWLIST_MISS, channel="dm")
         assert "not in bus_auto_execute_channels" in out
 
     def test_unknown_reason_is_surfaced_not_mislabelled(self, claude):
@@ -236,11 +257,19 @@ class TestClaudeHookRendersPerReasonAdvice:
             "未知の理由を許可リスト漏れとして案内しています = 誤案内。"
         )
 
-    def test_all_four_reasons_render_differently(self, claude):
-        outs = [self._render(claude, r)
+    @pytest.mark.parametrize("channel", ["trek-trigger", "dm"])
+    def test_all_four_reasons_render_differently(self, claude, channel):
+        """4 つの理由が互いに違う文言になること —— **引退 / 現役 のどちらの
+        channel でも**。
+
+        ms-185 e-7395 で「理由タグ無し」の案内が channel 依存になったので、
+        片方の channel だけで測ると、もう片方で区別が潰れても緑になる。
+        """
+        outs = [self._render(claude, r, channel=channel)
                 for r in (ALLOWLIST_MISS, PROVENANCE, RETIRED, UNKNOWN)]
         assert len(set(outs)) == 4, (
-            "4 つの理由のうち同じ文言になっているものがあります = 区別できていない"
+            f"channel={channel} で 4 つの理由のうち同じ文言になっているものが "
+            "あります = 区別できていない"
         )
 
     def test_no_downgrade_marker_means_no_advice_line(self, claude):
@@ -263,6 +292,181 @@ class TestClaudeHookRendersPerReasonAdvice:
         out = self._render(claude, RETIRED)
         assert RETIRED in out
         assert "not in bus_auto_execute_channels" not in out
+
+
+# ---------------------------------------------------------------------------
+# ms-185 e-7395: 引退した channel が **まだ許可されていない** とき、
+#                「許可してください」と案内してはならない
+# ---------------------------------------------------------------------------
+
+class TestRetiredUnapprovedIsCountedApart:
+    """Codex 側: 引退 + 未許可を、現役の承認待ちと **別のバケツ** に数えること。
+
+    ms-185 e-7395: Codex の許可リスト漏れバンドは件数だけを出す凍結文だったので、
+    引退した channel も「人間 opt-in 前」と案内していた。畳む側 (純粋関数) で
+    分けないと、``main()`` に inline で分岐する形に戻り、配線の逆転をテストで
+    捕まえられなくなる (e-7077 の保守性レビューが罰した形)。
+    """
+
+    def test_retired_channel_without_optin_does_not_land_in_allowlist(self, codex):
+        counts = codex.tally_downgrade_reasons(
+            [(ALLOWLIST_MISS, "trek-trigger")], bd=bd)
+        assert counts["retired_unapproved"] == 1, counts
+        assert counts["allowlist"] == 0, (
+            "引退した channel の許可リスト漏れを allowlist に畳んでいます = "
+            "「opt-in してください」という誤案内になります: %r" % (counts,)
+        )
+        assert counts["retired_unapproved_channels"] == {"trek-trigger"}
+
+    def test_live_channel_without_optin_still_lands_in_allowlist(self, codex):
+        counts = codex.tally_downgrade_reasons([(ALLOWLIST_MISS, "dm")], bd=bd)
+        assert counts["allowlist"] == 1, counts
+        assert counts["retired_unapproved"] == 0, counts
+
+    def test_mixed_batch_splits_the_two_states(self, codex):
+        counts = codex.tally_downgrade_reasons(
+            [(ALLOWLIST_MISS, "trek-trigger"), (ALLOWLIST_MISS, "dm"),
+             (ALLOWLIST_MISS, "trek-progress-check")], bd=bd)
+        assert counts["retired_unapproved"] == 2, counts
+        assert counts["allowlist"] == 1, counts
+        assert counts["retired_unapproved_channels"] == \
+            {"trek-trigger", "trek-progress-check"}
+
+    def test_advice_lines_are_byte_equal_to_the_shared_layer(self, codex):
+        """案内は共有層と **等値** (部分一致ではない)。"""
+        chans = {"trek-trigger", "trek-task-review"}
+        got = codex.render_retired_unapproved_advice_lines(chans, bd=bd)
+        want = "".join(
+            f"\n    - channel={ch}: {bd.downgrade_advice('', ch)}"
+            for ch in sorted(chans))
+        assert got == want, got
+
+    def test_no_lib_does_not_invent_a_recovery(self, codex):
+        """lib が読めない / channel 不明のときは回復手段を推測で名乗らない。"""
+        for args in (({"trek-trigger"}, None), (set(), bd)):
+            chans, mod = args
+            out = codex.render_retired_unapproved_advice_lines(chans, bd=mod)
+            assert "auto-execute" not in out, out
+            assert "特定できない" in out, out
+
+
+class TestRetiredChannelAwaitingApprovalIsNotToldToOptIn:
+    """引退と「人間の承認待ち」を案内層で見分けることを測る。
+
+    **なぜ案内層なのか**: 判定 (``classify_auto_execute``) は許可リストを先に見る
+    順序が固定されており、そこで外れた時点で理由タグが空になる。順序は
+    ``test_allowlist_miss_still_wins_over_retired`` が意図して固定している
+    (空タグが Claude hook の分岐に効いているため、e-5803 のレビュー由来)。
+    順序を変えると記録済みの決定を覆すので、区別は **案内を出す層で付ける**。
+    判定側の docstring も「案内層でやるしかない」と明記している。
+
+    **なぜ 1 箇所で足りるのか**: 案内の文面は
+    ``lib/bus_delivery.downgrade_advice`` が唯一の所有者で、Claude 側と Codex 側の
+    両 hook がこれを呼ぶ (``TestBothHooksShareOneAdviceSource`` がその委譲を
+    差し替えで測っている)。両 hook に同じ分岐を書くと、#812 で罰された
+    「同じ説明が 2 コピーで割れる」形を再生産する。だから直すのは共有層 1 箇所で、
+    ここでは **両 hook の出力に届いているか** を端から端まで測る。
+    """
+
+    # 3 状態。e-7395 の受入条件 1〜3 に 1:1 で対応する。
+    RETIRED_CH = "trek-trigger"      # 引退した channel の実例
+    LIVE_CH = "dm"                   # 引退していない channel
+
+    def test_retired_and_unapproved_says_retired_not_approve_me(self):
+        """受入条件1: 引退 + 許可リスト空 → 「引退済み」の意味になる。"""
+        delivery, downgraded, reason = bd.classify_auto_execute(
+            {"channel": self.RETIRED_CH, "delivery": "auto-execute"},
+            allowlist=frozenset())
+        assert (delivery, downgraded) == ("propose-to-ai", "auto-execute")
+        advice = bd.downgrade_advice(reason, self.RETIRED_CH)
+        assert "引退" in advice, (
+            "引退した channel が許可リストに無いとき、引退である旨を案内して "
+            f"いません: {advice!r}"
+        )
+        assert advice != bd.downgrade_advice(reason, self.LIVE_CH), (
+            "引退した channel と現役 channel で案内が同じです = 区別が付いて "
+            "いません。人間はこれに従って `auto-execute add` で登録し、次の通知で "
+            "「外してください」と逆を言われます"
+        )
+
+    def test_retired_and_approved_still_says_remove_the_stale_optin(self):
+        """受入条件2: 引退 + 許可リストに在る → 従来どおり「外してください」。"""
+        _d, _f, reason = bd.classify_auto_execute(
+            {"channel": self.RETIRED_CH, "delivery": "auto-execute"},
+            allowlist=frozenset({self.RETIRED_CH}))
+        assert reason == RETIRED, reason
+        advice = bd.downgrade_advice(reason, self.RETIRED_CH)
+        assert "auto-execute remove" in advice, (
+            "許可リストに残った引退 channel の直し方 (外す) が変わっています"
+        )
+
+    def test_live_channel_awaiting_approval_is_unchanged(self):
+        """受入条件3: 現役 + 許可リスト空 → 従来どおり「人間が許可する前」。"""
+        _d, _f, reason = bd.classify_auto_execute(
+            {"channel": self.LIVE_CH, "delivery": "auto-execute"},
+            allowlist=frozenset())
+        assert bd.downgrade_advice(reason, self.LIVE_CH) == \
+            "channel not in bus_auto_execute_channels (= 人間が許可する前)", (
+            "引退していない channel の承認待ち案内が変わっています = 既存の "
+            "読み手を壊しています"
+        )
+
+    def test_the_three_states_do_not_swap(self):
+        """3 状態の案内が互いに入れ替わらない (受入条件4 の「入れ替わらない」)。
+
+        1 件ずつ見ると、ある状態の文言を別の状態へコピーする変異を検知できない。
+        3 つを同時に取って互いに異なることを見る。
+        """
+        states = {
+            "retired+unapproved": (frozenset(), self.RETIRED_CH),
+            "retired+approved": (frozenset({self.RETIRED_CH}), self.RETIRED_CH),
+            "live+unapproved": (frozenset(), self.LIVE_CH),
+        }
+        advice = {}
+        for name, (allowlist, ch) in states.items():
+            _d, _f, reason = bd.classify_auto_execute(
+                {"channel": ch, "delivery": "auto-execute"}, allowlist=allowlist)
+            advice[name] = bd.downgrade_advice(reason, ch)
+        assert len(set(advice.values())) == 3, (
+            "3 状態のうち同じ案内になっているものがあります: "
+            + repr(advice)
+        )
+
+    def test_retired_advice_does_not_invite_opting_in(self):
+        """引退の案内が ``auto-execute add`` を **勧めて** いないこと。
+
+        文面に `auto-execute add` という語が出ることは許す (「許可しても無駄だ」と
+        説明するために名前を出すのは自然)。測るのは **勧誘していないこと** —
+        つまり現役 channel の承認待ち案内と同じ文言になっていないこと。
+        文面の言い回しそのものを機械で測ると、正当な否定形で偽の赤になる
+        (このリポジトリが 4 周のレビューで実証した経路なので踏まない)。
+        """
+        _d, _f, reason = bd.classify_auto_execute(
+            {"channel": self.RETIRED_CH, "delivery": "auto-execute"},
+            allowlist=frozenset())
+        retired_advice = bd.downgrade_advice(reason, self.RETIRED_CH)
+        live_advice = bd.downgrade_advice(reason, self.LIVE_CH)
+        assert retired_advice != live_advice
+        assert "引退" in retired_advice and "引退" not in live_advice
+
+    def test_both_hooks_surface_it(self, claude, codex):
+        """受入条件1 の「両フックで実機確認」: 共有層の案内が両方に届く。
+
+        文面の著者は共有層なので、ここで測るのは **運んでいるか** だけ
+        (意味の正しさは機械で測らない — PR#842 の保守性レビューで学んだ区別)。
+        """
+        expected = bd.downgrade_advice(ALLOWLIST_MISS, self.RETIRED_CH)
+        assert claude._downgrade_advice(ALLOWLIST_MISS, self.RETIRED_CH) == expected, (
+            "Claude 側の受信フックが共有層の案内を運んでいません"
+        )
+        # Codex 側は専用の整形関数を通す。**等値** で測る (部分一致だと、今日の
+        # 文言を凍結したコピーを埋め込んでも緑のままになる — #812 の judge が
+        # 実測した経路)。
+        line = codex.render_retired_unapproved_advice_lines(
+            {self.RETIRED_CH}, bd=bd)
+        assert line == f"\n    - channel={self.RETIRED_CH}: {expected}", (
+            "Codex 側が共有層の案内を運んでいません: " + repr(line)
+        )
 
 
 class TestReasonTagsAreAllDistinct:

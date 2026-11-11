@@ -764,9 +764,17 @@ def _render_context(events: list[dict], notify_only_count: int,
         )
     if auto_execute_downgraded_count:
         parts.append(
+            # ms-185 e-7395: ここは **件数しか知らない**。以前は理由を
+            # 「channel が allowlist に無いため」と 1 つ名乗っていたが、降格の
+            # 理由は 4 通りある (許可リスト漏れ / 引退した channel / 証拠の封筒
+            # 欠落 / 未知のタグ) ので、証拠欠落や引退の降格にも許可リスト漏れだと
+            # 誤った理由を付けていた。引退した channel では実害があり、読んだ人が
+            # `auto-execute add` で登録して次の通知で「外してください」と逆を
+            # 言われる。理由は event ごとのマーカーが channel 別に正しく持っている
+            # ので、ここは数えるだけにして理由の主張をやめる。
             f"(安全側降格: auto-execute → propose-to-ai に変換された event: "
-            f"{auto_execute_downgraded_count} 件 — channel が "
-            "`bus_auto_execute_channels` allowlist に無いため)"
+            f"{auto_execute_downgraded_count} 件 — 理由は各 event の "
+            "`[auto-execute downgraded ...]` マーカーを参照)"
         )
     parts.append("")
     # ms-169 e-6235: the generic event list is free-text received from other
