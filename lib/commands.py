@@ -4394,7 +4394,15 @@ def _emit_review_done_for_target(review_type: str, target_id: str, *,
                                  adj_summary: str = "",
                                  adjudications: list = None,
                                  no_findings: bool = False) -> None:
-    """target (PR を作らない作業) のレビュー実施を記録して関門を外す (ms-166 e-6918).
+    """target (PR を作らない作業) のレビュー実施を記録する (ms-166 e-6918).
+
+    **「関門を外す」ではない** (ms-119 e-7439)。この記録が消すのは **促し**
+    (review-due トリガー) で、target の完了 / 承認を止める関門ではない —— 下で
+    印字する文面のとおり、`cmd_target_approve` / `target_transition_approval_approve`
+    / `cmd_milestone_done` はこの記録を読まない。完了を止めるのは目的達成レビューの
+    人間承認だけで、思想は SPEC どおり助言 (非 blocking) に留まる。初版の docstring は
+    PR 側 (そこでは本当に `beacon pr approve` を止める) の言葉をそのまま持ってきて
+    いたので、target 側では偽の主張になっていた。
 
     PR 側と分けてあるのは、PR 側が持つ 2 つの道具 (``beacon-review-gate`` の印は
     PR head の commit に押す / identity はリポジトリ) が target に無いから。
@@ -4489,8 +4497,19 @@ def _emit_review_done_for_target(review_type: str, target_id: str, *,
         print("  ⚠ 共有置き場 (git の共通ディレクトリ) が取れなかったので、この "
               "cwd 限りの記録です — fork / 親の別の作業フォルダからは未実施に"
               "見えます。", file=sys.stderr)
+    # ms-119 e-7439: **存在しない関門を名乗らない**。旧文面は「完了の関門を通過
+    # できます」と印字していたが、target 側のこの記録を読む完了 / 承認の関門は
+    # 無い —— `_target_review_due_*` の読み手は この記録 (review done) と 免除
+    # (review skip) の 2 つだけで、`cmd_target_approve` /
+    # `core.target_transition_approval_approve` / `cmd_milestone_done` はどれも
+    # 読まない (AST で実測、tests/test_target_review_record_claims_e7439.py が
+    # 読み手の集合を固定している)。思想レビューは SPEC が「助言・非 blocking」と
+    # 宣言している機構なので、**gate を作るのではなく文面を実態に合わせた**
+    # (README が review status の契約を偽って書いていた件と同じ family)。
     print(f"  {target_id} の {review_type} の義務を解消しました "
-          f"— 完了の関門を通過できます。")
+          f"— 促し (review-due) は消えます。")
+    print(f"  ※ これは助言としての記録です: {target_id} の完了 / 承認は この記録を"
+          f"読みません (完了を止める関門は目的達成レビューの人間承認だけ)。")
 
 
 def cmd_review_done():
