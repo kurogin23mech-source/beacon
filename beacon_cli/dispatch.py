@@ -2421,8 +2421,16 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
     mode = "prepare" if args.prepare else ("finalize" if args.finalize else "normal")
     if mode != "finalize":
         try:
+            # `-c core.quotepath=false` keeps non-ASCII paths unescaped. With the
+            # default (quotePath=true) git emits `".beacon/documents/\343\203…"`,
+            # a string starting with a quote character, so the `.beacon/` prefix
+            # test below misses it and a Beacon-only commit is recorded as if it
+            # touched the user's files. The bash frontend passes the same flag for
+            # the same reason (ms-160 e-7406); the two must agree because either
+            # one can be the path a given install takes.
             changed = subprocess.check_output(
-                git_C + ["diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
+                git_C + ["-c", "core.quotepath=false",
+                         "diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
                 text=True,
                 encoding="utf-8",
             ).strip().splitlines()
