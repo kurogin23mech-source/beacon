@@ -218,6 +218,31 @@ def _hook_output(context: str, hook_event_name: str = "UserPromptSubmit") -> dic
     }
 
 
+def _render_channel_advice_lines(channels, *, bd, reason, no_channel_fallback) -> str:
+    """channel 群を「1 行ずつその channel の案内」に畳む整形規則 —— **ここ 1 箇所**。
+
+    ms-185 e-7395 / PR#844 独立保守性レビュー (medium): 理由ごとの公開関数が増える
+    たびに、同じ骨格 (``\n    - channel=<名前>: <案内>`` / ソート順 / bd 不在の
+    扱い) が写しで増えていた。3 つ目を作るときに 3 箇所を手で揃える形になり、1 つ
+    忘れても壊れたことに気付きにくい。整形規則をここに 1 つ置き、公開関数は
+    **理由タグと「channel が無いときの文」だけを渡す薄い口**にする。
+
+    公開関数のシグネチャは変えない。``scripts/invert-retired-provenance-guard.py``
+    が ``def render_provenance_advice_lines(channels, *, bd) -> str:`` を文字列
+    アンカーにしているので、署名を変えると反転ハーネスが当たらなくなって SKIP
+    (= 偽の安全) になる —— この PR がまさにその事故を 1 件直したところである。
+
+    ``bd`` が None (= lib が読めない) / channel 不明のときは **推測で名乗らない**。
+    知らないのに「直せます」と言う方が、言わないより害が大きい (e-7077 の教訓)。
+    """
+    if bd is None or not channels:
+        return no_channel_fallback
+    return "".join(
+        f"\n    - channel={ch or '?'}: {bd.downgrade_advice(reason, ch)}"
+        for ch in sorted(channels)
+    )
+
+
 def render_provenance_advice_lines(channels, *, bd) -> str:
     """証拠欠落で降格した channel 群を、1 行ずつ「その channel の直し方」に畳む。
 
@@ -237,14 +262,12 @@ def render_provenance_advice_lines(channels, *, bd) -> str:
     ときは、**回復手段を推測で名乗らない**。知らないのに「直せます」と言う方が、
     言わないより害が大きい (e-7077 の教訓)。
     """
-    if bd is None or not channels:
-        return ("\n    - 要求された証拠の封筒が付いていません "
-                "(channel を特定できないため回復手段を提示できません)")
-    return "".join(
-        f"\n    - channel={ch or '?'}: "
-        f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"
-        for ch in sorted(channels)
-    )
+    return _render_channel_advice_lines(
+        channels, bd=bd,
+        reason=(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE if bd is not None else ""),
+        no_channel_fallback=(
+            "\n    - 要求された証拠の封筒が付いていません "
+            "(channel を特定できないため回復手段を提示できません)"))
 
 
 def render_retired_unapproved_advice_lines(channels, *, bd) -> str:
@@ -265,13 +288,11 @@ def render_retired_unapproved_advice_lines(channels, *, bd) -> str:
 
     ``bd`` が None (= lib が読めない環境) / channel 不明のときは **推測で名乗らない**。
     """
-    if bd is None or not channels:
-        return ("\n    - 引退した channel ですが、channel を特定できないため "
-                "回復手段を提示できません")
-    return "".join(
-        f"\n    - channel={ch or '?'}: {bd.downgrade_advice('', ch)}"
-        for ch in sorted(channels)
-    )
+    return _render_channel_advice_lines(
+        channels, bd=bd, reason="",
+        no_channel_fallback=(
+            "\n    - 引退した channel ですが、channel を特定できないため "
+            "回復手段を提示できません"))
 
 
 def render_retired_advice(*, bd) -> str:
@@ -442,7 +463,7 @@ def main() -> int:
     # bus_auto_execute_channels) are downgraded — they stay in the generic list,
     # just without any imperative / forced Skill invoke.
     op_trigger_events: list[dict] = []
-    downgrade_reasons: list = []
+    downgrade_entries: list = []
     downgraded_allowlist = 0
     downgraded_retired_unapproved = 0
     downgraded_retired_unapproved_channels: set = set()
@@ -468,7 +489,7 @@ def main() -> int:
                 # ms-185 e-7395: channel も積む。「許可リスト漏れ」の空タグが
                 # 現役 channel の承認待ちと引退 channel の 2 つを指すので、
                 # 畳む側が見分けるのに channel が要る。
-                downgrade_reasons.append((reason, str(ev.get("channel") or "")))
+                downgrade_entries.append((reason, str(ev.get("channel") or "")))
                 if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
                     downgraded_provenance_channels.add(
                         str(ev.get("channel") or ""))
@@ -476,7 +497,7 @@ def main() -> int:
                     and str(ev.get("channel") or "")
                     == bd.OPERATION_TRIGGER_CHANNEL):
                 op_trigger_events.append(ev)
-        _tally = tally_downgrade_reasons(downgrade_reasons, bd=bd)
+        _tally = tally_downgrade_reasons(downgrade_entries, bd=bd)
         downgraded_allowlist = _tally["allowlist"]
         downgraded_retired_unapproved = _tally["retired_unapproved"]
         downgraded_retired_unapproved_channels = \

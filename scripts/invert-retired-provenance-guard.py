@@ -154,12 +154,23 @@ def codex_swaps_the_counter_wiring(src: str) -> str:
 
 def codex_folds_unknown_into_allowlist_miss(src: str) -> str:
     """未知の理由タグを allowlist-miss に畳む (= 将来の理由が黙って誤案内される)。"""
+    # ms-185 e-7395: 空タグの枝に「引退 channel か」の分岐が入ったので、アンカーを
+    # 実装に合わせ直した。変異の意味は変えない (未知の理由タグを空タグの枝へ流し、
+    # other カウンタを届かなくする = 将来の理由が黙って誤案内される状態)。
     old = ('        elif not reason:\n'
-           '            counts["allowlist"] += 1\n'
+           '            if str(channel or "") in retired_channels:\n'
+           '                counts["retired_unapproved"] += 1\n'
+           '                retired_unapproved_channels.add(str(channel or ""))\n'
+           '            else:\n'
+           '                counts["allowlist"] += 1\n'
            '        else:\n'
            '            counts["other"] += 1\n')
     new = ('        else:\n'
-           '            counts["allowlist"] += 1\n'
+           '            if str(channel or "") in retired_channels:\n'
+           '                counts["retired_unapproved"] += 1\n'
+           '                retired_unapproved_channels.add(str(channel or ""))\n'
+           '            else:\n'
+           '                counts["allowlist"] += 1\n'
            '        if False:\n'
            '            counts["other"] += 1\n')
     assert old in src, "anchor not found (codex_folds_unknown_into_allowlist_miss)"
@@ -306,15 +317,19 @@ def codex_freezes_a_byte_identical_copy(src: str) -> str:
     私は最初その等値比較を書いて偽の安全を作り、この変異で緑を踏んだ。真値源を試験中
     だけ差し替えて出力が追随するかを見る形に直したので、いまは赤くなる。
     """
-    anchor = '        f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"'
+    # ms-185 e-7395: 整形規則が共有関数 ``_render_channel_advice_lines`` に寄ったので
+    # 当て先を移した。変異の意味は変えない (channel ごとの案内を凍結コピーで差し替え、
+    # 真値源の差し替えに追随しなくする)。**公開関数の署名は変えない約束**なので、
+    # 署名を当て先にしている他のケースはそのまま効く。
+    anchor = '        f"\\n    - channel={ch or \'?\'}: {bd.downgrade_advice(reason, ch)}"'
     assert anchor in src, "anchor not found (codex_freezes_a_byte_identical_copy)"
-    return src.replace(
-        anchor,
-        '        f"{_FROZEN_ADVICE.get(ch) or bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"',
-        1).replace(
-        'def render_provenance_advice_lines(channels, *, bd) -> str:',
+    frozen = anchor.replace("{bd.downgrade_advice(reason, ch)}",
+                            "{_FROZEN_ADVICE.get(ch) or bd.downgrade_advice(reason, ch)}")
+    assert frozen != anchor, "frozen 差し替えが効いていない (当て先の形が変わった)"
+    return src.replace(anchor, frozen, 1).replace(
+        'def _render_channel_advice_lines(',
         '_FROZEN_ADVICE = {"operation-trigger": "frozen copy"}\n\n\n'
-        'def render_provenance_advice_lines(channels, *, bd) -> str:', 1)
+        'def _render_channel_advice_lines(', 1)
 
 
 def codex_folds_all_channels_into_one_line(src: str) -> str:

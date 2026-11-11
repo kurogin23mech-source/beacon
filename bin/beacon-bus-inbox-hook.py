@@ -600,8 +600,19 @@ def _downgrade_advice(reason: str, channel: str = "") -> str:
     if bd is None:
         # lib が読めない環境 (fail-closed 側に倒す設計)。知らない定数名で分岐した
         # ふりをするより、生のタグを見せる方が誤診を招かない。
+        #
+        # **空タグで「許可してください」と言わない (ms-185 e-7395 / PR#844 の独立
+        # AX + 保守性が一致で指摘)**: 空タグは「現役 channel の承認待ち」と「引退
+        # channel」の 2 つを指すが、見分ける材料 (RETIRED_PROVENANCE_CHANNELS) は
+        # lib 側にしか無い。以前はここで常に「人間が許可する前」を返しており、
+        # **lib が読めるかどうかという無関係な事情だけで案内が反転**していた
+        # (judge が実測: 引退 channel でも「まだ許可されていません」が出る)。
+        # それはこの課題がまさに消しに来た誤誘導を fail-closed 経路に残すこと。
+        # 材料が無いときは推測で名乗らない —— Codex 側の render_* と同じ作法。
         if not reason:
-            return "channel not in bus_auto_execute_channels (= 人間が許可する前)"
+            return ("降格の理由を解決できません (bus_delivery を読めないため、"
+                    "引退した channel か人間の承認待ちかを見分けられません)。"
+                    "`beacon bus auto-execute add` を自己判断で実行しないでください")
         return (f"理由タグ '{reason}' (bus_delivery を読めないため説明を "
                 "解決できません)")
     return bd.downgrade_advice(reason, channel)
