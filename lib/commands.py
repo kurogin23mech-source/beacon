@@ -1881,6 +1881,107 @@ def _pr_diff_collection(pr: str, pr_repo: str, gaps: list) -> tuple:
     return argv, target_ref, resolved, head_sha
 
 
+def _git_ok(argv: list) -> tuple:
+    """git を best-effort で叩き ``(成功か, stdout)`` を返す (失敗は静かに潰す)。"""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True)
+    except BaseException:
+        return False, ""
+    return proc.returncode == 0, proc.stdout or ""
+
+
+def _intra_range_moves(base: str, head: str) -> list:
+    """base..head の範囲内で **移動してきた** ファイルを機械的に集める
+    (ms-119 e-7404)。
+
+    返すのは ``[{"path": 移動先, "from": 元パス, "commit": 移動 commit}]``。
+
+    判定規則: 範囲内の rename (old → new) のうち、**old が base に存在しない**もの
+    だけを返す。old が base に在れば base..head の差分はそれを rename として見せる
+    ので (``diff.renames`` 既定 true)、judge は履歴を補う必要がない。old が base に
+    無い場合だけ、差分は new への純粋な新規追加になり「どこから来たか」が消える。
+
+    best-effort: base / head を手元で解決できない (未 fetch 等) なら空を返す
+    —— 推測で埋めるより、載せないほうが安全 (載せた注記が誤っていると judge を
+    逆向きに誤導する)。
+    """
+    base = str(base or "").strip()
+    head = str(head or "").strip()
+    if not base or not head:
+        return []
+    for ref in (base, head):
+        ok, _ = _git_ok(["git", "cat-file", "-e", f"{ref}^{{commit}}"])
+        if not ok:
+            return []
+    ok, out = _git_ok(["git", "log", "--diff-filter=R", "--name-status",
+                       "--format=%h", f"{base}..{head}"])
+    if not ok:
+        return []
+    moves = []
+    commit = ""
+    seen = set()
+    for line in out.splitlines():
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        if not line.startswith("R") or "\t" not in line:
+            # `--format=%h` の行 (= commit hash だけ)
+            commit = line.strip()
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        old, new = parts[1], parts[2]
+        if new in seen:
+            continue
+        # old が base に在るなら差分が rename として見せるので注記は不要。
+        old_at_base, _ = _git_ok(["git", "cat-file", "-e", f"{base}:{old}"])
+        if old_at_base:
+            continue
+        seen.add(new)
+        moves.append({"path": new, "from": old, "commit": commit})
+    return moves
+
+
+def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
+                             diff_ref: str = ""):
+    """差分の範囲内の移動を judge 向け参照に組む **唯一の入口** (ms-119 e-7404)。
+
+    単一種別の経路 (`cmd_review_context`) と `--batch` の経路
+    (`cmd_review_batch_context`) の **両方がここを通る** —— 片方だけに足すと、
+    節目のバッチ発火 (= 実際に judge を起動する既定経路) で効かない形が作れる。
+
+    範囲の決め方:
+      * ``pr``      — gh に base / head の sha を聞く (手元に無ければ空を返す)
+      * ``diff_ref`` — ``base...head`` / ``base..head`` を割る
+
+    どちらも解決できなければ None (載せない)。
+    """
+    import review_spine
+    base = head = ""
+    if pr:
+        argv = ["gh", "pr", "view", str(pr), "--json", "baseRefOid,headRefOid"]
+        if pr_repo:
+            argv += ["--repo", pr_repo]
+        ok, out = _git_ok(argv)
+        if ok:
+            try:
+                payload = json.loads(out or "{}")
+                base = str(payload.get("baseRefOid") or "")
+                head = str(payload.get("headRefOid") or "")
+            except BaseException:
+                base = head = ""
+    elif diff_ref:
+        sep = "..." if "..." in diff_ref else (".." if ".." in diff_ref else "")
+        if sep:
+            left, _, right = diff_ref.partition(sep)
+            base, head = left.strip(), (right.strip() or "HEAD")
+    if not (base and head):
+        return None
+    return review_spine.build_intra_range_move_reference(
+        _intra_range_moves(base, head))
+
+
 def _resolve_review_pr_repo(explicit: str, gaps: list) -> str:
     """レビュー対象 PR の **リポジトリ** を決める (ms-166 e-6971)。
 
@@ -2334,6 +2435,13 @@ def cmd_review_context():
         gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
                     "『既存機能と重複していないか』を repo 参照なしには確認できません "
                     "(/beacon-map で生成すると review 精度が上がります)。")
+    # ms-119 e-7404: 範囲内で移動してきたファイルを judge に伝える (差分では
+    # 移動先への新規追加に見えるので、「置き間違えた」と誤読される)。入口は
+    # `_artifact_move_reference` の 1 箇所で、--batch 経路も同じものを通る。
+    _move_ref = _artifact_move_reference(pr=pr, pr_repo=pr_repo,
+                                         diff_ref=diff_ref)
+    if _move_ref is not None:
+        external_references.append(_move_ref)
 
     bundle = review_spine.assemble_review_context(
         review_type,
@@ -2614,6 +2722,13 @@ def cmd_review_batch_context():
         shared_gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
                            "既存機能との重複を repo 参照なしには確認できません "
                            "(/beacon-map で生成すると review 精度が上がります)。")
+    # ms-119 e-7404: 単一種別の経路と **同じ入口** を通す。節目のバッチ発火が
+    # judge を起動する既定経路なので、ここに無いと実運用では効かない。
+    # リポジトリは収集が解決した値 (`_repo`) を使う。環境変数を読み直すと、
+    # 差分を採った先と注記を採る先が食い違う形が作れる。
+    _move_ref = _artifact_move_reference(pr=pr, pr_repo=_repo)
+    if _move_ref is not None:
+        external_references.append(_move_ref)
 
     registry = review_spine.load_review_types()
     implementer_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
