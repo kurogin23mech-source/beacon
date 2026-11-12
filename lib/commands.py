@@ -1913,38 +1913,58 @@ def _intra_range_moves(base: str, head: str) -> list:
         ok, _ = _git_ok(["git", "cat-file", "-e", f"{ref}^{{commit}}"])
         if not ok:
             return []
-    ok, out = _git_ok(["git", "log", "--diff-filter=R", "--name-status",
-                       "--format=%h", f"{base}..{head}"])
+    # `--reverse` で **古い順** に読む。範囲内で 2 回以上動いたファイルの連鎖を
+    # 古→新の向きに辿るため (新しい順だと中間を親と取り違える)。
+    ok, out = _git_ok(["git", "log", "--reverse", "--diff-filter=R",
+                       "--name-status", "--format=%h", f"{base}..{head}"])
     if not ok:
         return []
-    moves = []
+    # new -> (old, 動かした commit)。同じ行き先が再度動けば後の hop が勝つ。
+    parent = {}
+    order = []
     commit = ""
-    seen = set()
     for line in out.splitlines():
-        line = line.rstrip("\n")
         if not line.strip():
             continue
         if not line.startswith("R") or "\t" not in line:
-            # `--format=%h` の行 (= commit hash だけ)
-            commit = line.strip()
+            commit = line.strip()  # `--format=%h` の行
             continue
         parts = line.split("\t")
         if len(parts) < 3:
             continue
-        old, new = parts[1], parts[2]
-        if new in seen:
+        src, dst = parts[1], parts[2]
+        if dst not in parent:
+            order.append(dst)
+        parent[dst] = (src, commit)
+
+    moves = []
+    for dst in order:
+        # **head に実在する行き先だけを出す** (独立 AX レビュー misleading)。
+        # 初版は rename の hop を 1 つずつ出していたので、範囲内で 2 回以上
+        # 動いたファイルでは **中間のパス** (head にも差分にも無い) を名指す行が
+        # 出た。judge はそれを探して見つけられず「この注記は信用できない」と
+        # 読み、注記が守ろうとした『意図的な退役』の免罪ごと疑う —— この機能が
+        # 消すはずだった誤指摘に戻る。judge が試験リポジトリで再現した。
+        dst_at_head, _ = _git_ok(["git", "cat-file", "-e", f"{head}:{dst}"])
+        if not dst_at_head:
             continue
-        # old が base に在るなら差分が rename として見せるので注記は不要。
-        old_at_base, _ = _git_ok(["git", "cat-file", "-e", f"{base}:{old}"])
-        if old_at_base:
+        # 連鎖を辿って **範囲に入る前の出発点** まで戻る (中間は出さない)。
+        origin, hop_commit = parent[dst]
+        guard = 0
+        while origin in parent and guard < 64:
+            origin = parent[origin][0]
+            guard += 1
+        # 出発点が base に在るなら差分が rename として見せるので注記は不要。
+        origin_at_base, _ = _git_ok(["git", "cat-file", "-e", f"{base}:{origin}"])
+        if origin_at_base:
             continue
-        seen.add(new)
-        moves.append({"path": new, "from": old, "commit": commit})
+        moves.append({"path": dst, "from": origin, "commit": hop_commit})
     return moves
 
 
 def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
-                             diff_ref: str = ""):
+                             diff_ref: str = "", head_sha: str = "",
+                             gaps: "Optional[list]" = None):
     """差分の範囲内の移動を judge 向け参照に組む **唯一の入口** (ms-119 e-7404)。
 
     単一種別の経路 (`cmd_review_context`) と `--batch` の経路
@@ -1971,6 +1991,21 @@ def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
                 head = str(payload.get("headRefOid") or "")
             except BaseException:
                 base = head = ""
+        # **差分を採ったのと同じ sha を基準にする** (独立 AX レビュー silent)。
+        # 初版はここで引いた head をそのまま使っていたので、差分採取 (gh pr diff)
+        # とこの問い合わせの間に push が入ると、**judge に渡る差分は古い head の
+        # ままなのに注記は新しい head を基準に組まれた**。e-6859 が「bundle は
+        # どの差分を見たかを sha で名指す」と直した型を、この新しい消費者だけが
+        # 素通りしていた。呼び出し側が既に解決済みの sha を持っているので、
+        # それを基準にし、食い違いは隠さず gaps に出す。
+        if head_sha:
+            if head and head != head_sha and gaps is not None:
+                gaps.append(
+                    f"移動履歴の注記を組むときに見た PR head ({head[:12]}) が、"
+                    f"この bundle が運ぶ差分の head ({head_sha[:12]}) と違いました "
+                    f"(読んでいる間に push された可能性)。注記は差分と同じ "
+                    f"{head_sha[:12]} を基準に組んでいます。")
+            head = head_sha
     elif diff_ref:
         sep = "..." if "..." in diff_ref else (".." if ".." in diff_ref else "")
         if sep:
@@ -2439,7 +2474,8 @@ def cmd_review_context():
     # 移動先への新規追加に見えるので、「置き間違えた」と誤読される)。入口は
     # `_artifact_move_reference` の 1 箇所で、--batch 経路も同じものを通る。
     _move_ref = _artifact_move_reference(pr=pr, pr_repo=pr_repo,
-                                         diff_ref=diff_ref)
+                                         diff_ref=diff_ref,
+                                         head_sha=_head_sha, gaps=gaps)
     if _move_ref is not None:
         external_references.append(_move_ref)
 
@@ -2726,7 +2762,9 @@ def cmd_review_batch_context():
     # judge を起動する既定経路なので、ここに無いと実運用では効かない。
     # リポジトリは収集が解決した値 (`_repo`) を使う。環境変数を読み直すと、
     # 差分を採った先と注記を採る先が食い違う形が作れる。
-    _move_ref = _artifact_move_reference(pr=pr, pr_repo=_repo)
+    _move_ref = _artifact_move_reference(pr=pr, pr_repo=_repo,
+                                         head_sha=_head_sha,
+                                         gaps=shared_gaps)
     if _move_ref is not None:
         external_references.append(_move_ref)
 

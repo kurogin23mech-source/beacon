@@ -197,3 +197,123 @@ def test_diff_ref_path_resolves_the_range(repo):
     # 2 点ドットでも割れる。
     ref2 = commands._artifact_move_reference(diff_ref=f"{base}..{head}")
     assert ref2 is not None and "tests/y.py" in ref2["content"], ref2
+
+
+# --- 範囲内で 2 回以上動いた場合 (独立 AX レビュー misleading) ---
+
+def test_multi_hop_move_reports_only_the_path_that_exists_at_head(repo):
+    """**本体**: 中間のパスを名指さない。出発点 → 最終の行き先の 1 行だけ。
+
+    初版は rename の hop を 1 つずつ出していたので、範囲内で 2 回動いた
+    ファイルでは **head にも差分にも存在しない中間パス** を名指す行が出た。
+    文脈ゼロの judge はそれを探して見つけられず「この注記は信用できない」と
+    読み、注記が守ろうとした『意図的な退役』の免罪ごと疑う —— この機能が
+    消すはずだった誤指摘に戻る。
+    """
+    path, git = repo
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create in tests/")
+    git("mv", "tests/y.py", "tests/intermediate.py")
+    git("commit", "-q", "-m", "rename once")
+    (path / "trash").mkdir()
+    git("mv", "tests/intermediate.py", "trash/y.py")
+    git("commit", "-q", "-m", "retire to trash/")
+    base, head = _base_head(path)
+
+    moves = commands._intra_range_moves(base, head)
+    # 1 行だけ。出発点は範囲に入る前の最初のパス。
+    assert [(m["path"], m["from"]) for m in moves] == [
+        ("trash/y.py", "tests/y.py")], moves
+    # 中間パスは **どこにも現れない** (judge が探して見つけられないものを書かない)。
+    ref = commands._artifact_move_reference(diff_ref=f"{base}...{head}")
+    assert "intermediate" not in ref["content"], ref["content"]
+    # 差分側でも中間は見えない (= 注記が差分と同じものを指している)。
+    out = subprocess.run(["git", "diff", "--name-status", f"{base}..{head}"],
+                         cwd=str(path), capture_output=True, text=True)
+    assert "intermediate" not in out.stdout, out.stdout
+
+
+def test_every_reported_destination_exists_at_head(repo):
+    """注記が名指す行き先は必ず head に実在する (= 探して見つかる)。
+
+    上の試験は 1 事例を固定するが、これは **全行** に掛ける性質。
+    """
+    path, git = repo
+    (path / "a").mkdir()
+    (path / "a" / "one.py").write_text("1\n", encoding="utf-8")
+    (path / "a" / "two.py").write_text("2\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create two")
+    (path / "b").mkdir()
+    git("mv", "a/one.py", "b/one.py")
+    git("mv", "a/two.py", "a/two_mid.py")
+    git("commit", "-q", "-m", "move both once")
+    git("mv", "a/two_mid.py", "b/two.py")
+    git("commit", "-q", "-m", "move two again")
+    base, head = _base_head(path)
+    moves = commands._intra_range_moves(base, head)
+    assert moves, "何も検出していない (前提が崩れている)"
+    for m in moves:
+        ok = subprocess.run(["git", "cat-file", "-e", f"{head}:{m['path']}"],
+                            cwd=str(path), capture_output=True)
+        assert ok.returncode == 0, f"head に無いパスを名指している: {m}"
+
+
+# --- 差分と注記が同じ sha を基準にすること (独立 AX レビュー silent) ---
+
+def test_note_uses_the_sha_the_diff_was_pinned_to(monkeypatch, repo):
+    """呼び出し側が解決済みの sha を渡したら、それを基準にする。
+
+    初版は注記のために `gh pr view` を**別に**叩いて head を引き直していたので、
+    差分採取との間に push が入ると「judge に渡る差分は古い head、注記は新しい
+    head」という食い違いが silent に起きた (e-6859 が直した型の再導入)。
+    """
+    path, git = repo
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create")
+    git("mv", "tests/y.py", "y.py")
+    git("commit", "-q", "-m", "move")
+    base, head = _base_head(path)
+
+    # gh は「別の head」を返す (= 読んでいる間に push された状況)。
+    def fake_git_ok(argv):
+        if argv[:3] == ["gh", "pr", "view"]:
+            return True, json.dumps({"baseRefOid": base,
+                                     "headRefOid": "f" * 40})
+        return commands._git_ok(argv)
+
+    real = commands._git_ok
+    monkeypatch.setattr(commands, "_git_ok",
+                        lambda argv: fake_git_ok(argv) if argv[:3] == ["gh", "pr", "view"]
+                        else real(argv))
+    gaps = []
+    ref = commands._artifact_move_reference(pr="1", head_sha=head, gaps=gaps)
+    # 注記は **渡された sha** を基準に組まれる (= 差分と同じものを見ている)。
+    assert ref is not None and "tests/y.py" in ref["content"], ref
+    # 食い違いは隠さず開示する。
+    assert any("head" in g and head[:12] in g for g in gaps), gaps
+
+
+def test_no_gap_when_the_two_shas_agree(monkeypatch, repo):
+    """一致しているときに警告を出さない (正常時にノイズを出さない)。"""
+    path, git = repo
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create")
+    git("mv", "tests/y.py", "y.py")
+    git("commit", "-q", "-m", "move")
+    base, head = _base_head(path)
+    real = commands._git_ok
+    monkeypatch.setattr(
+        commands, "_git_ok",
+        lambda argv: ((True, json.dumps({"baseRefOid": base, "headRefOid": head}))
+                      if argv[:3] == ["gh", "pr", "view"] else real(argv)))
+    gaps = []
+    ref = commands._artifact_move_reference(pr="1", head_sha=head, gaps=gaps)
+    assert ref is not None, ref
+    assert gaps == [], gaps
