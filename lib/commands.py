@@ -1949,11 +1949,32 @@ def _intra_range_moves(base: str, head: str) -> list:
         if not dst_at_head:
             continue
         # 連鎖を辿って **範囲に入る前の出発点** まで戻る (中間は出さない)。
+        #
+        # **訪問済みを覚えて循環で止める** (独立保守性レビュー high, origin=introduced)。
+        # `tests/y.py → trash/y.py → tests/y.py` のように **退避してから同じ範囲内で
+        # 元の場所へ戻す** 形 (= このリポジトリの日常操作) では連鎖が輪になる。初版は
+        # 訪問済みを記録していなかったので遡りが輪を回り続け、`guard` の上限に達した
+        # 時点の **偶奇依存の値** を「出発点」として採用していた。その値は base にも
+        # head にも無い中間パスでありうるし、**`git diff base..head` が完全に空
+        # (= 何も変わっていない) 場合でも「移動した」という注記が出た** —— judge に
+        # 的外れな弁明を手渡す形で、この機構が消そうとした誤読を逆向きに再生産する。
+        # judge が使い捨てリポジトリで 3 通り再現した。
+        #
+        # 輪に入ったら **この行き先は報告しない** (元の場所へ戻ったので、添える履歴が
+        # 無い)。上限に達した場合も推測値を出さずに落とす。
         origin, hop_commit = parent[dst]
+        seen_chain = {dst}
+        cyclic = False
         guard = 0
-        while origin in parent and guard < 64:
+        while origin in parent:
+            if origin in seen_chain or guard >= 64:
+                cyclic = True
+                break
+            seen_chain.add(origin)
             origin = parent[origin][0]
             guard += 1
+        if cyclic:
+            continue
         # 出発点が base に在るなら差分が rename として見せるので注記は不要。
         origin_at_base, _ = _git_ok(["git", "cat-file", "-e", f"{base}:{origin}"])
         if origin_at_base:

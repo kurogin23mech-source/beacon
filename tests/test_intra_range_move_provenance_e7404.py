@@ -317,3 +317,131 @@ def test_no_gap_when_the_two_shas_agree(monkeypatch, repo):
     ref = commands._artifact_move_reference(pr="1", head_sha=head, gaps=gaps)
     assert ref is not None, ref
     assert gaps == [], gaps
+
+
+# --- 範囲内で元の場所へ戻る循環 (独立保守性レビュー high, origin=introduced) ---
+#
+# `tests/y.py → trash/y.py → tests/y.py` のように **退避してから同じ範囲内で元へ
+# 戻す** 形は、このリポジトリの日常操作 (`.trash/` へ退避 → やめて戻す)。初版は
+# 遡りで訪問済みを覚えていなかったので連鎖の輪を回り続け、`guard` 上限到達時点の
+# **偶奇依存の値** を「出発点」として報告した。その値は base にも head にも無い
+# 中間パスでありうる。
+#
+# 最悪の形は **`git diff base..head` が完全に空 (= 何も変わっていない) のに
+# 「移動した」注記が出る** こと —— judge に的外れな弁明を手渡し、この機構が消そうと
+# した誤読を逆向きに再生産する。
+#
+# 初版の試験はここを覆えていなかった: `path` (行き先) が head に実在することは
+# 全行に掛けていたが、**`from` (由来) の正しさを一度も見ていなかった**。
+
+def test_round_trip_move_is_not_reported(repo):
+    """**本体**: 退避して元に戻したら注記しない (添える履歴が無い)。"""
+    path, git = repo
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base has tests/y.py")
+    base_with_file = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                                    capture_output=True, text=True).stdout.strip()
+    (path / "trash").mkdir()
+    git("mv", "tests/y.py", "trash/y.py")
+    git("commit", "-q", "-m", "retire")
+    git("mv", "trash/y.py", "tests/y.py")
+    git("commit", "-q", "-m", "restore")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    # 前提: 範囲の差分は空 (何も変わっていない)。
+    out = subprocess.run(["git", "diff", "--name-status", f"{base_with_file}..{head}"],
+                         cwd=str(path), capture_output=True, text=True)
+    assert out.stdout.strip() == "", out.stdout
+    assert commands._intra_range_moves(base_with_file, head) == []
+    assert commands._artifact_move_reference(
+        diff_ref=f"{base_with_file}...{head}") is None
+
+
+def test_three_node_cycle_is_not_reported(repo):
+    """3 つ巴の循環でも、存在しない中間パスを由来として出さない。"""
+    path, git = repo
+    for d in ("a", "b", "c"):
+        (path / d).mkdir()
+    (path / "a" / "f.py").write_text("f = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base has a/f.py")
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    git("mv", "a/f.py", "b/f.py")
+    git("commit", "-q", "-m", "a->b")
+    git("mv", "b/f.py", "c/f.py")
+    git("commit", "-q", "-m", "b->c")
+    git("mv", "c/f.py", "a/f.py")
+    git("commit", "-q", "-m", "c->a")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    moves = commands._intra_range_moves(base, head)
+    # 中間パス (b/ c/) を由来として名指さない。
+    assert all("b/f.py" != m["from"] and "c/f.py" != m["from"] for m in moves), moves
+    # 元の場所へ戻っているので、そもそも注記しない。
+    assert moves == [], moves
+
+
+def test_every_reported_source_is_absent_at_base(repo):
+    """**全行に掛ける性質**: 報告する由来は base に存在しない。
+
+    これが規則そのもの (base に在るなら差分が rename として見せるので注記は不要)。
+    初版の試験は行き先の実在だけを全行に掛けており、**由来の側を一度も見ていな
+    かった** —— そこが循環の欠陥を通した穴だった。
+    """
+    path, git = repo
+    # base に在るファイルの移動 (注記しないべき) と、範囲内で作って移したファイル
+    # (注記するべき) を混ぜる。
+    (path / "src").mkdir()
+    (path / "src" / "new.py").write_text("n = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create new.py inside range")
+    (path / "dst").mkdir()
+    git("mv", "src/new.py", "dst/new.py")
+    git("mv", "keep.py", "dst/keep.py")
+    git("commit", "-q", "-m", "move both")
+    base, head = _base_head(path)
+    moves = commands._intra_range_moves(base, head)
+    assert moves, "何も検出していない (前提が崩れている)"
+    for m in moves:
+        at_base = subprocess.run(["git", "cat-file", "-e", f"{base}:{m['from']}"],
+                                 cwd=str(path), capture_output=True)
+        assert at_base.returncode != 0, f"base に在る由来を報告している: {m}"
+    # base に在った keep.py の移動は注記されない。
+    assert all(m["from"] != "keep.py" for m in moves), moves
+
+
+def test_cycle_of_a_file_created_inside_the_range_is_not_reported(repo):
+    """循環 **かつ** 出発点が base に無い場合も報告しない。
+
+    **なぜこの 1 本が要るか** (自分の反転で判明): 上の 2 本 (退避→復元 / 3 つ巴) は
+    どちらも出発点が base に在るので、循環を検出し損ねても **base フィルタが
+    偶然捕まえる**。そのため「循環を検出したら落とす」の行を殺しても緑のままだった
+    = 私の試験がその行を固定できていなかった (偽の安全)。
+
+    範囲内で作られたファイルが循環すると base フィルタは効かない: 出発点が base に
+    無いので通ってしまい、`{path: a, from: a}` のような **自分自身を由来とする**
+    無意味な注記が出る。ここを固定する。
+    """
+    path, git = repo
+    (path / "a").mkdir()
+    (path / "b").mkdir()
+    (path / "a" / "made.py").write_text("m = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create inside range")
+    git("mv", "a/made.py", "b/made.py")
+    git("commit", "-q", "-m", "a->b")
+    git("mv", "b/made.py", "a/made.py")
+    git("commit", "-q", "-m", "b->a (cycle, origin absent at base)")
+    base, head = _base_head(path)
+    # 前提: 出発点は base に無い (= base フィルタは効かない)。
+    at_base = subprocess.run(["git", "cat-file", "-e", f"{base}:a/made.py"],
+                             cwd=str(path), capture_output=True)
+    assert at_base.returncode != 0, "前提が崩れている (base に在る)"
+    moves = commands._intra_range_moves(base, head)
+    # 自分自身を由来とする注記を出さない。
+    assert all(m["path"] != m["from"] for m in moves), moves
+    # 元の場所へ戻っているので、そもそも注記しない。
+    assert moves == [], moves
