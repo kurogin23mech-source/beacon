@@ -1936,6 +1936,32 @@ def _intra_range_moves(base: str, head: str) -> list:
                        "--name-status", "--format=%h", f"{base}..{head}"])
     if not ok:
         return []
+    # **差分が実際に rename として見せている組** を実測する (ms-119 e-7404 /
+    # 独立 AX レビュー 最終周 silent)。
+    #
+    # 初版はここを推測で済ませていた: 「出発点が base に在るなら差分が rename として
+    # 見せるので注記は不要」。**この前提は成り立たない** —— git の rename 検出は
+    # base/head 2 ツリー間の **内容類似度** だけで判定し、範囲内に記録された rename
+    # 履歴を見ない。だから移動後に中身を大きく書き換えると、出発点が base に在っても
+    # 差分は単なる削除 + 新規追加に見える。実測 (2026-11-12): 60 行のファイルを移動
+    # してから全行書き換えると `git diff --name-status -M base..head` は
+    # `A new/f.py` + `D old/f.py` を返し、**注記も 0 件** になった ——
+    # この機構が直そうとした「範囲内の移動が新規追加に見えて誤読される」症状が、
+    # 別の誘因でそのまま再発する。merge commit の衝突解消だけで動いた場合も同型。
+    #
+    # そこで **推測をやめて差分に訊く**。注記を省くのは「judge が差分だけで辿れる」
+    # ときだけで、それは差分が rename として見せている組に限る。
+    shown_as_rename = set()
+    ok_d, out_d = _git_ok(["git", "diff", "--name-status", "-M",
+                           f"{base}..{head}"])
+    if ok_d:
+        for line in out_d.splitlines():
+            if not line.startswith("R") or "\t" not in line:
+                continue
+            cols = line.split("\t")
+            if len(cols) >= 3:
+                shown_as_rename.add((cols[1], cols[2]))
+
     # いま追っている連鎖: 現在のパス -> {"origin": 出発点, "hops": [...]}。
     chains = {}
     commit = ""
@@ -1975,9 +2001,11 @@ def _intra_range_moves(base: str, head: str) -> list:
         # 元の場所へ戻ったなら添える履歴が無い (退避 → 復元は日常操作)。
         if origin == dst:
             continue
-        # 出発点が base に在るなら差分が rename として見せるので注記は不要。
-        origin_at_base, _ = _git_ok(["git", "cat-file", "-e", f"{base}:{origin}"])
-        if origin_at_base:
+        # **差分が rename として見せている組だけ注記を省く**。推測 (= 出発点が
+        # base に在るか) で代用しない —— 移動後に大きく書き換えた場合や merge の
+        # 衝突解消で動いた場合は、出発点が base に在っても差分は削除 + 新規追加に
+        # 見えるので、省くと judge は履歴を辿れない (最終周 silent の指摘)。
+        if (origin, dst) in shown_as_rename:
             continue
         moves.append({"path": dst, "from": origin,
                       "commit": chain["hops"][-1]["commit"],

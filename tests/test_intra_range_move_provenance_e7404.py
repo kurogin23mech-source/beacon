@@ -688,3 +688,65 @@ def test_freed_path_refilled_by_a_new_file_does_not_inherit_the_old_origin(repo)
     assert len(moves["zdir/z.py"]["hops"]) == 1, moves
     # Y は引き続き p0 を由来とする。
     assert moves["ydir/y.py"]["from"] == "p0dir/p0.py", moves
+
+
+# --- 注記を省く条件は「差分が rename として見せているか」の実測 ---
+#
+# 初版は「出発点が base に在るなら差分が rename として見せる」と **推測** していた。
+# git の rename 検出は base/head 2 ツリー間の **内容類似度** だけで判定し、範囲内に
+# 記録された rename 履歴を見ないので、この前提は成り立たない。移動後に中身を大きく
+# 書き換えると、出発点が base に在っても差分は削除 + 新規追加に見える —— そのとき
+# 注記も省かれ、**この機構が直そうとした誤読が別の誘因でそのまま再発する**
+# (独立 AX レビュー 最終周 silent)。
+
+def test_moved_then_heavily_rewritten_is_reported(repo):
+    """**本体**: 移動後に大きく書き換えた場合も注記する。
+
+    差分が rename として見せないので、judge は履歴を辿れない = 注記が要る。
+    初版はここが 0 件だった (出発点が base に在るので推測フィルタに捕まった)。
+    """
+    path, git = repo
+    (path / "old").mkdir()
+    (path / "new").mkdir()
+    (path / "old" / "f.py").write_text(
+        "\n".join(f"original line {i}" for i in range(60)) + "\n", encoding="utf-8")
+    _commit_all(path, git, "base has old/f.py")
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    git("mv", "old/f.py", "new/f.py")
+    git("commit", "-q", "-m", "move to new/")
+    (path / "new" / "f.py").write_text(
+        "\n".join(f"completely rewritten {i}" for i in range(60)) + "\n",
+        encoding="utf-8")
+    _commit_all(path, git, "rewrite heavily")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+
+    # 前提: 差分は rename として見せない (削除 + 新規追加に見える)。
+    out = subprocess.run(["git", "diff", "--name-status", "-M", f"{base}..{head}"],
+                         cwd=str(path), capture_output=True, text=True)
+    assert "R" not in out.stdout.split("\t")[0], out.stdout
+    assert "A\tnew/f.py" in out.stdout and "D\told/f.py" in out.stdout, out.stdout
+    # 前提: 出発点は base に在る (= 初版の推測フィルタが効いてしまう形)。
+    at_base = subprocess.run(["git", "cat-file", "-e", f"{base}:old/f.py"],
+                             cwd=str(path), capture_output=True)
+    assert at_base.returncode == 0, "前提が崩れている"
+
+    moves = commands._intra_range_moves(base, head)
+    assert [(m["path"], m["from"]) for m in moves] == [
+        ("new/f.py", "old/f.py")], moves
+
+
+def test_plain_rename_the_diff_already_shows_is_not_reported(repo):
+    """差分が rename として見せている組は注記しない (ノイズにしない)。
+
+    省く条件を実測に変えても、この「省くべき」側が崩れないことを押さえる。
+    """
+    path, git = repo
+    git("mv", "keep.py", "kept.py")
+    git("commit", "-q", "-m", "plain rename of a file present at base")
+    base, head = _base_head(path)
+    out = subprocess.run(["git", "diff", "--name-status", "-M", f"{base}..{head}"],
+                         cwd=str(path), capture_output=True, text=True)
+    assert out.stdout.startswith("R"), out.stdout
+    assert commands._intra_range_moves(base, head) == []
