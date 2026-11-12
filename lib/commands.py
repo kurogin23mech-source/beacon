@@ -1913,15 +1913,31 @@ def _intra_range_moves(base: str, head: str) -> list:
         ok, _ = _git_ok(["git", "cat-file", "-e", f"{ref}^{{commit}}"])
         if not ok:
             return []
-    # `--reverse` で **古い順** に読む。範囲内で 2 回以上動いたファイルの連鎖を
-    # 古→新の向きに辿るため (新しい順だと中間を親と取り違える)。
+    # `--reverse` で **古い順** に読み、**前向きに連鎖を組む** (ms-119 e-7404 /
+    # 独立保守性レビュー 収束周 high)。
+    #
+    # **なぜ後ろ向きに辿るのをやめたか**: 初版は「宛先パス → 直前の元パス」の辞書を
+    # 作って後ろ向きに遡っていた。だがその辞書は **宛先パスごとに最後の上書きしか
+    # 持たない** ので、範囲内で同じパスが再利用されると (A が p0→X→Y と動いて X を
+    # 空け、別ファイル B が後から q0→X に入る) 、Y の由来を遡る途中で `parent[X]` が
+    # **B の由来** にすり替わった。judge が 2 通り実行で確認:
+    #   * 無関係な 2 つの rename を 1 本の連鎖として縫い合わせ、真の由来を落とす
+    #     (しかも並びが「古い順」にもならない)
+    #   * 報告されるべき移動が **黙って落ちる** (すり替わった由来が base に在るため
+    #     「差分が rename として見せる」側のフィルタに誤って捕まる)
+    # **パスは時間とともに別のファイルを指す** —— パス文字列をキーに履歴を畳む形は
+    # その事実と噛み合わない。
+    #
+    # 前向き 1 パスなら、各 rename を起きた順に連鎖へ繋ぐだけなので、パスが空いた
+    # 時点で鍵も外れ、後から同じパスに入った別ファイルは **別の連鎖** になる。
+    # 後ろ向きの走査が無くなるので、遡りが輪を回って止まらない形も構造的に消える
+    # (初版はそこを上流の循環検出に一方的に依存していた —— 独立保守性レビュー low)。
     ok, out = _git_ok(["git", "log", "--reverse", "--diff-filter=R",
                        "--name-status", "--format=%h", f"{base}..{head}"])
     if not ok:
         return []
-    # new -> (old, 動かした commit)。同じ行き先が再度動けば後の hop が勝つ。
-    parent = {}
-    order = []
+    # いま追っている連鎖: 現在のパス -> {"origin": 出発点, "hops": [...]}。
+    chains = {}
     commit = ""
     for line in out.splitlines():
         if not line.strip():
@@ -1933,71 +1949,39 @@ def _intra_range_moves(base: str, head: str) -> list:
         if len(parts) < 3:
             continue
         src, dst = parts[1], parts[2]
-        if dst not in parent:
-            order.append(dst)
-        parent[dst] = (src, commit)
+        # **`pop` で元のパスの鍵を外す** のが要点 (独立保守性レビュー 収束周 high)。
+        # パスが空いたら鍵も消えるので、後から同じパスに入った別ファイル (rename で
+        # 入る場合も、新規作成で埋まってから動く場合も) は **別の連鎖** になる。
+        # `get` で残すと、空いたパスの鍵が古い連鎖を指したまま残り、そこに入った
+        # 別のファイルが他人の由来を名乗る。
+        #
+        # 行き先に別の連鎖が居た場合は、直後の `chains[dst] = chain` が上書きする
+        # ので明示的に消す必要は無い (置き換えられたファイルは head に残らないので、
+        # 仮に残っても最後の実在チェックで落ちる)。
+        chain = chains.pop(src, None)
+        if chain is None:
+            chain = {"origin": src, "hops": []}
+        chain["hops"].append({"from": src, "to": dst, "commit": commit})
+        chains[dst] = chain
 
     moves = []
-    for dst in order:
-        # **head に実在する行き先だけを出す** (独立 AX レビュー misleading)。
-        # 初版は rename の hop を 1 つずつ出していたので、範囲内で 2 回以上
-        # 動いたファイルでは **中間のパス** (head にも差分にも無い) を名指す行が
-        # 出た。judge はそれを探して見つけられず「この注記は信用できない」と
-        # 読み、注記が守ろうとした『意図的な退役』の免罪ごと疑う —— この機能が
-        # 消すはずだった誤指摘に戻る。judge が試験リポジトリで再現した。
+    for dst, chain in chains.items():
+        # **head に実在する行き先だけを出す**。範囲内で作られて消えた / さらに動いた
+        # パスを名指すと、judge が探して見つけられず注記全体を疑う。
         dst_at_head, _ = _git_ok(["git", "cat-file", "-e", f"{head}:{dst}"])
         if not dst_at_head:
             continue
-        # 連鎖を辿って **範囲に入る前の出発点** まで戻る (中間は出さない)。
-        #
-        # **訪問済みを覚えて循環で止める** (独立保守性レビュー high, origin=introduced)。
-        # `tests/y.py → trash/y.py → tests/y.py` のように **退避してから同じ範囲内で
-        # 元の場所へ戻す** 形 (= このリポジトリの日常操作) では連鎖が輪になる。初版は
-        # 訪問済みを記録していなかったので遡りが輪を回り続け、`guard` の上限に達した
-        # 時点の **偶奇依存の値** を「出発点」として採用していた。その値は base にも
-        # head にも無い中間パスでありうるし、**`git diff base..head` が完全に空
-        # (= 何も変わっていない) 場合でも「移動した」という注記が出た** —— judge に
-        # 的外れな弁明を手渡す形で、この機構が消そうとした誤読を逆向きに再生産する。
-        # judge が使い捨てリポジトリで 3 通り再現した。
-        #
-        # 輪に入ったら **この行き先は報告しない** (元の場所へ戻ったので、添える履歴が
-        # 無い)。上限に達した場合も推測値を出さずに落とす。
-        origin, hop_commit = parent[dst]
-        seen_chain = {dst}
-        cyclic = False
-        guard = 0
-        while origin in parent:
-            if origin in seen_chain or guard >= 64:
-                cyclic = True
-                break
-            seen_chain.add(origin)
-            origin = parent[origin][0]
-            guard += 1
-        if cyclic:
+        origin = chain["origin"]
+        # 元の場所へ戻ったなら添える履歴が無い (退避 → 復元は日常操作)。
+        if origin == dst:
             continue
         # 出発点が base に在るなら差分が rename として見せるので注記は不要。
         origin_at_base, _ = _git_ok(["git", "cat-file", "-e", f"{base}:{origin}"])
         if origin_at_base:
             continue
-        # **辿った道筋を commit ごと運ぶ** (独立 AX レビュー misleading)。
-        # 初版は出発点まで畳んだのに `commit` は **最後のホップ 1 つ** だけを載せて
-        # いた。judge がその commit を `git show` で裏取りすると、見えるのは
-        # **中間パスとの rename** で、注記が主張する出発点はどこにも現れない ——
-        # 「この注記は検証できない」と結論され、この機構が消すはずだった誤指摘に
-        # 戻る (judge が実行で確認)。証拠が主張を裏付けない形。
-        #
-        # 道筋 (hops) を古い順に全部載せれば、**各ホップがその commit で裏取り
-        # できる**。中間パスは「現在の置き場所」ではなく道筋の通過点として示す
-        # (前の周で直した「中間を行き先として名指す」形には戻さない)。
-        hops = []
-        cur = dst
-        while cur in parent:
-            src, c = parent[cur]
-            hops.append({"from": src, "to": cur, "commit": c})
-            cur = src
-        hops.reverse()
-        moves.append({"path": dst, "from": origin, "commit": hop_commit,
-                      "hops": hops})
+        moves.append({"path": dst, "from": origin,
+                      "commit": chain["hops"][-1]["commit"],
+                      "hops": list(chain["hops"])})
     return moves
 
 

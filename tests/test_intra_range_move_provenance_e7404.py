@@ -548,3 +548,143 @@ def test_single_hop_note_has_no_trail(repo):
     base, head = _base_head(path)
     ref = commands._artifact_move_reference(diff_ref=f"{base}...{head}")
     assert ref is not None and "道筋" not in ref["content"], ref["content"]
+
+
+# --- パスの再利用 (独立保守性レビュー 収束周 high, origin=introduced) ---
+#
+# **パスは時間とともに別のファイルを指す**。初版は「宛先パス → 直前の元パス」の辞書を
+# 作って後ろ向きに遡っていたが、その辞書は宛先ごとに **最後の上書きしか持たない**。
+# 範囲内で同じパスが再利用されると (A が p0→X→Y で X を空け、B が後から q0→X に入る)、
+# Y の由来を遡る途中で X の値が **B の由来** にすり替わった。judge が 2 通り実行で確認:
+#   * 無関係な 2 つの rename を 1 本に縫い合わせ、真の由来を落とす
+#   * 報告されるべき移動が黙って落ちる (すり替わった由来が base に在るため、
+#     「差分が rename として見せる」側のフィルタに誤って捕まる)
+#
+# 直しは **時系列で前向きに連鎖を組む** 方式への作り替え。パスが空いた時点で鍵も
+# 外れるので、後から同じパスに入った別ファイルは別の連鎖になる。
+
+def _commit_all(path, git, msg):
+    git("add", "-A")
+    git("commit", "-q", "-m", msg)
+
+
+def test_path_reuse_keeps_each_chain_separate(repo):
+    """**本体**: 空いたパスに別ファイルが入っても、由来が混ざらない。
+
+    judge のケース1 の再現: B は範囲内で新規作成される。
+    """
+    path, git = repo
+    for d in ("p0dir", "q0dir", "xdir", "ydir"):
+        (path / d).mkdir()
+    (path / "p0dir" / "p0.py").write_text("a\n", encoding="utf-8")
+    _commit_all(path, git, "create p0 inside range")
+    git("mv", "p0dir/p0.py", "xdir/x.py")
+    git("commit", "-q", "-m", "p0 -> X")
+    git("mv", "xdir/x.py", "ydir/y.py")
+    git("commit", "-q", "-m", "X -> Y")
+    (path / "q0dir" / "q0.py").write_text("b\n", encoding="utf-8")
+    _commit_all(path, git, "create q0 inside range")
+    git("mv", "q0dir/q0.py", "xdir/x.py")
+    git("commit", "-q", "-m", "q0 -> X (path reuse)")
+    base, head = _base_head(path)
+
+    moves = {m["path"]: m for m in commands._intra_range_moves(base, head)}
+    # Y の由来は **p0** (すり替わらない)。
+    assert moves["ydir/y.py"]["from"] == "p0dir/p0.py", moves
+    assert [(h["from"], h["to"]) for h in moves["ydir/y.py"]["hops"]] == [
+        ("p0dir/p0.py", "xdir/x.py"), ("xdir/x.py", "ydir/y.py")], moves
+    # X に入った B は **別の連鎖** として、自分の由来で報告される。
+    assert moves["xdir/x.py"]["from"] == "q0dir/q0.py", moves
+    assert len(moves["xdir/x.py"]["hops"]) == 1, moves
+
+
+def test_path_reuse_does_not_swallow_the_real_move(repo):
+    """**本体**: 再利用した側が base に在っても、本来の移動を落とさない。
+
+    judge のケース2 の再現。すり替わった由来が base に在ると、base フィルタが
+    誤って効いて **報告が 0 件になる** のが初版の欠陥だった。
+    """
+    path, git = repo
+    for d in ("p0dir", "xdir", "ydir"):
+        (path / d).mkdir()
+    (path / "q0_at_base.py").write_text("q\n", encoding="utf-8")
+    _commit_all(path, git, "base has q0_at_base.py")
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    (path / "p0dir" / "p0.py").write_text("a\n", encoding="utf-8")
+    _commit_all(path, git, "create p0 inside range")
+    git("mv", "p0dir/p0.py", "xdir/x.py")
+    git("commit", "-q", "-m", "p0 -> X")
+    git("mv", "xdir/x.py", "ydir/y.py")
+    git("commit", "-q", "-m", "X -> Y")
+    git("mv", "q0_at_base.py", "xdir/x.py")
+    git("commit", "-q", "-m", "q0(at base) -> X (path reuse)")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+
+    # 前提: 差分では ydir/y.py が素の追加に見え、真の由来は base に無い
+    # (= まさに注記すべき形)。
+    out = subprocess.run(["git", "diff", "--name-status", f"{base}..{head}"],
+                         cwd=str(path), capture_output=True, text=True)
+    assert "A\tydir/y.py" in out.stdout, out.stdout
+    at_base = subprocess.run(["git", "cat-file", "-e", f"{base}:p0dir/p0.py"],
+                             cwd=str(path), capture_output=True)
+    assert at_base.returncode != 0, "前提が崩れている"
+
+    moves = {m["path"]: m for m in commands._intra_range_moves(base, head)}
+    assert "ydir/y.py" in moves, f"本来の移動が落ちている: {moves}"
+    assert moves["ydir/y.py"]["from"] == "p0dir/p0.py", moves
+    # base に在ったファイルの移動 (q0_at_base -> X) は注記しない。
+    assert "xdir/x.py" not in moves, moves
+
+
+def test_no_backward_walk_remains(repo):
+    """後ろ向きに遡るループが存在しないこと (= 上流の循環検出に依存しない)。
+
+    独立保守性レビュー low: 初版の `hops` 再構成ループは visited-set も上限も持たず、
+    「ここに循環は来ない」を数行離れた検出ロジックに一方的に依存していた (検出を
+    殺すとハングした)。前向き 1 パスに作り替えたので遡りが存在しない —— その構造を
+    固定する (後ろ向きの走査が戻ってきたら、依存も戻ってくる)。
+    """
+    import ast
+    src = (pathlib.Path(__file__).resolve().parents[1] / "lib" / "commands.py"
+           ).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_intra_range_moves")
+    # while ループを持たない (前向きの for 1 パスだけ)。
+    whiles = [n for n in ast.walk(fn) if isinstance(n, ast.While)]
+    assert whiles == [], f"後ろ向きの走査が戻っている: {len(whiles)} 個の while"
+
+
+def test_freed_path_refilled_by_a_new_file_does_not_inherit_the_old_origin(repo):
+    """空いたパスが **新規作成** で埋まり、それが動いても由来を受け継がない。
+
+    **なぜこの 1 本が要るか** (自分の反転で判明): 連鎖の引き継ぎを `pop` から `get` に
+    変えても、既存の試験は全部緑のままだった —— 既存の再利用ケースは rename で
+    埋まるので、別経路で古い鍵が消えて偶然同じ結果になる。古い鍵が残る害が出るのは
+    **空いたパスが新規作成で埋まり、そこから動く** 形。そのとき `get` 版は新しい
+    ファイルに他人の由来 (p0) を名乗らせる。
+    """
+    path, git = repo
+    for d in ("p0dir", "xdir", "ydir", "zdir"):
+        (path / d).mkdir()
+    (path / "p0dir" / "p0.py").write_text("a\n", encoding="utf-8")
+    _commit_all(path, git, "create p0 inside range")
+    git("mv", "p0dir/p0.py", "xdir/x.py")
+    git("commit", "-q", "-m", "p0 -> X")
+    git("mv", "xdir/x.py", "ydir/y.py")
+    git("commit", "-q", "-m", "X -> Y (X is now free)")
+    # 空いた X を **新規作成** で埋める (rename ではない)。
+    (path / "xdir" / "x.py").write_text("brand new\n", encoding="utf-8")
+    _commit_all(path, git, "create a NEW file at the freed path X")
+    git("mv", "xdir/x.py", "zdir/z.py")
+    git("commit", "-q", "-m", "X -> Z (the new file moves)")
+    base, head = _base_head(path)
+
+    moves = {m["path"]: m for m in commands._intra_range_moves(base, head)}
+    # Z は **自分の出発点 (X)** を名乗る。p0 を受け継がない。
+    assert moves["zdir/z.py"]["from"] == "xdir/x.py", moves
+    assert len(moves["zdir/z.py"]["hops"]) == 1, moves
+    # Y は引き続き p0 を由来とする。
+    assert moves["ydir/y.py"]["from"] == "p0dir/p0.py", moves
