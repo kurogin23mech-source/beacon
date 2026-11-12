@@ -830,3 +830,65 @@ def review_bindings_for_completion(*, has_spec=False, gated=False):
             "origin": "SPEC / vision",
         })
     return bindings
+
+
+def build_intra_range_move_reference(moves):
+    """差分の範囲内で「移動してきた」ファイルを judge に伝える参照を組む
+    (ms-119 e-7404)。
+
+    **なぜ要るか** (2026-11-12 の実測で判明): judge に渡す差分は base..head の
+    1 枚なので、**同じ範囲内でファイルが作られ、その後 別の場所へ移された**場合、
+    base に元のパスが無いため「移動先に新規追加された」としか見えない。rename
+    検出 (git の ``-M``) では復元できない —— rename の相手が base に存在しないため。
+
+    実害 (PR#840 の 6 周目): `.trash/` へ退避した試験ファイルについて、独立 judge
+    2 体が揃って「新しく書いた現役の試験を置き間違えた、tests/ へ戻すべき」と
+    high で指摘した。渡された差分に対しては **judge の読みは正しかった** —— 欠けて
+    いたのは「この範囲内で移動してきた」という履歴。このリポジトリは ``rm`` を
+    使わず ``.trash/`` へ ``mv`` して退役させる運用なので、退役のたびに構造的に
+    再発する。しかも全 judge が同じ入力を読むので **2 体一致が誤りを強める方向に
+    働き、合意度では濾せない**。
+
+    起票時の見立て (= rename 検出が効いていない) は実測で否定された: ``git show`` /
+    ``git diff`` は ``diff.renames`` 既定 true で既に rename を検出しており、
+    ``gh pr diff`` も検出する。``-M`` を足すのはバイト単位で同一の no-op だった。
+    真因は上記の「範囲内の create → 移動」。
+
+    ``moves`` は ``[{"path": 移動先, "from": 元パス, "commit": 移動した commit}]``。
+    空なら None (= 載せるものが無い。空の参照を載せて「確認した」に見せない)。
+    """
+    items = [m for m in (moves or [])
+             if (m or {}).get("path") and (m or {}).get("from")]
+    if not items:
+        return None
+    lines = [
+        "この差分の範囲内で **移動してきた** ファイル (差分では移動先への新規追加に"
+        "見えるが、元は範囲内の別の場所に在った):",
+    ]
+    for m in items:
+        commit = str(m.get("commit") or "").strip()
+        suffix = f" (移動した commit: {commit})" if commit else ""
+        lines.append(f"  - {m['path']} ← {m['from']}{suffix}")
+        # 2 回以上動いた場合は **辿った道筋を commit ごと** 添える
+        # (ms-119 / 独立 AX レビュー misleading)。単一の commit だけを載せると、
+        # judge がそれを `git show` で裏取りしたときに中間パスとの rename しか
+        # 見えず、注記が主張する出発点が現れない = 証拠が主張を裏付けない。
+        # 中間パスは「現在の置き場所」ではなく **道筋の通過点** として示す。
+        hops = [h for h in (m.get("hops") or [])
+                if (h or {}).get("from") and (h or {}).get("to")]
+        if len(hops) > 1:
+            trail = " → ".join(
+                [hops[0]["from"]]
+                + [f"({h.get('commit') or '?'}) {h['to']}" for h in hops])
+            lines.append(f"      道筋 (この範囲内で辿った通過点、現在の置き場所では"
+                         f"ない): {trail}")
+    lines.append(
+        "判定の含意: 移動先が `.trash/` 等の退役置き場なら、これは **意図的な退役** "
+        "であって『新しく書いたものを置き間違えた』ではない。元の場所へ戻す提案を"
+        "する前に、移動が意図的かを差分の範囲の記録で確かめること。")
+    return {
+        "id": "intra-range-moves",
+        "kind": "artifact-provenance",
+        "content": "\n".join(lines),
+        "moves": items,
+    }
