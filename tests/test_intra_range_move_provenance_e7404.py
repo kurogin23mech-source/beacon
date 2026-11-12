@@ -226,9 +226,19 @@ def test_multi_hop_move_reports_only_the_path_that_exists_at_head(repo):
     # 1 行だけ。出発点は範囲に入る前の最初のパス。
     assert [(m["path"], m["from"]) for m in moves] == [
         ("trash/y.py", "tests/y.py")], moves
-    # 中間パスは **どこにも現れない** (judge が探して見つけられないものを書かない)。
+    # **中間パスを「報告する行き先」として名指さない**。これが守るべき性質。
+    #
+    # 初版はここを「中間パスは本文にどこにも現れない」と書いていたが、後の周の
+    # 独立 AX レビューが「単一 commit では主張を裏取りできない」を指摘したため、
+    # 道筋 (通過点 + 各 commit) を本文に添えるようにした。2 つの指摘は衝突する
+    # ように見えて両立する: judge が **ファイルとして探す** のは報告された行き先
+    # (`path`) なので、そこに中間を出さなければ「探して見つからない」は起きない。
+    # 通過点は履歴として明示ラベル付きで示すので、現在の置き場所と取り違えない。
+    assert all(m["path"] != "tests/intermediate.py" for m in moves), moves
     ref = commands._artifact_move_reference(diff_ref=f"{base}...{head}")
-    assert "intermediate" not in ref["content"], ref["content"]
+    # 通過点として出る場合は「現在の置き場所ではない」と明示されている。
+    if "tests/intermediate.py" in ref["content"]:
+        assert "現在の置き場所ではない" in ref["content"], ref["content"]
     # 差分側でも中間は見えない (= 注記が差分と同じものを指している)。
     out = subprocess.run(["git", "diff", "--name-status", f"{base}..{head}"],
                          cwd=str(path), capture_output=True, text=True)
@@ -445,3 +455,96 @@ def test_cycle_of_a_file_created_inside_the_range_is_not_reported(repo):
     assert all(m["path"] != m["from"] for m in moves), moves
     # 元の場所へ戻っているので、そもそも注記しない。
     assert moves == [], moves
+
+
+# --- 注記の主張が、添えた commit で裏取りできること (独立 AX レビュー misleading) ---
+#
+# 前の周で「連鎖を出発点まで畳む」ように直したが、`commit` は **最後のホップ 1 つ**
+# だけを載せていた。judge がその commit を `git show` で裏取りすると、見えるのは
+# **中間パスとの rename** で、注記が主張する出発点はどこにも現れない ——
+# 「この注記は検証できない」と結論され、この機構が消すはずだった誤指摘に戻る。
+# 証拠が主張を裏付けない形 (judge が実行で確認)。
+
+def test_multi_hop_note_is_verifiable_commit_by_commit(repo):
+    """**本体**: 道筋の各ホップが、その commit を見れば確かめられる。
+
+    注記に載る全ての (from → to, commit) の組について、`git show --name-status
+    <commit>` に実際にその rename が現れることを機械的に突き合わせる。
+    """
+    path, git = repo
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create in tests/")
+    git("mv", "tests/y.py", "tests/intermediate.py")
+    git("commit", "-q", "-m", "rename once")
+    (path / "trash").mkdir()
+    git("mv", "tests/intermediate.py", "trash/y.py")
+    git("commit", "-q", "-m", "retire to trash/")
+    base, head = _base_head(path)
+
+    moves = commands._intra_range_moves(base, head)
+    assert len(moves) == 1, moves
+    hops = moves[0].get("hops") or []
+    assert len(hops) == 2, hops
+    # **向きを固定する** (自分の反転で判明: 逆順でも緑のままだった)。道筋は
+    # 出発点から現在の行き先へ向かって並ぶ。逆だと本文が「中間 → 行き先 → 中間」と
+    # 読め、judge に移動の向きを誤って伝える。
+    assert hops[0]["from"] == moves[0]["from"], hops
+    assert hops[-1]["to"] == moves[0]["path"], hops
+    # 隣り合うホップが繋がっている (= 途切れた道筋を出さない)。
+    for a, b in zip(hops, hops[1:]):
+        assert a["to"] == b["from"], (a, b)
+    for h in hops:
+        out = subprocess.run(
+            ["git", "show", "--name-status", "--format=", h["commit"]],
+            cwd=str(path), capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        # その commit に、そのホップの rename が実際に現れる。
+        assert h["from"] in out.stdout and h["to"] in out.stdout, (
+            f"ホップ {h} が commit {h['commit']} で裏取りできない:\n{out.stdout}")
+
+
+def test_multi_hop_reference_shows_the_trail_with_commits(repo):
+    """judge 向けの注記本文に、道筋と各 commit が載ること。
+
+    単一の commit だけを載せて「移動した」と主張する形には戻さない。
+    """
+    path, git = repo
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create")
+    git("mv", "tests/y.py", "tests/mid.py")
+    git("commit", "-q", "-m", "hop 1")
+    (path / "trash").mkdir()
+    git("mv", "tests/mid.py", "trash/y.py")
+    git("commit", "-q", "-m", "hop 2")
+    base, head = _base_head(path)
+    ref = commands._artifact_move_reference(diff_ref=f"{base}...{head}")
+    assert ref is not None, ref
+    content = ref["content"]
+    assert "道筋" in content, content
+    # 全ホップの commit が本文に出る (= judge が 1 つずつ裏取りできる)。
+    for h in ref["moves"][0]["hops"]:
+        assert h["commit"] in content, (h, content)
+    # 通過点であることが明示される (= 現在の置き場所と取り違えさせない)。
+    assert "現在の置き場所ではない" in content, content
+    # 本文の道筋も 出発点 → 行き先 の向きで並ぶ。
+    trail_line = [ln for ln in content.splitlines() if "道筋" in ln][0]
+    mv = ref["moves"][0]
+    assert trail_line.index(mv["from"]) < trail_line.rindex(mv["path"]), trail_line
+
+
+def test_single_hop_note_has_no_trail(repo):
+    """1 回だけ動いた場合は道筋を添えない (正常時にノイズを出さない)。"""
+    path, git = repo
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create")
+    git("mv", "tests/y.py", "y.py")
+    git("commit", "-q", "-m", "move once")
+    base, head = _base_head(path)
+    ref = commands._artifact_move_reference(diff_ref=f"{base}...{head}")
+    assert ref is not None and "道筋" not in ref["content"], ref["content"]

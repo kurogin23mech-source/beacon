@@ -869,6 +869,19 @@ def build_intra_range_move_reference(moves):
         commit = str(m.get("commit") or "").strip()
         suffix = f" (移動した commit: {commit})" if commit else ""
         lines.append(f"  - {m['path']} ← {m['from']}{suffix}")
+        # 2 回以上動いた場合は **辿った道筋を commit ごと** 添える
+        # (ms-119 / 独立 AX レビュー misleading)。単一の commit だけを載せると、
+        # judge がそれを `git show` で裏取りしたときに中間パスとの rename しか
+        # 見えず、注記が主張する出発点が現れない = 証拠が主張を裏付けない。
+        # 中間パスは「現在の置き場所」ではなく **道筋の通過点** として示す。
+        hops = [h for h in (m.get("hops") or [])
+                if (h or {}).get("from") and (h or {}).get("to")]
+        if len(hops) > 1:
+            trail = " → ".join(
+                [hops[0]["from"]]
+                + [f"({h.get('commit') or '?'}) {h['to']}" for h in hops])
+            lines.append(f"      道筋 (この範囲内で辿った通過点、現在の置き場所では"
+                         f"ない): {trail}")
     lines.append(
         "判定の含意: 移動先が `.trash/` 等の退役置き場なら、これは **意図的な退役** "
         "であって『新しく書いたものを置き間違えた』ではない。元の場所へ戻す提案を"

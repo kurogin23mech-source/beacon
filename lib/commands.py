@@ -1979,7 +1979,25 @@ def _intra_range_moves(base: str, head: str) -> list:
         origin_at_base, _ = _git_ok(["git", "cat-file", "-e", f"{base}:{origin}"])
         if origin_at_base:
             continue
-        moves.append({"path": dst, "from": origin, "commit": hop_commit})
+        # **辿った道筋を commit ごと運ぶ** (独立 AX レビュー misleading)。
+        # 初版は出発点まで畳んだのに `commit` は **最後のホップ 1 つ** だけを載せて
+        # いた。judge がその commit を `git show` で裏取りすると、見えるのは
+        # **中間パスとの rename** で、注記が主張する出発点はどこにも現れない ——
+        # 「この注記は検証できない」と結論され、この機構が消すはずだった誤指摘に
+        # 戻る (judge が実行で確認)。証拠が主張を裏付けない形。
+        #
+        # 道筋 (hops) を古い順に全部載せれば、**各ホップがその commit で裏取り
+        # できる**。中間パスは「現在の置き場所」ではなく道筋の通過点として示す
+        # (前の周で直した「中間を行き先として名指す」形には戻さない)。
+        hops = []
+        cur = dst
+        while cur in parent:
+            src, c = parent[cur]
+            hops.append({"from": src, "to": cur, "commit": c})
+            cur = src
+        hops.reverse()
+        moves.append({"path": dst, "from": origin, "commit": hop_commit,
+                      "hops": hops})
     return moves
 
 
