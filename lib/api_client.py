@@ -1139,55 +1139,14 @@ class ApiClient:
             if s.get("session_id") == session_id:
                 return s
         return {}
-
-    # Trek operations (ms-69 / e-1681)
-    #
-    # Top-level resource (= not under /api/projects/) because treks bridge
-    # projects. Caller does not pass a project_id — trek membership lives at
-    # the user grain (user_id + email), so the auth token alone identifies
-    # the caller. See server/app.py /api/treks/* endpoints (e-1656).
-
-    def list_treks(self, *, status: str = "", include_archived: bool = False,
-                   all_actors: bool = False) -> list:
-        """List treks visible to the caller. Default scope = creator OR member.
-
-        ``status``: filter by lifecycle (planning|active|archived).
-        ``include_archived``: also surface archived treks (default hides).
-        ``all_actors``: admin view (= every trek). Non-admin caller gets 403.
-        """
-        qs = []
-        if status:
-            qs.append(f"status={urllib.parse.quote(status)}")
-        if include_archived:
-            qs.append("include_archived=true")
-        if all_actors:
-            qs.append("all_actors=true")
-        suffix = "?" + "&".join(qs) if qs else ""
-        return self.get(f"/api/treks{suffix}")
-    # ms-185 e-7071: 共同作業空間 (Trek) の HTTP クライアントのうち **32 メソッドを
-    # 落とした**。e-7070 がサーバ側の書き込み 41 ルートを落としたので、これらは
-    # 呼び出すと必ず 404 になる死んだメソッドだった (api_client.py の外に呼び出し元が
-    # 無いことを全 32 件について実測してから落とした — 元の呼び出し元は
-    # lib/cmd_trek.py で、それ自体が e-7070 で .trash/ へ移っている)。
-    #
-    # **残したのは読み出し 2 つだけ**: list_treks (GET /api/treks) と
-    # get_trek (GET /api/treks/{trek_id})。過去の記録を読む面は e-7081 の判断で
-    # 残す面であり、tests/test_trek_record_read_surface_e7081.py が固定している。
-    #
-    # 独立 AX レビューがこの不統一を指摘した: store 層の削除 (lib/store.py ほか) には
-    # 「どこへ行ったか」の説明コメントを残したのに、ここだけ死んだメソッドが
-    # 生きているように見える名前で残っていた。レビューは 4 件を挙げたが、生存ルートと
-    # HTTP 動詞まで突き合わせて数え直すと 32 件だった。
-
-
-    def get_trek(self, trek_id: str) -> dict:
-        """Fetch a single trek by id. 403 if caller is neither creator nor member."""
-        return self.get(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}")
-
-    # ------------------------------------------------------------------
-    # Organizations (ms-118 / e-4231) — top-level tenancy entity.
-    # Mirrors the trek methods above: create/list/show over /api/orgs.
-    # ------------------------------------------------------------------
+    # ms-185 e-7322 / e-7327: ここに Trek の HTTP クライアント読み出し 2 つ
+    # (``list_treks`` / ``get_trek``) が在った。e-7071 の注記は「残したのは読み出し
+    # 2 つだけ」と書いていたが、``get_trek`` は同じコミットで唯一の呼び出し元
+    # (``store_api.StoreApi.get_trek``) も消しており呼び出し元ゼロ、``list_treks`` の
+    # 唯一の呼び出し元 ``StoreApi.list_treks`` も e-7322 で落ちた。32 メソッドに適用
+    # した「呼び出し元ゼロなら落とす」をこの 2 つにも適用する。サーバ側の HTTP
+    # ルートは残っており (tests/test_trek_record_read_surface_e7081.py が固定)、
+    # 読みたければ curl / ブラウザから引ける。
     def create_org(self, *, name: str) -> dict:
         """Create a team org. Caller (= auth token's user) becomes owner.
 

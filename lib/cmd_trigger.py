@@ -40,8 +40,11 @@ from commands_shared import (
     parse_review_due_filename,
     reviewed_marker_paths,
     _fire_pr_open_review_triggers,
-    _pending_review_types_for_pr,
+    _pr_open_review_nudge_pending_types,
     _pr_open_reviewed_marker_path,
+    reviewed_marker_sha,
+    pr_review_obligations,
+    review_blocking_types,
     _get_cloud_config_path,
     _resolve_active_api_url,
     _extract_token,
@@ -688,6 +691,116 @@ def _auto_fire_release_marker_trigger() -> None:
         f.write("\n")
 
 
+def _retire_satisfied_pr_review_nudges(open_prs: list) -> None:
+    """**もう関門を止めていない** 種別の促しを下げる (ms-119 e-7359)。
+
+    促しと関門が同じ意味になるための残り半分。``_auto_fire_...`` が
+    「head が進んだら促しを戻す」側を担い、ここが「もう止めていないなら促しを
+    下げる」側を担う。両方が同じ導出 (``pr_review_obligations``) を真値にする。
+
+    何が困っていたか: 促しは **いまの作業フォルダのトリガーファイル** だけを見るので、
+    fork で ``review done`` を打つと関門は開く (作業フォルダ横断の台帳を読むため) のに、
+    親の ``beacon trigger check`` には促しが出続けた。逆向きのズレ (実施後にコミットを
+    積むと関門は赤に戻るのに促しは出ない) は anchor 側で閉じたが、こちらが残っていた。
+    **向きが逆の 2 つのズレが並ぶと、促しだけ見ている人は「もう要らない」と誤読する。**
+
+    ``trigger check`` ではなく **tick でやる** のが要点。``check`` は安価な読み取りに
+    保つ契約がある (ms-98 e-2764: 以前 check が無条件に cloud を叩き、Skill の各 Step が
+    それを呼んだため 429 の嵐になった)。促しごとに gh を叩くのは同じ轍なので、
+    head は anchor が既に取った ``gh pr list`` の結果を使い回す。
+
+    **下げる側に倒すのは「もう止めていない」と確かめられたときだけ。** head が
+    取れない PR は触らない (促しは出す側に倒す —— 止める力が無いので、過剰に促して
+    煩いのは実害が小さく、促さないのは事故に直結する)。
+    """
+    if not open_prs:
+        return
+    try:
+        triggers_dir = _get_triggers_dir()
+        existing = os.listdir(triggers_dir)
+    except OSError:
+        return
+    for pr in open_prs:
+        num = str(pr.get("number") or "").strip()
+        head = str(pr.get("headRefOid") or "").strip()
+        if not num:
+            continue
+        if not head:
+            # ms-119 e-7359 AC4: **黙って据え置かない。** 促しを残す側に倒すのは
+            # 正しいが、「確かめたうえで残した」と「確かめられないので残した」は
+            # 読み手にとって別の情報。gh が PR を返したのに headRefOid が無い形は
+            # 稀なので、出ても騒がしくならない。
+            print(f"ℹ {core.extract_pr_repo_from_url(pr.get('url') or '') or 'PR'}"
+                  f"#{num} の促しは据え置きました — いまの差分 (head) を確かめられず、"
+                  f"関門を止めているかを判定できませんでした。",
+                  file=sys.stderr)
+            continue
+        repo = core.extract_pr_repo_from_url(pr.get("url") or "")
+        try:
+            ob = pr_review_obligations(num, repo, head_sha=head)
+        except Exception:
+            continue                     # 導出できないなら触らない
+        if not ob.get("resolved"):
+            continue
+        blocking = set(review_blocking_types(ob))
+        for fn in existing:
+            parsed = parse_review_due_filename(fn)
+            if parsed is None:
+                continue
+            rtype, fn_pr, fn_repo = parsed
+            if fn_pr != num:
+                continue
+            if fn_repo and repo and fn_repo != repo:
+                continue
+            if rtype in blocking:
+                continue                 # まだ止めている = 促しは残す
+            try:
+                os.remove(os.path.join(triggers_dir, fn))
+            except OSError:
+                continue
+            print(f"ℹ {repo or 'PR'}#{num} の {rtype} の促しを下げました "
+                  f"({head[:12]} に対して関門を止めていません — 別の作業フォルダで"
+                  f"実施された / 理由付きで免除された)。", file=sys.stderr)
+
+
+def nudge_types_to_fire_for_pr(pr_number: str, pr_repo: str, head_sha: str,
+                               present_types: set):
+    """この PR で **促しを足すべき** 種別と表示名を返す (ms-119)。
+
+    返り値は ``[(review_type, label), ...]``。導出が使えなかったときだけ
+    ``None`` を返し、呼び出し側は旧経路 (全か無か + マーカー検査) に退く。
+
+    **なぜ切り出すか** (独立 AX レビュー 7 周目 の skill_gap): 促しは 2 方向
+    (足す / 下げる) で維持される派生状態なのに、**下げる方向にしか専用の試験が
+    無かった**。足す側は発火元の anchor 関数が ``PYTEST_CURRENT_TEST`` で即
+    return するため、そのままでは試験から駆動できない —— 試験できない形だった
+    ことが、非対称 (1 種別だけ実施済みのとき、もう片方の促しが二度と復活しない)
+    を 7 周目まで生かしていた。判定だけを独立に呼べる形にして、両方向に試験を
+    置けるようにする。
+
+    判定は **関門が読むのと同じ導出** (``pr_review_obligations``) を使う。
+    促し側で独立に「実施済みか」を計算すると、同じ問いに 2 つの答えが生まれる
+    (このリポジトリが繰り返し踏んでいる型)。``head_sha`` は呼び出し側が
+    ``gh pr list`` で得た値をそのまま渡す (gh を二度聞かない)。空文字なら
+    「確かめられない」として扱われ、促しは **出す側に倒れる**。
+    """
+    num = str(pr_number or "").strip()
+    if not num:
+        return None
+    try:
+        ob = pr_review_obligations(num, pr_repo, head_sha=head_sha)
+        owed = set(ob.get("owed") or [])
+    except Exception:
+        return None
+    missing = owed - set(present_types or ())
+    if not missing:
+        return []
+    import review_spine
+    descs = review_spine.judge_run_review_types()
+    return [(tid, (descs.get(tid) or {}).get("label", tid))
+            for tid in sorted(missing)]
+
+
 def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
     """Anchor firing to the real PR-open event (ms-119 e-4060): scan GitHub's
     OPEN PRs and fire the pr-open review-due triggers for any that lack them.
@@ -708,14 +821,16 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
     try:
         import subprocess
         r = subprocess.run(
+            # ms-119 e-6859: headRefOid も聞く。同じ 1 リクエストなので追加費用は
+            # 無く、これで「いまの差分まで見たか」を促し側も判定できる。
             ["gh", "pr", "list", "--state", "open", "--json",
-             "number,title,url"],
+             "number,title,url,headRefOid"],
             capture_output=True, text=True, timeout=15)
         if r.returncode != 0 or not r.stdout.strip():
             return
         open_prs = json.loads(r.stdout)
     except Exception:
-        return
+        return None
     for pr in open_prs:
         num = str(pr.get("number") or "").strip()
         if not num:
@@ -747,30 +862,86 @@ def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
         # 自分の repo 付きと旧式の両方を消すので 1 回の `review done` で解消する
         # (= 二重の義務は残らない)。既にレビュー済みの PR は下のマーカー検査で止まる。
         _repo = core.extract_pr_repo_from_url(pr.get("url") or "")
-        if any((lambda p: p is not None and p[1] == num and p[2] == _repo)(
-                    parse_review_due_filename(fn))
-               for fn in existing):
+        # **促しは種別ごとに揃える** (独立 AX レビュー 7 周目, 2026-11-10)。
+        #
+        # 初版はここで「この PR のトリガーが 1 件でも在れば何もしない」という
+        # 全か無かの判定をしていた (下の docstring が『Fresh open PR with no
+        # review-due yet』と言っているのがそれ)。その結果、**1 種別だけ実施済みで
+        # 別種別が未実施のまま head が進む**と、実施済み側の促しが二度と復活
+        # しなかった: 関門は種別ごとに sha を比べるので両方を要求するのに、
+        # 促しは残っている 1 件しか出さない。
+        #
+        # 下げる方向 (`_retire_satisfied_pr_review_nudges`) は head を見て種別
+        # ごとに判定していたので、**上げる方向だけが非対称**だった。足す側も
+        # 同じ導出 (関門が読む `pr_review_obligations`) から種別単位で決める。
+        # head は `gh pr list` が返した値をそのまま渡すので gh を二度聞かない
+        # (空文字なら「確かめられない」扱い = 促しは出す側に倒れる)。
+        _head = str(pr.get("headRefOid") or "").strip()
+        _present = set()
+        for fn in existing:
+            _p = parse_review_due_filename(fn)
+            if _p is not None and _p[1] == num and _p[2] == _repo:
+                _present.add(_p[0])
+        _to_fire = nudge_types_to_fire_for_pr(num, _repo, _head, _present)
+        if _to_fire is not None:
+            # 要るのに促しが無い種別だけを個別に発火する。
+            # `_fire_review_due_for_pr` は 1 種別 1 ファイルで冪等なので、
+            # 残っている種別には触らない。
+            for _tid, _label in _to_fire:
+                _fire_review_due_for_pr(
+                    _tid, _label, num, pr.get("title") or "",
+                    pr.get("url") or "", pr_repo=_repo)
             continue
-        # Fresh open PR with no review-due yet → fire the pr-open set.
-        if _pr_open_reviewed_marker_exists(num, _repo):
+
+        # --- 旧経路 (導出が使えないときだけ) ---
+        # 全か無か: この PR の促しが 1 件でも在れば触らない。
+        if _present:
+            continue
+        # ms-119 e-6859: 抑止は **見た差分に限る**。以前はマーカーが在れば永久に
+        # 抑止していたので、`review done` の後にコミットを積んでも促しが出ず、
+        # 「促しが消えた」を「関門が開いた」と読ませた (独立 AX レビューが実機で
+        # 再現)。関門は正しく止まるが、`BEACON_REVIEW_GATE_CI` 未設定のリポジトリ
+        # では `gh pr merge` / UI のマージボタンが関門を経由しないため、促しの
+        # 空リストを信じて直接マージ経路へ進むと、この課題が塞いだはずの事故が
+        # 読み取り専用の確認経路側で再発する。
+        #
+        # **促しは出す側に倒す**: sha が分からない (gh が返さない / 旧形式の
+        # マーカー) ときは抑止しない。促しは止める力を持たないので、過剰に出て
+        # 煩いのは実害が小さく、出ないのは事故に直結する。
+        if _reviewed_marker_covers_head(num, _repo, _head):
             continue
         _fire_pr_open_review_triggers(num, pr.get("title") or "",
                                       pr.get("url") or "", pr_repo=_repo)
+    # ms-119 e-7359: 同じ `gh pr list` の結果を促しの引き下げ側にも渡す
+    # (head をもう一度聞かない)。
+    return open_prs
 
 
-def _pr_open_reviewed_marker_exists(pr_number: str, pr_repo: str = "") -> bool:
-    """True when this PR's reviews were already run once (a done-marker exists),
-    so the anchor must NOT re-fire review-due for it. `beacon review done`
-    stamps this marker the first time all of a PR's reviews clear.
+def _reviewed_marker_covers_head(pr_number: str, pr_repo: str,
+                                 head_sha: str) -> bool:
+    """この PR の「実施済み」マーカーが **いまの head を覆っている** か
+    (ms-119 e-6859)。覆っていれば促しを再発火しない。
 
-    ms-166 e-6971: リポジトリ別のマーカーと旧式 (リポジトリ無し) の **両方** を見る。
-    片方だけ見ると、既存のマーカーを無視して再発火する / 逆に別リポジトリの
-    「実施済み」でこのリポジトリの発火を止める、のどちらかになる。
+    覆っていると言えるのは、マーカーが在り、かつその ``reviewed_sha`` が
+    いまの head と一致するときだけ。次のどれでも **覆っていない** 扱いにする
+    (= 促しを出す):
+
+    * マーカーが無い (= まだ一度も実施していない)
+    * マーカーに sha が無い (= 旧形式。どの差分まで見たかを言っていない)
+    * ``head_sha`` が取れない (= 一致を確かめられない)
+    * sha が食い違う (= 実施後にコミットが積まれた)
+
+    **促しは出す側に倒す**。関門 (``pr_review_obligations``) は逆に止める側へ
+    倒すが、促しは止める力を持たないので、非対称が正しい —— 過剰に促して煩いのは
+    実害が小さく、促さないのは「もう要らない」と誤読させて事故に直結する。
     """
-    # 住所の列挙は commands_shared.reviewed_marker_paths が唯一の場所
-    # (独立保守性レビュー medium: 同じ 2 要素集合が 2 箇所で手組みされていた)。
-    return any(os.path.exists(p)
-               for p in reviewed_marker_paths(pr_number, pr_repo))
+    marker = reviewed_marker_sha(pr_number, pr_repo)
+    if marker is None or not marker:
+        return False
+    head_sha = str(head_sha or "").strip()
+    if not head_sha:
+        return False
+    return marker == head_sha
 
 
 def _cleanup_spec_needed_triggers() -> None:
@@ -1528,7 +1699,9 @@ def cmd_trigger_tick():
     _auto_fire_release_marker_trigger()
     _auto_fire_map_drift_trigger()
     _auto_fire_untriaged_backlog_trigger()  # ms-126
-    _auto_fire_pr_open_review_triggers_for_open_prs()  # ms-119 e-4060 anchor
+    _open_prs = _auto_fire_pr_open_review_triggers_for_open_prs()  # ms-119 e-4060
+    # ms-119 e-7359: 促しと関門を同じ意味にする残り半分 (もう止めていない種別を下げる)。
+    _retire_satisfied_pr_review_nudges(_open_prs or [])
     _cleanup_stale_triggers()
     # Touch the stamp so subsequent ``check`` calls within the TTL window
     # skip the auto-tick gate. Mirrors what ``_maybe_auto_tick`` writes on

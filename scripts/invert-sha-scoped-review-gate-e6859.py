@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+"""レビュー済みの帳簿を sha で持つ機構が「壊したとき実際に赤くなるか」を測る
+反転ハーネス (ms-119 e-6859)。
+
+**この機構は『緑なのに未レビュー』を消すために在る。** だから守る試験が偽の緑を
+出していたら、直す前より悪い (緑のガードは信頼されるので)。e-6859 の受入条件は
+「実施後にコミットを 1 本積むとゲートが赤に戻ることを **実測で** 確認すること
+(test-the-test)」を明示的に求めているので、ここがその実測。
+
+**初回の実測で、自分で書いた試験のうち 2 件が偽の緑だった** (2026-11-05):
+
+* ``sha_pinned is False`` の枝を丸ごと消しても緑 — 試験が sha 空の記録しか
+  見ておらず、「sha 空」の別の枝が代わりに拾っていた。枝が本当に効くのは
+  **sha を持ちながら pin していないと名乗る記録** のときなので、その形を足した。
+* 印を押す先を ``reviewed_sha`` から手元 HEAD に書き換えても緑 — 試験が 2 つを
+  同じ値にしていて区別できていなかった。``git rev-parse`` が空を返す形
+  (commit が 1 つも無いリポジトリ等、非 0 でも例外は飛ばないのでここに来る) で
+  区別が出るので、その形を足した。
+
+使い方: python3 scripts/invert-sha-scoped-review-gate-e6859.py
+終了コード: 全ケースが期待どおりなら 0、1 件でも外れるか SKIP なら 1
+(SKIP は緑と同じ害なので失敗として数える)。対象ファイルは毎ケース必ず元に戻す。
+
+**pytest から呼ばない。** 共有ファイルを in-place で書き換えるので、CI の並列
+worker が変異中のファイルを読む (ハーネス共通の穴 4、``invert_harness`` の
+docstring 参照)。
+"""
+from __future__ import annotations
+
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import invert_harness as ih  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+SPINE = ROOT / "lib" / "review_spine.py"
+SHARED = ROOT / "lib" / "commands_shared.py"
+PR = ROOT / "lib" / "cmd_pr.py"
+CMDS = ROOT / "lib" / "commands.py"
+TRIG = ROOT / "lib" / "cmd_trigger.py"
+OBL_STUB = ROOT / "tests" / "_pr_obligations_stub.py"
+GATE_CI = ROOT / "scripts" / "review-gate-ci.py"
+TARGET = ROOT / "lib" / "cmd_target.py"
+
+GATE_T = "tests/test_review_merge_gate.py"
+SHA_T = "tests/test_review_sha_scoped_gate_e6859.py"
+CI_T = "tests/test_review_gate_ci.py"
+STAMP_T = "tests/test_review_gate_stamp_visibility_e6873.py"
+EV_T = "tests/test_no_evidence_approval_countable_e7247.py"
+NUDGE_T = "tests/test_review_nudge_matches_the_gate_e7359.py"
+
+#: 壊す前に緑であることを確かめる母集団。関門 / 導出 / 印 / 開示の 4 面すべて。
+BASELINE = [GATE_T, SHA_T, CI_T, STAMP_T, EV_T, NUDGE_T]
+
+
+# --- 壊し方 -----------------------------------------------------------------
+#
+# どれも「e-6859 より前の形」か「寛容を一段緩めた形」。つまり **実際に起きていた
+# 欠陥か、起きやすい緩め方** を当てる (合成的な構文破壊は当てない —— それは
+# 「壊し方が下手」を「守られている」と読み違える穴 3 そのもの)。
+
+def gate_reads_the_trigger_files_again(src: str) -> str:
+    """関門を導出から「トリガーファイルの有無」に戻す = e-6859 の退行そのもの。"""
+    anchor = "    ob = pr_review_obligations(pr_number, pr_repo)"
+    assert anchor in src, "anchor not found (gate_reads_the_trigger_files_again)"
+    return src.replace(anchor, (
+        "    ob = {'owed': _pr_open_review_nudge_pending_types(pr_number, pr_repo),\n"
+        "          'resolved': True, 'head_sha': '', 'pr_state': 'OPEN',\n"
+        "          'satisfied': [], 'legacy_no_sha': [], 'unpinned': [],\n"
+        "          'stale': [], 'skipped': [], 'provenance': []}"), 1)
+
+
+def credit_a_record_regardless_of_its_sha(src: str) -> str:
+    """実施記録を head と突き合わせず常に差し引く (= PR 単位の帳簿に戻る)。"""
+    anchor = "        if head_known and rsha == head:"
+    assert anchor in src, "anchor not found (credit_a_record_regardless_of_its_sha)"
+    return src.replace(anchor, "        if head_known or True:", 1)
+
+
+def treat_an_unpinned_record_like_a_legacy_one(src: str) -> str:
+    """pin できなかった新記録を旧形式と同じ扱いにする。
+
+    旧形式のための寛容が **恒久的な抜け道** に変わる形 (gh が落ちていると
+    sha 無しの記録が増え、以後の全差分を覆う)。素朴に緩めると素通りする型。
+    """
+    anchor = "        if pinned is False:"
+    assert anchor in src, "anchor not found (treat_an_unpinned_record_like_a_legacy_one)"
+    return src.replace(anchor, "        if False:", 1)
+
+
+def let_an_unknown_head_through_the_gate(src: str) -> str:
+    """head 不明でも関門を通す (= 止める側に倒す判断を外す)。"""
+    anchor = '    if not ob.get("resolved"):'
+    assert anchor in src, "anchor not found (let_an_unknown_head_through_the_gate)"
+    return src.replace(anchor, "    if False:", 1)
+
+
+def write_the_ledger_without_a_sha(src: str) -> str:
+    """台帳レコードが sha を持たない (= 記録側を壊す)。
+
+    関門側が無傷でも、記録が差分を指していなければ同じ穴に戻る。
+    """
+    anchor = '        "reviewed_sha": str(reviewed_sha or "").strip(),'
+    assert anchor in src, "anchor not found (write_the_ledger_without_a_sha)"
+    return src.replace(anchor, '        "reviewed_sha": "",', 1)
+
+
+def stamp_the_local_head_instead_of_the_reviewed_sha(src: str) -> str:
+    """印を「レビューした sha」でなく手元 HEAD に押す。"""
+    anchor = '                            "--sha", reviewed_sha, "--pr", pr_number],'
+    assert anchor in src, "anchor not found (stamp_the_local_head_instead_of_the_reviewed_sha)"
+    return src.replace(anchor, '                            "--sha", local_sha, "--pr", pr_number],', 1)
+
+
+def stamp_without_checking_every_required_type(src: str) -> str:
+    """全種別の充足を見ずに印を押す = 1 種別の実施で今の head を緑にできた形
+    (PR #785 の事故の本体)。"""
+    anchor = "    if _blocking:"
+    assert anchor in src, "anchor not found (stamp_without_checking_every_required_type)"
+    return src.replace(anchor, "    if False:", 1)
+
+
+def read_the_skip_log_with_the_ledger_spelling(src: str) -> str:
+    """免除ログを台帳の綴り (``pr_number`` / ``pr_repo``) で読む。
+
+    書き手は ``ref`` / ``repo`` を書くので、免除したのに関門が開かない状態
+    (しかも理由が表示されない) になる。
+    """
+    anchor = '                rec_repo = str(rec.get("repo") or "").strip()'
+    assert anchor in src, "anchor not found (read_the_skip_log_with_the_ledger_spelling)"
+    return src.replace(anchor, (
+        '                rec_repo = str(rec.get("pr_repo") or "").strip()\n'
+        '                if str(rec.get("pr_number") or "x") != pr_number:\n'
+        '                    continue'), 1)
+
+
+def hardcode_the_required_set(src: str) -> str:
+    """必須種別を registry でなくリテラルで持つ = 関門と CI が別集合を見る形。"""
+    anchor = ('    return [d["review"]\n'
+              '            for d in batch_review_types_for_node("pr-open", registry=registry)]')
+    assert anchor in src, "anchor not found (hardcode_the_required_set)"
+    return src.replace(anchor, '    return ["ax"]', 1)
+
+
+def silence_the_weakening_disclosure(src: str) -> str:
+    """緑の意味を弱める開示 (旧形式 / pin 無し / 免除 / stale) を黙らせる。
+
+    差し引いた根拠を言わなくなると、関門の緑が黙って意味を変える。
+    """
+    anchor = "def format_pr_review_obligation_disclosure(ob: dict) -> list:"
+    assert anchor in src, "anchor not found (silence_the_weakening_disclosure)"
+    return src.replace(anchor, anchor + "\n    return []", 1)
+
+
+def drop_the_live_github_guard_under_test(src: str) -> str:
+    """試験中の gh 遮断を外す = 試験が生きた GitHub に依存する形。
+
+    関門がこの問いを毎回立てるので、遮断が無いと試験全体が非 hermetic になる
+    (実測: 架空リポジトリ ``o/r`` で本物の GraphQL エラーが返った)。
+    """
+    anchor = "    if (isinstance(gh_port.get_adapter(), gh_port.SubprocessGhAdapter)"
+    assert anchor in src, "anchor not found (drop_the_live_github_guard_under_test)"
+    return src.replace(anchor, "    if (False", 1)
+
+
+# --- 独立レビュー (PR #838, AX + 保守性) の指摘に対する修正への壊し方 -------
+
+def suppress_the_nudge_forever_again(src: str) -> str:
+    """促しの抑止を「マーカーが在れば永久」に戻す = AX① の退行。
+
+    judge が実機で再現した形。関門は止まるが、``BEACON_REVIEW_GATE_CI`` 未設定の
+    リポジトリでは ``gh pr merge`` / UI が関門を経由しないので、促しの空リストを
+    信じて直接マージ経路へ進むと、事故が読み取り専用の確認経路側から再発する。
+    """
+    anchor = ("    marker = reviewed_marker_sha(pr_number, pr_repo)\n"
+              "    if marker is None or not marker:\n"
+              "        return False")
+    assert anchor in src, "anchor not found (suppress_the_nudge_forever_again)"
+    return src.replace(anchor, (
+        "    marker = reviewed_marker_sha(pr_number, pr_repo)\n"
+        "    if marker is not None:\n"
+        "        return True\n"
+        "    if marker is None or not marker:\n"
+        "        return False"), 1)
+
+
+def drop_the_sha_from_the_decision_evidence(src: str) -> str:
+    """追記記録から sha を落とす = AX②。履歴がどこにも残らなくなる。
+
+    台帳は (PR, 種別) ごとに上書きなので、追記側に sha が無いと「以前は別の sha を
+    見ていた」が再現できない。この課題の核心価値 (どの差分を見たかを辿れる) が
+    自己矮小化する。
+    """
+    anchor = ('                         + ([f"sha:{reviewed_sha}"] '
+              "if reviewed_sha else [])),")
+    assert anchor in src, "anchor not found (drop_the_sha_from_the_decision_evidence)"
+    return src.replace(anchor, "                         ),", 1)
+
+
+def let_two_buckets_disclose_the_same_type(src: str) -> str:
+    """開示のバケツの排他を外す = AX③。「実施済み」と「免除」が同時に出る。"""
+    anchor = ("    legacy_no_sha = [t for t in legacy_no_sha if t not in satisfied]\n"
+              "    _already = set(satisfied) | set(legacy_no_sha)")
+    assert anchor in src, "anchor not found (let_two_buckets_disclose_the_same_type)"
+    return src.replace(anchor, "    _already = set()", 1)
+
+
+def accept_any_string_as_a_sha(src: str) -> str:
+    """sha の形の検査を外す = AX④。貼り間違いでも成功を名乗る。"""
+    anchor = '_SHA_SHAPE = re.compile(r"\\A[0-9a-fA-F]{7,64}\\Z")'
+    assert anchor in src, "anchor not found (accept_any_string_as_a_sha)"
+    return src.replace(anchor, '_SHA_SHAPE = re.compile(r".*", re.S)', 1)
+
+
+def hand_write_the_obligations_fake_again(src: str) -> str:
+    """試験の fake を本物から導出するのをやめ、手書きに戻す = 保守性②。
+
+    本物のキーが変わっても fake は古い形を返し続け、fake 経由の試験群だけが
+    偽の緑になる (judge が反転実験で実測した形)。
+    """
+    anchor = "    base = review_spine.derive_pr_review_obligations("
+    assert anchor in src, "anchor not found (hand_write_the_obligations_fake_again)"
+    head = src[: src.index(anchor)]
+    tail = src[src.index("    base.update({"):]
+    hand = (
+        '    base = {"owed": list(_owed), "satisfied": list(_satisfied),\n'
+        '            "legacy_no_sha": [], "unpinned": [], "stale": [],\n'
+        '            "skipped": [], "head_sha": head_sha,\n'
+        '            "head_known": bool(head_sha), "required": required}\n')
+    return head + hand + tail
+
+
+def stop_naming_which_sha_was_reviewed(src: str) -> str:
+    """開示の ``↺`` 行から「実施した差分」を落とす。
+
+    守る性質は保守性① と同じ (どの sha に対する実施だったかを言う = 次の一手が
+    分かる) だが、**事実の住所が移った** ので当て先も移した: 親レビューの
+    指摘 2 で「事実は開示に 1 箇所 / 理由は関門の文面」に分担を決めたため、
+    以前の当て先 (関門の文面側の ``detail``) はもう存在しない。
+    """
+    anchor = ('            f"    \u21ba {s[\'review\']}: \u5b9f\u65bd\u306f '
+              '{s[\'reviewed_sha\'][:12]} \u306b\u5bfe\u3059\u308b\u3082\u306e\u3067\u3001"')
+    assert anchor in src, "anchor not found (stop_naming_which_sha_was_reviewed)"
+    return src.replace(anchor, (
+        '            f"    \u21ba {s[\'review\']}: \u5b9f\u65bd\u306f '
+        '(\u7701\u7565) \u306b\u5bfe\u3059\u308b\u3082\u306e\u3067\u3001"'), 1)
+
+
+def claim_passage_against_the_recorded_sha(src: str) -> str:
+    """最後の名乗りを「いまの head」でなく「記録した sha」に対して評価する。
+
+    **ドッグフーディングで自分が踏んだ形** (2026-11-06)。過去の sha を正直に記録
+    すると「gate を通過できます」と出るのに、同じ瞬間に `review status` は未実施と
+    答えた = 名乗りと実態のズレ。
+    """
+    anchor = "    _gate = pr_review_obligations(pr_number, pr_repo)\n    _where ="
+    assert anchor in src, "anchor not found (claim_passage_against_the_recorded_sha)"
+    return src.replace(anchor, (
+        "    _gate = pr_review_obligations(pr_number, pr_repo, "
+        "head_sha=_reviewed_sha)\n    _where ="), 1)
+
+
+# --- 独立レビュー 2 周目 (PR #838) の指摘に対する修正への壊し方 -------------
+
+def let_the_gate_recompute_the_verdict(src: str) -> str:
+    """関門が `passed` を読むのをやめ、自分で再計算する = AX 2 周目 high の退行。
+
+    判定の所有が 2 箇所に戻るので、新しい呼び出し元が一部を写し忘れる経路が開く。
+    """
+    anchor = '    if ob.get("passed"):'
+    assert anchor in src, "anchor not found (let_the_gate_recompute_the_verdict)"
+    return src.replace(anchor, (
+        '    if ob.get("pr_state") in ("MERGED", "CLOSED") or '
+        '(ob.get("resolved") and not (ob.get("owed") or [])):'), 1)
+
+
+def make_json_mode_skip_the_verdict(src: str) -> str:
+    """`review status --json` が判定より前に return する = judge が実測した形。
+
+    README には「Exits 2 while anything is owed」と書いてあるのに、テキスト
+    モードにしか実装されていない状態に戻す。
+    """
+    anchor = ("    _rc = 0 if ob.get(\"passed\") else 2\n"
+              "    if json_mode:\n"
+              "        print(json.dumps(ob, ensure_ascii=False))\n"
+              "        sys.exit(_rc)")
+    assert anchor in src, "anchor not found (make_json_mode_skip_the_verdict)"
+    return src.replace(anchor, (
+        "    _rc = 0 if ob.get(\"passed\") else 2\n"
+        "    if json_mode:\n"
+        "        print(json.dumps(ob, ensure_ascii=False))\n"
+        "        return"), 1)
+
+
+def drop_the_merged_short_circuit_from_status(src: str) -> str:
+    """`review status` から merge 済みの早期 return を落とす。
+
+    関門は素通りさせるのに status は「未実施、approve / merge は止まります」と
+    言い、マージ済み PR にレビューの実行まで促す (judge が実測)。
+    """
+    anchor = '    if ob.get("pr_state") in ("MERGED", "CLOSED"):\n        print(f"  \u2192 \u3053\u306e PR \u306f\u65e2\u306b'
+    assert anchor in src, "anchor not found (drop_the_merged_short_circuit_from_status)"
+    idx = src.index(anchor)
+    end = src.index("    if not ob.get(\"resolved\"):", idx)
+    return src[:idx] + src[end:]
+
+
+def recompute_passed_in_the_test_stub(src: str) -> str:
+    """試験の共有 stub が `passed` を手書きする = fake 経由が偽の緑に戻る。"""
+    anchor = '        base["passed"] = commands_shared._review_gate_passed(base)'
+    assert anchor in src, "anchor not found (recompute_passed_in_the_test_stub)"
+    return src.replace(anchor, '        base["passed"] = not base.get("owed")', 1)
+
+
+def recompute_the_required_set_in_ci(src: str) -> str:
+    """CI の required check が委譲をやめて自分で計算する = 真実源が 2 つに戻る。"""
+    anchor = "    return review_spine.required_pr_open_review_types()"
+    assert anchor in src, "anchor not found (recompute_the_required_set_in_ci)"
+    return src.replace(anchor, (
+        '    return [d["review"] for d in '
+        'review_spine.batch_review_types_for_node("pr-open")]'), 1)
+
+
+def inline_the_report_decision_again(src: str) -> str:
+    """`review done` の分岐判定を純粋関数から外す (= 戻り値を無視して黙る)。"""
+    anchor = "    for _stream, _text in _report[\"lines\"]:"
+    assert anchor in src, "anchor not found (inline_the_report_decision_again)"
+    end = src.index("    if _report[\"stamp_marker\"]:")
+    return src[: src.index(anchor)] + src[end:]
+
+
+def accept_a_short_sha_without_expanding_it(src: str) -> str:
+    """短縮 sha を伸ばさずそのまま記録する = ドッグフーディングで踏んだ形。
+
+    関門は完全一致で比べるので、短縮 sha の記録は一生一致しない (記録は残るのに
+    関門が一生開かない)。
+    """
+    anchor = "        _full, _resolve_err = resolve_full_commit_sha(_reviewed_sha)"
+    assert anchor in src, "anchor not found (accept_a_short_sha_without_expanding_it)"
+    return src.replace(anchor, (
+        "        _full, _resolve_err = _reviewed_sha, \"\""), 1)
+
+
+def let_a_display_reader_read_owed_directly(src: str) -> str:
+    """表示側が `blocking` でなく `owed` を直接読む = 親レビュー AX high の退行。
+
+    `passed: True` の辞書に対して「関門はまだ開いていません」と矛盾する文言を
+    返せるようになる。
+    """
+    anchor = "    gate_owed = review_blocking_types(ob)"
+    assert anchor in src, "anchor not found (let_a_display_reader_read_owed_directly)"
+    return src.replace(anchor, '    gate_owed = ob.get("owed") or []', 1)
+
+
+def make_blocking_compute_independently(src: str) -> str:
+    """`blocking` を関門が読む値と無関係に計算する = 答えが 2 つに戻る。"""
+    anchor = ("    passed = ob.get(\"passed\")\n"
+              "    if passed is None:\n"
+              "        passed = _review_gate_passed(ob)")
+    assert anchor in src, "anchor not found (make_blocking_compute_independently)"
+    return src.replace(anchor, "    passed = _review_gate_passed(ob)", 1)
+
+
+def restate_the_stale_fact_in_the_block_error(src: str) -> str:
+    """stale の事実 (sha の対応) を関門の文面にも書く = 同じ事実が 2 回出る。"""
+    anchor = ('    return (f"\\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"\n'
+              '            f"積まれた** ため再度要ります (どの種別がどの差分に対する実施だったかは"')
+    assert anchor in src, "anchor not found (restate_the_stale_fact_in_the_block_error)"
+    return src.replace(anchor, (
+        '    _d = " / ".join(f"{s[\'review\']}={s[\'reviewed_sha\'][:12]}" for s in stale)\n'
+        '    return (f"\\n  うち {len(stale)} 件は **一度実施済みですが、その後コミットが"\n'
+        '            f"積まれた** ため再度要ります ({_d} / "'), 1)
+
+
+def drop_the_head_sha_from_the_bundle(src: str) -> str:
+    """bundle から head_sha を落とす = 独立 AX レビュー 4 周目 high の退行。
+
+    `--reviewed-sha` に渡すべき値の供給源が消えるので、judge が読んでいる間の
+    push で「見ていない sha」が実施済みとして記録される継ぎ目が戻る。
+    """
+    anchor = '        "head_sha": str(head_sha or "").strip(),'
+    assert anchor in src, "anchor not found (drop_the_head_sha_from_the_bundle)"
+    return src.replace(anchor, "", 1)
+
+
+def resolve_the_head_apart_from_the_diff(src: str) -> str:
+    """head を差分収集と別の瞬間に解決する (= 常に空を返す) 形に戻す。"""
+    anchor = "    head_sha, _state, _err = resolve_pr_head(pr, resolved)"
+    assert anchor in src, "anchor not found (resolve_the_head_apart_from_the_diff)"
+    return src.replace(anchor, '    head_sha, _state, _err = "", "", ""', 1)
+
+
+def silently_drop_reviewed_sha_with_target(src: str) -> str:
+    """--target で --reviewed-sha を黙って捨てる = AX 4 周目 high の退行。
+
+    当て先は ``commands_shared.decide_review_done_argument_error`` (引数の両立規則
+    5 つの置き場)。もとは ``commands.cmd_review_done`` の前置きに直接在ったが、
+    独立保守性レビュー medium (2026-11-10) を受けて純粋関数へ移した。**規則の
+    中身は変えていない** ので、測る対象はそのまま移動先に付け替えるだけでよい。
+    """
+    anchor = "    if target_id and reviewed_sha:"
+    assert anchor in src, "anchor not found (silently_drop_reviewed_sha_with_target)"
+    return src.replace(anchor, "    if False:", 1)
+
+
+def let_the_override_branch_read_owed(src: str) -> str:
+    """override 分岐が blocking でなく owed を直読みする = 保守性 4 周目の退行。"""
+    anchor = "    pending = review_blocking_types(ob)\n    if override:"
+    assert anchor in src, "anchor not found (let_the_override_branch_read_owed)"
+    return src.replace(anchor, '    pending = ob.get("owed") or []\n    if override:', 1)
+
+
+# --- backlog (e-7247 / e-7029 / e-7359) への壊し方 --------------------------
+
+def stop_counting_no_evidence_approvals(src: str) -> str:
+    """証拠ゼロ承認のタグを落とす = e-7247 の受入条件 2 の退行。
+
+    記録は残るが数える経路が消えるので、監査する人が「何件あるか」に答えられない。
+    """
+    anchor = "            evidence.append(NO_REVIEW_EVIDENCE_ACK_TAG)"
+    assert anchor in src, "anchor not found (stop_counting_no_evidence_approvals)"
+    return src.replace(anchor, "            pass", 1)
+
+
+def call_the_optin_path_an_ai_approval_again(src: str) -> str:
+    """承認の注記を override の種類を見ない形に戻す = e-7029 の退行。
+
+    人間の正当な opt-in でも「AI セッションが承認」と出て、警告の情報量が
+    実質ゼロになる。
+    """
+    anchor = '    if signal == "ai-session-unguarded":'
+    assert anchor in src, "anchor not found (call_the_optin_path_an_ai_approval_again)"
+    return src.replace(anchor, (
+        '    if signal == "user-override" and kind != "human":\n'
+        '        return ["  \u26a0 AI \u30bb\u30c3\u30b7\u30e7\u30f3\u304c '
+        'override \u3067\u627f\u8a8d\u3057\u307e\u3057\u305f"]\n'
+        '    if signal == "ai-session-unguarded":'), 1)
+
+
+def let_a_satisfied_nudge_keep_nagging(src: str) -> str:
+    """もう止めていない促しを下げるのをやめる = e-7359 の退行。
+
+    fork で実施しても親の促しが出続け、促しと関門の意味が再び割れる。
+    """
+    anchor = "            if rtype in blocking:\n                continue"
+    assert anchor in src, "anchor not found (let_a_satisfied_nudge_keep_nagging)"
+    return src.replace(anchor, "            if True:\n                continue", 1)
+
+
+def retire_a_nudge_even_when_the_head_is_unknown(src: str) -> str:
+    """head 不明でも促しを下げる = 促しを「出す側に倒す」判断を外す。"""
+    # 当て先: head 不明の枝ごと落とす (AC4 の開示を足したときに 2 つの if に
+    # 分かれたので、以前の 1 行の形はもう無い)。
+    anchor = "        if not head:"
+    assert anchor in src, "anchor not found (retire_a_nudge_even_when_the_head_is_unknown)"
+    idx = src.index(anchor)
+    end = src.index("        repo = core.extract_pr_repo_from_url", idx)
+    return src[:idx] + src[end:]
+
+
+#: (表示名, 対象ファイル, 壊し方, 赤くなるべき試験)
+EXPECT_RED = [
+    ("関門が導出でなくトリガーファイルを読む (e-6859 の退行そのもの)",
+     PR, gate_reads_the_trigger_files_again,
+     f"{GATE_T}::test_gate_blocks_again_after_a_commit_is_pushed "
+     f"{GATE_T}::test_gate_passes_when_all_types_reviewed_at_this_head"),
+
+    ("実施記録の sha を head と突き合わせず常に差し引く",
+     SPINE, credit_a_record_regardless_of_its_sha,
+     f"{SHA_T}::test_a_review_pinned_to_another_sha_is_owed_again "
+     f"{GATE_T}::test_gate_blocks_again_after_a_commit_is_pushed"),
+
+    ("pin できなかった新記録を旧形式と同じ扱いにする (寛容が抜け道になる形)",
+     SPINE, treat_an_unpinned_record_like_a_legacy_one,
+     f"{SHA_T}::test_a_new_record_that_failed_to_pin_is_NOT_credited "
+     f"{SHA_T}::test_an_unpinned_record_is_not_credited_EVEN_IF_its_sha_matches_head"),
+
+    ("head 不明でも関門を通す (止める側に倒す判断を外す)",
+     PR, let_an_unknown_head_through_the_gate,
+     f"{GATE_T}::test_gate_blocks_when_head_cannot_be_resolved"),
+
+    ("台帳レコードが sha を持たない (記録側を壊す)",
+     SHARED, write_the_ledger_without_a_sha,
+     f"{SHA_T}::test_the_ledger_record_carries_the_reviewed_sha "
+     f"{GATE_T}::test_gate_blocks_again_after_a_commit_is_pushed"),
+
+    ("印を「レビューした sha」でなく手元 HEAD に押す",
+     CMDS, stamp_the_local_head_instead_of_the_reviewed_sha,
+     f"{CI_T}::test_ci_flip_pushes_the_mark_to_the_reviewed_sha "
+     f"{CI_T}::test_ci_flip_targets_the_reviewed_sha_not_the_local_head"),
+
+    ("全種別の充足を見ずに印を押す (1 種別で緑にできた形)",
+     CMDS, stamp_without_checking_every_required_type,
+     f"{CI_T}::test_ci_flip_refuses_while_another_type_is_still_owed"),
+
+    ("免除ログの読み口を台帳の綴りに戻す (免除が効かなくなる)",
+     SHARED, read_the_skip_log_with_the_ledger_spelling,
+     f"{SHA_T}::test_the_skip_reader_reads_what_the_skip_writer_writes "
+     f"{GATE_T}::test_gate_credits_a_reason_bearing_skip"),
+
+    ("必須種別を registry でなくリテラルで持つ (CI と別集合になる形)",
+     SPINE, hardcode_the_required_set,
+     f"{SHA_T}::test_the_required_set_comes_from_the_registry_not_a_literal"),
+
+    ("弱める開示 (旧形式/pin無し/免除/stale) をまとめて黙らせる",
+     SHARED, silence_the_weakening_disclosure,
+     f"{SHA_T}::test_every_weakening_bucket_is_disclosed "
+     f"{SHA_T}::test_a_satisfied_type_discloses_which_sha_and_whose_record"),
+
+    ("試験中の gh 遮断を外す (試験が生きた GitHub に依存する形)",
+     SHARED, drop_the_live_github_guard_under_test,
+     f"{SHA_T}::test_resolve_pr_head_does_not_touch_live_github_under_test"),
+    # --- 独立レビュー (PR #838) の指摘に対する修正 ---
+    ("促しの抑止を「マーカーが在れば永久」に戻す (AX①)",
+     TRIG, suppress_the_nudge_forever_again,
+     f"{SHA_T}::test_the_nudge_refires_after_a_commit_is_pushed "
+     f"{SHA_T}::test_a_legacy_marker_without_a_sha_does_not_suppress_the_nudge"),
+
+    ("追記記録から sha を落とす (AX② — 履歴がどこにも残らない)",
+     CMDS, drop_the_sha_from_the_decision_evidence,
+     f"{SHA_T}::test_the_reviewed_sha_survives_in_the_append_only_decision_arm"),
+
+    ("開示のバケツの排他を外す (AX③ — 実施済みと免除が同時に出る)",
+     SPINE, let_two_buckets_disclose_the_same_type,
+     f"{SHA_T}::test_one_type_is_disclosed_in_exactly_one_bucket"),
+
+    ("sha の形の検査を外す (AX④ — 貼り間違いでも成功を名乗る)",
+     SHARED, accept_any_string_as_a_sha,
+     f"{SHA_T}::test_the_sha_shape_is_checked"),
+
+    ("試験の fake を手書きに戻す (保守性② — fake 経由が偽の緑に戻る)",
+     OBL_STUB, hand_write_the_obligations_fake_again,
+     f"{SHA_T}::test_the_shared_obligations_fake_is_derived_from_the_real_function"),
+
+    ("開示から「実施した差分」を落とす (保守性① / 住所は親レビュー 2 で移動)",
+     SHARED, stop_naming_which_sha_was_reviewed,
+     f"{SHA_T}::test_the_stale_fact_is_stated_in_exactly_one_place "
+     f"{GATE_T}::test_gate_blocks_again_after_a_commit_is_pushed"),
+    ("最後の名乗りを「記録した sha」に対して評価する (ドッグフーディングで踏んだ形)",
+     CMDS, claim_passage_against_the_recorded_sha,
+     f"{SHA_T}::test_review_done_asks_the_real_head_not_the_recorded_sha"),
+    # --- 独立レビュー 2 周目 (PR #838) の指摘に対する修正 ---
+    ("関門が passed を読まず自分で再計算する (AX 2 周目 high)",
+     PR, let_the_gate_recompute_the_verdict,
+     f"{SHA_T}::test_the_gate_reads_passed_instead_of_recomputing"),
+
+    ("review status --json が判定より前に return する (出力形式で rc が変わる)",
+     CMDS, make_json_mode_skip_the_verdict,
+     f"{SHA_T}::test_review_status_exits_the_same_way_in_both_output_modes"),
+
+    ("review status から merge 済みの早期 return を落とす (関門と食い違う)",
+     CMDS, drop_the_merged_short_circuit_from_status,
+     f"{SHA_T}::test_review_status_and_the_gate_agree_about_a_merged_pr"),
+
+    ("試験の共有 stub が passed を手書きする (fake 経由が偽の緑に戻る)",
+     OBL_STUB, recompute_passed_in_the_test_stub,
+     f"{SHA_T}::test_the_pass_verdict_lives_in_one_place "
+     f"{SHA_T}::test_review_status_and_the_gate_agree_about_a_merged_pr"),
+
+    ("CI の required check が委譲をやめる (真実源が 2 つに戻る)",
+     GATE_CI, recompute_the_required_set_in_ci,
+     f"{SHA_T}::test_the_ci_required_check_delegates_instead_of_recomputing"),
+
+    ("review done が分岐判定の戻り値を無視する (何も言わなくなる)",
+     CMDS, inline_the_report_decision_again,
+     f"{SHA_T}::test_review_done_asks_the_real_head_not_the_recorded_sha"),
+    ("短縮 sha を伸ばさずそのまま記録する (ドッグフーディングで踏んだ形 2)",
+     SHARED, lambda s: s.replace(
+         "    value = str(value or \"\").strip()\n    if not value:\n"
+         "        return \"\", \"値が空です\"",
+         "    value = str(value or \"\").strip()\n    return value, \"\"", 1),
+     f"{SHA_T}::test_a_shortened_sha_is_expanded_at_the_entrance "
+     f"{SHA_T}::test_an_unresolvable_sha_is_refused_not_recorded"),
+    # --- 親セッションのレビュー (2026-11-06) の指摘に対する修正 ---
+    ("表示側が blocking でなく owed を直接読む (親レビュー AX high の退行)",
+     SHARED, let_a_display_reader_read_owed_directly,
+     f"{SHA_T}::test_no_reader_can_say_blocked_while_passed_is_true"),
+
+    ("blocking を関門が読む値と無関係に計算する (答えが 2 つに戻る)",
+     SHARED, make_blocking_compute_independently,
+     f"{SHA_T}::test_blocking_follows_the_value_the_gate_reads"),
+
+    ("stale の事実を関門の文面にも書く (同じ事実が 2 回出る)",
+     SHARED, restate_the_stale_fact_in_the_block_error,
+     f"{SHA_T}::test_the_stale_fact_is_stated_in_exactly_one_place"),
+    # --- 独立レビュー 4 周目 (PR #838) の指摘に対する修正 ---
+    ("bundle から head_sha を落とす (AX 4 周目 high — 供給源が消える)",
+     SPINE, drop_the_head_sha_from_the_bundle,
+     f"{SHA_T}::test_the_bundle_names_which_diff_the_judge_saw"),
+
+    ("head を差分収集と別の瞬間に解決する (ドリフトの継ぎ目が戻る)",
+     CMDS, resolve_the_head_apart_from_the_diff,
+     f"{SHA_T}::test_the_head_is_resolved_where_the_diff_is_collected"),
+
+    ("--target で --reviewed-sha を黙って捨てる (AX 4 周目 high / silent)",
+     SHARED, silently_drop_reviewed_sha_with_target,
+     f"{SHA_T}::test_reviewed_sha_is_refused_with_target_not_silently_dropped"),
+
+    ("override 分岐が owed を直読みする (保守性 4 周目 — 分岐単位の見落とし)",
+     PR, let_the_override_branch_read_owed,
+     f"{GATE_T}::test_the_override_branch_reads_the_blocking_set "
+     f"{GATE_T}::test_gate_override_proceeds_with_audit"),
+    # --- backlog (e-7247 / e-7029 / e-7359) ---
+    ("証拠ゼロ承認のタグを落とす (e-7247 — 数える経路が消える)",
+     TARGET, stop_counting_no_evidence_approvals,
+     f"{EV_T}::test_a_no_evidence_approval_is_countable"),
+
+    ("承認の注記を override の種類を見ない形に戻す (e-7029)",
+     TARGET, call_the_optin_path_an_ai_approval_again,
+     f"{EV_T}::test_the_optin_path_is_not_called_an_ai_approval"),
+
+    ("もう止めていない促しを下げるのをやめる (e-7359 — 促しと関門が再び割れる)",
+     TRIG, let_a_satisfied_nudge_keep_nagging,
+     f"{NUDGE_T}::test_a_nudge_is_retired_once_it_no_longer_blocks"),
+
+    ("head 不明でも促しを下げる (促しを出す側に倒す判断を外す)",
+     TRIG, retire_a_nudge_even_when_the_head_is_unknown,
+     f"{NUDGE_T}::test_an_unknown_head_leaves_the_nudge_alone"),
+]
+
+
+def main() -> int:
+    originals = {p: p.read_text(encoding="utf-8")
+                 for p in (SPINE, SHARED, PR, CMDS, TRIG, OBL_STUB, GATE_CI,
+                           TARGET)}
+    if not ih.check_baseline(BASELINE, ROOT):
+        return 1
+
+    bad = 0
+    for label, path, mutate, target in EXPECT_RED:
+        try:
+            path.write_text(mutate(originals[path]), encoding="utf-8")
+            ih.invalidate_bytecode_cache(path, ROOT)
+            went_red, tail = ih.run_and_classify(target.split(), ROOT)
+        except AssertionError as exc:
+            ih.restore(originals, ROOT)
+            print("  SKIP  %s: 当てる場所が無い (%s) — SKIP は緑と同じ害なので、"
+                  "壊し方を実装に合わせて直すこと" % (label, exc))
+            bad += 1
+            continue
+        finally:
+            ih.restore(originals, ROOT)
+        print(("  OK  " if went_red else " MISS ") + label)
+        print("          → %s" % tail)
+        if not went_red:
+            bad += 1
+            print("          期待: 赤 / 実際: 緑 — 試験がこの欠陥を見ていない")
+
+    print()
+    if bad:
+        print("NG: %d 件が期待と違うか SKIP。偽の安全なので直すこと。" % bad)
+        return 1
+    if not ih.check_not_polluted(BASELINE, ROOT):
+        return 1
+    print()
+    print("OK: %d 件すべて壊したときに赤くなった。" % len(EXPECT_RED))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(ih.guarded_main(main, sys.argv, __doc__, ROOT))

@@ -127,7 +127,7 @@ def codex_folds_retired_into_allowlist_miss(src: str) -> str:
     「足した」≠「全域に効く」になる。
     """
     anchor = ('        elif retired_tag is not None and reason == retired_tag:\n'
-              '            counts["retired"] += 1\n')
+              '            counts["retired_still_allowlisted"] += 1\n')
     assert anchor in src, "anchor not found (codex_folds_retired_into_allowlist_miss)"
     return src.replace(anchor, "", 1)
 
@@ -143,23 +143,54 @@ def codex_swaps_the_counter_wiring(src: str) -> str:
     old = ('        if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:\n'
            '            counts["provenance"] += 1\n'
            '        elif retired_tag is not None and reason == retired_tag:\n'
-           '            counts["retired"] += 1\n')
+           '            counts["retired_still_allowlisted"] += 1\n')
     new = ('        if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:\n'
-           '            counts["retired"] += 1\n'
+           '            counts["retired_still_allowlisted"] += 1\n'
            '        elif retired_tag is not None and reason == retired_tag:\n'
            '            counts["provenance"] += 1\n')
     assert old in src, "anchor not found (codex_swaps_the_counter_wiring)"
     return src.replace(old, new, 1)
 
 
+def codex_swaps_retired_and_live_awaiting_approval(src: str) -> str:
+    """引退 + 未許可 と 現役 + 未許可 の判定を入れ替える。
+
+    PR#844 2 周目の独立 AX レビュー (medium): この PR の核心は「理由タグが空のとき、
+    channel が引退集合に居れば retired_not_allowlisted、居なければ allowlist」という
+    新しい分岐である。既存 2 件のアンカー追従だけを直し、**この分岐そのものを
+    取り違える変異がカタログに無かった**。「リストに在るものは全部守られている」と
+    いう安心感と実際の守備範囲の差になるので、この PR が主張する性質を自分の
+    カタログに入れる。
+
+    壊すと「引退した channel に『許可してください』と案内し、現役 channel に
+    『引退済み』と案内する」状態になる = この課題がまさに消しに来た誤誘導の鏡像。
+    """
+    old = '            if str(channel or "") in retired_channels:\n'
+    new = '            if str(channel or "") not in retired_channels:\n'
+    assert old in src, ("anchor not found "
+                        "(codex_swaps_retired_and_live_awaiting_approval)")
+    return src.replace(old, new, 1)
+
+
 def codex_folds_unknown_into_allowlist_miss(src: str) -> str:
     """未知の理由タグを allowlist-miss に畳む (= 将来の理由が黙って誤案内される)。"""
+    # ms-185 e-7395: 空タグの枝に「引退 channel か」の分岐が入ったので、アンカーを
+    # 実装に合わせ直した。変異の意味は変えない (未知の理由タグを空タグの枝へ流し、
+    # other カウンタを届かなくする = 将来の理由が黙って誤案内される状態)。
     old = ('        elif not reason:\n'
-           '            counts["allowlist"] += 1\n'
+           '            if str(channel or "") in retired_channels:\n'
+           '                counts["retired_not_allowlisted"] += 1\n'
+           '                retired_not_allowlisted_channels.add(str(channel or ""))\n'
+           '            else:\n'
+           '                counts["allowlist"] += 1\n'
            '        else:\n'
            '            counts["other"] += 1\n')
     new = ('        else:\n'
-           '            counts["allowlist"] += 1\n'
+           '            if str(channel or "") in retired_channels:\n'
+           '                counts["retired_not_allowlisted"] += 1\n'
+           '                retired_not_allowlisted_channels.add(str(channel or ""))\n'
+           '            else:\n'
+           '                counts["allowlist"] += 1\n'
            '        if False:\n'
            '            counts["other"] += 1\n')
     assert old in src, "anchor not found (codex_folds_unknown_into_allowlist_miss)"
@@ -259,7 +290,7 @@ def make_a_gated_channel_unsatisfiable(src: str) -> str:
     # 残った operation-trigger のエントリに移す (足す変異の中身は同じ)。
     tail = ('    OPERATION_TRIGGER_CHANNEL: ProvenanceRequirement(\n'
             '        has_approved_operation_envelope, _OPERATION_ADVICE),')
-    head = ('SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",')
+    head = ('GATED_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",')
     assert tail in src and head in src, \
         "anchor not found (make_a_gated_channel_unsatisfiable)"
     return src.replace(
@@ -268,7 +299,7 @@ def make_a_gated_channel_unsatisfiable(src: str) -> str:
         '    "nobody-can-satisfy-me": ProvenanceRequirement(lambda ev: False, "x"),',
         1).replace(
         head,
-        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n'
+        'GATED_PROVENANCE_CHANNELS = frozenset({\n'
         '    "nobody-can-satisfy-me",\n    "operation-trigger",', 1)
 
 
@@ -306,15 +337,19 @@ def codex_freezes_a_byte_identical_copy(src: str) -> str:
     私は最初その等値比較を書いて偽の安全を作り、この変異で緑を踏んだ。真値源を試験中
     だけ差し替えて出力が追随するかを見る形に直したので、いまは赤くなる。
     """
-    anchor = '        f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"'
+    # ms-185 e-7395: 整形規則が共有関数 ``_render_channel_advice_lines`` に寄ったので
+    # 当て先を移した。変異の意味は変えない (channel ごとの案内を凍結コピーで差し替え、
+    # 真値源の差し替えに追随しなくする)。**公開関数の署名は変えない約束**なので、
+    # 署名を当て先にしている他のケースはそのまま効く。
+    anchor = '        f"\\n    - channel={ch or \'?\'}: {bd.downgrade_advice(reason, ch)}"'
     assert anchor in src, "anchor not found (codex_freezes_a_byte_identical_copy)"
-    return src.replace(
-        anchor,
-        '        f"{_FROZEN_ADVICE.get(ch) or bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"',
-        1).replace(
-        'def render_provenance_advice_lines(channels, *, bd) -> str:',
+    frozen = anchor.replace("{bd.downgrade_advice(reason, ch)}",
+                            "{_FROZEN_ADVICE.get(ch) or bd.downgrade_advice(reason, ch)}")
+    assert frozen != anchor, "frozen 差し替えが効いていない (当て先の形が変わった)"
+    return src.replace(anchor, frozen, 1).replace(
+        'def _render_channel_advice_lines(',
         '_FROZEN_ADVICE = {"operation-trigger": "frozen copy"}\n\n\n'
-        'def render_provenance_advice_lines(channels, *, bd) -> str:', 1)
+        'def _render_channel_advice_lines(', 1)
 
 
 def codex_folds_all_channels_into_one_line(src: str) -> str:
@@ -389,11 +424,11 @@ def let_the_set_and_map_drift(src: str) -> str:
     集合と要求表がズレた状態。fail-closed なので実害は「黙って降格し続ける」で、
     まさに e-7078 が消した「誰も満たせない判定」の再生産。
     """
-    anchor = 'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",'
+    anchor = 'GATED_PROVENANCE_CHANNELS = frozenset({\n    "operation-trigger",'
     assert anchor in src, "anchor not found (let_the_set_and_map_drift)"
     return src.replace(
         anchor,
-        'SYSTEM_PROVENANCE_CHANNELS = frozenset({\n    "nobody-declares-me",'
+        'GATED_PROVENANCE_CHANNELS = frozenset({\n    "nobody-declares-me",'
         '\n    "operation-trigger",', 1)
 
 
@@ -441,6 +476,9 @@ CASES = [
     ("配線だけを逆転させる (トークンは一切変えない)", CODEX,
      codex_swaps_the_counter_wiring,
      CONSUMER_TEST + "::TestCodexTallyIsWiredToTheRightCounter"),
+    ("引退+未許可 と 現役+未許可 の判定を入れ替える", CODEX,
+     codex_swaps_retired_and_live_awaiting_approval,
+     CONSUMER_TEST + "::TestRetiredUnapprovedIsCountedApart"),
     ("未知の理由を allowlist-miss に畳む", CODEX,
      codex_folds_unknown_into_allowlist_miss,
      CONSUMER_TEST + "::TestCodexTallyIsWiredToTheRightCounter::"

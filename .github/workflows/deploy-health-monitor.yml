@@ -109,7 +109,7 @@ jobs:
             --owner-user-id "${BEACON_OWNER_USER_ID:-}" \
             --state-file .beacon/.deploy-health-alerted
 
-      # e-1391 (ms-66) — twin watchdog for the periodic TICK (Trek/Operation
+      # e-1391 (ms-66) — twin watchdog for the periodic TICK (Operation
       # autonomy driver), a different silent-death mode than a stale deploy: the
       # box can be serving fresh code yet no longer ticking (the migration
       # incident). Reuses the same infra/secrets; separate dedup state so a dead

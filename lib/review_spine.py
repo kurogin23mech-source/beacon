@@ -324,7 +324,7 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
                             diff_text, mode, target_ref, gaps=None,
                             known_judge_types=None, external_references=None,
                             implementer_model="", artifact=None,
-                            origin_provenance=None):
+                            origin_provenance=None, head_sha=""):
     """Assemble the review-kernel bundle handed to an independent judge subagent.
 
     This is the *structural* enforcement of reviewer independence (ms-119
@@ -352,6 +352,14 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         diff_text: the mechanically-collected unified diff (git / gh pr diff).
         mode: "diff" (change-scoped) or "full-surface" (snapshot audit).
         target_ref: what was reviewed (PR number / ref range / target id).
+        head_sha: **どの差分を judge が見たか** を sha で名指す (ms-119 e-6859、
+            独立 AX レビュー 4 周目 high)。``--reviewed-sha`` に渡すべき値の
+            **唯一の構造的な供給源**。これが無いと、judge が読んでいる間に誰かが
+            push した場合、``review done`` は「いまの head」を gh に聞き直して
+            **judge が一度も見ていない sha** を実施済みとして記録する ——
+            この課題が消すと宣言した欠陥クラスが、bundle → done の継ぎ目で
+            そのまま再現する。judge は冒頭でこの値を自分の作業ツリーと照合できる。
+            取れなければ空 (推測で埋めない)。
         gaps: optional list of gentle gaps to surface (e.g. philosophy review of
             a SPEC-less target — the missing 原典 is itself a finding, 方針5).
         known_judge_types: optional set of allowed judge-run type ids. Defaults
@@ -387,6 +395,11 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         "review_type": review_type,
         "mode": mode,
         "target_ref": target_ref,
+        # ms-119 e-6859 (独立 AX レビュー 4 周目 high): **judge が見た差分の sha**。
+        # `--reviewed-sha` に渡すべき値がここに在ることで、「見た sha」と
+        # 「記録される sha」が同じ変数の値になる (2 回の独立した gh 問い合わせの
+        # 間に起きるドリフトが構造的に閉じる)。空 = 不明。
+        "head_sha": str(head_sha or "").strip(),
         "origin": _origin_slot(origin_id, origin_content, origin_provenance),
         "artifact": artifact,
         "independence_contract": INDEPENDENCE_CONTRACT,
@@ -535,6 +548,194 @@ def batch_review_types_for_node(node, *, registry=None):
             {"review": REVIEW_ATTAINMENT, "judge_run": False},
         ]
     return []
+
+
+#: 実施記録が「どの差分に対する実施か」を持たないとき (= 旧形式 / 解決できなかった)
+#: のしるし。推測で埋めず空のままにする —— 「不明」を特定の sha とみなすと、関門を
+#: 外してよいかの判定を捏造することになる。
+REVIEW_SHA_UNKNOWN = ""
+
+
+def required_pr_open_review_types(registry=None):
+    """PR が取り込まれる前に **記録されていなければならない** レビュー種別。
+
+    ``batch_review_types_for_node("pr-open")`` から導く (= registry が唯一の
+    真実源)。新しい pr-open 種別の descriptor を置けば、ここも関門も自動で追従する。
+    ``scripts/review-gate-ci.py:required_review_types`` と同じ集合を指すので、
+    ローカルの関門と CI の required check が別の集合を見ることがない。
+    """
+    return [d["review"]
+            for d in batch_review_types_for_node("pr-open", registry=registry)]
+
+
+def derive_pr_review_obligations(*, required, performed, skipped, head_sha):
+    """PR の「まだ要るレビュー」を **導出する** (ms-119 e-6859)。純粋関数。
+
+        owed = required − (head_sha に対する実施) − (理由付きの免除)
+
+    **なぜ導出なのか。** 以前この問いは「義務ファイルが在るか」で答えていた。
+    義務は PR-open で 1 回書かれ、``beacon review done`` が消す —— つまり
+    「要る / 要らない」を **削除と復活の状態遷移** で表していた。新しいコミットを
+    積んでも復活させる経路が無かったので、一度実施すれば以後どれだけ積んでも
+    「実施済み」のままだった。実測 (PR #785 / #834 / #835 / #836): judge が一度も
+    見ていない差分に対して ``beacon-review-gate`` が緑になり、しかも #835 では
+    **AX の findings を直したコミット自身が未レビュー** のまま帳簿上「レビュー済み」
+    だった。修正コミットこそ欠陥を作ることが 3 周連続で実測されているので、この穴は
+    統計的にいちばん危ない領域を帳簿から隠していた。
+
+    状態遷移の形を保ったまま「push で復活させる」経路を足しても、復活経路を 1 つ
+    忘れれば同じ穴が残る。導出なら **忘れる経路が構造的に存在しない** —— head_sha が
+    変わった瞬間に第 2 項が空になり、全種別が owed に戻る。
+
+    Args:
+        required: 必須種別の列 (``required_pr_open_review_types()``)。
+        performed: 実施記録の列。各要素は
+            ``{"review_type", "reviewed_sha", "sha_pinned"}``
+            (余分なキーは無視する)。``sha_pinned`` の 3 値が要点 ——
+            下の「3 値である理由」を参照。
+        skipped: 理由付きで免除された種別の列。各要素は
+            ``{"review_type", "skipped_at_sha"}`` か、種別の文字列。
+        head_sha: いまレビュー対象になっている差分の sha。確かめられなければ
+            ``REVIEW_SHA_UNKNOWN`` / None を渡す —— **呼び出し側は head が不明なら
+            関門を閉じたままにする** (「現在の差分に対して実施済み」と言えないため)。
+
+    **``sha_pinned`` が 3 値である理由** (ここを 2 値にすると穴が開く):
+
+    ``True``
+        この記録は「どの差分に対する実施か」を自分で pin している。
+        ``reviewed_sha == head_sha`` のときだけ差し引く。
+    ``None`` (= 記録にその欄が無い / 旧形式)
+        この変更より前に書かれた記録。``LEGACY_REVIEW_DUE_TOLERANCE`` と同じ判断で
+        **差し引くが開示する** —— 黙って厳しくして、実際に実施したレビューを
+        まとめて未実施に戻さない。open な PR の寿命 (数日〜数週) を超えれば
+        自然に居なくなる。
+    ``False``
+        **新しい記録なのに sha を pin できなかった** (= 実施は記録したが、head を
+        確かめられなかった)。これは差し引かない。ここを ``None`` と同じ扱いに
+        すると、旧記録のための寛容が **恒久的な抜け道** に変わる: gh が落ちている
+        / offline で ``review done`` を打つたびに「sha 無しだから差し引く」記録が
+        増え、以後の全差分を覆ってしまう。「緩めると言い換えで素通りする」型
+        そのものなので、旧形式への寛容と「今回 pin できなかった」を分けて持つ。
+
+    Returns:
+        dict:
+            ``head_sha`` / ``head_known`` — 判定の土台。
+            ``required`` — 必須種別 (重複を畳んだ入力順)。
+            ``owed`` — まだ要る種別 (required 順)。
+            ``satisfied`` — head_sha に対する実施が在る種別。
+            ``legacy_no_sha`` — 旧形式の記録 (``sha_pinned is None`` かつ sha 無し)
+                のため **従来どおり差し引いた** 種別。呼び出し側は開示する。
+            ``unpinned`` — ``sha_pinned is False`` の記録。差し引かない。
+                ``[{"review", "reason"}]``。
+            ``stale`` — 実施記録が **別の sha** に対するものだった種別。
+                ``[{"review", "reviewed_sha"}]``。owed に戻る。
+            ``skipped`` — 免除で差し引いた種別。``[{"review", "skipped_at_sha"}]``。
+                免除は sha 単位にしない (人間が理由付きで出した判断を、push ごとに
+                出し直させるのは現実的でない) が、**どの時点の免除かを開示する**。
+
+        **バケツは 1 種別につき 1 つ** (排他)。強い根拠が勝つ順は
+        ``satisfied`` > ``legacy_no_sha`` > ``skipped``、差し引かれなかった側は
+        ``stale`` / ``unpinned`` のどちらか 1 つ。2 つ以上のバケツに同じ種別が
+        載ると、開示が「実施済み」と「免除」を同時に言い、読み手がどちらを信じれば
+        よいか決められない (独立 AX レビューが実測した形)。
+    """
+    req = []
+    for t in (required or []):
+        t = str(t or "").strip()
+        if t and t not in req:
+            req.append(t)
+
+    head = str(head_sha or "").strip()
+    head_known = bool(head)
+
+    # --- 実施記録を 4 つに分ける ---
+    satisfied = []
+    legacy_no_sha = []
+    unpinned = {}
+    stale_by_type = {}
+    for rec in (performed or []):
+        if not isinstance(rec, dict):
+            continue
+        rtype = str(rec.get("review_type") or "").strip()
+        if not rtype or rtype not in req:
+            continue
+        if rtype in satisfied:
+            continue                    # head 一致が既に在る種別は上書きしない
+        rsha = str(rec.get("reviewed_sha") or "").strip()
+        pinned = rec.get("sha_pinned", None)
+
+        if pinned is False:
+            # 新しい記録だが sha を pin できなかった = 差し引かない。
+            unpinned.setdefault(
+                rtype,
+                "実施は記録されていますが、どの差分に対する実施か pin できて"
+                "いません (記録時に head を確かめられなかった)")
+            continue
+        if not rsha:
+            if pinned is None:
+                # 旧形式 —— 従来どおり差し引く (開示はする)。
+                if rtype not in legacy_no_sha:
+                    legacy_no_sha.append(rtype)
+            else:
+                # pinned=True を名乗りながら sha が空 = 名乗りが実装と合っていない。
+                # 信用しない側に倒す。
+                unpinned.setdefault(
+                    rtype, "記録が sha を pin したと名乗っていますが空です")
+            continue
+        if head_known and rsha == head:
+            satisfied.append(rtype)
+            stale_by_type.pop(rtype, None)
+            unpinned.pop(rtype, None)
+        else:
+            # head 不明のときも「確かめられないので信用しない」側に倒す。
+            stale_by_type.setdefault(rtype, rsha)
+
+    # --- 免除 ---
+    #
+    # **1 種別につき開示されるバケツは必ず 1 つ** (ms-119 e-6859、独立 AX レビュー)。
+    # 初版は免除と旧形式を無条件に積んでいたので、同じ種別に「実施済み」と「免除」の
+    # 両方の記録が在ると、開示に ``✓ ax: <sha> に対して実施`` と
+    # ``⊘ ax: 人間が理由付きで免除`` が **同時に出た**。judge の指摘どおり
+    # 「差し引いた根拠を必ず言う」という設計意図が、2 つの矛盾する根拠を並べることで
+    # 「どちらを信じればいいか分からない」形に転化していた。
+    #
+    # 優先順位は **強い根拠が勝つ** 順: 実施 (この head を見た) > 旧形式の寛容
+    # (見たが差分が不明) > 免除 (見ていないが人間が免除した)。弱い側を黙って
+    # 落とすのではなく、強い根拠が在るならそれだけを言う。
+    legacy_no_sha = [t for t in legacy_no_sha if t not in satisfied]
+    _already = set(satisfied) | set(legacy_no_sha)
+    skipped_out = []
+    for s in (skipped or []):
+        if isinstance(s, dict):
+            rtype = str(s.get("review_type") or "").strip()
+            at = str(s.get("skipped_at_sha") or "").strip()
+        else:
+            rtype, at = str(s or "").strip(), ""
+        if not rtype or rtype not in req or rtype in _already:
+            continue
+        if any(x["review"] == rtype for x in skipped_out):
+            continue
+        skipped_out.append({"review": rtype, "skipped_at_sha": at})
+
+    credited = (set(satisfied) | set(legacy_no_sha)
+                | {x["review"] for x in skipped_out})
+    owed = [t for t in req if t not in credited]
+    stale = [{"review": t, "reviewed_sha": stale_by_type[t]}
+             for t in req if t in stale_by_type and t not in credited]
+    unpinned_out = [{"review": t, "reason": unpinned[t]}
+                    for t in req if t in unpinned and t not in credited]
+
+    return {
+        "head_sha": head,
+        "head_known": head_known,
+        "required": req,
+        "owed": owed,
+        "satisfied": satisfied,
+        "legacy_no_sha": legacy_no_sha,
+        "unpinned": unpinned_out,
+        "stale": stale,
+        "skipped": skipped_out,
+    }
 
 
 def _finding_key(finding):
@@ -722,3 +923,65 @@ def review_bindings_for_completion(*, has_spec=False, gated=False):
             "origin": "SPEC / vision",
         })
     return bindings
+
+
+def build_intra_range_move_reference(moves):
+    """差分の範囲内で「移動してきた」ファイルを judge に伝える参照を組む
+    (ms-119 e-7404)。
+
+    **なぜ要るか** (2026-11-12 の実測で判明): judge に渡す差分は base..head の
+    1 枚なので、**同じ範囲内でファイルが作られ、その後 別の場所へ移された**場合、
+    base に元のパスが無いため「移動先に新規追加された」としか見えない。rename
+    検出 (git の ``-M``) では復元できない —— rename の相手が base に存在しないため。
+
+    実害 (PR#840 の 6 周目): `.trash/` へ退避した試験ファイルについて、独立 judge
+    2 体が揃って「新しく書いた現役の試験を置き間違えた、tests/ へ戻すべき」と
+    high で指摘した。渡された差分に対しては **judge の読みは正しかった** —— 欠けて
+    いたのは「この範囲内で移動してきた」という履歴。このリポジトリは ``rm`` を
+    使わず ``.trash/`` へ ``mv`` して退役させる運用なので、退役のたびに構造的に
+    再発する。しかも全 judge が同じ入力を読むので **2 体一致が誤りを強める方向に
+    働き、合意度では濾せない**。
+
+    起票時の見立て (= rename 検出が効いていない) は実測で否定された: ``git show`` /
+    ``git diff`` は ``diff.renames`` 既定 true で既に rename を検出しており、
+    ``gh pr diff`` も検出する。``-M`` を足すのはバイト単位で同一の no-op だった。
+    真因は上記の「範囲内の create → 移動」。
+
+    ``moves`` は ``[{"path": 移動先, "from": 元パス, "commit": 移動した commit}]``。
+    空なら None (= 載せるものが無い。空の参照を載せて「確認した」に見せない)。
+    """
+    items = [m for m in (moves or [])
+             if (m or {}).get("path") and (m or {}).get("from")]
+    if not items:
+        return None
+    lines = [
+        "この差分の範囲内で **移動してきた** ファイル (差分では移動先への新規追加に"
+        "見えるが、元は範囲内の別の場所に在った):",
+    ]
+    for m in items:
+        commit = str(m.get("commit") or "").strip()
+        suffix = f" (移動した commit: {commit})" if commit else ""
+        lines.append(f"  - {m['path']} ← {m['from']}{suffix}")
+        # 2 回以上動いた場合は **辿った道筋を commit ごと** 添える
+        # (ms-119 / 独立 AX レビュー misleading)。単一の commit だけを載せると、
+        # judge がそれを `git show` で裏取りしたときに中間パスとの rename しか
+        # 見えず、注記が主張する出発点が現れない = 証拠が主張を裏付けない。
+        # 中間パスは「現在の置き場所」ではなく **道筋の通過点** として示す。
+        hops = [h for h in (m.get("hops") or [])
+                if (h or {}).get("from") and (h or {}).get("to")]
+        if len(hops) > 1:
+            trail = " → ".join(
+                [hops[0]["from"]]
+                + [f"({h.get('commit') or '?'}) {h['to']}" for h in hops])
+            lines.append(f"      道筋 (この範囲内で辿った通過点、現在の置き場所では"
+                         f"ない): {trail}")
+    lines.append(
+        "判定の含意: 移動先が `.trash/` 等の退役置き場なら、これは **意図的な退役** "
+        "であって『新しく書いたものを置き間違えた』ではない。元の場所へ戻す提案を"
+        "する前に、移動が意図的かを差分の範囲の記録で確かめること。")
+    return {
+        "id": "intra-range-moves",
+        "kind": "artifact-provenance",
+        "content": "\n".join(lines),
+        "moves": items,
+    }

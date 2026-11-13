@@ -18,6 +18,10 @@
 
 根本はサーバ側で合言葉の表を共有ストアに置くこと (e-7305 の受入条件)。この試験は
 **それが入るまで利用者がログインできる状態を保つ受け皿**を守る。
+
+追記 (ms-187): 表は共有の保存先 (`server/cli_pairing.py`) に移った。新しいサーバでは
+404 は本当に無効なコードのときだけになるが、古いサーバが残っている間も通るよう、
+404 で待ち続ける挙動はそのまま固定する。
 """
 from __future__ import annotations
 
@@ -68,7 +72,7 @@ def _drive(monkeypatch, tmp_path, poll_script):
             i = polls["n"]
             polls["n"] += 1
             kind = poll_script[i] if i < len(poll_script) else poll_script[-1]
-            if kind in ("404", "410"):
+            if kind in ("404", "409", "410"):
                 raise urllib.error.HTTPError(url, int(kind), "err", {}, None)
             if kind == "pending":
                 return _Resp(json.dumps({"status": "pending"}).encode())
@@ -160,3 +164,18 @@ def test_the_happy_paths_are_unchanged(monkeypatch, tmp_path, script, want_conta
     assert outcome == "returned", f"{outcome}\n{out}"
     assert want_contains in out
     assert creds
+
+
+def test_an_already_used_code_stops_at_once_and_says_why(monkeypatch, tmp_path):
+    """409 (受け取り済み) は即終了し、やり直しを案内する (ms-187)。
+
+    サーバーはトークンを渡す前にコードを受け取り済みにするので、前回の応答が
+    通信の途中で失われると、以後の問い合わせはすべて 409 になる。待っても
+    回復しないので、5 分待たせて「Timeout」と言わない。
+    """
+    outcome, out, polls, creds = _drive(monkeypatch, tmp_path, ["409"])
+    assert outcome == "exit 1", outcome
+    assert "already used" in out and "beacon auth login" in out, out
+    assert "Timeout" not in out
+    assert polls == 1, f"受け取り済みで待ち続けている (polls={polls})"
+    assert not creds

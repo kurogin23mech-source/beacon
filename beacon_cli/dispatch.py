@@ -114,6 +114,23 @@ def _run_commands_py(
     env.setdefault("BEACON_PROJECT_FILE", ".beacon/project.json")
     env["BEACON_DIR"] = str(root)
 
+    # Carry the caller's cwd to the child (ms-160 e-7423). `bin/beacon` exports
+    # BEACON_INVOCATION_CWD before it relocates into the project root, and
+    # lib/git_cwd.py reads it so the git ports act on the directory the user
+    # actually invoked from — the worktree, not the parent repo that holds
+    # `.beacon/`. This frontend had no equivalent: an independent maintainability
+    # review verified that `BEACON_INVOCATION_CWD` never reached the child here,
+    # so on a pipx / Windows install (where this is the only frontend) `beacon
+    # push record` and `beacon deploy record` from a worktree kept recording the
+    # parent's branch — the very bug e-7423 set out to fix.
+    #
+    # Set once here rather than per handler: every subcommand goes through this
+    # function, so a new verb cannot forget it. This is also what folds the two
+    # sources of truth into one — the module-level `get_invocation_cwd()` (used
+    # by `_handle_log` for its own `git -C`) and the env var the bash frontend
+    # exports now agree, because the former feeds the latter.
+    env.setdefault("BEACON_INVOCATION_CWD", str(get_invocation_cwd()))
+
     # #19 follow-up: main.py reconfigures sys.stdout in *this* process at
     # import time, but commands.py runs in a fresh child process where that
     # reconfigure never executes. Force PYTHONUTF8 + PYTHONIOENCODING so
@@ -2421,8 +2438,16 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
     mode = "prepare" if args.prepare else ("finalize" if args.finalize else "normal")
     if mode != "finalize":
         try:
+            # `-c core.quotepath=false` keeps non-ASCII paths unescaped. With the
+            # default (quotePath=true) git emits `".beacon/documents/\343\203…"`,
+            # a string starting with a quote character, so the `.beacon/` prefix
+            # test below misses it and a Beacon-only commit is recorded as if it
+            # touched the user's files. The bash frontend passes the same flag for
+            # the same reason (ms-160 e-7406); the two must agree because either
+            # one can be the path a given install takes.
             changed = subprocess.check_output(
-                git_C + ["diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
+                git_C + ["-c", "core.quotepath=false",
+                         "diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
                 text=True,
                 encoding="utf-8",
             ).strip().splitlines()

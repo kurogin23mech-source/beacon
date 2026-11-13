@@ -218,6 +218,48 @@ def _hook_output(context: str, hook_event_name: str = "UserPromptSubmit") -> dic
     }
 
 
+#: 降格の集計バンドの見出し語。**ここ 1 箇所**に置く (PR#844 2 周目の独立保守性
+#: レビュー, medium): 以前は理由ごとのバンド 4 つ + 本受信側で合計 5 箇所に写しが在り、
+#: 1 つだけ表記を変えても他が緑のままで気付けない形だった。
+#:
+#: 試験はこの定数を**読まない** —— 試験がコードと同じ定数を参照すると、文言を変えても
+#: 全部緑で通り、観測可能な出力に対する検査でなくなる。試験はリテラルを独立に固定し、
+#: 文言を変えたら落ちるのが正しい (judge は試験側もこの定数から組み立てる案を出したが、
+#: その半分は採らなかった)。
+_DOWNGRADE_BAND = "安全側降格"
+
+
+def _render_channel_advice_lines(channels, *, bd, reason, no_channel_fallback) -> str:
+    """channel 群を「1 行ずつその channel の案内」に畳む整形規則 —— **ここ 1 箇所**。
+
+    ms-185 e-7395 / PR#844 独立保守性レビュー (medium): 理由ごとの公開関数が増える
+    たびに、同じ骨格 (``\n    - channel=<名前>: <案内>`` / ソート順 / bd 不在の
+    扱い) が写しで増えていた。3 つ目を作るときに 3 箇所を手で揃える形になり、1 つ
+    忘れても壊れたことに気付きにくい。整形規則をここに 1 つ置き、公開関数は
+    **理由タグと「channel が無いときの文」だけを渡す薄い口**にする。
+
+    **この関数の本体は反転ハーネスの当て先である**:
+    ``scripts/invert-retired-provenance-guard.py`` が下の f-string に忠実な欠陥を
+    注入して「守る対象を壊すと赤くなるか」を測る。本体を書き換えるときはハーネスを
+    走らせて **SKIP 0 件 / exit 0** を確かめること (アンカーが外れるとハーネスは
+    SKIP を出し、それは緑と同じ害である)。
+
+    どの文字列を当て先にしているかはここに**写さない** —— 初版はここに当て先の
+    リテラルを書き、しかも同じコミットがその当て先を移したので、着地した時点で
+    既に嘘になっていた (PR#844 2 周目の独立 AX レビューが実測)。写しは持たず、
+    ハーネス側を唯一の宣言にする。
+
+    ``bd`` が None (= lib が読めない) / channel 不明のときは **推測で名乗らない**。
+    知らないのに「直せます」と言う方が、言わないより害が大きい (e-7077 の教訓)。
+    """
+    if bd is None or not channels:
+        return no_channel_fallback
+    return "".join(
+        f"\n    - channel={ch or '?'}: {bd.downgrade_advice(reason, ch)}"
+        for ch in sorted(channels)
+    )
+
+
 def render_provenance_advice_lines(channels, *, bd) -> str:
     """証拠欠落で降格した channel 群を、1 行ずつ「その channel の直し方」に畳む。
 
@@ -237,17 +279,63 @@ def render_provenance_advice_lines(channels, *, bd) -> str:
     ときは、**回復手段を推測で名乗らない**。知らないのに「直せます」と言う方が、
     言わないより害が大きい (e-7077 の教訓)。
     """
-    if bd is None or not channels:
-        return ("\n    - 要求された証拠の封筒が付いていません "
-                "(channel を特定できないため回復手段を提示できません)")
-    return "".join(
-        f"\n    - channel={ch or '?'}: "
-        f"{bd.downgrade_advice(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE, ch)}"
-        for ch in sorted(channels)
-    )
+    return _render_channel_advice_lines(
+        channels, bd=bd,
+        reason=(bd.DOWNGRADE_NON_SYSTEM_ENVELOPE if bd is not None else ""),
+        no_channel_fallback=(
+            "\n    - 要求された証拠の封筒が付いていません "
+            "(channel を特定できないため回復手段を提示できません)"))
 
 
-def tally_downgrade_reasons(reasons, *, bd) -> dict:
+def render_retired_not_allowlisted_advice_lines(channels, *, bd) -> str:
+    """引退した channel が **まだ許可されていない** 件を、1 行ずつ案内に畳む。
+
+    **なぜ専用の口が要るか (ms-185 e-7395)**: 判定 (``classify_auto_execute``) は
+    許可リストを先に見るので、引退した channel が許可リストに無いときの理由タグは
+    「許可リスト漏れ」と同じ空文字列になる (順序は意図して固定されている)。Codex 側
+    の許可リスト漏れバンドは **件数だけ** を出す凍結文だったので、引退した channel も
+    「人間 opt-in 前」と案内していた。人間がそれに従って登録すると、次の通知では
+    「外してください」と逆を言われる。二度と使わない channel を許可させる誤誘導。
+
+    **なぜ兄弟 (``render_provenance_advice_lines``) と同じ形にしたか**: 文言の所有者は
+    ``lib/bus_delivery.downgrade_advice`` 1 つで、ここは整形だけを持つ。純粋関数に
+    するのは、Codex 側の出力を共有層と **等値** で突き合わせられるようにするため
+    (部分一致だと、今日の文言を凍結したコピーを埋め込んでも緑のままになる —— #812
+    の独立 judge が実測した経路)。``main()`` に inline で書くと同じ穴に戻る。
+
+    ``bd`` が None (= lib が読めない環境) / channel 不明のときは **推測で名乗らない**。
+    """
+    return _render_channel_advice_lines(
+        channels, bd=bd, reason="",
+        no_channel_fallback=(
+            "\n    - 引退した channel ですが、channel を特定できないため "
+            "回復手段を提示できません"))
+
+
+def render_retired_advice(*, bd) -> str:
+    """引退した channel の降格について「原因と直し方」の 1 句を共有層から取る。
+
+    **直した穴 (ms-185 e-7308)**: 証拠欠落の理由は #812 のレビュー後に
+    ``render_provenance_advice_lines`` へ切り出して共有層へ委譲したが、**引退理由は
+    凍結コピーのまま** ``main()`` の中に残っていた。実測すると、共有層の文言を別物に
+    差し替えても Codex 側の出力は変わらなかった (= 委譲していない)。Claude 側には
+    4 理由すべてを共有層と等値比較する検査 (``test_claude_hook_does_not_keep_its_own
+    _copy_of_the_other_reasons``) が在ったので、同じ非対称がこの理由だけ残っていた。
+
+    e-7071 で 4 つの channel を実際に引退させたため、この経路が初めて実運用に乗った。
+    2 つの文言は同じことを言っていたが、守るものが無いので片方だけ直した瞬間に黙って
+    ズレる形だった。
+
+    ``bd`` が None (= lib が読めない環境) のときは**回復手段を推測で名乗らない**
+    (e-7077 の教訓。``render_provenance_advice_lines`` と同じ姿勢)。
+    """
+    if bd is None:
+        return ("channel は allowlist 済だが、サーバが発行する channel では "
+                "なくなっています (共有層を読めないため回復手段を提示できません)")
+    return bd.downgrade_advice(bd.DOWNGRADE_RETIRED_CHANNEL, "")
+
+
+def tally_downgrade_reasons(entries, *, bd) -> dict:
     """降格理由のリストを、理由ごとの件数に畳む (ms-185 e-7077 / 保守性レビュー)。
 
     **なぜ純粋関数に切り出したか**: 以前この対応表は ``main()`` の走査ループに
@@ -259,27 +347,60 @@ def tally_downgrade_reasons(reasons, *, bd) -> dict:
     案内する — 通知文と真因が入れ替わった状態になる。ソース文字列検査では
     原理的に捕まえられないので、**値を返す関数**にして振る舞いで測れるようにした。
 
-    ``reasons`` は降格した event の理由タグの並び (空文字列 = 許可リスト漏れ)。
-    ``bd`` は ``lib/bus_delivery`` モジュール (理由タグの定数の出どころ)。
+    ``entries`` は降格した event の ``(理由タグ, channel)`` の並び
+    (理由タグの空文字列 = 許可リスト漏れ)。``bd`` は ``lib/bus_delivery`` モジュール
+    (理由タグの定数と、引退した channel の集合の出どころ)。
 
-    戻り値のキーは 4 つで固定: ``allowlist`` / ``provenance`` / ``retired`` /
-    ``other``。``other_reasons`` は未知のタグの集合 (開示用)。**未知のタグを
-    ``allowlist`` に畳まない** — 畳むと「opt-in しろ」という誤案内になる。
+    **channel も取る理由 (ms-185 e-7395)**: 「許可リスト漏れ」の空タグは 2 つの
+    別の状態を指す —— 人間がまだ許可していない現役 channel と、**引退した
+    channel**。前者は「許可してください」が正しい案内だが、後者にそれを出すと、
+    人間が登録した次の通知で「外してください」と逆を言われる。タグだけでは
+    見分けられないので channel が要る。以前は理由タグだけを受け取っており、
+    引退した channel も ``allowlist`` に畳んで誤案内していた。
+
+    Returns (**型が 2 種類混ざるので明示する**, PR#844 2 周目の独立 AX レビュー):
+
+    * 件数 (``int``) — 5 キー固定:
+      ``allowlist`` (現役 channel の承認待ち) /
+      ``retired_not_allowlisted`` (引退 channel が許可リストに無い) /
+      ``retired_still_allowlisted`` (引退 channel が許可リストに残っている) /
+      ``provenance`` (証拠の封筒が無い) / ``other`` (未知のタグ)
+    * 開示用の集合 (``set``) — 2 キー:
+      ``other_reasons`` (未知のタグそのもの) /
+      ``retired_not_allowlisted_channels`` (案内を channel ごとに出すため)
+
+    **``sum(counts.values())`` は TypeError になる** (int と set が混ざる)。総件数が
+    要るなら件数キーだけを足すこと。``json.dumps`` も同じ理由で落ちる。
+
+    引退 channel 絡みは ``retired_not_allowlisted`` と ``retired_still_allowlisted``
+    の **2 キーに分かれる**。以前は後者が ``retired`` という名前で前者と接頭辞を
+    共有しており、「``retired`` が引退の全件数」と誤読できた (同レビューの指摘)。
+    対称な名前に変えたので、片方だけを合計に使う形にはなりにくい。
+
+    **未知のタグを ``allowlist`` に畳まない** — 畳むと「opt-in しろ」という誤案内になる。
     """
-    counts = {"allowlist": 0, "provenance": 0, "retired": 0, "other": 0}
+    counts = {"allowlist": 0, "retired_not_allowlisted": 0, "provenance": 0,
+              "retired_still_allowlisted": 0, "other": 0}
     other_reasons: set = set()
+    retired_not_allowlisted_channels: set = set()
     retired_tag = getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None)
-    for reason in reasons:
+    retired_channels = getattr(bd, "RETIRED_PROVENANCE_CHANNELS", frozenset())
+    for reason, channel in entries:
         if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
             counts["provenance"] += 1
         elif retired_tag is not None and reason == retired_tag:
-            counts["retired"] += 1
+            counts["retired_still_allowlisted"] += 1
         elif not reason:
-            counts["allowlist"] += 1
+            if str(channel or "") in retired_channels:
+                counts["retired_not_allowlisted"] += 1
+                retired_not_allowlisted_channels.add(str(channel or ""))
+            else:
+                counts["allowlist"] += 1
         else:
             counts["other"] += 1
             other_reasons.add(str(reason))
     counts["other_reasons"] = other_reasons
+    counts["retired_not_allowlisted_channels"] = retired_not_allowlisted_channels
     return counts
 
 
@@ -373,16 +494,17 @@ def main() -> int:
     # bus_auto_execute_channels) are downgraded — they stay in the generic list,
     # just without any imperative / forced Skill invoke.
     op_trigger_events: list[dict] = []
-    downgrade_reasons: list = []
+    downgrade_entries: list = []
     downgraded_allowlist = 0
+    downgraded_retired_not_allowlisted = 0
+    downgraded_retired_not_allowlisted_channels: set = set()
     downgraded_provenance = 0
     downgraded_retired = 0
     downgraded_other = 0
     downgraded_other_reasons: set = set()
-    # ms-185 / #812 レビュー: 署名欠落の降格は **channel ごとに回復手段が違う**
-    # (operation-trigger = 人間の承認で直せる / trek-* = operator には直せない)。
-    # 件数だけ数えていた以前の形では、どちらの案内を出すか決められず、trek の
-    # 世界観の固定文を全件に出していた。だから channel を集める。
+    # 署名欠落の降格は channel ごとに回復手段が違うので channel を集める。
+    # どの channel が何を要求し、どう直すかは lib/bus_delivery.downgrade_advice の
+    # docstring が唯一の説明 — ここには写しを置かない (ms-185 e-7395)。
     downgraded_provenance_channels: set = set()
     gate_unavailable_autoexec = 0
     if bd is not None:
@@ -395,7 +517,10 @@ def main() -> int:
                 # 理由ごとの件数は tally_downgrade_reasons (純粋関数) が持つ。
                 # ここで inline に分岐していた頃は、配線の逆転をテストで捕まえ
                 # られなかった (ms-185 e-7077 / 保守性レビュー)。
-                downgrade_reasons.append(reason)
+                # ms-185 e-7395: channel も積む。「許可リスト漏れ」の空タグが
+                # 現役 channel の承認待ちと引退 channel の 2 つを指すので、
+                # 畳む側が見分けるのに channel が要る。
+                downgrade_entries.append((reason, str(ev.get("channel") or "")))
                 if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
                     downgraded_provenance_channels.add(
                         str(ev.get("channel") or ""))
@@ -403,10 +528,13 @@ def main() -> int:
                     and str(ev.get("channel") or "")
                     == bd.OPERATION_TRIGGER_CHANNEL):
                 op_trigger_events.append(ev)
-        _tally = tally_downgrade_reasons(downgrade_reasons, bd=bd)
+        _tally = tally_downgrade_reasons(downgrade_entries, bd=bd)
         downgraded_allowlist = _tally["allowlist"]
+        downgraded_retired_not_allowlisted = _tally["retired_not_allowlisted"]
+        downgraded_retired_not_allowlisted_channels = \
+            _tally["retired_not_allowlisted_channels"]
         downgraded_provenance = _tally["provenance"]
-        downgraded_retired = _tally["retired"]
+        downgraded_retired = _tally["retired_still_allowlisted"]
         downgraded_other = _tally["other"]
         downgraded_other_reasons = _tally["other_reasons"]
     else:
@@ -458,10 +586,24 @@ def main() -> int:
                 + "\n".join(notices) + "\n")
     if downgraded_allowlist:
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_allowlist} 件 — channel が bus_auto_execute_channels "
             "allowlist に無い (= 人間 opt-in 前) ため。上の一覧に通常イベントとして "
             "出ています。自動実行はしないでください。\n"
+        )
+    if downgraded_retired_not_allowlisted:
+        # ms-185 e-7395: 許可リスト漏れのうち **引退した channel** は、上の
+        # 「人間 opt-in 前」バンドに混ぜてはいけない。混ぜると人間が
+        # `auto-execute add` で登録し、次の通知で「外してください」と逆を
+        # 言われる。文言は lib/bus_delivery.downgrade_advice が唯一の所有者で、
+        # 整形は render_retired_not_allowlisted_advice_lines (純粋関数) が持つ
+        # — inline に書くと共有層との等値をテストで守れない。
+        parts.append(
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
+            f"{downgraded_retired_not_allowlisted} 件 — 引退した channel です "
+            f"(許可リストにも入っていません)。"
+            f"{render_retired_not_allowlisted_advice_lines(downgraded_retired_not_allowlisted_channels, bd=bd)}\n"
+            "  上の一覧に通常イベントとして出ています。自動実行はしないでください。\n"
         )
     if downgraded_provenance:
         # channel ごとに回復手段が違うので、1 行ずつ **その channel の** 案内を
@@ -472,24 +614,23 @@ def main() -> int:
         advice_lines = render_provenance_advice_lines(
             downgraded_provenance_channels, bd=bd)
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_provenance} 件 — channel は allowlist 済だが、"
             f"要求された証拠の封筒が付いていないため。{advice_lines}\n"
             "  上の一覧に通常イベントとして出ています。自動実行はしないでください。\n"
         )
     if downgraded_retired:
+        # ms-185 e-7308: 文言は lib/bus_delivery.downgrade_advice が唯一の所有者。
+        # 以前はここに凍結コピーが在り、共有層を差し替えても追従しなかった。
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
-            f"{downgraded_retired} 件 — channel は allowlist 済だが、"
-            "サーバが発行する channel ではなくなっています (= 古い opt-in が残った "
-            "状態、ms-185 e-7077)。opt-in し直しても直りません。直すには "
-            "`beacon bus auto-execute remove --channel <名前>` で古い opt-in を "
-            "外してください。上の一覧に通常イベントとして出ています。自動実行は "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
+            f"{downgraded_retired} 件 — {render_retired_advice(bd=bd)}。"
+            "上の一覧に通常イベントとして出ています。自動実行は "
             "しないでください。\n"
         )
     if downgraded_other:
         parts.append(
-            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"\n⚠ {_DOWNGRADE_BAND}: auto-execute → propose-to-ai に変換された event "
             f"{downgraded_other} 件 — この hook が知らない理由タグです "
             f"({', '.join(sorted(downgraded_other_reasons))})。降格自体は効いて "
             "いますが、理由をここで説明できません (= bus_delivery 側に理由が "

@@ -248,13 +248,24 @@ def login_web():
             if e.code == 410:
                 print("\nCode expired. Run 'beacon auth login' again.")
                 sys.exit(1)
+            if e.code == 409:
+                # サーバーはトークンを渡す前にコードを「受け取り済み」にする (ms-187)。
+                # 前回の応答が通信の途中で失われると、次の問い合わせは 409 になる。
+                # ログインはサーバー側では済んでいるが、この端末には保存されていない。
+                # 待ち続けても回復しないので、ここで止めてやり直しを案内する。
+                print("\nThis login code was already used, but the credentials "
+                      "did not reach this terminal.")
+                print("  `beacon auth login` をもう一度実行してください。")
+                sys.exit(1)
             if e.code == 404:
-                # **404 は致命的ではない。** サーバの pairing コード表
-                # (routers_auth の _cli_pending) はプロセス内メモリで、しかも
-                # router インスタンスごとのローカル辞書。コードを発行した
+                # **404 は致命的ではない。** 以前のサーバは pairing コード表を
+                # インスタンスごとのメモリに置いていたため、コードを発行した
                 # インスタンスと、この問い合わせに答えたインスタンスが違えば、
-                # 答えた側はコードを知らないので 404 を返す —— それは
+                # 答えた側はコードを知らずに 404 を返した —— それは
                 # 「コードが無効」ではなく「相手が知らない」。
+                # ms-187 でコード表は共有の保存先 (server/cli_pairing.py) に移り、
+                # 新しいサーバでは 404 は本当に無効なコードのときだけになった。
+                # 古いサーバが残っている間も通るよう、ここは待ち続ける。
                 #
                 # 以前はここで即 exit していたため、**承認する時間が構造的に
                 # 無かった**: 問い合わせは 3 秒間隔で、数回のうちに必ず別
@@ -269,9 +280,6 @@ def login_web():
                 # タイムアウトさせない —— 原因が分からないまま待たされるのが
                 # 一番たちが悪い)。
                 #
-                # 本来の直しはサーバ側でコード表を共有ストアに置くこと。
-                # ここは、それが入るまで利用者がログインできる状態を保つための
-                # 受け皿。
                 unknown_polls += 1
                 continue
         except Exception:
@@ -281,10 +289,10 @@ def login_web():
         print("\nInvalid code (a server instance never recognised it).")
         print("  発行したコードを、どのインスタンスも知らないまま締め切りを"
               "迎えました。")
-        print("  `beacon auth login` をやり直してください。続くなら、"
-              "pairing コード表が")
-        print("  インスタンス間で共有されていない疑いがあります "
-              "(server/routers_auth.py の _cli_pending)。")
+        print("  `beacon auth login` をやり直してください。続くなら、サーバーが"
+              "コードの保存先")
+        print("  (server/cli_pairing.py が使う store_router) を読めていない"
+              "疑いがあります。")
         sys.exit(1)
     print("\nTimeout. Run 'beacon auth login' again.")
     sys.exit(1)
@@ -661,13 +669,7 @@ def _refresh_web_auth_token(creds_data: dict) -> dict | None:
     if result.get("refresh_token"):
         updated["refresh_token"] = result["refresh_token"]
 
-    try:
-        cred_path = _credentials_path()
-        with open(cred_path, "w", encoding="utf-8") as f:
-            json.dump(updated, f, indent=2)
-    except OSError:
-        pass  # best-effort; return the updated dict even if write fails
-
+    _save_credentials(updated)  # best-effort; return the updated dict even if write fails
     return updated
 
 
@@ -691,8 +693,147 @@ def _get_firebase_api_key_from_token(token: str) -> str | None:
     return None
 
 
+# ms-187 e-7490: CLI のログイン (bcli トークン、30 日で切れる) を、使っている間は
+# 自動で延長する。以前は延長の仕組みが無く、30 日ごとに黙って切れていた
+# (2026-11-13 に、9 月 20 日から切れていたことが判明)。
+#
+# 期限まで 7 日を切ったトークンを、beacon を使ったときにサーバーの
+# /api/auth/exchange-cli-token で新しい 30 日分に取り替える。この口はもともと
+# Web UI 用にあり、CLI トークンでも本人確認が通る (require_auth は bcli を検証する)。
+#
+# - 延長に失敗しても、今の操作は止めない (手元のトークンはまだ有効なので、そのまま使う)。
+# - 失敗したら 1 時間は再挑戦しない (サーバーが落ちているときに、毎回の操作が
+#   問い合わせ待ちで遅くなるのを防ぐ)。
+# - 期限を過ぎたトークンは延長できない (サーバーが受け付けない)。その場合は今と同じく
+#   `beacon auth login` を案内する。
+_RENEW_WINDOW_SECONDS = 7 * 86400
+_RENEW_RETRY_SECONDS = 3600
+_RENEW_TIMEOUT_SECONDS = 5
+
+
+def _save_credentials(creds_data: dict) -> bool:
+    """credentials.json を書き戻す (best-effort)。書けたかどうかを返し、書けなくても例外は出さない。
+
+    一時ファイルに書いてから置き換える (os.replace)。並行して読む別プロセス
+    (hook や別セッションの beacon) が、書きかけの空ファイルを読んで落ちないように
+    するため。
+
+    一時ファイルは最初から所有者だけが読み書きできる権限 (0600) で作る。置き換えでは
+    元のファイルの権限が引き継がれないので、既定の権限 (多くは 0644) で作ると、
+    延長のたびにトークンを他のユーザーが読めるファイルになってしまう。
+    """
+    try:
+        cred_path = _credentials_path()
+        cred_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cred_path.with_name(f"{cred_path.name}.{os.getpid()}.tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(creds_data, f, indent=2)
+        try:
+            os.chmod(tmp, 0o600)  # 既に在った一時ファイルを再利用した場合に備える
+        except OSError:
+            pass
+        os.replace(tmp, cred_path)
+        return True
+    except OSError:
+        return False
+
+
+def _renew_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        # サーバーの説明 (detail) を添える。90 日の上限で断られたのか、トークンが
+        # 無効なのかは、HTTP の番号だけでは見分けられない。
+        detail = ""
+        try:
+            detail = str(json.loads(exc.read() or b"{}").get("detail") or "")
+        except Exception:
+            detail = ""
+        suffix = f": {detail}" if detail else ""
+        if exc.code in (401, 403):
+            return f"サーバーが延長を断りました (HTTP {exc.code}{suffix})"
+        return f"サーバーがエラーを返しました (HTTP {exc.code}{suffix})"
+    if isinstance(exc, (urllib.error.URLError, OSError)):
+        return "サーバーに届きませんでした"
+    return "サーバーの応答を読めませんでした"
+
+
+def _maybe_renew_cli_token(creds_data: dict, now: int) -> dict:
+    """期限が近い CLI トークンを新しい 30 日分に差し替えて返す。不要・失敗なら元のまま返す。"""
+    if creds_data.get("token_type") != "beacon_cli":
+        return creds_data
+    try:
+        expiry = int(creds_data.get("token_expiry") or 0)
+        last_attempt = int(creds_data.get("renew_attempted_at") or 0)
+    except (TypeError, ValueError):
+        return creds_data
+    if not expiry or expiry - now > _RENEW_WINDOW_SECONDS:
+        return creds_data
+    if now - last_attempt < _RENEW_RETRY_SECONDS:
+        return creds_data
+
+    updated = dict(creds_data)
+    updated["renew_attempted_at"] = now
+    failure = ""
+    try:
+        req = urllib.request.Request(
+            f"{_get_api_url()}/api/auth/exchange-cli-token",
+            method="POST",
+            data=b"",
+            headers={
+                "Authorization": f"Bearer {creds_data.get('token', '')}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(
+            req, timeout=_RENEW_TIMEOUT_SECONDS, context=_get_ssl_context()
+        ) as resp:
+            result = json.loads(resp.read())
+        new_token = result.get("id_token") or ""
+        new_expiry = int(result.get("token_expiry") or 0)
+        if new_token.startswith("bcli.") and new_expiry > expiry:
+            updated["token"] = new_token
+            updated["token_expiry"] = new_expiry
+            updated.pop("renew_attempted_at", None)
+            updated.pop("last_renew_error", None)
+            if result.get("email"):
+                updated["email"] = result["email"]
+        else:
+            failure = "サーバーの応答に新しいログインが入っていませんでした"
+    except Exception as exc:  # 延長は付加機能。失敗しても手元のトークンで続ける。
+        failure = _renew_failure_reason(exc)
+
+    if failure:
+        # 黙って失敗させない: 理由を残し、あと何日で切れるかを 1 行知らせる
+        # (延長が壊れたまま期限当日に突然止まる、を避ける。AX レビュー finding)。
+        # 1 時間に 1 回しか試さないので、この警告も 1 時間に 1 回まで。
+        updated["last_renew_error"] = failure
+        days_left = max(0, (expiry - now) // 86400)
+        print(
+            f"注意: ログインの自動延長に失敗しました ({failure})。"
+            f"このままだと約 {days_left} 日でログインが切れます。"
+            f"`beacon auth login` で入り直すと 30 日分に戻ります。",
+            file=sys.stderr,
+        )
+    if not _save_credentials(updated) and not failure:
+        # 延長はできたが保存できなかった。黙っていると、次の操作でも古いトークンを
+        # 読んで延長を繰り返し、期限の日に突然切れる。
+        print(
+            "注意: ログインを延長しましたが、認証情報ファイルに保存できませんでした "
+            f"({_credentials_path()})。書き込みの権限を確かめてください。",
+            file=sys.stderr,
+        )
+    return updated
+
+
 def load_credentials():
-    """Load and refresh cached credentials. Returns credentials or None."""
+    """Load and refresh cached credentials. Returns credentials or None.
+
+    **Side effects** (not a pure read): a Beacon CLI token within 7 days of expiry
+    is renewed over the network (≤ 5 s) and credentials.json is rewritten
+    (ms-187 e-7490, see ``_maybe_renew_cli_token``); legacy Google tokens are
+    refreshed the same way. Callers on hot paths should expect that at most once
+    per hour.
+    """
     cred_path = _credentials_path()
     if not cred_path.exists():
         return None
@@ -733,7 +874,7 @@ def load_credentials():
                 "       (Token expired. Run: beacon auth login)"
             )
             return None
-        return creds_data
+        return _maybe_renew_cli_token(creds_data, now)
 
     # OAuth mode: use google credentials
     _ensure_deps()

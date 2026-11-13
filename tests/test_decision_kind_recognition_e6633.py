@@ -358,3 +358,56 @@ def test_vocabulary_has_one_source_across_cli_and_server():
     assert de.KNOWN_DECISION_KINDS is dv.KNOWN_DECISION_KINDS
     assert de.DECISION_KINDS is dv.KNOWN_DECISION_KINDS
     assert cmd_decision._KNOWN_KINDS is dv.KNOWN_DECISION_KINDS
+
+
+# ---------------------------------------------------------------------------
+# ms-185 e-7330 — 産出者を持つ種別を「引退」に入れても気づけない穴
+# ---------------------------------------------------------------------------
+
+def test_no_kind_with_a_producer_is_listed_as_retired():
+    """産出者を持つ種別が引退辞書に居ない (= 集合の交わりが空)。
+
+    **直した穴**: この性質はこれまで**具体名 3 つへの pin** でしか守られていなかった
+    (`tests/test_trek_record_read_surface_e7081.py` が halt / resume / trek-review に
+    ついて「RETIRED に在り KNOWN に無い」を測り、生きている例として scope-approval を
+    1 つ名指ししていた)。名指しは名指しした種別しか守らないので、**4 つ目の種別を
+    誤って引退辞書に入れても緑のまま**だった。
+
+    何が壊れるか: 引退辞別は「読み手だけのための辞書 = 産出者を要求しない」という
+    約束で在る。産出者を持つ種別をそこへ入れると、(a) `beacon decision record` が
+    その種別で記録するたびに「引退した種別です」と**嘘の開示**を出し、(b) 読み手は
+    「もう誰も書いていない」と読む。実際には今日も書かれている。
+
+    なぜ交わりで書くか: 名前を増やすたびに試験を足す形だと、足し忘れが同じ穴を開ける。
+    守りたいのは「産出者を持つ」と「引退した」が両立しないという**性質**なので、
+    集合どうしの関係として書く。
+    """
+    producers = set(cl.DECISION_CAPTURE_PRODUCERS)
+    retired = set(dv.RETIRED_DECISION_KINDS)
+    both = sorted(producers & retired)
+    assert not both, (
+        f"産出者を持つ種別が引退辞書にも載っています: {both}。"
+        f"引退辞書は「かつて産出していた種別」= 産出者を要求しない読み手用の辞書なので、"
+        f"今日も書かれている種別を入れると記録のたびに嘘の開示が出ます。"
+        f"本当に引退させるなら産出者 (DECISION_CAPTURE_PRODUCERS の該当行) も"
+        f"一緒に外すこと"
+    )
+
+
+def test_every_retired_kind_has_no_producer_left():
+    """逆向き: 引退辞書の各種別に産出者が残っていない。
+
+    上の試験と同じ交わりを見るが、**赤くなったときに読む向きが逆**になる。
+    上は「生きている種別を誤って引退に入れた」、こちらは「引退させたのに産出者を
+    外し忘れた」。同じ 1 つの交わりでも、どちら側の操作が間違ったのかで直す場所が
+    違うので、メッセージを分けておく。
+    """
+    producers = set(cl.DECISION_CAPTURE_PRODUCERS)
+    leftover = sorted(k for k in dv.RETIRED_DECISION_KINDS
+                      if k in producers)
+    assert not leftover, (
+        f"引退させた種別に産出者が残っています: {leftover}。"
+        f"引退は「読み手だけ残す」操作なので、書き手 (producer) を外すところまでが"
+        f"1 組です。外し忘れると捕獲被覆の検査が「産出者が在るのに記録が無い」側で"
+        f"赤くなるか、あるいは記録されるのに引退と開示されます"
+    )

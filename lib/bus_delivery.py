@@ -61,17 +61,29 @@ OPERATION_TRIGGER_CHANNEL = "operation-trigger"
 # production. The tests were green because they pinned ``operation-trigger``
 # against a synthetic T1-system envelope, a shape production cannot produce.
 # So the proof was re-pointed from "the server signed it (for a Trek)" to "the
-# human approved it (for this Operation)". The set name is kept because the
-# downgrade reason tag ``non-system-envelope`` is a wire value the inbox hooks
-# branch on to choose which fix to advise (e-5803 review); renaming the vocabulary
-# is a separate change from re-pointing the gate.
+# human approved it (for this Operation)".
+#
+# ms-185 e-7157 — **the set was renamed from ``SYSTEM_PROVENANCE_CHANNELS``.**
+# After the re-pointing above, that name asserted something false about
+# ``operation-trigger``: the evidence it demands is a human's approval, not a
+# server signature. The long comment here disclosed that, which is why the
+# rename was deferred twice — but two independent reviews raised it in a row,
+# and a name that has to be corrected by the comment under it is a name that
+# misleads anyone who only greps. The predicate had already been neutralised
+# (``has_system_provenance`` → ``has_required_provenance``), so the set name was
+# the last surface still claiming "system".
+#
+# **The downgrade reason tag ``non-system-envelope`` was NOT renamed**, and must
+# not be: it is a wire value the inbox hooks branch on to choose which fix to
+# advise (e-5803 review). Renaming the vocabulary a receiver reads off the wire
+# is a different, breaking change from renaming a Python identifier.
 #
 # Kept as a literal (not derived from ``PROVENANCE_REQUIREMENTS.keys()``) because
 # ``classify_auto_execute`` binds it as a default argument at def time, and the
 # map cannot be built until its predicates exist. The two are held in agreement
 # by ``test_gated_channels_match_their_requirements``, which fails if a name sits
 # in one and not the other — a structural check instead of fragile init order.
-SYSTEM_PROVENANCE_CHANNELS = frozenset({
+GATED_PROVENANCE_CHANNELS = frozenset({
     "operation-trigger",
 })
 
@@ -84,7 +96,7 @@ SYSTEM_PROVENANCE_CHANNELS = frozenset({
 # That is sound while "opted in" and "server-minted" are decided independently.
 #
 # It stops being sound the moment a channel is REMOVED from
-# ``SYSTEM_PROVENANCE_CHANNELS`` while stale opt-ins for it still sit in some
+# ``GATED_PROVENANCE_CHANNELS`` while stale opt-ins for it still sit in some
 # project's ``bus_auto_execute_channels``. The channel then silently changes
 # class — from "signature required" to "trusted on the opt-in alone" — and an
 # unsigned ``delivery=auto-execute`` event on it is executed. Measured on
@@ -99,7 +111,7 @@ SYSTEM_PROVENANCE_CHANNELS = frozenset({
 # opt-ins) is still done — this is defence in depth, not a substitute, because
 # allowlists live in every project's own record and we cannot reach them all.
 #
-# **Do not just delete a name from SYSTEM_PROVENANCE_CHANNELS — move it here.**
+# **Do not just delete a name from GATED_PROVENANCE_CHANNELS — move it here.**
 # ``tests/test_retired_provenance_channels_e7077.py`` fails if a known
 # server-minted channel family member is in neither set.
 #
@@ -158,10 +170,29 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 def sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
     """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
 
-    Payload-derived ids (op_id / trek_id / task_id) are interpolated into the
-    imperative command strings; this defends the injected instruction against a
-    malformed id (newline / markdown / shell metacharacter) leaking in. Returns
-    ``fallback`` when nothing survives so the block never emits an empty command.
+    The contract: **every payload-derived id that reaches an imperative command
+    string goes through here first.** That defends the injected instruction
+    against a malformed id (newline / markdown / shell metacharacter) leaking in.
+    Returns ``fallback`` when nothing survives, so a block never emits an empty
+    command.
+
+    **No list of id names lives in this docstring** (ms-185, PR#842 rounds 3-4).
+    It used to enumerate them, and every edit of that list got one entry wrong:
+    round 3 dropped ``trek_id`` (correctly — the retired channels lost their
+    interpolation site) but left ``task_id`` in, which no caller ever passes, and
+    never added ``spec_doc_id``, which one does. Two independent reviews caught
+    the same stale list, each time *after* it had just been edited. A copy of the
+    caller set cannot be kept honest by hand, so there is no copy: **the call
+    sites are the list** — `grep -rn "sanitize_id(" lib/ bin/ scripts/`.
+
+    (The `-r` is load-bearing and was missing when this paragraph was first
+    written: plain `grep -n PATTERN dir/` exits 2 with "Is a directory" on stderr
+    and prints **nothing** to stdout, so a reader who checks only stdout concludes
+    "no callers" — the exact wrong answer, stated confidently. That first version
+    also claimed the command "cannot go stale", which is not a thing a command can
+    promise; the claim is dropped. An independent AX review caught it, and it got
+    past the author because the authoring shell aliased `grep` to a wrapper that
+    recursed by default — measuring one's own shell is not measuring the reader's.)
     """
     cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
     return cleaned or fallback
@@ -212,7 +243,7 @@ def has_approved_operation_envelope(ev: dict) -> bool:
 
 
 # What each gated channel accepts as proof of human authority. A channel may only
-# appear in SYSTEM_PROVENANCE_CHANNELS if it names a predicate here, which is what
+# appear in GATED_PROVENANCE_CHANNELS if it names a predicate here, which is what
 # structurally prevents the state ms-185 e-7078 found: a gate whose proof no issuer
 # can mint (the judgment stays in the code, always fails, and nobody notices
 # because the failure looks like ordinary caution).
@@ -288,7 +319,7 @@ def has_required_provenance(ev: dict) -> bool:
     **Fail-closed on an undeclared channel.** A channel with no entry in
     ``PROVENANCE_REQUIREMENTS`` has no proof it could present, so this returns
     False. Callers reach this only for channels they are gating (membership in
-    ``SYSTEM_PROVENANCE_CHANNELS``), and for a gated channel "we never said what
+    ``GATED_PROVENANCE_CHANNELS``), and for a gated channel "we never said what
     counts as proof" must mean "not proven", never "nothing required".
 
     That is not the unsatisfiable judgment ms-185 e-7078 set out to remove: the
@@ -309,7 +340,8 @@ def has_required_provenance(ev: dict) -> bool:
     return requirement.predicate(ev)
 
 
-def downgrade_advice(reason: str, channel: str = "") -> str:
+def downgrade_advice(reason: str, channel: str = "", *,
+                     retired_channels=RETIRED_PROVENANCE_CHANNELS) -> str:
     """降格 1 件につき「何が起きて、どう直すか」の 1 句を返す唯一の場所。
 
     両方の受信 hook (Claude = ``bin/beacon-bus-inbox-hook.py`` / Codex =
@@ -319,16 +351,55 @@ def downgrade_advice(reason: str, channel: str = "") -> str:
     誰も見ていなかった)。説明は「何を証拠として要求したか」から導かれるべきもの
     なので、要求を宣言している ``PROVENANCE_REQUIREMENTS`` と同じ場所に置く。
 
-    ``channel`` を受け取るのが要点。``non-system-envelope`` という理由タグ 1 つが
-    ``operation-trigger`` (人間の承認が要る = 回復手段が在る) と ``trek-*``
-    (サーバ署名が要る = operator には直せない) の**両方**を指すので、タグだけで
-    分岐すると必ず片方に誤った案内を出す。
+    ``channel`` を受け取るのが要点。理由タグ 1 つが複数の世界を指すので、タグだけで
+    分岐すると必ずどれかに誤った案内を出す。
+
+    * ``non-system-envelope``: 証拠の封筒が無い。要求を宣言している channel
+      (``PROVENANCE_REQUIREMENTS``) なら回復手段が在り (``operation-trigger`` は
+      人間の承認)、宣言が無い channel では**推測で名乗らない**。
+    * 理由タグ無し (= 許可リスト漏れ): 「人間がまだ許可していない」が既定の意味
+      だが、**引退した channel では意味が逆**になる。引退した channel は許可して
+      も自律実行にならないので、「許可してください」と案内すると二度と使わない
+      channel を登録させる誤誘導になる (ms-185 e-7395)。判定
+      (``classify_auto_execute``) は許可リストを先に見る順序が固定されている
+      ため、この区別は**案内層で付けるしかない** —— それがここ。
+
+    ``trek-*`` は署名を要求する集合 (``GATED_PROVENANCE_CHANNELS``) には **居ない**。
+    居るのは ``operation-trigger`` だけで、``trek-*`` は
+    ``RETIRED_PROVENANCE_CHANNELS`` (= サーバがもう発行しない) に移った
+    (ms-185)。だから回復手段は「許可リストから外す」で、operator に手段が在る。
+
+    **タグだけで分岐していた頃の実害**: 当時 ``trek-*`` 向けに書かれていた文言
+    (「偽装の恐れ」「opt-in し直しても直りません」) を ``operation-trigger`` にも
+    返しており、**実在する回復手段を隠して「直らない」と断定**していた。読んだ AI が
+    人間に「直りません」と誤報告する。だから案内は必ず channel から導く。
+
+    **両 hook 側はここへの 1 行ポインタだけを持つ** (ms-185 e-7395 / PR#842 独立
+    保守性レビュー)。散文同士の一致を機械検査で強制するのは、このリポジトリが
+    両方向の失敗を実証した道なので取らない —— 複製を比べるのではなく複製を無くす。
+
+    ``retired_channels`` は ``classify_auto_execute`` と対称にした差し替え口
+    (試験が引退集合を注入して両者を揃えて動かせる)。**デフォルト値は定義時に
+    束縛される**ので、``bus_delivery.RETIRED_PROVENANCE_CHANNELS`` をモジュール
+    変数として差し替えてもこの関数には効かない —— 差し替えたいときは引数で渡すこと
+    (PR#844 2 周目の独立保守性レビュー: 試験されていない継ぎ目は「在るのに効かない」
+    と誤解されるので、注入を実証する試験を添えた)。
 
     提示の仕方 (1 件ずつ inline に添えるか、件数つきの塊にまとめるか) は hook
     ごとに違うので、ここは**原因と回復手段の 1 句だけ**を返し、前後の飾りは
     呼び出し側に委ねる。
     """
     if not reason:
+        if str(channel or "") in retired_channels:
+            # ms-185 e-7395: 引退した channel が許可リストに無いとき、判定は
+            # 「許可リスト漏れ」と同じ空タグを返す (評価順が allowlist → retired で
+            # 固定されており、順序を変えると記録済みの決定を覆す)。既定の案内
+            # 「人間が許可する前」をそのまま出すと、人間が `auto-execute add` で
+            # 登録し、次の通知で「外してください」と**逆のことを言われる**。
+            # 1 往復の手間と、二度と使わない channel を許可させる誤誘導になる。
+            return ("この channel は引退済みで、サーバはもう発行しません "
+                    "(許可リストにも入っていません)。`beacon bus auto-execute add` "
+                    "で許可しても自律実行にはならないので、登録しないでください")
         # 文言は従来のまま。既存の読み手 (人間 / AI) と
         # ``test_allowlist_miss_output_keeps_the_original_wording`` が
         # この literal を見ている。
@@ -379,7 +450,7 @@ def classify_auto_execute(
     # 引数の順から優先順位を類推して逆に取る。優先順位が逆になっても降格自体は
     # 変わらないが理由タグが変わり、消費側の案内が反転する。
     retired_channels=RETIRED_PROVENANCE_CHANNELS,
-    provenance_channels=SYSTEM_PROVENANCE_CHANNELS,
+    provenance_channels=GATED_PROVENANCE_CHANNELS,
 ) -> tuple:
     """Resolve one event's effective delivery + downgrade metadata.
 
@@ -390,9 +461,25 @@ def classify_auto_execute(
         ``("propose-to-ai", "auto-execute", "")`` (allowlist miss, no reason tag).
       * auto-execute, channel in ``retired_channels`` →
         ``("propose-to-ai", "auto-execute", "retired-provenance-channel")``.
-        Checked BEFORE the provenance gate and regardless of the allowlist,
-        because a retired channel's opt-in is exactly the stale state we must
-        not trust (ms-185 e-7077 — see RETIRED_PROVENANCE_CHANNELS).
+        Checked BEFORE the provenance gate — a retired channel's opt-in is
+        exactly the stale state we must not trust (ms-185 e-7077 — see
+        RETIRED_PROVENANCE_CHANNELS).
+
+        **But AFTER the allowlist**, so a retired channel that was never
+        opted in reports the allowlist miss (reason tag ``""``), not the
+        retirement. That order is deliberate (``test_allowlist_miss_still_wins
+        _over_retired``): the empty reason tag is what the Claude hook branches
+        on when deciding whether to attach ``_downgrade_reason``. This docstring
+        used to claim "regardless of the allowlist", which an independent AX
+        review (PR#840 5 周目) measured as false. The claim is removed rather
+        than the order changed, because changing the order would overturn a
+        recorded decision.
+
+        Consequence the caller must handle: with the default (empty) allowlist,
+        a retired channel is indistinguishable here from a channel awaiting
+        human approval. A consumer that turns the reason tag into advice will
+        say "run ``auto-execute add``" for a channel that must never be opted
+        in. The advice layer is where that has to be told apart — not here.
       * auto-execute, channel is a provenance channel whose per-channel proof
         (``PROVENANCE_REQUIREMENTS``) is absent →
         ``("propose-to-ai", "auto-execute", "non-system-envelope")``.
@@ -419,15 +506,14 @@ def classify_auto_execute(
 def format_operation_trigger_imperative(events: list) -> str:
     """Render the "AUTONOMOUS ACTION" inject for opted-in operation-trigger events.
 
-    Scope boundary (e-5803 review / Maint-3): this module currently shares ONLY
-    the operation-trigger imperative. The trek-channel Level-3 imperatives
-    (trek-trigger / trek-progress-check / trek-task-review / trek-leader-digest)
-    still live as Claude-hook-only formatters in bin/beacon-bus-inbox-hook.py and
-    are NOT rendered by the Codex inbox hook. That is intentional for now (e-5803's
-    scope was operation-trigger + the downgrade gate), not an oversight — a Codex
-    session gets the generic event list for trek DMs, not the forced-invoke block.
-    Extending trek parity to Codex is deliberately deferred to a follow-up so this
-    module isn't a half-migrated home that invites duplicate trek formatters.
+    Scope boundary (e-5803 review / Maint-3): this module shares ONLY the
+    operation-trigger imperative, and that is now the whole set. The trek-channel
+    Level-3 imperatives it used to defer (trek-trigger / trek-progress-check /
+    trek-task-review / trek-leader-digest) are gone with the device (ms-185
+    e-7079), so the "extend trek parity to Codex later" follow-up this docstring
+    used to promise is void — ms-185 decided not to reimplement it. The retired
+    channel names are listed in ``RETIRED_PROVENANCE_CHANNELS``, which is
+    what a received trek-* event meets now.
 
 
     Each event is an opted-in auto-execute event on the ``operation-trigger``
@@ -477,7 +563,7 @@ __all__ = [
     "PROPOSE_TO_AI",
     "NOTIFY_USER_ONLY",
     "OPERATION_TRIGGER_CHANNEL",
-    "SYSTEM_PROVENANCE_CHANNELS",
+    "GATED_PROVENANCE_CHANNELS",
     "DOWNGRADE_NON_SYSTEM_ENVELOPE",
     "OPERATION_ENVELOPE_TIER",
     "PROVENANCE_REQUIREMENTS",

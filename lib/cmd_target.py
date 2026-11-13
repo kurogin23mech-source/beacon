@@ -196,6 +196,29 @@ def cmd_target_review_request():
         session_id=_resolve_session_id() or "")
     save_project(data, op={"op": "target_transition_approval_add",
                            "target_id": target_id, "entry_id": eid})
+    # ms-119 e-7440: **ここでも節目のレビュー義務を立てる**。
+    #
+    # 兄弟の `beacon milestone done <id> --review` (= cmd_milestone の
+    # `_route_completion_to_review`) は同じ承認依頼を作った直後に review-due を
+    # 発火するが、この入口だけ発火していなかった。結果、**同じ完了主張に 2 つの
+    # 非等価な入口** が在り、こちらから入ると:
+    #   * 思想レビューの促しが立たない (= 撃つべき節目だと誰も言わない)
+    #   * その後に実際に思想レビューを実施しても `beacon review done --type
+    #     philosophy --target <id>` が「レビュー未実施トリガーがありません」で
+    #     拒否され、**実施したレビューを記録する口が無い**
+    # 2026-11-11 に実踏し、実施した思想レビュー 7 件の findings を台帳ではなく
+    # report doc に退避する羽目になった (トリガーを手で捏造すれば通るが、それは
+    # 記録の意味を壊す)。発火側を揃えるのが構造的な修正。
+    #
+    # `gated=True`: 承認依頼はいま作ったので目的達成の促しは重ねない (兄弟と同じ
+    # 判断)。has_spec は下の criteria gap と **同じ値** を使う (2 箇所で別々に
+    # 数えると、促しと gap が違う前提で喋る形が作れる)。
+    _has_spec = (_spec_exists_for_ms(target_id) if kind == "milestone"
+                 else _spec_exists_for_op(target_id) if kind == "operation"
+                 else False)
+    _fire_review_due_trigger(target_id, kind, old_state, new_state,
+                             target_title=work_model.target_label(target),
+                             has_spec=_has_spec, gated=True)
     print(f"目的達成レビュー依頼を作成: {eid}")
     print(f"  {target_id}: {old_state} -> {new_state} (人間承認待ち)")
     if intent:
@@ -207,8 +230,7 @@ def cmd_target_review_request():
     # 承認前に確認するよう促す forcing function。
     _gap = _ta.format_criteria_gap(
         _ta.assess_completion_criteria(
-            has_spec=_spec_exists_for_ms(target_id) if kind == "milestone"
-            else _spec_exists_for_op(target_id) if kind == "operation" else False,
+            has_spec=_has_spec,
             objective=target.get("objective", ""),
             acceptance=target.get("acceptance_criteria", ""),
             intent=intent),
@@ -234,6 +256,15 @@ def _decided_by_for_gate() -> str:
     (単一真実源) に移した。この名前は既存の呼び出し元のために残す薄い委譲。"""
     from commands_shared import decided_by_for_gate
     return decided_by_for_gate()
+
+
+#: 証拠ゼロで意識的に承認したことを **数えられる形** で判断記録に残すタグ
+#: (ms-119 e-7247)。``beacon decision list --json`` の evidence にこの語が在る
+#: 件数が「証拠なしで通った承認」の件数。
+#:
+#: 語を変えるときは、数える側 (運用 / 監査) が過去の記録を引けなくなることに注意
+#: (追記のみの記録なので、過去分は旧い語のまま残る)。
+NO_REVIEW_EVIDENCE_ACK_TAG = "no-review-evidence-ack"
 
 
 def _record_completion_verdict_decision(target_id, verdict, entry, approval_rationale):
@@ -288,6 +319,25 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
             src = (r.get("source") or "").strip()
             if src and f"review:{src}" not in evidence:
                 evidence.append(f"review:{src}")
+        # ms-119 e-7247: **証拠ゼロで承認したことを数えられるようにする。**
+        #
+        # 承認の口は既に「証拠が 1 件も無ければ拒否する」(e-4205、choke point の
+        # EvidenceRequiredError) を持ち、意識的な bypass には
+        # BEACON_ACK_NO_EVIDENCE=1 を要求して ``approval_gate.no_evidence_ack`` を
+        # 刻む。つまり **記録は残っていた**。足りなかったのは「後から数えられる」
+        # 側で、この印の読み手は表示の 1 行だけだった (e-7247 の受入条件 2)。
+        #
+        # 専用の問い合わせ動詞は増やさない。判断記録は追記のみで、`evidence` は
+        # 既に検索可能なタグの語彙なので、ここに 1 つ載せれば
+        # `beacon decision list` で数えられる (review done の `sha:` と同じ手筋)。
+        # 「証拠が空」だけを手掛かりにしない —— 空は「書き込み順の都合で載らなかった」
+        # とも読めるので、**意識的に bypass した** ことを明示の語で言う。
+        _gate = meta.get("approval_gate") or {}
+        if _gate.get("no_evidence_ack"):
+            evidence.append(NO_REVIEW_EVIDENCE_ACK_TAG)
+            parts.append("⚠ 独立レビューの証拠ゼロのまま意識的に承認 "
+                         "(BEACON_ACK_NO_EVIDENCE=1)")
+            rationale = " / ".join(parts) or None
         client, config = _get_api_client()
         project_id = config.get("project_id", "")
         if not project_id:
@@ -402,8 +452,8 @@ def cmd_target_approve():
     if _gate:
         _es = f", evidence={_gate['evidence_source']}" if _gate.get("evidence_source") else ""
         print(f"  gate: {_gate.get('signal')} (session_kind={_gate.get('session_kind')}{_es})")
-        if _gate.get("signal") == "user-override" and _gate.get("session_kind") != "human":
-            print("  ⚠ AI セッションが override で承認しました — この遷移は監査対象です。")
+        for _line in format_approval_gate_notice(_gate):
+            print(_line)
         if _gate.get("no_evidence_ack"):
             print("  ⚠ 独立レビュー証拠なしで承認されました "
                   "(--acknowledge-no-evidence) — この遷移は監査対象です (ms-119 / e-4205)。")
@@ -1951,17 +2001,20 @@ def _spec_exists_for_descriptor_target(target_id: str) -> bool:
     Descriptor targets are not milestones/operations, so they don't carry the
     ``milestone`` / ``operation`` doc field; a SPEC is linked via the generic
     ``target`` field. This lets the 思想 (philosophy) review bind at a descriptor
-    target's completion when it has a written 原典, mirroring milestones."""
-    if not target_id:
-        return False
-    try:
-        docs = get_store().list_documents()
-    except Exception:
-        return False
-    for doc in docs:
-        if doc.get("scope") == "spec" and doc.get("target") == target_id:
-            return True
-    return False
+    target's completion when it has a written 原典, mirroring milestones.
+
+    **走査は `_spec_doc_for_target` に委譲する** (ms-119 e-7438 / 独立 AX レビュー
+    最終周 misleading)。以前はここが自前で ``target`` field を走査し、兄弟の
+    ``_spec_doc_for_target`` は ``milestone`` / ``operation`` しか知らなかった ——
+    **同じ問い (SPEC は在るか) に 2 つの関数が別の field 規約で答えていた**。その
+    ため「ここが True と答えた descriptor target の doc を、あちらは必ず見つけ
+    られない」状態になり、思想レビューの呼び出しを組み立てる経路が descriptor
+    target では常に placeholder 入りの fallback に落ちていた。規約を 1 箇所に
+    畳んだので、新しい descriptor kind が増えても両者が食い違わない。"""
+    from commands_shared import _spec_doc_for_target as _scan
+    # kind は "milestone" / "operation" 以外なら何でも descriptor 扱い (= 汎用
+    # ``target`` field)。この関数は descriptor 専用なので sentinel を渡す。
+    return _scan(target_id, "descriptor") is not None
 
 
 def _ai_session_attainment_approve_ban_active() -> bool:
@@ -1988,6 +2041,51 @@ def _ai_session_attainment_approve_ban_active() -> bool:
     if os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1":
         return False
     return not _session_kind_is_human()
+
+
+def format_approval_gate_notice(gate: dict) -> list:
+    """承認がどの signal で通ったかの注記を組む (ms-119 e-7029)。純粋。
+
+    **断定できないことを断定しない。**
+
+    初版は ``signal == "user-override" and session_kind != "human"`` のとき
+    「⚠ AI セッションが override で承認しました」と出していた。だが
+    ``user-override`` (= ``BEACON_TARGET_APPROVE_USER_OVERRIDE=1``) は **人間が
+    明示的に opt-in するための経路** であり、Claude Code の ``!`` 経路 (人間が
+    ターミナルから直接打つ正規の経路) では ``session_kind`` が宣言されないまま
+    ``unset`` で残る。つまり **人間の正当な承認でも同じ警告が出ていた**。
+
+    実例 (2026-10-15, profile-extractor の ms-43)::
+
+        gate: user-override (session_kind=unset, evidence=independent-judge:fable)
+        ⚠ AI セッションが override で承認しました — この遷移は監査対象です。
+
+    1 行目が ``user-override`` と正しくラベル付けしているのに、2 行目が同じ出力の中で
+    それと矛盾することを言っている。e-4006 の guard の狙いは「AI の自己承認を
+    隠せなくする」ことだが、**警告が常に出るなら監査する側は区別が付かず、警告としての
+    情報量が実質ゼロになる**。
+
+    そこで記録から言えることだけを言う:
+
+    * ``ai-session-unguarded`` —— guard をすり抜けている。これが本当に怪しい形なので
+      強い警告を出す。
+    * ``user-override`` + ``session_kind == "human"`` —— 人間が宣言して opt-in した。
+      注記は出さない (gate 行だけで足りる)。
+    * ``user-override`` + 宣言なし —— **事実の記述**。「opt-in 経路で通った / 誰が
+      打ったかは記録から断定できない」と言う。AI とも人間とも決めつけない。
+    """
+    signal = str((gate or {}).get("signal") or "")
+    kind = str((gate or {}).get("session_kind") or "")
+    if signal == "ai-session-unguarded":
+        return ["  ⚠ セッション種別の guard をすり抜けて承認されました "
+                "— AI セッションの自己承認の可能性が高く、この遷移は監査対象です。"]
+    if signal == "user-override" and kind != "human":
+        return ["  ℹ 人間の明示的 opt-in の経路 "
+                "(BEACON_TARGET_APPROVE_USER_OVERRIDE=1) で承認されました。"
+                "このセッションは種別を宣言していないため、**打ったのが人間か AI かは"
+                "記録から断定できません** — 記録には signal と session_kind が"
+                "そのまま残ります。"]
+    return []
 
 
 def _approval_gate_record() -> dict:

@@ -19,6 +19,8 @@ from __future__ import annotations
 import subprocess
 from typing import Protocol
 
+from git_cwd import git_cwd as _git_cwd  # 「どこで git を叩くか」の唯一の定義
+
 
 class GitReadAdapter(Protocol):
     """Read-only git introspection interface Beacon declares."""
@@ -43,7 +45,7 @@ class SubprocessGitReadAdapter:
     def current_branch(self) -> str:
         return subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, cwd=_git_cwd(),
         ).strip()
 
     def branch_show_current(self, timeout: int = 5) -> str:
@@ -52,13 +54,13 @@ class SubprocessGitReadAdapter:
         Returncode-agnostic like the caller: returns stdout as-is."""
         return subprocess.run(
             ["git", "branch", "--show-current"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, cwd=_git_cwd(),
         ).stdout.strip()
 
     def rev_parse_short(self, ref: str = "HEAD") -> str:
         return subprocess.check_output(
             ["git", "rev-parse", "--short", ref],
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, cwd=_git_cwd(),
         ).strip()
 
     def log_commits(self, from_hash: str, to_hash: str, limit: int) -> list:
@@ -68,7 +70,8 @@ class SubprocessGitReadAdapter:
             args = ["git", "log", f"{from_hash}..{to_hash}", "--format=%H %s"]
         else:
             args = ["git", "log", to_hash, "--format=%H %s", f"-{limit}"]
-        out = subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True).strip()
+        out = subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True,
+                                      cwd=_git_cwd()).strip()
         commits = []
         for line in out.splitlines():
             if line.strip():
@@ -82,14 +85,14 @@ class SubprocessGitReadAdapter:
         agnostic: returns whatever lines stdout carried (empty list if none)."""
         out = subprocess.run(
             ["git", "log", "--pretty=%s", f"-{limit}"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, cwd=_git_cwd(),
         ).stdout
         return [ln for ln in out.splitlines()]
 
     def config_user_name(self) -> str:
         return subprocess.check_output(
             ["git", "config", "user.name"],
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, cwd=_git_cwd(),
         ).strip()
 
 

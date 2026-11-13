@@ -103,11 +103,10 @@ if _BACKEND == "dynamodb":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
-        # Treks (ms-69 / e-1652)
+        # Treks (ms-69 / e-1652) — 読み出しのみ。ms-185 e-7306 で書き込み
+        # (save_trek / delete_trek / append_trek_log) を 3 backend すべてから外した。
         get_trek,
-        save_trek,
         list_treks,
-        delete_trek,
         # Organizations (ms-113 / e-3731) — top-level tenancy entity
         get_org,
         save_org,
@@ -118,7 +117,6 @@ if _BACKEND == "dynamodb":
         master_put,
         master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
-        append_trek_log,
         list_trek_logs,
         # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
         append_decision_event,
@@ -228,11 +226,10 @@ elif _BACKEND == "mysql":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
-        # Treks (ms-69 / e-1652)
+        # Treks (ms-69 / e-1652) — 読み出しのみ。ms-185 e-7306 で書き込み
+        # (save_trek / delete_trek / append_trek_log) を 3 backend すべてから外した。
         get_trek,
-        save_trek,
         list_treks,
-        delete_trek,
         # Organizations (ms-113 / e-3731) — top-level tenancy entity
         get_org,
         save_org,
@@ -243,7 +240,6 @@ elif _BACKEND == "mysql":
         master_put,
         master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
-        append_trek_log,
         list_trek_logs,
         # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
         append_decision_event,
@@ -353,11 +349,10 @@ elif _BACKEND == "firestore":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
-        # Treks (ms-69 / e-1652)
+        # Treks (ms-69 / e-1652) — 読み出しのみ。ms-185 e-7306 で書き込み
+        # (save_trek / delete_trek / append_trek_log) を 3 backend すべてから外した。
         get_trek,
-        save_trek,
         list_treks,
-        delete_trek,
         # Organizations (ms-113 / e-3731) — top-level tenancy entity
         get_org,
         save_org,
@@ -368,7 +363,6 @@ elif _BACKEND == "firestore":
         master_put,
         master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
-        append_trek_log,
         list_trek_logs,
         # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
         append_decision_event,

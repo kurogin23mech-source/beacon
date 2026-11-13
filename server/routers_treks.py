@@ -57,6 +57,17 @@ import store_router as db  # e-1544: same backend-routing binding app.py uses
 # session を持つので user_id は phase A 以降では曖昧であり、session_id が
 # member identity の真値。両方の世代の記録が現に在るため、読み出しは
 # どちらの粒度でも引けなければならない。
+# ms-185 e-7326: **members の世代判定を宣言している唯一の場所がここ。**
+# e-7070 で正本 (``lib/trek.py``) を落としたとき、この判定は ``lib/cmd_bus.py`` と
+# この file の 2 つに写され、一致を測る検査が無い状態になっていた (e-7069 が
+# 「二重実装は黙ってズレる」として足した突き合わせを、削除の過程で失った形)。
+# cmd_bus 側の写しは e-7080 / e-7321 で送信予算の迂回判定ごと落ちたので、残るのは
+# ここ 1 つである。
+#
+# **phase を増やすとき (例 'D') は、ここだけを直せばよい。** 他に写しが無いことは
+# ``tests/test_member_generation_single_owner_e7326.py`` が固定しており、2 つ目の
+# 宣言が現れた時点で赤くなる。共有する必要が出たら、写すのではなく一方が他方を
+# import すること。
 # ---------------------------------------------------------------------------
 _DEFAULT_MIGRATION_PHASE = "pre-A"
 _VALID_MIGRATION_PHASES = ("pre-A", "A", "B", "C")

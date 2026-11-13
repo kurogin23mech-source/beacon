@@ -74,10 +74,17 @@ def _op_trigger_event(*, envelope=None) -> dict:
 
 
 def _trek_trigger_event(*, envelope=None) -> dict:
-    """``trek-trigger`` の 1 件。要求される証拠はサーバ署名 (T1-system)。
+    """``trek-trigger`` の 1 件 (= 引退した channel の実例)。
 
-    operation-trigger と**同じ理由タグ**で降格するが、回復手段は違う
-    (operator には直せない)。混在時に片方が誤案内にならないかを測るのに使う。
+    **ms-185 で扱いが変わった**: 以前はサーバ署名 (T1-system) を要求する channel
+    だったが、署名を要求する集合 (``GATED_PROVENANCE_CHANNELS``) から外れ、
+    ``RETIRED_PROVENANCE_CHANNELS`` (= サーバがもう発行しない) に移った。だから
+    回復手段は「operator には直せない」ではなく、**許可リストから外す**
+    (``beacon bus auto-execute remove``) であり、operator に手段が在る。
+
+    許可リストに **無い** 状態では、引退を知らせる案内になる (e-7395)。許可リストに
+    **残っている** 状態では「外してください」になる。混在時に片方が誤案内に
+    ならないかを測るのに使う。
     """
     e = {
         "event_id": "1787000020000-TREKtrig",
@@ -111,6 +118,52 @@ def test_non_opted_in_auto_execute_is_downgraded_with_allowlist_reason(tmp_path)
     assert "安全側降格" in ctx
     assert "opt-in 前" in ctx
     assert "T1-system" not in ctx  # e-5803 review AX-1: not a provenance failure
+
+
+def test_retired_channel_without_optin_is_not_told_to_opt_in(tmp_path):
+    """受入条件1 (Codex 側, ms-185 e-7395): 引退 + 許可リスト空 の案内。
+
+    以前はここが「channel が allowlist に無い (= 人間 opt-in 前)」の件数バンドに
+    畳まれていた。人間がそれに従って ``auto-execute add`` で登録すると、次の通知で
+    「外してください」と逆を言われる —— 1 往復の手間と、二度と使わない channel を
+    許可させる誤誘導。
+    """
+    cwd = _setup(tmp_path, auto_execute_channels=[])
+    _seed(cwd, _trek_trigger_event())
+    ctx = _run(cwd)
+    assert "AUTONOMOUS ACTION" not in ctx
+    assert "安全側降格" in ctx
+    assert "引退した channel" in ctx, (
+        "引退である旨を案内していません: " + ctx
+    )
+    assert "opt-in 前" not in ctx, (
+        "引退した channel を「人間 opt-in 前」と案内しています = 登録させる "
+        "誤誘導です: " + ctx
+    )
+
+
+def test_retired_channel_with_stale_optin_still_says_remove(tmp_path):
+    """受入条件2 (Codex 側): 引退 + 許可リストに在る → 従来どおり「外す」。"""
+    cwd = _setup(tmp_path, auto_execute_channels=["trek-trigger"])
+    _seed(cwd, _trek_trigger_event())
+    ctx = _run(cwd)
+    assert "auto-execute remove" in ctx, (
+        "許可リストに残った引退 channel の直し方 (外す) が出ていません: " + ctx
+    )
+
+
+def test_live_channel_without_optin_still_says_opt_in(tmp_path):
+    """受入条件3 (Codex 側): 現役 + 許可リスト空 → 従来どおり「opt-in 前」。
+
+    引退側を分けたことで、現役側の案内が巻き込まれて変わっていないことを見る。
+    """
+    cwd = _setup(tmp_path, auto_execute_channels=[])
+    _seed(cwd, _op_trigger_event(envelope=_T1_ENVELOPE))
+    ctx = _run(cwd)
+    assert "opt-in 前" in ctx, ctx
+    assert "引退した channel" not in ctx, (
+        "現役 channel を引退と案内しています: " + ctx
+    )
 
 
 def test_opted_in_but_no_approved_envelope_names_the_operation_recovery(tmp_path):

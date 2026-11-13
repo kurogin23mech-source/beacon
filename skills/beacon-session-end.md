@@ -300,7 +300,7 @@ N件のメモのうちM件を memo ドキュメントに残します。
 **昇格先 Doc を作業 target に紐付ける (ms-164 e-5944)**: session-end は Step 4 で「このセッションが進めた作業 target (worked-target)」を既に確定している (session log payload の `target_ids` / `target_source`)。memo 昇格 Doc も、この worked-target に紐付けて「どの target を進めた検討メモか」を target 起点で辿れるようにする — 昇格先を無条件で project 全体 (project-wide memo scope) に固定しない。判定:
 
 - `target_source` が **`fork` または `inferred`** (= 作業 target が確定している) かつ worked-target が **milestone (`ms-…`)** → `beacon doc add` に **`--ms <worked-target-id>`** を付ける (`target_ids` の先頭 = 主たる作業 target)。
-- `target_source` が **`none` / `ambiguous`** (= 作業 target 未確定)、または worked-target が milestone でない target-class (`beacon doc add` は現状 `--ms` / `--op` / `--trek` のみで汎用 `--target` を持たないため) → 従来どおり **project-wide memo scope** のまま (`--ms` を付けない)。
+- `target_source` が **`none` / `ambiguous`** (= 作業 target 未確定)、または worked-target が milestone でない target-class (`beacon doc add` の受け付ける紐付けが 2 つのフロントで食い違っているため。bash 側 (`bin/lib/cmd_doc.sh`) は `--ms` / `--op` / `--account` / `--opportunity` / `--target` を持つが、Python 側 (`beacon_cli/dispatch.py`) は `--ms` / `--op` だけで 汎用 `--target` を持たない。どちらで走っても壊れない側に寄せる。ms-185 e-7071: ここは `--trek` を挙げていたが、その旗は e-7079 で両フロントから落ちており、どちらにも無い) → 従来どおり **project-wide memo scope** のまま (`--ms` を付けない)。
 
 承認後、Bash ツールで実行 (worked-target が確定していれば `--ms` を付ける):
 ```bash
