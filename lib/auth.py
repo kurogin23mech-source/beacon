@@ -691,6 +691,80 @@ def _get_firebase_api_key_from_token(token: str) -> str | None:
     return None
 
 
+# ms-187 e-7490: CLI のログイン (bcli トークン、30 日で切れる) を、使っている間は
+# 自動で延長する。以前は延長の仕組みが無く、30 日ごとに黙って切れていた
+# (2026-11-13 に、9 月 20 日から切れていたことが判明)。
+#
+# 期限まで 7 日を切ったトークンを、beacon を使ったときにサーバーの
+# /api/auth/exchange-cli-token で新しい 30 日分に取り替える。この口はもともと
+# Web UI 用にあり、CLI トークンでも本人確認が通る (require_auth は bcli を検証する)。
+#
+# - 延長に失敗しても、今の操作は止めない (手元のトークンはまだ有効なので、そのまま使う)。
+# - 失敗したら 1 時間は再挑戦しない (サーバーが落ちているときに、毎回の操作が
+#   問い合わせ待ちで遅くなるのを防ぐ)。
+# - 期限を過ぎたトークンは延長できない (サーバーが受け付けない)。その場合は今と同じく
+#   `beacon auth login` を案内する。
+_RENEW_WINDOW_SECONDS = 7 * 86400
+_RENEW_RETRY_SECONDS = 3600
+_RENEW_TIMEOUT_SECONDS = 5
+
+
+def _save_credentials(creds_data: dict) -> None:
+    """credentials.json を書き戻す (best-effort)。書けなくても呼び出し側は続行する。"""
+    try:
+        cred_path = _credentials_path()
+        cred_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cred_path, "w", encoding="utf-8") as f:
+            json.dump(creds_data, f, indent=2)
+    except OSError:
+        pass
+
+
+def _maybe_renew_cli_token(creds_data: dict, now: int) -> dict:
+    """期限が近い CLI トークンを新しい 30 日分に差し替えて返す。不要・失敗なら元のまま返す。"""
+    if creds_data.get("token_type") != "beacon_cli":
+        return creds_data
+    try:
+        expiry = int(creds_data.get("token_expiry") or 0)
+        last_attempt = int(creds_data.get("renew_attempted_at") or 0)
+    except (TypeError, ValueError):
+        return creds_data
+    if not expiry or expiry - now > _RENEW_WINDOW_SECONDS:
+        return creds_data
+    if now - last_attempt < _RENEW_RETRY_SECONDS:
+        return creds_data
+
+    updated = dict(creds_data)
+    updated["renew_attempted_at"] = now
+    try:
+        req = urllib.request.Request(
+            f"{_get_api_url()}/api/auth/exchange-cli-token",
+            method="POST",
+            data=b"",
+            headers={
+                "Authorization": f"Bearer {creds_data.get('token', '')}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(
+            req, timeout=_RENEW_TIMEOUT_SECONDS, context=_get_ssl_context()
+        ) as resp:
+            result = json.loads(resp.read())
+        new_token = result.get("id_token") or ""
+        new_expiry = int(result.get("token_expiry") or 0)
+        if new_token.startswith("bcli.") and new_expiry > expiry:
+            updated["token"] = new_token
+            updated["token_expiry"] = new_expiry
+            updated.pop("renew_attempted_at", None)
+            if result.get("email"):
+                updated["email"] = result["email"]
+    except Exception:
+        pass  # 延長は付加機能。失敗しても手元のトークンで続ける。
+
+    _save_credentials(updated)
+    return updated
+
+
 def load_credentials():
     """Load and refresh cached credentials. Returns credentials or None."""
     cred_path = _credentials_path()
@@ -733,7 +807,7 @@ def load_credentials():
                 "       (Token expired. Run: beacon auth login)"
             )
             return None
-        return creds_data
+        return _maybe_renew_cli_token(creds_data, now)
 
     # OAuth mode: use google credentials
     _ensure_deps()
