@@ -123,11 +123,28 @@ def test_poll_is_one_time_across_instances():
     code = a.post("/api/auth/cli-start").json()["code"]
     a.post("/api/auth/cli-approve", json={"code": code})
     assert a.get("/api/auth/cli-poll", params={"code": code}).json()["status"] == "approved"
-    # 別の台で同じ合言葉を使い回しても、二度目は渡さない
+    # 別の台で同じ合言葉を使い回しても、二度目は渡さない。「無効な合言葉」(404) と
+    # 区別して「使用済み」(409) と答え、ログインが成功済みだと読めるようにする
     replay = b.get("/api/auth/cli-poll", params={"code": code})
-    assert replay.status_code == 404, replay.text
-    # 受け取り済みの合言葉は、もう承認もできない
-    assert b.post("/api/auth/cli-approve", json={"code": code}).status_code == 404
+    assert replay.status_code == 409, replay.text
+    assert "already used" in replay.json()["detail"]
+
+
+def test_re_pressing_authorize_after_login_completed_still_reads_as_success():
+    """CLI が受け取り済みの後に同じ人が Authorize を押し直しても、失敗に見せない。"""
+    store = _SharedStore()
+    owner = _instance(store, user={"sub": "u1", "email": "u1@example.com"})
+    intruder = _instance(store, user={"sub": "u2", "email": "u2@example.com"})
+    code = owner.post("/api/auth/cli-start").json()["code"]
+    owner.post("/api/auth/cli-approve", json={"code": code})
+    assert owner.get("/api/auth/cli-poll", params={"code": code}).json()["status"] == "approved"
+    again = owner.post("/api/auth/cli-approve", json={"code": code})
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "approved"
+    # 使用済みの合言葉を、別の人が承認し直すことはできない
+    assert intruder.post("/api/auth/cli-approve", json={"code": code}).status_code == 409
+    # 押し直しで記録が使用済みから戻ることもない (= もう一度は受け取れない)
+    assert store.rows[(cli_pairing.ENTITY, code)]["status"] == cli_pairing.STATUS_CONSUMED
 
 
 def test_code_expires_after_ttl_on_every_instance():
@@ -260,3 +277,62 @@ def test_cli_pairing_is_registered_on_every_backend():
     assert dc.TABLE_KEY_SCHEMA[cli_pairing.ENTITY] == ("code", None)
     assert dc._MASTER_KEY_ATTR[cli_pairing.ENTITY] == "code"
     assert cli_pairing.ENTITY not in dc._SUBCOLLECTION_SK_NAMES
+
+
+# ---------------------------------------------------------------------------
+# 5. 自動延長に上限がある (e-7490 の独立レビュー finding)
+# ---------------------------------------------------------------------------
+def _exchange_client(user, minted):
+    def _mint(sub, email, *, auth_time=None):
+        minted.append((sub, email, auth_time))
+        return ("bcli.renewed", 4102444800)
+
+    app = FastAPI()
+    app.include_router(routers_auth.make_router(
+        require_auth=lambda: user,
+        make_cli_token=_mint,
+        get_local_dev_enabled=lambda: False,
+        get_auth_provider=lambda: "firebase",
+        pairing_table=cli_pairing.PairingTable(cli_pairing.StorePersistence(_SharedStore())),
+    ))
+    return TestClient(app)
+
+
+def test_renewal_carries_the_original_sign_in_time_forward():
+    import time as _t
+    signed_in = int(_t.time()) - 10 * 86400
+    minted: list = []
+    c = _exchange_client({"sub": "u1", "email": "u1@example.com", "auth_time": signed_in}, minted)
+    r = c.post("/api/auth/exchange-cli-token")
+    assert r.status_code == 200, r.text
+    assert minted == [("u1", "u1@example.com", signed_in)]
+
+
+def test_renewal_is_refused_once_the_sign_in_is_too_old():
+    import time as _t
+    too_old = int(_t.time()) - routers_auth.CLI_SESSION_MAX_AGE - 60
+    minted: list = []
+    c = _exchange_client({"sub": "u1", "email": "u1@example.com", "auth_time": too_old}, minted)
+    r = c.post("/api/auth/exchange-cli-token")
+    assert r.status_code == 401, r.text
+    assert "beacon auth login" in r.json()["detail"]
+    assert minted == []
+
+
+def test_legacy_cli_token_without_auth_time_uses_its_issue_time():
+    import time as _t
+    exp = int(_t.time()) + 5 * 86400          # 30 日トークンの 25 日目
+    minted: list = []
+    c = _exchange_client({"sub": "u1", "email": "u1@example.com", "exp": exp}, minted)
+    assert c.post("/api/auth/exchange-cli-token").status_code == 200
+    assert minted[0][2] == exp - 30 * 86400
+
+
+def test_minted_cli_token_records_sign_in_time():
+    import app as app_module
+
+    tok, _exp = app_module._make_cli_token("u1", "u1@example.com", auth_time=1_700_000_000)
+    assert app_module._verify_cli_token(tok)["auth_time"] == 1_700_000_000
+    fresh, _ = app_module._make_cli_token("u1", "u1@example.com")
+    import time as _t
+    assert abs(app_module._verify_cli_token(fresh)["auth_time"] - int(_t.time())) < 5

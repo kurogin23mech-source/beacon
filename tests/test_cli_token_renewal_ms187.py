@@ -129,3 +129,35 @@ def test_non_cli_tokens_are_not_touched(env):
     env["write"](token_type="cognito_id_token", token_expiry=now + 3600)
     assert auth.load_credentials()["token"] == "bcli.old.sig"
     assert env["calls"] == []
+
+
+def test_renewal_failure_is_not_silent(env, capsys):
+    """延長が失敗し続けても黙らない: 理由を残し、あと何日で切れるかを知らせる。"""
+    now = int(time.time())
+    env["write"](token_expiry=now + 3 * DAY)
+    env["state"]["raise"] = auth.urllib.error.HTTPError(
+        "https://api.example.test/api/auth/exchange-cli-token", 401, "no", {}, None)
+    auth.load_credentials()
+    err = capsys.readouterr().err
+    assert "自動延長に失敗" in err and "beacon auth login" in err and "3 日" in err
+    assert "401" in env["saved"]()["last_renew_error"]
+
+
+def test_successful_renewal_clears_the_previous_error(env):
+    now = int(time.time())
+    env["write"](token_expiry=now + 2 * DAY, last_renew_error="サーバーに届きませんでした",
+                 renew_attempted_at=now - 2 * 3600)
+    env["state"]["reply"] = {"id_token": "bcli.new.sig", "token_expiry": now + 30 * DAY}
+    auth.load_credentials()
+    assert "last_renew_error" not in env["saved"]()
+
+
+def test_credentials_are_replaced_atomically(env, tmp_path):
+    """書き戻しは一時ファイル → 置き換え。途中で空のファイルを見せない。"""
+    now = int(time.time())
+    env["write"](token_expiry=now + 2 * DAY)
+    env["state"]["reply"] = {"id_token": "bcli.new.sig", "token_expiry": now + 30 * DAY}
+    auth.load_credentials()
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+    assert env["saved"]()["token"] == "bcli.new.sig"

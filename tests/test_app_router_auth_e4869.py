@@ -144,7 +144,7 @@ def test_dev_login_mints_token_via_injected_make_cli_token(monkeypatch):
 def test_cli_pairing_round_trip_through_router():
     """cli-start → cli-approve → cli-poll shares the injected pairing table
     and issues a token via the injected minter. Exercises the whole CLI-pairing
-    flow through a freshly-mounted router (auth-local state moved with the routes)."""
+    flow through a freshly-mounted router over an injected shared pairing table (ms-187 e-7488)."""
     from fastapi import FastAPI
 
     probe = FastAPI()
@@ -178,7 +178,7 @@ def test_cli_approve_requires_auth(monkeypatch):
 
 def test_cli_poll_is_one_time_after_consume():
     """cli-poll consumes the pairing code on success (marks it consumed + issues token),
-    so a replay (second poll of the same code) must NOT re-issue — it returns 404.
+    so a replay (second poll of the same code) must NOT re-issue — it returns 409.
     Guards the one-time property of the flow (AX/maintainability review, PR #610)."""
     from fastapi import FastAPI
 
@@ -197,9 +197,10 @@ def test_cli_poll_is_one_time_after_consume():
     c.post("/api/auth/cli-approve", json={"code": code})
     first = c.get("/api/auth/cli-poll", params={"code": code})
     assert first.json()["id_token"] == "bcli.once", first.json()
-    # replay: the code was marked consumed on the first successful poll.
+    # replay: the code was marked consumed on the first successful poll; a second
+    # poll is refused with 409 "already used" (distinct from 404 "invalid code").
     replay = c.get("/api/auth/cli-poll", params={"code": code})
-    assert replay.status_code == 404, (replay.status_code, replay.text)
+    assert replay.status_code == 409, (replay.status_code, replay.text)
 
 
 def test_no_stale_auth_routes_left_in_app_py():

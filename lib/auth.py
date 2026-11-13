@@ -661,13 +661,7 @@ def _refresh_web_auth_token(creds_data: dict) -> dict | None:
     if result.get("refresh_token"):
         updated["refresh_token"] = result["refresh_token"]
 
-    try:
-        cred_path = _credentials_path()
-        with open(cred_path, "w", encoding="utf-8") as f:
-            json.dump(updated, f, indent=2)
-    except OSError:
-        pass  # best-effort; return the updated dict even if write fails
-
+    _save_credentials(updated)  # best-effort; return the updated dict even if write fails
     return updated
 
 
@@ -710,14 +704,31 @@ _RENEW_TIMEOUT_SECONDS = 5
 
 
 def _save_credentials(creds_data: dict) -> None:
-    """credentials.json を書き戻す (best-effort)。書けなくても呼び出し側は続行する。"""
+    """credentials.json を書き戻す (best-effort)。書けなくても呼び出し側は続行する。
+
+    一時ファイルに書いてから置き換える (os.replace)。並行して読む別プロセス
+    (hook や別セッションの beacon) が、書きかけの空ファイルを読んで落ちないように
+    するため。
+    """
     try:
         cred_path = _credentials_path()
         cred_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cred_path, "w", encoding="utf-8") as f:
+        tmp = cred_path.with_name(f"{cred_path.name}.{os.getpid()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(creds_data, f, indent=2)
+        os.replace(tmp, cred_path)
     except OSError:
         pass
+
+
+def _renew_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403):
+            return f"サーバーが延長を断りました (HTTP {exc.code})"
+        return f"サーバーがエラーを返しました (HTTP {exc.code})"
+    if isinstance(exc, (urllib.error.URLError, OSError)):
+        return "サーバーに届きませんでした"
+    return "サーバーの応答を読めませんでした"
 
 
 def _maybe_renew_cli_token(creds_data: dict, now: int) -> dict:
@@ -736,6 +747,7 @@ def _maybe_renew_cli_token(creds_data: dict, now: int) -> dict:
 
     updated = dict(creds_data)
     updated["renew_attempted_at"] = now
+    failure = ""
     try:
         req = urllib.request.Request(
             f"{_get_api_url()}/api/auth/exchange-cli-token",
@@ -756,17 +768,39 @@ def _maybe_renew_cli_token(creds_data: dict, now: int) -> dict:
             updated["token"] = new_token
             updated["token_expiry"] = new_expiry
             updated.pop("renew_attempted_at", None)
+            updated.pop("last_renew_error", None)
             if result.get("email"):
                 updated["email"] = result["email"]
-    except Exception:
-        pass  # 延長は付加機能。失敗しても手元のトークンで続ける。
+        else:
+            failure = "サーバーの応答に新しいログインが入っていませんでした"
+    except Exception as exc:  # 延長は付加機能。失敗しても手元のトークンで続ける。
+        failure = _renew_failure_reason(exc)
 
+    if failure:
+        # 黙って失敗させない: 理由を残し、あと何日で切れるかを 1 行知らせる
+        # (延長が壊れたまま期限当日に突然止まる、を避ける。AX レビュー finding)。
+        # 1 時間に 1 回しか試さないので、この警告も 1 時間に 1 回まで。
+        updated["last_renew_error"] = failure
+        days_left = max(0, (expiry - now) // 86400)
+        print(
+            f"注意: ログインの自動延長に失敗しました ({failure})。"
+            f"このままだと約 {days_left} 日でログインが切れます。"
+            f"`beacon auth login` で入り直すと 30 日分に戻ります。",
+            file=sys.stderr,
+        )
     _save_credentials(updated)
     return updated
 
 
 def load_credentials():
-    """Load and refresh cached credentials. Returns credentials or None."""
+    """Load and refresh cached credentials. Returns credentials or None.
+
+    **Side effects** (not a pure read): a Beacon CLI token within 7 days of expiry
+    is renewed over the network (≤ 5 s) and credentials.json is rewritten
+    (ms-187 e-7490, see ``_maybe_renew_cli_token``); legacy Google tokens are
+    refreshed the same way. Callers on hot paths should expect that at most once
+    per hour.
+    """
     cred_path = _credentials_path()
     if not cred_path.exists():
         return None

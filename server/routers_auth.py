@@ -5,8 +5,12 @@ from the server/app.py god-module, following the auth-router型 established by
 routers_me.py / routers_orgs.py / routers_admin.py
 (make_router(require_auth, *, ...injected helpers)).
 
-Pure move: every route body is verbatim from app.py's auth handlers — same
-paths, same shapes, no behavior change.
+Originally a pure move from app.py (same paths, same shapes). Since then the
+CLI-pairing routes (cli-start / cli-approve / cli-poll) have changed behaviour
+(ms-187 e-7488): the code table lives in a shared store; cli-approve requires a
+``sub`` (400 otherwise) and refuses a code another account already approved
+(409); cli-poll answers 409 for a code that was already used; the approver's
+browser token is no longer stored. The other routes are still verbatim moves.
 
 The CLI-pairing code table lives in the injected ``pairing_table``
 (``cli_pairing.PairingTable``), backed by a store **every server instance sees**
@@ -43,6 +47,7 @@ Injected dependencies (owned by app.py, passed in to avoid an import cycle):
 from __future__ import annotations
 
 import os
+import time
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -50,6 +55,35 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 from cli_pairing import PairingError, PairingTable
+
+# ms-187 e-7490: the CLI renews its token through exchange-cli-token while it is in
+# use. Cap how long one sign-in can be stretched that way, so renewal does not turn
+# a 30-day token into an indefinitely valid one (independent AX review finding).
+# Past this age the endpoint refuses and the person signs in again.
+CLI_SESSION_MAX_AGE = 86400 * 90
+# CLI tokens minted before auth_time existed carry only ``exp``; they were issued
+# with a 30-day lifetime, so their sign-in time is at most exp - 30 days.
+_LEGACY_CLI_TOKEN_LIFETIME = 86400 * 30
+
+
+def _signed_in_at(user: dict) -> int:
+    """When the caller actually signed in (``auth_time``), for the renewal cap.
+
+    Firebase / Cognito ID tokens and CLI tokens minted since ms-187 carry
+    ``auth_time``. Older CLI tokens only carry ``exp``; fall back to the latest
+    possible issue time (exp - 30 days).
+    """
+    try:
+        auth_time = int(user.get("auth_time") or 0)
+    except (TypeError, ValueError):
+        auth_time = 0
+    if auth_time:
+        return auth_time
+    try:
+        exp = int(user.get("exp") or 0)
+    except (TypeError, ValueError):
+        exp = 0
+    return exp - _LEGACY_CLI_TOKEN_LIFETIME if exp else int(time.time())
 
 
 class DevLoginRequest(BaseModel):
@@ -195,7 +229,16 @@ def make_router(
         email = user.get("email", "")
         if not sub:
             raise HTTPException(status_code=400, detail="missing sub claim")
-        token, expiry = make_cli_token(sub, email)
+        # ms-187 e-7490: the CLI also calls this to renew its own (bcli) token while
+        # in use. Carry the original sign-in time forward and refuse once the chain
+        # is older than CLI_SESSION_MAX_AGE, so renewal has a ceiling.
+        signed_in_at = _signed_in_at(user)
+        if int(time.time()) - signed_in_at > CLI_SESSION_MAX_AGE:
+            raise HTTPException(
+                status_code=401,
+                detail="Sign-in is too old to renew; run `beacon auth login` again",
+            )
+        token, expiry = make_cli_token(sub, email, auth_time=signed_in_at)
         return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
 
     # ---- CLI Auth (Web UI-mediated flow) ----

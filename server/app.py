@@ -396,10 +396,22 @@ _CLI_TOKEN_PREFIX = "bcli."
 _CLI_TOKEN_LIFETIME = 86400 * 30  # 30 days
 
 
-def _make_cli_token(sub: str, email: str) -> tuple[str, int]:
-    """Issue a long-lived CLI token (HMAC-SHA256). Returns (token, expiry_unix)."""
-    expiry = int(time.time()) + _CLI_TOKEN_LIFETIME
-    payload = json.dumps({"sub": sub, "email": email, "exp": expiry}, separators=(",", ":"))
+def _make_cli_token(sub: str, email: str, *, auth_time: int | None = None) -> tuple[str, int]:
+    """Issue a long-lived CLI token (HMAC-SHA256). Returns (token, expiry_unix).
+
+    ``auth_time`` is when the person actually signed in (ms-187 e-7490). A fresh
+    login leaves it unset (= now); renewing an existing token carries the original
+    value forward, so ``exchange-cli-token`` can refuse to extend a login chain past
+    ``routers_auth.CLI_SESSION_MAX_AGE`` — renewal must not turn a 30-day token
+    into an indefinitely valid one.
+    """
+    now = int(time.time())
+    expiry = now + _CLI_TOKEN_LIFETIME
+    payload = json.dumps(
+        {"sub": sub, "email": email, "exp": expiry,
+         "auth_time": int(auth_time) if auth_time else now},
+        separators=(",", ":"),
+    )
     payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
     secret = os.environ.get("BEACON_CLI_TOKEN_SECRET", "dev-secret-CHANGE-ME")
     sig = _hmac.new(secret.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()

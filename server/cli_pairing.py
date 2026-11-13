@@ -26,11 +26,28 @@ DynamoDB / MySQL でも同じ形で動く。Redis は本番の Cloud Run に無�
 - 承認した人のブラウザのトークンは保存しない (以前のメモリ表は保存していたが、
   一度も読まれていなかった)。保存するのは、誰が承認したか (``sub`` / ``email``) だけ。
 
-**残る弱点 (承知の上)**: ``master_put`` は「条件付き書き込み」ではないので、同じ
-合言葉への poll が **ほぼ同時に 2 台へ** 届くと、両方がトークンを渡しうる。正規の
-CLI は 3 秒おきに 1 本ずつしか問い合わせないので起きず、起きるのは合言葉を知って
-いる者が同時に叩いた場合だけである。合言葉を知られていれば、そもそも 1 本目で
-トークンを取られるので、二重発行によって悪化する範囲は無い。
+**残る弱点 (承知の上)**: ``master_put`` は「条件付き書き込み」(= 書く直前の状態が
+想定どおりのときだけ書く) ではない。そのため次の 2 つは防げない:
+
+- 同じ合言葉への poll が **ほぼ同時に 2 台へ** 届くと、両方がトークンを渡しうる。
+  正規の CLI は 3 秒おきに 1 本ずつしか問い合わせないので起きない。起きるのは
+  合言葉を知っている者が同時に叩いた場合だけで、その場合はそもそも 1 本目で
+  トークンを取られているので、二重発行で悪化する範囲は無い。
+- **別々の 2 人が同じ合言葉をほぼ同時に承認する**と、両方に「承認済み」が返り、
+  CLI が受け取るのは後から書いた方の身元のトークンになる。409 (別の人が先に
+  承認済み) の守りは、承認が順番に届いた場合にしか効かない。合言葉は画面に出る
+  だけで共有を想定しておらず、5 分で失効するので、これは承知の上で残す。塞ぐには
+  保存先に条件付き書き込みを足す必要がある (DynamoDB の条件式 / Firestore の
+  トランザクション / MySQL の UPDATE ... WHERE)。
+
+**溜まる記録**: 失効した合言葉と受け取り済みの合言葉は保存先に残る (1 件数十バイト)。
+片付けは保存先の自動削除の仕組み (Firestore の TTL ポリシー / DynamoDB の TTL) を
+``expires`` に掛けて行う運用作業として、別タスクで扱う。
+
+**保存の口**: ``master_get`` / ``master_put`` は、もとは共有マスター (顧客の名寄せ
+台帳、ms-111) のために作られた汎用の口で、ここではそれを短命な合言葉の表にも使って
+いる。マスター側の一括処理 (同期・正規化など) を足すときは、entity ``cli_pairing``
+を巻き込まないこと。
 """
 from __future__ import annotations
 
@@ -120,11 +137,11 @@ class PairingTable:
         # 整数秒で持つ (DynamoDB は float を受け付けないため)。
         return int(self._clock())
 
-    def _live(self, code: str) -> dict:
-        """有効な (= 存在し、失効しておらず、まだ受け取られていない) 記録を返す。"""
+    def _find(self, code: str) -> dict:
+        """存在し、失効していない記録を返す (受け取り済みも含む)。"""
         code = (code or "").strip().upper()
         rec = self._p.get(code) if code else None
-        if not rec or rec.get("status") == STATUS_CONSUMED:
+        if not rec:
             raise PairingError(404, "Invalid or expired code")
         if self._now() > int(rec.get("expires", 0)):
             raise PairingError(410, "Code expired")
@@ -147,9 +164,14 @@ class PairingTable:
         raise PairingError(503, "Could not allocate a pairing code; try again")
 
     def approve(self, code: str, *, sub: str, email: str) -> dict:
-        """サインインした人が合言葉を承認する。押し直し (同じ人) はそのまま成功にする。"""
-        rec = self._live(code)
-        if rec.get("status") == STATUS_APPROVED:
+        """サインインした人が合言葉を承認する。押し直し (同じ人) はそのまま成功にする。
+
+        CLI がもうトークンを受け取った後 (受け取り済み) に、同じ人が Authorize を
+        押し直した場合も成功を返す。ログインは済んでいるので、「無効な合言葉」と
+        見せて不要なやり直しに誘わないため (AX レビュー finding)。
+        """
+        rec = self._find(code)
+        if rec.get("status") in (STATUS_APPROVED, STATUS_CONSUMED):
             if rec.get("sub") != sub:
                 # 別の人が先に承認した合言葉を、上書きで乗っ取らせない。
                 raise PairingError(409, "Code already approved by another account")
@@ -169,8 +191,12 @@ class PairingTable:
         返り値は ``{"status": "pending"}`` か
         ``{"status": "approved", "sub": ..., "email": ...}``。後者を返す前に
         記録を「受け取り済み」にするので、同じ合言葉で二度は受け取れない。
+        二度目の問い合わせには 409 「already used」を返す (「無効な合言葉」の 404 と
+        区別し、ログインは成功済みだと読めるようにする)。
         """
-        rec = self._live(code)
+        rec = self._find(code)
+        if rec.get("status") == STATUS_CONSUMED:
+            raise PairingError(409, "Code already used (this login has completed)")
         if rec.get("status") != STATUS_APPROVED:
             return {"status": STATUS_PENDING}
         self._p.put(rec["code"], {**rec, "status": STATUS_CONSUMED, "consumed_at": self._now()})
