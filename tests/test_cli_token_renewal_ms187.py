@@ -178,3 +178,27 @@ def test_renewed_credentials_stay_owner_only(env, tmp_path):
         os.umask(old_umask)
     assert env["saved"]()["token"] == "bcli.new.sig"
     assert (cred.stat().st_mode & 0o777) == 0o600
+
+
+def test_refusal_reason_includes_the_server_explanation(env, capsys):
+    """断られた理由 (90 日の上限か、トークンの不具合か) を、サーバーの説明で見分けられる。"""
+    now = int(time.time())
+    env["write"](token_expiry=now + 3 * DAY)
+    body = io.BytesIO(json.dumps(
+        {"detail": "Sign-in is too old to renew; run `beacon auth login` again"}).encode())
+    env["state"]["raise"] = auth.urllib.error.HTTPError(
+        "https://api.example.test/api/auth/exchange-cli-token", 401, "no", {}, body)
+    auth.load_credentials()
+    assert "too old to renew" in capsys.readouterr().err
+    assert "too old to renew" in env["saved"]()["last_renew_error"]
+
+
+def test_a_renewal_that_cannot_be_saved_is_not_silent(env, monkeypatch, capsys):
+    """延長できても保存できなければ、そのことを知らせる (次の操作で延長を繰り返さないように)。"""
+    now = int(time.time())
+    env["write"](token_expiry=now + 2 * DAY)
+    env["state"]["reply"] = {"id_token": "bcli.new.sig", "token_expiry": now + 30 * DAY}
+    monkeypatch.setattr(auth, "_save_credentials", lambda _d: False)
+    creds = auth.load_credentials()
+    assert creds["token"] == "bcli.new.sig"  # この操作では新しいトークンを使う
+    assert "保存できませんでした" in capsys.readouterr().err

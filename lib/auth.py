@@ -248,13 +248,24 @@ def login_web():
             if e.code == 410:
                 print("\nCode expired. Run 'beacon auth login' again.")
                 sys.exit(1)
+            if e.code == 409:
+                # サーバーはトークンを渡す前にコードを「受け取り済み」にする (ms-187)。
+                # 前回の応答が通信の途中で失われると、次の問い合わせは 409 になる。
+                # ログインはサーバー側では済んでいるが、この端末には保存されていない。
+                # 待ち続けても回復しないので、ここで止めてやり直しを案内する。
+                print("\nThis login code was already used, but the credentials "
+                      "did not reach this terminal.")
+                print("  `beacon auth login` をもう一度実行してください。")
+                sys.exit(1)
             if e.code == 404:
-                # **404 は致命的ではない。** サーバの pairing コード表
-                # (routers_auth の _cli_pending) はプロセス内メモリで、しかも
-                # router インスタンスごとのローカル辞書。コードを発行した
+                # **404 は致命的ではない。** 以前のサーバは pairing コード表を
+                # インスタンスごとのメモリに置いていたため、コードを発行した
                 # インスタンスと、この問い合わせに答えたインスタンスが違えば、
-                # 答えた側はコードを知らないので 404 を返す —— それは
+                # 答えた側はコードを知らずに 404 を返した —— それは
                 # 「コードが無効」ではなく「相手が知らない」。
+                # ms-187 でコード表は共有の保存先 (server/cli_pairing.py) に移り、
+                # 新しいサーバでは 404 は本当に無効なコードのときだけになった。
+                # 古いサーバが残っている間も通るよう、ここは待ち続ける。
                 #
                 # 以前はここで即 exit していたため、**承認する時間が構造的に
                 # 無かった**: 問い合わせは 3 秒間隔で、数回のうちに必ず別
@@ -269,9 +280,6 @@ def login_web():
                 # タイムアウトさせない —— 原因が分からないまま待たされるのが
                 # 一番たちが悪い)。
                 #
-                # 本来の直しはサーバ側でコード表を共有ストアに置くこと。
-                # ここは、それが入るまで利用者がログインできる状態を保つための
-                # 受け皿。
                 unknown_polls += 1
                 continue
         except Exception:
@@ -281,10 +289,10 @@ def login_web():
         print("\nInvalid code (a server instance never recognised it).")
         print("  発行したコードを、どのインスタンスも知らないまま締め切りを"
               "迎えました。")
-        print("  `beacon auth login` をやり直してください。続くなら、"
-              "pairing コード表が")
-        print("  インスタンス間で共有されていない疑いがあります "
-              "(server/routers_auth.py の _cli_pending)。")
+        print("  `beacon auth login` をやり直してください。続くなら、サーバーが"
+              "コードの保存先")
+        print("  (server/cli_pairing.py が使う store_router) を読めていない"
+              "疑いがあります。")
         sys.exit(1)
     print("\nTimeout. Run 'beacon auth login' again.")
     sys.exit(1)
@@ -703,8 +711,8 @@ _RENEW_RETRY_SECONDS = 3600
 _RENEW_TIMEOUT_SECONDS = 5
 
 
-def _save_credentials(creds_data: dict) -> None:
-    """credentials.json を書き戻す (best-effort)。書けなくても呼び出し側は続行する。
+def _save_credentials(creds_data: dict) -> bool:
+    """credentials.json を書き戻す (best-effort)。書けたかどうかを返し、書けなくても例外は出さない。
 
     一時ファイルに書いてから置き換える (os.replace)。並行して読む別プロセス
     (hook や別セッションの beacon) が、書きかけの空ファイルを読んで落ちないように
@@ -726,15 +734,24 @@ def _save_credentials(creds_data: dict) -> None:
         except OSError:
             pass
         os.replace(tmp, cred_path)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _renew_failure_reason(exc: Exception) -> str:
     if isinstance(exc, urllib.error.HTTPError):
+        # サーバーの説明 (detail) を添える。90 日の上限で断られたのか、トークンが
+        # 無効なのかは、HTTP の番号だけでは見分けられない。
+        detail = ""
+        try:
+            detail = str(json.loads(exc.read() or b"{}").get("detail") or "")
+        except Exception:
+            detail = ""
+        suffix = f": {detail}" if detail else ""
         if exc.code in (401, 403):
-            return f"サーバーが延長を断りました (HTTP {exc.code})"
-        return f"サーバーがエラーを返しました (HTTP {exc.code})"
+            return f"サーバーが延長を断りました (HTTP {exc.code}{suffix})"
+        return f"サーバーがエラーを返しました (HTTP {exc.code}{suffix})"
     if isinstance(exc, (urllib.error.URLError, OSError)):
         return "サーバーに届きませんでした"
     return "サーバーの応答を読めませんでした"
@@ -797,7 +814,14 @@ def _maybe_renew_cli_token(creds_data: dict, now: int) -> dict:
             f"`beacon auth login` で入り直すと 30 日分に戻ります。",
             file=sys.stderr,
         )
-    _save_credentials(updated)
+    if not _save_credentials(updated) and not failure:
+        # 延長はできたが保存できなかった。黙っていると、次の操作でも古いトークンを
+        # 読んで延長を繰り返し、期限の日に突然切れる。
+        print(
+            "注意: ログインを延長しましたが、認証情報ファイルに保存できませんでした "
+            f"({_credentials_path()})。書き込みの権限を確かめてください。",
+            file=sys.stderr,
+        )
     return updated
 
 
