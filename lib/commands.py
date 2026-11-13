@@ -1750,10 +1750,12 @@ def _collect_whole_target_artifact(target_id: str):
             continue
         seen[key] = []
         refs.append((h, ent.get("description", "") or ""))
+    import review_spine as _rs  # 作業記録の落とし方は _collect_change_diff と同じ源
     commits = []
     spent = 0
     truncated = False
     n_error = 0
+    dropped_all = []  # [(path, chars)] — 何を judge に見せなかったかを後で開示する
     for h, subject in refs:
         entry = {"hash": h, "subject": subject}
         folded = seen.get(h[:_LEDGER_HASH_ABBREV]) or []
@@ -1778,13 +1780,29 @@ def _collect_whole_target_artifact(target_id: str):
             n_error += 1
             continue
         diff = proc.stdout or ""
+        # ms-119 e-7352 の 6 番目の経路: ここは `git show` で 1 commit ずつ採るので
+        # _collect_change_diff (= 変更スコープの唯一の口) を通らない。通らないなら
+        # **同じ落とし方をここでも行う**。でないと target 全体のレビューだけが、
+        # 実装者の作業記録 (.beacon/ = 作業記録の behavior / セッションログの summary
+        # / タスクの motivation) を judge に運ぶ — judge に「読むな」と頼んで閉じる
+        # 形は、この機構が他のどこでも拒否している形。
+        diff, dropped_here = _rs.strip_bookkeeping_from_diff(diff)
+        if dropped_here:
+            dropped_all.extend(dropped_here)
         spent += len(diff)
         entry["diff"] = diff
         if not diff.strip():
             # successful but empty — distinct from "no diff collected". Tag the
             # reason so "" is not misread as "changed nothing".
-            entry["empty_reason"] = "no-textual-diff (空 / メタのみの commit の可能性)"
+            entry["empty_reason"] = (
+                "bookkeeping-only (この commit は Beacon の作業記録しか変えていない)"
+                if dropped_here else
+                "no-textual-diff (空 / メタのみの commit の可能性)")
         commits.append(entry)
+    bookkeeping_gap = _rs.bookkeeping_drop_gap(dropped_all)
+    if bookkeeping_gap:
+        # 黙って削らない。judge が「この target の変更を全部見た」と誤認しないため。
+        gaps.append(bookkeeping_gap)
     if not refs:
         gaps.append(f"{target_id} に記録された commit がありません。whole-target の "
                     f"照合対象が空です — この target の実装が beacon log されていないか、"
