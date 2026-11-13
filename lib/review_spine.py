@@ -28,6 +28,7 @@ interface change.
 
 import json as _json
 import os as _os
+import re as _re
 
 import transition_approval as _ta
 
@@ -209,6 +210,98 @@ def whole_target_artifact(commits, *, target_id, truncated=False):
         "commits": list(commits or []),
         "truncated": bool(truncated),
     }
+
+
+# Paths whose diff is Beacon's own bookkeeping, not the change under review
+# (ms-119 e-7352). `.beacon/project.json` carries `beacon log` behavior text,
+# session-log summaries and task motivation — i.e. *the implementer session's
+# explanation of its own intent*, which is exactly what
+# ``INDEPENDENCE_CONTRACT`` tells the judge not to read. A bundle that carries
+# it is the contract's author breaking the contract.
+BOOKKEEPING_PATH_PREFIXES = (".beacon/",)
+
+
+def _diff_section_paths(section_lines):
+    """Paths a unified-diff section touches, from its own header lines.
+
+    ``--- a/x`` / ``+++ b/y`` are preferred over the ``diff --git`` line because
+    they survive paths with spaces; the ``diff --git`` line is the fallback for
+    sections that carry no file headers (a pure mode/rename change).
+    """
+    paths = []
+    for line in section_lines:
+        if line.startswith("--- ") or line.startswith("+++ "):
+            ref = line[4:].strip()
+            if ref == "/dev/null":
+                continue
+            if ref[:2] in ("a/", "b/"):
+                ref = ref[2:]
+            if ref:
+                paths.append(ref)
+    if not paths and section_lines:
+        m = _re.match(r"^diff --git a/(.+?) b/(.+)$", section_lines[0].rstrip("\n"))
+        if m:
+            paths.extend([m.group(1), m.group(2)])
+    return paths
+
+
+def strip_bookkeeping_from_diff(diff_text, prefixes=BOOKKEEPING_PATH_PREFIXES):
+    """``(filtered_diff, dropped)`` — drop Beacon's own bookkeeping from a diff.
+
+    ``dropped`` is ``[(path, chars), ...]`` so the caller can **say what the
+    judge was not shown**. Disclosure is half the point: a judge handed a
+    silently-trimmed diff believes it saw the whole change, and the two findings
+    that asked for this filter were themselves about a bundle that misrepresented
+    its own contents.
+
+    Why here and not "the judge skips it": three independent judges reported
+    reading ``.beacon/project.json`` hunks in the artifact and *self-reported*
+    skipping them (2026-11-02 / 2026-11-04 / 2026-11-05, 原典 26% / 16% / 70% of
+    the diff by character count). Closing a hole by asking the reader not to look
+    is the shape Beacon rejects everywhere else — if it must not be read, it must
+    not be sent.
+
+    A rename into or out of a bookkeeping path drops too (either side matching is
+    enough): the section's content is the bookkeeping file's text either way.
+
+    Pure: no file or process access, so the contract is unit-testable without a
+    repo.
+    """
+    if not diff_text:
+        return diff_text, []
+    lines = diff_text.splitlines(keepends=True)
+    # Sections start at each `diff --git`; anything before the first one is a
+    # preamble that belongs to no file and is kept verbatim.
+    starts = [i for i, L in enumerate(lines) if L.startswith("diff --git ")]
+    if not starts:
+        return diff_text, []
+    kept = list(lines[:starts[0]])
+    dropped = []
+    bounds = starts + [len(lines)]
+    for i in range(len(starts)):
+        section = lines[bounds[i]:bounds[i + 1]]
+        paths = _diff_section_paths(section)
+        hit = next((p for p in paths
+                    if any(p.startswith(pre) for pre in prefixes)), None)
+        if hit is None:
+            kept.extend(section)
+        else:
+            dropped.append((hit, sum(len(L) for L in section)))
+    return "".join(kept), dropped
+
+
+def bookkeeping_drop_gap(dropped):
+    """The one-line disclosure for ``dropped``, or ``""`` when nothing was cut."""
+    if not dropped:
+        return ""
+    total = sum(n for _, n in dropped)
+    shown = ", ".join(f"{p} ({n:,} 字)" for p, n in dropped[:5])
+    more = f" ほか {len(dropped) - 5} ファイル" if len(dropped) > 5 else ""
+    return (f"artifact から Beacon 自身の作業記録 {len(dropped)} ファイル "
+            f"(合計 {total:,} 字) を外しました: {shown}{more}。"
+            f"これらは実装者セッションの意図説明 (作業記録の behavior / セッション"
+            f"ログの summary / タスクの motivation) を含むため、独立性の契約が"
+            f"読むなと言う対象です。**差分のこの部分は判定に入っていません。**")
 
 
 def _origin_slot(origin_id, origin_content, provenance):

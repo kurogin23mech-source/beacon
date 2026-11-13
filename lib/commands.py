@@ -1750,10 +1750,12 @@ def _collect_whole_target_artifact(target_id: str):
             continue
         seen[key] = []
         refs.append((h, ent.get("description", "") or ""))
+    import review_spine as _rs  # 作業記録の落とし方は _collect_change_diff と同じ源
     commits = []
     spent = 0
     truncated = False
     n_error = 0
+    dropped_all = []  # [(path, chars)] — 何を judge に見せなかったかを後で開示する
     for h, subject in refs:
         entry = {"hash": h, "subject": subject}
         folded = seen.get(h[:_LEDGER_HASH_ABBREV]) or []
@@ -1778,13 +1780,29 @@ def _collect_whole_target_artifact(target_id: str):
             n_error += 1
             continue
         diff = proc.stdout or ""
+        # ms-119 e-7352 の 6 番目の経路: ここは `git show` で 1 commit ずつ採るので
+        # _collect_change_diff (= 変更スコープの唯一の口) を通らない。通らないなら
+        # **同じ落とし方をここでも行う**。でないと target 全体のレビューだけが、
+        # 実装者の作業記録 (.beacon/ = 作業記録の behavior / セッションログの summary
+        # / タスクの motivation) を judge に運ぶ — judge に「読むな」と頼んで閉じる
+        # 形は、この機構が他のどこでも拒否している形。
+        diff, dropped_here = _rs.strip_bookkeeping_from_diff(diff)
+        if dropped_here:
+            dropped_all.extend(dropped_here)
         spent += len(diff)
         entry["diff"] = diff
         if not diff.strip():
             # successful but empty — distinct from "no diff collected". Tag the
             # reason so "" is not misread as "changed nothing".
-            entry["empty_reason"] = "no-textual-diff (空 / メタのみの commit の可能性)"
+            entry["empty_reason"] = (
+                "bookkeeping-only (この commit は Beacon の作業記録しか変えていない)"
+                if dropped_here else
+                "no-textual-diff (空 / メタのみの commit の可能性)")
         commits.append(entry)
+    bookkeeping_gap = _rs.bookkeeping_drop_gap(dropped_all)
+    if bookkeeping_gap:
+        # 黙って削らない。judge が「この target の変更を全部見た」と誤認しないため。
+        gaps.append(bookkeeping_gap)
     if not refs:
         gaps.append(f"{target_id} に記録された commit がありません。whole-target の "
                     f"照合対象が空です — この target の実装が beacon log されていないか、"
@@ -1821,6 +1839,14 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list,
     a judge would then "review" and a ``review done`` would record as performed.
     For ``--diff-ref`` an empty diff is a legitimate answer (the two refs really
     are identical), so that caller keeps the gap and the bundle.
+
+    **This is also where Beacon's own bookkeeping leaves the artifact** (ms-119
+    e-7352). Every change-scoped collector routes through here, so dropping
+    ``.beacon/`` once covers all of them — and a new collector that hand-rolls
+    its own ``git diff`` skips the drop, which is what
+    ``tests/test_review_bundle_bookkeeping_e7352.py`` watches for. What was
+    dropped is disclosed in ``gaps``: a judge handed a silently-trimmed diff
+    believes it saw the whole change.
     """
     proc = subprocess.run(argv, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -1838,6 +1864,27 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list,
                   file=sys.stderr)
             sys.exit(1)
         gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+        return diff_text
+    # ms-119 e-7352: Beacon 自身の作業記録 (.beacon/) を artifact から外す。
+    # ここは 4 つの差分収集 (review context / batch / 目的達成 / --diff-ref) が
+    # 通る唯一の口なので、1 箇所で全経路に効く。黙って削らず、何を外したかを
+    # gaps に出す (judge が「差分の全部を見た」と誤認しないため)。
+    import review_spine as _rs
+    diff_text, dropped = _rs.strip_bookkeeping_from_diff(diff_text)
+    gap = _rs.bookkeeping_drop_gap(dropped)
+    if gap:
+        gaps.append(gap)
+    if dropped and not diff_text.strip():
+        # 作業記録しか変えていない PR。空の artifact を judge に渡すと、何も見て
+        # いない判定が `review done` で「実施した」として記録され、approve /
+        # merge の関門を外す (e-6971 が閉じたのと同じ穴)。
+        if empty_is_error:
+            print(f"Error: {target_ref} の差分は Beacon の作業記録 (.beacon/) "
+                  f"だけでした。レビューできる変更が無いので止めます。\n"
+                  f"  {gap}", file=sys.stderr)
+            sys.exit(1)
+        gaps.append(f"{target_ref} の差分は作業記録だけで、レビュー対象の変更が"
+                    f"ありません。")
     return diff_text
 
 
@@ -2196,11 +2243,13 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
         diff_text = _collect_change_diff(argv, pr_ref, gaps, empty_is_error=True)
     elif diff_ref:
         target_ref = f"{target_id} ({diff_ref})"
-        proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-            sys.exit(1)
-        diff_text = proc.stdout
+        # ms-119 e-7352: ここは収集を手書きしていた 5 番目の経路で、e-6971 が
+        # 「3 箇所を 1 つに寄せた」ときに取り残されていた (--pr 側だけ寄せた)。
+        # 寄せる前はこの枝だけが -U25 を持たず、差分が空でも gaps に出ず、
+        # Beacon 自身の作業記録 (.beacon/) も落ちない —— 同じ bundle なのに
+        # --pr で採ったか --diff-ref で採ったかで judge の見るものが違っていた。
+        diff_text = _collect_change_diff(["git", "diff", "-U25", diff_ref],
+                                         target_ref, gaps)
 
     _mi = _model_independence_gap()
     if _mi:
@@ -2385,67 +2434,8 @@ def cmd_review_context():
               f"--diff-ref) です。target 全体の close レビューには --type philosophy "
               f"を使ってください (--target は whole-target 専用)。", file=sys.stderr)
         sys.exit(1)
-    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
-    origin_kind = origin_spec.get("kind", "")
-    # 原典の出所 (= どのファイルから解決したか) は **repo-file 原典にしか無い**。
-    # doc 原典 (思想レビューの SPEC / vision) には解決元のパスが存在しないので、
-    # `None` が正しい値 (review_spine.assemble_review_context の既定も None、
-    # docstring も optional と明記)。
-    #
-    # **なぜ分岐の前で初期化するか** (2026-11-11): 初版は repo-file 分岐の中だけで
-    # 束縛し、下の assemble 呼び出しで無条件に読んでいた。doc 分岐はこれを設定
-    # しないので、**思想レビューはどの経路 (--target / --pr / --diff-ref) からも
-    # UnboundLocalError で落ちていた** —— SPEC が「Advisory クラスの第 2 instance」
-    # と宣言している機構が、一度も実行できない状態だった。
-    #
-    # これは直前に同じ関数の `_head_sha` で直した型とまったく同じ形で、3 行隣に
-    # 在った。あのとき **同型の兄弟を列挙しなかった** ので見落とした。assemble に
-    # 渡す名前のうち分岐内でしか束縛されないものを機械的に洗い直し、到達可能な
-    # 全経路で束縛されるのは `target_ref` (4 経路すべてで設定) と確認済み。
-    # 残る穴はこの 1 つだった。
-    origin_provenance = None
-    if origin_kind == "repo-file":
-        # 原典 is a fixed repo file that travels with the capability (Layer 3).
-        # --origin-doc does not apply; silently ignoring it would let the caller
-        # believe their doc became the 原典 — reject instead.
-        ref = origin_spec.get("ref", "")
-        if not ref:
-            print(f"Error: review type {review_type!r} descriptor has origin.kind"
-                  f"=repo-file but no 'ref' (skills/<type>/review-type.json is "
-                  f"malformed).", file=sys.stderr)
-            sys.exit(1)
-        if origin_doc:
-            print(f"Error: --origin-doc is not valid for --type {review_type} "
-                  f"(its 原典 is fixed to {ref}).", file=sys.stderr)
-            sys.exit(1)
-        origin_id = ref
-        # ms-119 e-7345: 解決は 1 箇所 (_resolve_repo_file_origin) に寄せた。
-        # 以前はここと batch 側の _repo_file_origin に同じ解決が手書きで 2 つ
-        # 並んでおり、片方だけ直る形だった (コード内の注記自身が「抽出は価値ある
-        # follow-up」と認めていた)。
-        origin_content, origin_provenance = _resolve_repo_file_origin(ref, gaps)
-    elif origin_kind == "doc":
-        # 原典 is a document supplied at review time (a target's SPEC / vision).
-        # Absence is itself a finding (SPEC § 方針5): surface as a gap, don't lie.
-        if not origin_doc:
-            print(f"Error: --type {review_type} needs --origin-doc <doc-id> "
-                  f"(the SPEC / vision the implementation is checked against).",
-                  file=sys.stderr)
-            sys.exit(1)
-        doc = get_store().get_document(origin_doc)
-        if not doc:
-            print(f"Error: origin doc not found: {origin_doc}", file=sys.stderr)
-            sys.exit(1)
-        origin_id = origin_doc
-        origin_content = doc.get("content", "")
-        if not origin_content.strip():
-            gaps.append(f"原典 {origin_doc} は本文が空です。drift の照合基準が"
-                        f"無いため、findings は intent 推定に留まります (SPEC § 方針5)。")
-    else:
-        print(f"Error: review type {review_type!r} descriptor has unknown "
-              f"origin.kind {origin_kind!r} (expected 'repo-file' or 'doc').",
-              file=sys.stderr)
-        sys.exit(1)
+    origin_id, origin_content, origin_provenance = _resolve_review_origin(
+        review_type, desc, origin_doc, gaps)
 
     # --- artifact collection: mechanical, no interpretation ---
     diff_text = ""
@@ -2649,6 +2639,72 @@ def _capability_root():
     """
     import review_spine  # local import — matches this file's module-import idiom
     return review_spine.install_root()
+
+
+def _resolve_review_origin(review_type, desc, origin_doc, gaps):
+    """``(origin_id, origin_content, provenance)`` for one review type's 原典,
+    or exit with a clean error. Used by the SINGLE-TYPE review-context path.
+
+    Every 原典 kind resolves here and **returns the whole triple**, the same
+    shape :func:`_repo_file_origin` hands the batch path. That is the point:
+    this used to be an if/elif that assigned ``origin_id`` / ``origin_content``
+    / ``origin_provenance`` into the caller's locals, and when e-7345 added
+    provenance it was added to the repo-file branch only. The doc branch (思想
+    / philosophy, whose 原典 is a target's SPEC) never bound the name, so
+    **every** ``beacon review context --type philosophy`` died with
+    ``UnboundLocalError: origin_provenance`` at the assemble call — the whole
+    review type was unreachable while ax / maintainability kept working, and
+    nothing said so until a caller read the traceback. A branch that must
+    ``return`` a triple cannot leave one of the three unset; the next 原典 kind
+    added here inherits that for free.
+
+    A doc 原典 has no checkout, so its provenance is ``None`` — exactly the
+    "caller cannot say which working tree" case ``review_spine._origin_slot``
+    documents, which keeps the slot at its two-key shape.
+    """
+    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
+    origin_kind = origin_spec.get("kind", "")
+    if origin_kind == "repo-file":
+        # 原典 is a fixed repo file that travels with the capability (Layer 3).
+        # --origin-doc does not apply; silently ignoring it would let the caller
+        # believe their doc became the 原典 — reject instead.
+        ref = origin_spec.get("ref", "")
+        if not ref:
+            print(f"Error: review type {review_type!r} descriptor has origin.kind"
+                  f"=repo-file but no 'ref' (skills/<type>/review-type.json is "
+                  f"malformed).", file=sys.stderr)
+            sys.exit(1)
+        if origin_doc:
+            print(f"Error: --origin-doc is not valid for --type {review_type} "
+                  f"(its 原典 is fixed to {ref}).", file=sys.stderr)
+            sys.exit(1)
+        # ms-119 e-7345: 解決は 1 箇所 (_resolve_repo_file_origin) に寄せた。
+        # 以前はここと batch 側の _repo_file_origin に同じ解決が手書きで 2 つ
+        # 並んでおり、片方だけ直る形だった (コード内の注記自身が「抽出は価値ある
+        # follow-up」と認めていた)。
+        content, provenance = _resolve_repo_file_origin(ref, gaps)
+        return ref, content, provenance
+    if origin_kind == "doc":
+        # 原典 is a document supplied at review time (a target's SPEC / vision).
+        # Absence is itself a finding (SPEC § 方針5): surface as a gap, don't lie.
+        if not origin_doc:
+            print(f"Error: --type {review_type} needs --origin-doc <doc-id> "
+                  f"(the SPEC / vision the implementation is checked against).",
+                  file=sys.stderr)
+            sys.exit(1)
+        doc = get_store().get_document(origin_doc)
+        if not doc:
+            print(f"Error: origin doc not found: {origin_doc}", file=sys.stderr)
+            sys.exit(1)
+        content = doc.get("content", "")
+        if not content.strip():
+            gaps.append(f"原典 {origin_doc} は本文が空です。drift の照合基準が"
+                        f"無いため、findings は intent 推定に留まります (SPEC § 方針5)。")
+        return origin_doc, content, None
+    print(f"Error: review type {review_type!r} descriptor has unknown "
+          f"origin.kind {origin_kind!r} (expected 'repo-file' or 'doc').",
+          file=sys.stderr)
+    sys.exit(1)
 
 
 def _resolve_repo_file_origin(ref, gaps):
