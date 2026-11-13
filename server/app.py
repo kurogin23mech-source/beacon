@@ -396,10 +396,22 @@ _CLI_TOKEN_PREFIX = "bcli."
 _CLI_TOKEN_LIFETIME = 86400 * 30  # 30 days
 
 
-def _make_cli_token(sub: str, email: str) -> tuple[str, int]:
-    """Issue a long-lived CLI token (HMAC-SHA256). Returns (token, expiry_unix)."""
-    expiry = int(time.time()) + _CLI_TOKEN_LIFETIME
-    payload = json.dumps({"sub": sub, "email": email, "exp": expiry}, separators=(",", ":"))
+def _make_cli_token(sub: str, email: str, *, auth_time: int | None = None) -> tuple[str, int]:
+    """Issue a long-lived CLI token (HMAC-SHA256). Returns (token, expiry_unix).
+
+    ``auth_time`` is when the person actually signed in (ms-187 e-7490). A fresh
+    login leaves it unset (= now); renewing an existing token carries the original
+    value forward, so ``exchange-cli-token`` can refuse to extend a login chain past
+    ``routers_auth.CLI_SESSION_MAX_AGE`` — renewal must not turn a 30-day token
+    into an indefinitely valid one.
+    """
+    now = int(time.time())
+    expiry = now + _CLI_TOKEN_LIFETIME
+    payload = json.dumps(
+        {"sub": sub, "email": email, "exp": expiry,
+         "auth_time": int(auth_time) if auth_time else now},
+        separators=(",", ":"),
+    )
     payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
     secret = os.environ.get("BEACON_CLI_TOKEN_SECRET", "dev-secret-CHANGE-ME")
     sig = _hmac.new(secret.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
@@ -4925,7 +4937,8 @@ def health():
 # (factory + include_router)。token 発行 _make_cli_token は verify 対の
 # _verify_cli_token と同居させるため app.py 所有のまま注入。config flag
 # (_local_dev_enabled / _AUTH_PROVIDER) は test が runtime 書き換えするため
-# 値でなく callable で渡す。_cli_pending は auth-local state として router 側へ移設。
+# 値でなく callable で渡す。CLI ログインの合言葉の表は、全台で共有する保存先
+# (cli_pairing.PairingTable, ms-187 e-7488) として注入する。
 
 
 # ---------------------------------------------------------------------------
@@ -4991,6 +5004,7 @@ app.include_router(
 # verify path); the config flags are injected as callables so tests that flip
 # app._local_dev_enabled / app._AUTH_PROVIDER at runtime are reflected.
 from routers_auth import make_router as _make_auth_router
+import cli_pairing as _cli_pairing
 
 app.include_router(
     _make_auth_router(
@@ -4998,6 +5012,9 @@ app.include_router(
         make_cli_token=_make_cli_token,
         get_local_dev_enabled=lambda: _local_dev_enabled,
         get_auth_provider=lambda: _AUTH_PROVIDER,
+        # ms-187 e-7488: 合言葉の表は全台で共有する保存先に置く (メモリに置くと
+        # Cloud Run の複数台で承認が別の台に届き、ログインが失敗する)。
+        pairing_table=_cli_pairing.PairingTable(_cli_pairing.StorePersistence(db)),
     )
 )
 

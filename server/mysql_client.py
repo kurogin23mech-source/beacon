@@ -58,6 +58,10 @@ ENTITIES = [
     # 対象外にする (organizations と同じ扱い)。起動時 create_mysql_tables が作る。
     "master_accounts",
     "master_contacts",
+    # ms-187 / e-7488: CLI ログインの合言葉 (ペアリングコード) の表。pk=code, sk=''。
+    # 全サーバー台で共有するため保存先に置く (server/cli_pairing.py)。project 配下では
+    # ないので _SUBCOLLECTION_SK_NAMES には載せない。起動時 create_mysql_tables が作る。
+    "cli_pairing",
     # projects/{pid}/* subcollections
     "retros",
     "documents",
