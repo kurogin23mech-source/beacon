@@ -8,14 +8,19 @@ routers_me.py / routers_orgs.py / routers_admin.py
 Pure move: every route body is verbatim from app.py's auth handlers — same
 paths, same shapes, no behavior change.
 
-The CLI-pairing pending-code table ``_cli_pending`` is **auth-local in-memory
-state** (only cli-start / cli-approve / cli-poll touch it). It is a
-**factory-local** dict created inside ``make_router`` (not a module global), so
-each router instance owns its own table and a second mount cannot leak pairing
-codes across instances. cli-start writes it, cli-approve marks approved, cli-poll
-reads + issues the token — all against this one closure-captured dict.
+The CLI-pairing code table lives in the injected ``pairing_table``
+(``cli_pairing.PairingTable``), backed by a store **every server instance sees**
+(ms-187 e-7488). It used to be a per-process dict here, which broke login on the
+multi-instance Cloud Run deploy: cli-start / cli-approve / cli-poll land on
+different instances, and an instance that never issued the code answered 404.
+See ``server/cli_pairing.py`` for the full story and the safety properties.
 
 Injected dependencies (owned by app.py, passed in to avoid an import cycle):
+
+- ``pairing_table``          — ``cli_pairing.PairingTable`` over the shared store
+                               (``StorePersistence(store_router)`` in production).
+                               Type-checked at construction: a plain dict or a
+                               missing table fails at mount, not at login time.
 
 - ``require_auth``           — the host app's identity dependency (exchange-cli-
                                token and cli-approve require it).
@@ -38,14 +43,13 @@ Injected dependencies (owned by app.py, passed in to avoid an import cycle):
 from __future__ import annotations
 
 import os
-import secrets
-import time
 from typing import Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
+from cli_pairing import PairingError, PairingTable
 
 
 class DevLoginRequest(BaseModel):
@@ -63,6 +67,7 @@ def make_router(
     make_cli_token: Callable[[str, str], tuple[str, int]],
     get_local_dev_enabled: Callable[[], bool],
     get_auth_provider: Callable[[], str],
+    pairing_table: PairingTable,
 ) -> APIRouter:
     """Build the /api/auth/* router with the host app's auth + token helpers.
 
@@ -73,6 +78,7 @@ def make_router(
             make_cli_token=_make_cli_token,
             get_local_dev_enabled=lambda: _local_dev_enabled,
             get_auth_provider=lambda: _AUTH_PROVIDER,
+            pairing_table=PairingTable(StorePersistence(db)),
         ))
 
     Keyword-only + ``Callable``-typed injected helpers, with a construction-time
@@ -91,14 +97,12 @@ def make_router(
                 f"got {type(_dep).__name__} — pass a function, not a value."
             )
 
-    # In-memory pending CLI-pairing codes: code -> {sub, email, id_token, expires}.
-    # Auth-local process state, scoped to THIS router instance (factory-local, not
-    # module-global): each make_router() call gets its own dict, so a second mount
-    # (e.g. a test probe) cannot leak pairing codes into the real app's table. In
-    # production make_router runs once, so behaviour is identical to the single
-    # module-global app.py had. Shared across the three cli-auth routes below via
-    # the closure.
-    _cli_pending: dict[str, dict] = {}
+    if not isinstance(pairing_table, PairingTable):
+        raise TypeError(
+            "routers_auth.make_router: pairing_table must be a cli_pairing.PairingTable "
+            f"(got {type(pairing_table).__name__}) — the CLI pairing codes must live in "
+            "a store every server instance can see (ms-187 e-7488)."
+        )
 
     router = APIRouter()
 
@@ -195,61 +199,49 @@ def make_router(
         return {"status": "ok", "id_token": token, "email": email, "token_expiry": expiry}
 
     # ---- CLI Auth (Web UI-mediated flow) ----
+    # 合言葉の表は pairing_table (= 全サーバー台で共有する保存先、ms-187 e-7488) が持つ。
+    # start / approve / poll が別々の台に届いても同じ記録を見る。
 
     @router.post("/api/auth/cli-start")
     def cli_auth_start():
         """CLI calls this to get a pairing code. No auth required."""
-        code = secrets.token_urlsafe(6)[:8].upper()  # Short human-readable code
-        _cli_pending[code] = {"expires": time.time() + 300}
-        # Cleanup expired
-        now = time.time()
-        for k in [k for k, v in _cli_pending.items() if v["expires"] < now]:
-            del _cli_pending[k]
-        return {"code": code, "expires_in": 300, "url": f"https://beacon-ai.dev/cli-auth?code={code}"}
+        try:
+            code = pairing_table.start()
+        except PairingError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
+        return {
+            "code": code,
+            "expires_in": pairing_table.ttl_seconds,
+            "url": f"https://beacon-ai.dev/cli-auth?code={code}",
+        }
 
     @router.post("/api/auth/cli-approve")
-    def cli_auth_approve(body: CliApproveRequest, user: dict = Depends(require_auth), request: Request = None):
+    def cli_auth_approve(body: CliApproveRequest, user: dict = Depends(require_auth)):
         """Web UI calls this (authenticated) to approve a CLI pairing code."""
-        code = body.code.upper()
-        if code not in _cli_pending:
-            raise HTTPException(status_code=404, detail="Invalid or expired code")
-        entry = _cli_pending[code]
-        if time.time() > entry["expires"]:
-            del _cli_pending[code]
-            raise HTTPException(status_code=410, detail="Code expired")
-        # Store the user's auth info for CLI to pick up
-        entry["email"] = user.get("email", "")
-        entry["sub"] = user.get("sub", "")
-        entry["approved"] = True
-        # Get the raw token from authorization header
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            entry["id_token"] = auth_header[7:]
-        return {"status": "approved", "email": entry["email"]}
+        sub = user.get("sub", "")
+        if not sub:
+            raise HTTPException(status_code=400, detail="missing sub claim")
+        try:
+            return pairing_table.approve(body.code, sub=sub, email=user.get("email", ""))
+        except PairingError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
 
     @router.get("/api/auth/cli-poll")
     def cli_auth_poll_get(code: str = ""):
         """CLI polls this to check if the code has been approved. No auth required."""
-        code = code.upper()
-        if code not in _cli_pending:
-            raise HTTPException(status_code=404, detail="Invalid or expired code")
-        entry = _cli_pending[code]
-        if time.time() > entry["expires"]:
-            del _cli_pending[code]
-            raise HTTPException(status_code=410, detail="Code expired")
-        if not entry.get("approved"):
+        try:
+            result = pairing_table.poll(code)
+        except PairingError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
+        if result["status"] != "approved":
             return {"status": "pending"}
-        # Approved — issue a long-lived CLI token and return it
-        sub = entry.get("sub", "")
-        email = entry.get("email", "")
-        cli_token, token_expiry = make_cli_token(sub, email)
-        result = {
+        # Approved (and already marked consumed) — issue a long-lived CLI token.
+        cli_token, token_expiry = make_cli_token(result["sub"], result["email"])
+        return {
             "status": "approved",
-            "email": email,
+            "email": result["email"],
             "id_token": cli_token,
             "token_expiry": token_expiry,
         }
-        del _cli_pending[code]
-        return result
 
     return router

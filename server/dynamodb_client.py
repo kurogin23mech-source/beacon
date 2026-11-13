@@ -100,6 +100,8 @@ TABLES = {
     # ms-111 / e-3620: 共有マスター identity (top-level, org 単位で cross-project 共有)
     "master_accounts": f"{TABLE_PREFIX}-master_accounts",   # PK=master_account_id
     "master_contacts": f"{TABLE_PREFIX}-master_contacts",   # PK=master_contact_id
+    # ms-187 / e-7488: CLI ログインの合言葉の表 (全サーバー台で共有、server/cli_pairing.py)
+    "cli_pairing": f"{TABLE_PREFIX}-cli_pairing",           # PK=code
     # projects/{pid}/* subcollections
     "retros": f"{TABLE_PREFIX}-retros",
     "documents": f"{TABLE_PREFIX}-documents",
@@ -144,6 +146,8 @@ TABLE_KEY_SCHEMA: dict[str, tuple[str, str | None]] = {
     # ms-111 / e-3620: 共有マスター identity (PK = record 自身の canonical id)
     "master_accounts": ("master_account_id", None),
     "master_contacts": ("master_contact_id", None),
+    # ms-187 / e-7488: CLI ログインの合言葉の表 (PK = 合言葉そのもの)
+    "cli_pairing": ("code", None),
     # users/{uid}/* subcollections
     "machines": ("user_id", "fingerprint_id"),
     # projects/{pid}/active_claims (_SUBCOLLECTION_SK_NAMES には載らないが
@@ -1836,6 +1840,9 @@ def delete_org(org_id: str) -> bool:
 _MASTER_KEY_ATTR = {
     "master_accounts": "master_account_id",
     "master_contacts": "master_contact_id",
+    # ms-187 / e-7488: master_get / master_put の汎用口を、CLI ログインの合言葉の
+    # 表 (server/cli_pairing.py) も使う。
+    "cli_pairing": "code",
 }
 
 
