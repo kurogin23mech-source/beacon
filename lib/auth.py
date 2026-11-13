@@ -709,13 +709,22 @@ def _save_credentials(creds_data: dict) -> None:
     一時ファイルに書いてから置き換える (os.replace)。並行して読む別プロセス
     (hook や別セッションの beacon) が、書きかけの空ファイルを読んで落ちないように
     するため。
+
+    一時ファイルは最初から所有者だけが読み書きできる権限 (0600) で作る。置き換えでは
+    元のファイルの権限が引き継がれないので、既定の権限 (多くは 0644) で作ると、
+    延長のたびにトークンを他のユーザーが読めるファイルになってしまう。
     """
     try:
         cred_path = _credentials_path()
         cred_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cred_path.with_name(f"{cred_path.name}.{os.getpid()}.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(creds_data, f, indent=2)
+        try:
+            os.chmod(tmp, 0o600)  # 既に在った一時ファイルを再利用した場合に備える
+        except OSError:
+            pass
         os.replace(tmp, cred_path)
     except OSError:
         pass

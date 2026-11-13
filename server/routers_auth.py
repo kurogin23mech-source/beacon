@@ -29,7 +29,12 @@ Injected dependencies (owned by app.py, passed in to avoid an import cycle):
 - ``require_auth``           — the host app's identity dependency (exchange-cli-
                                token and cli-approve require it).
 - ``make_cli_token``         — ``app._make_cli_token``. Mints the long-lived HMAC
-                               ``bcli.*`` token. Kept in app.py because it pairs
+                               ``bcli.*`` token. Contract:
+                               ``make_cli_token(sub, email, *, auth_time=None)
+                               -> (token, expiry)``; exchange-cli-token passes
+                               ``auth_time`` to carry the original sign-in time
+                               forward (ms-187 90-day cap), so a substitute
+                               must accept that keyword. Kept in app.py because it pairs
                                with ``_verify_cli_token`` (which ``require_auth``'s
                                verify path uses) — the HMAC scheme stays
                                single-sourced.
@@ -98,7 +103,7 @@ class CliApproveRequest(BaseModel):
 def make_router(
     require_auth: Callable,
     *,
-    make_cli_token: Callable[[str, str], tuple[str, int]],
+    make_cli_token: Callable[..., tuple[str, int]],
     get_local_dev_enabled: Callable[[], bool],
     get_auth_provider: Callable[[], str],
     pairing_table: PairingTable,

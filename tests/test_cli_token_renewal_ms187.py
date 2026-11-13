@@ -161,3 +161,20 @@ def test_credentials_are_replaced_atomically(env, tmp_path):
     leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
     assert env["saved"]()["token"] == "bcli.new.sig"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX のファイル権限の検証")
+def test_renewed_credentials_stay_owner_only(env, tmp_path):
+    """置き換えで権限が緩まない: 延長後も credentials.json は所有者だけが読める (0600)。"""
+    now = int(time.time())
+    env["write"](token_expiry=now + 2 * DAY)
+    cred = tmp_path / "credentials.json"
+    os.chmod(cred, 0o600)
+    old_umask = os.umask(0o022)
+    try:
+        env["state"]["reply"] = {"id_token": "bcli.new.sig", "token_expiry": now + 30 * DAY}
+        auth.load_credentials()
+    finally:
+        os.umask(old_umask)
+    assert env["saved"]()["token"] == "bcli.new.sig"
+    assert (cred.stat().st_mode & 0o777) == 0o600
