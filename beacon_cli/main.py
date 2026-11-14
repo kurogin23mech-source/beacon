@@ -37,6 +37,9 @@ from ._version import __version__
 # This runs at *import* time so every entry-point (the console script,
 # `python -m beacon_cli.hooks.post_commit`, test harnesses that import
 # main) gets the fix without each call site remembering to repeat it.
+# The bash entrypoint (bin/beacon) bypasses this module entirely by running
+# `python3 lib/commands.py` in a fresh interpreter, so lib/commands.py
+# carries the same block — keep the two in lockstep.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
