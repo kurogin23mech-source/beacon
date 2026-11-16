@@ -14,12 +14,12 @@
 
 cmd_retro() {
     ensure_project
-    local since="" until="" catch_up=""
+    local since="" until="" catch_up="" until_explicit=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --since) since="${2:-}"; shift 2 ;;
-            --until) until="${2:-}"; shift 2 ;;
+            --until) until="${2:-}"; until_explicit=1; shift 2 ;;
             --prepare) shift ;;
             --catch-up) catch_up="1"; shift ;;
             -?*) _guard_flag "$1" ;;
@@ -65,5 +65,6 @@ cmd_retro() {
     fi
 
     BEACON_SINCE="$since" BEACON_UNTIL="$until" BEACON_RETRO_CATCH_UP="$catch_up" \
+    BEACON_UNTIL_EXPLICIT="$until_explicit" \
         python3 "$COMMANDS_PY" retro_prepare
 }

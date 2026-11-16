@@ -4140,6 +4140,61 @@ def _remove_binding_from_target_review_due(target_id: str, review_type: str) -> 
     return True
 
 
+def _review_gate_is_in_use() -> bool:
+    """Whether this repository actually uses the ``beacon-review-gate`` check.
+
+    ms-181 e-7103 受入条件 5/6 — **環境変数を不要にした方**を採った。
+
+    以前はここが ``BEACON_REVIEW_GATE_CI=1`` という **env の opt-in** だった。
+    つまり「レビューをやった」と記録しても、operator がその env を覚えていない
+    限り GitHub の印は pending のまま残る。2026-10-19 に ms-185 fork が実測し、
+    2026-10-20 に本セッションでも踏んだ: `beacon review done` を打っても印は
+    pending で、env を付けて**打ち直して**初めて success になった。関門には表裏
+    2 つの穴があり (作成直後は関門が立たない / 実施しても印が押されない)、これは
+    裏側。片方だけ直すと「素通りする」か「レビュー済みのつもりで取り込みが
+    塞がれ続ける」のどちらかが残る。
+
+    「このリポジトリは関門を使っているか」の **真値源は operator の shell では
+    なく GitHub の repo 変数** — ワークフロー (`.github/workflows/review-gate.yml`)
+    自身がその変数で自分を有効化する。だからそれに訊く。env は明示的な上書きと
+    して残す (CI 自身や、変数を読めない環境で強制したいとき)。
+
+    読めなかったとき (gh 未設定 / 認証切れ / 網不通) は **押さない**。押せない
+    ことを呼び出し側が必ず表示するので、黙って pending にはならない。
+    """
+    return _review_gate_state()[0]
+
+
+def _review_gate_state():
+    """``(使っているか, 理由)`` — 理由は ``"env"`` / ``"repo"`` / ``"unreadable"``。
+
+    **「使っていない」と「判定できない」を畳まない** (ms-181、独立 AX レビュー
+    2026-11-17 が実測)。gh が入っていない / 認証が切れている / 網が届かない端末では
+    repo 変数を読めないが、以前はそれを「使っていない」と同じ ``False`` にして
+    いた。呼び出し側は区別を知らないまま『このリポジトリはレビュー関門を使って
+    いません』と出すので、**実際には GitHub 側で関門が有効なのに「何もしなくて
+    よい」と読める**。レビューを済ませたのに印が押されず、PR が pending のまま
+    取り込めない —— この課題が env 忘れとして直した症状が、gh の到達性という別の
+    経路から同じ顔で戻ってくる。
+    """
+    override = os.environ.get("BEACON_REVIEW_GATE_CI", "")
+    if override == "1":
+        return True, "env"
+    if override == "0":
+        return False, "env"
+    try:
+        proc = subprocess.run(
+            ["gh", "variable", "get", "BEACON_REVIEW_GATE_CI"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False, "unreadable"
+    if proc.returncode != 0:
+        # 変数が無いのか gh が答えられないのかは、ここでは区別が付かない。
+        # 区別が付かないことを「使っていない」と言い切らない。
+        return False, "unreadable"
+    return proc.stdout.strip() == "1", "repo"
+
+
 def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
                                  reviewed_sha: str = "") -> None:
     """``beacon-review-gate`` の印を **レビューした sha に** success で押す
@@ -4179,10 +4234,20 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
        削除の有無しか見ないので、「この差分をまだ誰も見ていない」状態と区別が
        付かなかった。
     """
-    if os.environ.get("BEACON_REVIEW_GATE_CI", "") != "1":
-        print("  (ゲートの印は触っていません: BEACON_REVIEW_GATE_CI=1 が無いため。"
-              "この PR がゲート必須なら push 済の head に対して "
-              "BEACON_REVIEW_GATE_CI=1 を付けて再実行してください)", file=sys.stderr)
+    _in_use, _why = _review_gate_state()
+    if not _in_use:
+        if _why == "unreadable":
+            print("  ⚠ ゲートの印は押していません: このリポジトリが関門を使って"
+                  "いるかを **判定できませんでした** (gh が無い / 認証切れ / "
+                  "到達不能)。使っていないとは言っていません —— 使っているなら"
+                  "印は pending のまま残り、取り込めません。\n"
+                  "    出口: `gh auth login` で読めるようにするか、"
+                  "`BEACON_REVIEW_GATE_CI=1` を付けて明示的に押してください。",
+                  file=sys.stderr)
+        else:
+            print("  (ゲートの印は触っていません: このリポジトリはレビュー関門を"
+                  "使っていません。使うなら "
+                  "`gh variable set BEACON_REVIEW_GATE_CI 1`)", file=sys.stderr)
         return
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -7754,6 +7819,27 @@ def _registry_usage_line(command_tail: str) -> str:
     raise KeyError(f"help registry に {command_tail!r} の行がありません")
 
 
+def _since_forms_for_help():
+    """The accepted ``<period>`` spellings, read from the parser that owns them.
+
+    ms-181 e-7101: `beacon retro` / `beacon recap` both read a period with
+    ``date_window.parse_since``, so the help text is generated from that
+    module's ``SINCE_FORMS``. A list typed beside a parser drifts from it
+    silently and then advertises a vocabulary the command does not accept —
+    the same class of defect as a period the command accepts but ignores.
+    Degrades to the bare spellings if the module is unreachable (partial
+    install): help should thin out, never crash the registry every other
+    help surface renders from.
+    """
+    try:
+        import date_window as _dw  # noqa: PLC0415
+        return tuple(_dw.SINCE_FORMS)
+    except Exception:
+        return ("today", "yesterday", "this-week", "last-week", "this-month",
+                "<N>d", "<N>w", "<N>h", "<N>m", "YYYY-MM-DD",
+                "YYYY-MM-DD..YYYY-MM-DD")
+
+
 def _help_registry():
     """Single source of truth for the CLI command reference (ms-120 e-3897).
 
@@ -7928,7 +8014,19 @@ def _help_registry():
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
         {"command": "beacon pr sync", "flags": ["--dry-run", "--json"], "description": "Align beacon PR entries with GitHub state (merged/closed) — ms-61 / e-2005"},
-        {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
+        # ms-181 e-7101: the flags were absent here, so `beacon retro --help`
+        # (rendered from this registry) never mentioned the two flags the
+        # command actually reads — and the period they take was undocumented
+        # on every help surface.
+        #
+        # The vocabulary is DERIVED from date_window.SINCE_FORMS, not typed.
+        # The first version of this row hand-typed a partial subset ending in
+        # "…", omitting last-week / this-month / <N>w / <N>h / <N>m / A..B —
+        # all of which the parser accepts. An AX review of PR #811 caught it
+        # and was right that it is the same antipattern this change had just
+        # criticised elsewhere, made worse by the bash front being the DEFAULT
+        # path on macOS: the incomplete list was the one most readers reach.
+        {"command": "beacon retro", "flags": ["--prepare", "--catch-up", "--since <period>", "--until <period>"], "description": "Start weekly retrospective (interactive). --since は期間の下端、--until は上端 (--until は時点のみ。3d のような長さは下端専用なので拒否される)。<period> = " + " | ".join(_since_forms_for_help()) + "。解釈できない期間は拒否する (黙って別の期間を答えない)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)。**これは促し (トリガーファイルの有無) の面であって関門ではない** — 空配列は「関門が開いている」を意味しない (実施後にコミットを積むと促しは出ないが関門は閉じる)。PR の独立レビュー義務の確定判定は `beacon review status --pr <n>` を使う (ms-119 e-6859)"},
         # ms-178 e-6654: note was absent from this registry, so `--help` missed,
         # fell through to the dispatcher, and `note clear --help` deleted the

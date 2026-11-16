@@ -26,6 +26,7 @@ import sys
 from typing import Optional
 
 import core
+import date_window as _dw
 import occupation
 from commands_shared import (
     load_project,
@@ -38,6 +39,101 @@ from commands_shared import (
     _load_local_documents,
     _resolve_content_input,
 )
+
+
+def _until_was_explicit(until_spec: str, since_spec: str) -> bool:
+    """利用者が ``--until`` を自分で打ったか (= 既定が埋めただけ ではないか)。
+
+    両フロントは ``--until`` 未指定のとき既定 (今日 / catch-up なら昨日) を
+    埋めてから渡すので、ここに届く時点では「打った」と「埋まった」が同じ形に
+    なっている。``BEACON_UNTIL_EXPLICIT`` を見て区別する —— フロントは利用者が
+    実際に旗を打ったときだけこれを立てる。
+
+    立っていない古いフロント (版ズレ) から呼ばれた場合は **既定扱い** にする。
+    そちらに倒すと ``A..B`` の上端が生きるだけで、両端を明示した呼び出しは
+    ``..`` を含まないのでこの分岐に入らない。
+    """
+    return bool(os.environ.get("BEACON_UNTIL_EXPLICIT", "").strip())
+
+
+def _resolve_window(since_spec: str, until_spec: str):
+    """Turn the two period strings the CLI front passes into ISO bounds.
+
+    Each flag names ONE end of the window, and the spec it carries is read by
+    :func:`date_window.parse_since` — the same parser ``beacon recap --since``
+    uses — taking that spec's lower bound for ``--since`` and its upper bound
+    for ``--until``. So ``--since yesterday --until today`` resolves to
+    yesterday..today, ``--since this-week`` to Monday, and an ISO date to
+    itself (the shape the /beacon-retro Skill passes, unchanged).
+
+    Why this exists (ms-181 e-7101)
+    -------------------------------
+    The two strings used to go straight into text comparisons. Measured on
+    2026-10-20: ``beacon retro --since yesterday --until today`` exited 0,
+    echoed ``"since": "yesterday"`` and returned an empty week — the spec was
+    neither honoured nor refused, and nothing in the output said so. The same
+    vocabulary works in ``beacon recap``, so the two verbs disagreed about
+    what "yesterday" means while both reported success. An unreadable period
+    now fails loudly instead of answering a period nobody asked for; a
+    confident empty answer is worse than an error, because an error gets
+    fixed.
+
+    Exits 1 (never falls back to a different window) with the accepted forms
+    listed, so the caller learns the vocabulary from the refusal itself.
+    """
+    def _bound(spec: str, flag: str, end: bool) -> str:
+        spec = (spec or "").strip()
+        if not spec:
+            # Both fronts fill their own default before calling, so an empty
+            # spec here means "no bound on this side" — reachable only from a
+            # direct/programmatic call, where unbounded is the honest reading.
+            return ""
+        if end and _dw.is_duration_spec(spec):
+            # A length of time has no upper end of its own: parse_since puts
+            # today there, so this used to be accepted and silently mean
+            # ``--until today``. Refused rather than reinterpreted — guessing
+            # which end the caller meant is how the original defect worked.
+            print(f"Error: {flag} takes a point in time, not a length of one "
+                  f"({spec!r} means a span back from now, so it has no upper "
+                  f"end of its own). Use a day (today / yesterday / last-week) "
+                  f"or a date (YYYY-MM-DD). A span belongs on --since.",
+                  file=sys.stderr)
+            sys.exit(1)
+        try:
+            lo, hi = _dw.parse_since(spec)
+        except ValueError as exc:
+            print(f"Error: {flag}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return hi if end else lo
+
+    since = _bound(since_spec, "--since", end=False)
+    # ms-181 (独立 AX レビュー 2026-11-17、実測): ``--since A..B`` のように
+    # **両端を 1 つの語で**指定されたとき、上端 B を捨てていた。--until は
+    # フロントが既定 (今日) を埋めて渡すので、ここからは「利用者が --until を
+    # 打った」のか「既定が入っただけ」なのか区別が付かず、既定が B を上書き
+    # していた。結果 `retro --since 2026-11-01..2026-11-05` は 11-05 までの
+    # つもりで**今日まで**を集め、しかも received には打った文字列をそのまま
+    # 返すので、出力を見ても気付けなかった (姉妹の recap は B を尊重する)。
+    # この課題自身が「期間を指定したのに自信のある空の答えが返る」を直すもの
+    # なので、同じ形の silent な取り違えを残さない。
+    #
+    # 明示の --until が来ていれば常にそちらが勝つ (下の explicit 判定)。
+    range_upper = ""
+    if ".." in (since_spec or ""):
+        try:
+            range_upper = _dw.parse_since(since_spec)[1]
+        except ValueError:
+            range_upper = ""
+    if range_upper and not _until_was_explicit(until_spec, since_spec):
+        until = range_upper
+    else:
+        until = _bound(until_spec, "--until", end=True)
+    problem = _dw.validate_range(since, until,
+                                 lower_flag="--since", upper_flag="--until")
+    if problem:
+        print(f"Error: {problem}", file=sys.stderr)
+        sys.exit(1)
+    return since, until
 
 
 def cmd_retro_prepare():
@@ -63,10 +159,15 @@ def cmd_retro_prepare():
         ``BEACON_RETRO_CATCH_UP=1`` enables the listing; without it the
         block is omitted so existing Skill output is unchanged.
     """
-    since = os.environ.get("BEACON_SINCE", "")
-    until = os.environ.get("BEACON_UNTIL", "")
+    since_spec = os.environ.get("BEACON_SINCE", "")
+    until_spec = os.environ.get("BEACON_UNTIL", "")
+    since, until = _resolve_window(since_spec, until_spec)
     catch_up_mode = os.environ.get("BEACON_RETRO_CATCH_UP", "") == "1"
     data = load_project()
+    #: Stamps retro could not judge against the period, tallied by entry type
+    #: and reported in the payload (ms-181 e-7101) — owned here, filled by the
+    #: walker and the deploy loop below, same idiom as ``search``.
+    undated: dict = {}
 
     # ms-155 e-5600: the per-class narrative grouping walks the project's
     # DELIVERABLE-BEARING classes (derived from the deliverable declaration), not a
@@ -82,7 +183,7 @@ def cmd_retro_prepare():
     for kind in occupation.deliverable_bearing_classes(data):
         for ms in occupation.target_records(data, kind):
             ms_entries = core.collect_retro_entries(
-                ms.get("entries", []), since, until)
+                ms.get("entries", []), since, until, undated)
             if ms_entries:
                 weekly_milestones.append({
                     "id": ms["id"],
@@ -110,10 +211,19 @@ def cmd_retro_prepare():
     # (milestone-only) is kept for back-compat readers; ``target_ids`` is the
     # generic read-back, symmetric with cmd_deploy.py's own re-read idiom
     # (``d.get("target_ids", [])``, line 329/452).
+    #
+    # ms-181 e-7101: the window test goes through ``date_window`` like the
+    # entry walker and ``search`` do. The truncation to ``[:10]`` that used to
+    # stand in for "compare by day" only worked here by accident — it hid the
+    # date-only-upper-bound hole on this one facet while the entry walker, fed
+    # full timestamps, dropped the final day. Two spellings of one rule in one
+    # function is how the facets of a single payload start disagreeing.
     weekly_deploys = []
     for dep in data.get("deployments", []):
-        dep_date = (dep.get("date") or "")[:10]
-        if (not since or dep_date >= since) and (not until or dep_date <= until):
+        dep_verdict = _dw.classify(dep.get("date") or "", since, until)
+        if dep_verdict == _dw.UNDATED:
+            undated["deploy"] = undated.get("deploy", 0) + 1
+        if dep_verdict == _dw.IN_WINDOW:
             weekly_deploys.append({
                 "id": dep["id"],
                 "type": dep.get("type", ""),
@@ -145,11 +255,34 @@ def cmd_retro_prepare():
 
     output: dict = {
         "project": data.get("name", ""),
-        "period": {"since": since, "until": until},
+        # ms-181 e-7101: ``since`` / ``until`` are the RESOLVED bounds, not the
+        # raw strings. They used to be the echo of whatever arrived, so
+        # ``--since yesterday`` printed ``"since": "yesterday"`` beside an
+        # empty answer and read as if the period had been honoured. For an
+        # ISO-date argument (every call the Skill makes) the value is
+        # unchanged; ``received`` keeps the spec this handler was handed, so a
+        # resolved window is never invisible and never mistaken for the input.
+        #
+        # Deliberately ``received`` and not ``requested``: both CLI fronts fill
+        # their own default before calling, so what arrives here is NOT
+        # necessarily what a person typed, and an AX review of PR #811 was
+        # right that the name promised a distinction the value cannot make.
+        # Telling "typed" from "defaulted" needs the fronts to say which — see
+        # the follow-up task, not a name that implies we already know.
+        "period": {
+            "since": since,
+            "until": until,
+            "received": {"since": since_spec, "until": until_spec},
+        },
         "summary": data.get("summary", ""),
         "milestones": weekly_milestones,
         "deploys": weekly_deploys,
         "source_breakdown": source_breakdown,
+        # Records carrying no stamp at all: excluded from the period (as
+        # before) but counted, so "we could not judge these" cannot read as
+        # "these did not happen". Rendered by ``date_window`` so the keys are
+        # the same wherever this is reported, rather than each module choosing.
+        "undated": _dw.undated_block(undated),
     }
 
     # ms-79 / e-1837 (UC5-F2): catch-up batch info.

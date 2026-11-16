@@ -218,11 +218,33 @@ def has_review_evidence(entry):
 # yet met" prior. A task at highest/high is a *known, encoded* piece of work the
 # owner already judged important; leaving it untouched while claiming attainment is
 # the "掃除機がある≠掃除した" hole (a mechanism exists in code ≠ the goal was reached).
-# medium/low/lowest are NOT gated — attainment is defined on OUTCOMES (AC), not on
-# draining every task, and lower-tier backlog is normal residue, not a completion
-# blocker. (See wave8 2026-07-29: attainment read 11/12 while 1 highest + 3 high
-# tasks sat untouched.)
-BACKLOG_GATED_PRIORITIES = ("highest", "high")
+# (See wave8 2026-07-29: attainment read 11/12 while 1 highest + 3 high tasks sat
+# untouched.)
+#
+# ms-181 / e-6999 — ``untriaged`` JOINED this set, and that is a decision worth
+# stating rather than a tidy-up. ``untriaged`` is a **sentinel, not a severity**
+# (``core.UNTRIAGED_PRIORITY``): it records "a machine raised this and no human has
+# judged its importance yet". Putting it on the ungated side silently asserted the
+# judgement nobody had made — it read as "low" when its actual meaning is "unknown".
+#
+# Measured 2026-10-15 on ms-166's own attainment review: 16 tasks sat unstarted
+# (medium 5 / untriaged 11, zero highest/high), the gate demanded **zero**
+# dispositions, and the approval would have sailed through. The untriaged-backlog
+# trigger was reporting those same items as debt at the same time, so the two halves
+# of the system disagreed about whether they counted. Same shape as this module's
+# fail-closed rule for an unknown STATUS: an unknown priority is gated, so a tier
+# nobody has judged cannot slip a completion claim by default.
+#
+# medium / low / lowest stay UNGATED: those have been looked at and judged
+# lower-importance, and attainment is defined on OUTCOMES (AC), not on draining
+# every task — lower-tier residue is normal. The asymmetry is the point: judged-low
+# is residue, unjudged is unknown.
+BACKLOG_GATED_PRIORITIES = ("highest", "high", "untriaged")
+
+#: The tiers deliberately NOT gated, named so the refusal can say what it counted
+#: and what it did not (e-6999 受入条件 1). A reader must not have to infer the
+#: complement of a set from an error message.
+BACKLOG_UNGATED_PRIORITIES = ("medium", "low", "lowest")
 
 # ms-119 / e-4579: the closed value domain for a backlog-task disposition. Each
 # unstarted highest/high task must carry EXACTLY one of these before the target's
@@ -286,16 +308,24 @@ def normalize_task_status(status):
 
 
 def is_backlog_gated(task):
-    """True if ``task`` is an UNSTARTED highest/high work item (ms-119 / e-4579).
+    """True if ``task`` is an UNSTARTED work item at a gated priority (e-4579).
 
+    Gated = highest / high / **untriaged** (ms-181 e-6999; see
+    ``BACKLOG_GATED_PRIORITIES`` for why an unjudged tier is not a low one).
     ``task`` is a work-item dict (``{"id", "type", "status", "meta": {"priority"}}``).
-    Only ``type == "task"`` items with an unstarted status and a gated priority
-    qualify — commits / notes / done / in-flight tasks do not. Pure."""
+    Only ``type == "task"`` items with an unstarted status qualify — commits / notes
+    / done / in-flight tasks do not.
+
+    An EMPTY priority is gated too: it is the same "nobody judged this" state the
+    ``untriaged`` sentinel names, just written by an older code path, and the module
+    fails closed on things it cannot classify. Pure."""
     if (task.get("type") or "task") != "task":
         return False
     if normalize_task_status(task.get("status")) != "unstarted":
         return False
     priority = ((task.get("meta") or {}).get("priority") or "").strip().lower()
+    if not priority:
+        return True
     return priority in BACKLOG_GATED_PRIORITIES
 
 

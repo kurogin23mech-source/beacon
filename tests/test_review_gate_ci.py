@@ -62,21 +62,87 @@ def test_plan_subcommand_prints_payload():
     assert out["state"] == "pending" and out["pr"] == "7"
 
 
-# --- local flip is OFF by default ------------------------------------------
+# --- the local flip follows the REPOSITORY, not the operator's shell -------
+#
+# ms-181 e-7103 changed the question this asks. It used to pin "no env var →
+# touch nothing at all", which protected repositories that do not use the gate
+# but ALSO meant an operator who ran `beacon review done` without remembering
+# `BEACON_REVIEW_GATE_CI=1` left the check pending — measured twice (ms-185's
+# fork 2026-10-19, PR #811 2026-10-20) and the second half of e-7103's
+# two-sided hole. The protected property is kept: a repository that has not
+# opted in is still left alone. What changed is who is asked — the repo
+# variable the workflow itself is gated on, instead of a shell the operator has
+# to remember.
 
-def test_ci_flip_is_noop_by_default(monkeypatch):
-    """Without BEACON_REVIEW_GATE_CI=1 the local flip must not shell out to gh
-    (default OFF — the CI gate is opt-in scaffolding, spends nothing)."""
+def test_ci_flip_leaves_a_repo_that_has_not_opted_in_alone(monkeypatch):
+    """No env var + repo variable unset → no status is pushed.
+
+    This is what the old "no-op by default" test was really protecting, and it
+    must keep holding: deriving the opt-in must not start stamping commit
+    statuses onto repositories that never asked for the gate.
+    """
     monkeypatch.delenv("BEACON_REVIEW_GATE_CI", raising=False)
-    called = {"n": 0}
+    calls = []
+
+    class _Unset:
+        returncode = 1
+        stdout = ""
+
+    def rec(argv, *a, **k):
+        calls.append(argv)
+        return _Unset()
+
+    monkeypatch.setattr(commands.subprocess, "run", rec)
+    commands._ci_flip_review_gate_success("42")
+    # It may ASK (one `gh variable get`), but it must not go on to resolve a
+    # head sha or invoke the gate script.
+    assert all("headRefOid" not in " ".join(c) for c in calls), calls
+    assert all("review-gate-ci.py" not in " ".join(c) for c in calls), calls
+
+
+def test_ci_flip_needs_no_env_var_when_the_repo_uses_the_gate(monkeypatch):
+    """受入条件 5: the stamp lands without anyone remembering a variable."""
+    monkeypatch.delenv("BEACON_REVIEW_GATE_CI", raising=False)
+    calls = []
+
+    class R:
+        returncode = 0
+
+        def __init__(self, argv):
+            # `gh variable get` answers "1"; the sha probes answer a sha.
+            self.stdout = "1\n" if "variable" in argv else "abc123sha\n"
+
+    def rec(argv, *a, **k):
+        calls.append(argv)
+        return R(argv)
+
+    monkeypatch.setattr(commands.subprocess, "run", rec)
+    # ms-119 e-6859 で契約が変わった: 印は **レビューした sha** に押すので、
+    # 関数が自分で head を問い合わせる経路は無くなり、呼び出し側が sha を渡す。
+    # 受入条件 5 が主張するのは「env を覚えていなくても押せる」ことなので、
+    # 見るべきは repo 変数に訊いたことと、実際に印を押しにいったこと。
+    commands._ci_flip_review_gate_success("42", reviewed_sha="abc123sha")
+    # repo 変数に訊いた = env を覚えていなくても判断できている
+    assert any("variable" in " ".join(c) for c in calls), calls
+    # env が無いことを理由に降りていない (降りていればここまで来ない)。
+    # この先で止まるのは別の理由 (その sha に対する必須種別が未実施) なので、
+    # 受入条件 5 が主張する範囲はここまで。
+    assert any("rev-parse" in " ".join(c) for c in calls), calls
+
+
+def test_ci_flip_can_still_be_turned_off_explicitly(monkeypatch):
+    """`BEACON_REVIEW_GATE_CI=0` asks nothing and pushes nothing.
+
+    Keeps an escape hatch for a repository that has the variable set but a
+    context where stamping is wrong (a probe, a replay, someone else's PR).
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "0")
 
     def boom(*a, **k):
-        called["n"] += 1
-        raise AssertionError("subprocess should not run when gate CI is OFF")
+        raise AssertionError("an explicit 0 must not consult gh at all")
 
     monkeypatch.setattr(commands.subprocess, "run", boom)
-    commands._ci_flip_review_gate_success("42")  # must be a no-op
-    assert called["n"] == 0
+    commands._ci_flip_review_gate_success("42")
 
 
 SHA = "abc123sha"
@@ -280,3 +346,36 @@ def test_execute_plan_stops_at_first_failure(monkeypatch):
     # stopped after the first (failing) step — the second never ran.
     assert len(results) == 1 and results[0]["ok"] is False
     assert len(calls) == 1
+
+
+# --- 「使っていない」と「判定できない」を畳まない -----------------------------
+#
+# 独立 AX レビュー (2026-11-17、実測): gh が無い / 認証切れ / 到達不能の端末でも
+# 「このリポジトリはレビュー関門を使っていません」と出ていた。実際には GitHub 側で
+# 有効なのに「何もしなくてよい」と読めるので、レビュー済みなのに印が pending の
+# まま残り取り込めない。**この課題が env 忘れとして直した症状が、gh の到達性という
+# 別の経路から同じ顔で戻ってくる形**だった。
+
+def test_unreadable_is_not_reported_as_opted_out(monkeypatch, capsys):
+    monkeypatch.delenv("BEACON_REVIEW_GATE_CI", raising=False)
+
+    def boom(*a, **k):
+        raise OSError("gh: command not found")
+
+    monkeypatch.setattr(commands.subprocess, "run", boom)
+    in_use, why = commands._review_gate_state()
+    assert (in_use, why) == (False, "unreadable")
+
+    commands._ci_flip_review_gate_success("42", reviewed_sha="abc123sha")
+    err = capsys.readouterr().err
+    assert "判定できませんでした" in err, err
+    assert "使っていません" not in err.split("判定できませんでした")[0], (
+        "判定できないのに『使っていない』と言い切っている")
+
+
+def test_explicit_opt_out_still_says_so(monkeypatch, capsys):
+    """0 を明示した人には、従来どおり『使っていません』と言う。"""
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "0")
+    assert commands._review_gate_state() == (False, "env")
+    commands._ci_flip_review_gate_success("42", reviewed_sha="abc123sha")
+    assert "使っていません" in capsys.readouterr().err
