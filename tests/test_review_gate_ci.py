@@ -346,3 +346,36 @@ def test_execute_plan_stops_at_first_failure(monkeypatch):
     # stopped after the first (failing) step — the second never ran.
     assert len(results) == 1 and results[0]["ok"] is False
     assert len(calls) == 1
+
+
+# --- 「使っていない」と「判定できない」を畳まない -----------------------------
+#
+# 独立 AX レビュー (2026-11-17、実測): gh が無い / 認証切れ / 到達不能の端末でも
+# 「このリポジトリはレビュー関門を使っていません」と出ていた。実際には GitHub 側で
+# 有効なのに「何もしなくてよい」と読めるので、レビュー済みなのに印が pending の
+# まま残り取り込めない。**この課題が env 忘れとして直した症状が、gh の到達性という
+# 別の経路から同じ顔で戻ってくる形**だった。
+
+def test_unreadable_is_not_reported_as_opted_out(monkeypatch, capsys):
+    monkeypatch.delenv("BEACON_REVIEW_GATE_CI", raising=False)
+
+    def boom(*a, **k):
+        raise OSError("gh: command not found")
+
+    monkeypatch.setattr(commands.subprocess, "run", boom)
+    in_use, why = commands._review_gate_state()
+    assert (in_use, why) == (False, "unreadable")
+
+    commands._ci_flip_review_gate_success("42", reviewed_sha="abc123sha")
+    err = capsys.readouterr().err
+    assert "判定できませんでした" in err, err
+    assert "使っていません" not in err.split("判定できませんでした")[0], (
+        "判定できないのに『使っていない』と言い切っている")
+
+
+def test_explicit_opt_out_still_says_so(monkeypatch, capsys):
+    """0 を明示した人には、従来どおり『使っていません』と言う。"""
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "0")
+    assert commands._review_gate_state() == (False, "env")
+    commands._ci_flip_review_gate_success("42", reviewed_sha="abc123sha")
+    assert "使っていません" in capsys.readouterr().err

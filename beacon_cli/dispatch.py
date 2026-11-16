@@ -5485,12 +5485,16 @@ def _handle_retro(root: Path, args: argparse.Namespace) -> int:
 
     if not since:
         since = _compute_default_since()
+    # 利用者が自分で --until を打ったかを記録してから既定を埋める。handler 側は
+    # これを見て `--since A..B` の上端を既定で上書きしない (ms-181、独立 AX)。
+    until_explicit = "1" if until else ""
     if not until:
         until = _compute_default_until()
 
     return _run_commands_py(root, "retro_prepare", {
         "BEACON_SINCE": since,
         "BEACON_UNTIL": until,
+        "BEACON_UNTIL_EXPLICIT": until_explicit,
         "BEACON_RETRO_CATCH_UP": "1" if catch_up else "",
     })
 

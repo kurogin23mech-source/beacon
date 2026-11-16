@@ -4162,18 +4162,37 @@ def _review_gate_is_in_use() -> bool:
     読めなかったとき (gh 未設定 / 認証切れ / 網不通) は **押さない**。押せない
     ことを呼び出し側が必ず表示するので、黙って pending にはならない。
     """
+    return _review_gate_state()[0]
+
+
+def _review_gate_state():
+    """``(使っているか, 理由)`` — 理由は ``"env"`` / ``"repo"`` / ``"unreadable"``。
+
+    **「使っていない」と「判定できない」を畳まない** (ms-181、独立 AX レビュー
+    2026-11-17 が実測)。gh が入っていない / 認証が切れている / 網が届かない端末では
+    repo 変数を読めないが、以前はそれを「使っていない」と同じ ``False`` にして
+    いた。呼び出し側は区別を知らないまま『このリポジトリはレビュー関門を使って
+    いません』と出すので、**実際には GitHub 側で関門が有効なのに「何もしなくて
+    よい」と読める**。レビューを済ませたのに印が押されず、PR が pending のまま
+    取り込めない —— この課題が env 忘れとして直した症状が、gh の到達性という別の
+    経路から同じ顔で戻ってくる。
+    """
     override = os.environ.get("BEACON_REVIEW_GATE_CI", "")
     if override == "1":
-        return True
+        return True, "env"
     if override == "0":
-        return False
+        return False, "env"
     try:
         proc = subprocess.run(
             ["gh", "variable", "get", "BEACON_REVIEW_GATE_CI"],
             capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0 and proc.stdout.strip() == "1"
+        return False, "unreadable"
+    if proc.returncode != 0:
+        # 変数が無いのか gh が答えられないのかは、ここでは区別が付かない。
+        # 区別が付かないことを「使っていない」と言い切らない。
+        return False, "unreadable"
+    return proc.stdout.strip() == "1", "repo"
 
 
 def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
@@ -4215,10 +4234,20 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
        削除の有無しか見ないので、「この差分をまだ誰も見ていない」状態と区別が
        付かなかった。
     """
-    if not _review_gate_is_in_use():
-        print("  (ゲートの印は触っていません: このリポジトリはレビュー関門を"
-              "使っていません。使うなら "
-              "`gh variable set BEACON_REVIEW_GATE_CI 1`)", file=sys.stderr)
+    _in_use, _why = _review_gate_state()
+    if not _in_use:
+        if _why == "unreadable":
+            print("  ⚠ ゲートの印は押していません: このリポジトリが関門を使って"
+                  "いるかを **判定できませんでした** (gh が無い / 認証切れ / "
+                  "到達不能)。使っていないとは言っていません —— 使っているなら"
+                  "印は pending のまま残り、取り込めません。\n"
+                  "    出口: `gh auth login` で読めるようにするか、"
+                  "`BEACON_REVIEW_GATE_CI=1` を付けて明示的に押してください。",
+                  file=sys.stderr)
+        else:
+            print("  (ゲートの印は触っていません: このリポジトリはレビュー関門を"
+                  "使っていません。使うなら "
+                  "`gh variable set BEACON_REVIEW_GATE_CI 1`)", file=sys.stderr)
         return
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

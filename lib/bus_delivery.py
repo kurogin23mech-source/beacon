@@ -340,6 +340,13 @@ def has_required_provenance(ev: dict) -> bool:
     return requirement.predicate(ev)
 
 
+#: 未知の理由タグに対する案内の目印。**検査側が部分一致で探すのはこの定数**。
+#: 文面を 2 箇所で独立にタイプすると、片方だけ変わったときに検査が黙って通る
+#: (2026-11-17 に実測: 検査は「この hook が知りません」、実装は「この**受信** hook
+#: が知りません」で、受入条件を守る唯一の安全網が一度も発火しなかった)。
+UNKNOWN_REASON_SENTINEL = "この受信 hook が知りません"
+
+
 def downgrade_advice(reason: str, channel: str = "", *,
                      retired_channels=RETIRED_PROVENANCE_CHANNELS) -> str:
     """降格 1 件につき「何が起きて、どう直すか」の 1 句を返す唯一の場所。
@@ -419,7 +426,7 @@ def downgrade_advice(reason: str, channel: str = "", *,
                     f"いません (channel='{channel or '?'}' の要求が "
                     "PROVENANCE_REQUIREMENTS に無いため、回復手段を提示できません)")
         return requirement.advice
-    return (f"理由タグ '{reason}' はこの受信 hook が知りません "
+    return (f"理由タグ '{reason}' は{UNKNOWN_REASON_SENTINEL} "
             "(= bus_delivery に理由が足され、hook が追従していない)")
 
 

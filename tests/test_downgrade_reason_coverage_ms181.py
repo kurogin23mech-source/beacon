@@ -37,7 +37,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: The fallback wording ``_downgrade_advice`` returns for a tag it does not
 #: know. A reason that lands here has NO advice of its own — which is exactly
 #: the gap this module exists to detect.
-_UNKNOWN_MARKER = "この hook が知りません"
+# 実装側の定数をそのまま使う。ここで文面を独立にタイプすると、片方だけ変わった
+# ときにこの検査が黙って通る — 実際に起きた (検査は「この hook が知りません」、
+# 実装は「この受信 hook が知りません」で部分一致せず、受入条件 3 を守る唯一の
+# 安全網が一度も発火していなかった。反転ハーネスが MISS として報告した)。
+def _unknown_marker(bd):
+    return bd.UNKNOWN_REASON_SENTINEL
 
 
 def _load(path, name):
@@ -101,7 +106,7 @@ def test_every_declared_reason_has_advice_of_its_own(bd, claude_hook):
     missing = []
     for name, value in sorted(_declared_reasons(bd).items()):
         advice = claude_hook._downgrade_advice(value)
-        if _UNKNOWN_MARKER in advice:
+        if _unknown_marker(bd) in advice:
             missing.append(name)
     assert not missing, (
         "これらの降格理由に専用の案内がありません (未知タグの fallback に落ちて "

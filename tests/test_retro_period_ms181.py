@@ -518,3 +518,41 @@ def test_the_help_registry_documents_the_flags_and_their_period():
     assert {"--since <period>", "--until <period>"} <= set(entry["flags"])
     assert "--until" in entry["description"], \
         "the description must say what each end means, not just name the flags"
+
+
+# --- 両端を 1 つの語で指定したとき、上端を捨てない -----------------------------
+#
+# 独立 AX レビュー (2026-11-17) が実測した欠陥: `--since A..B` の B が捨てられ、
+# フロントが埋めた --until の既定 (今日) に上書きされていた。received には打った
+# 文字列がそのまま返るので、出力を見ても気付けない。姉妹の recap は B を尊重する
+# ので、「2 つの verb は同じ語彙に同じ意味を与える」という受入条件 2 がこの形で
+# だけ崩れていた。**この課題自身が「期間を指定したのに自信のある空の答えが返る」
+# を直すもの**なので、同じ形の silent な取り違えを残さない。
+
+def test_a_range_in_since_keeps_its_upper_bound(monkeypatch):
+    monkeypatch.delenv("BEACON_UNTIL_EXPLICIT", raising=False)
+    since, until = cmd_retro._resolve_window("2026-11-01..2026-11-05", "today")
+    assert (since, until) == ("2026-11-01", "2026-11-05"), (
+        "範囲の上端が、フロントが埋めた --until の既定で上書きされている")
+
+
+def test_an_explicit_until_still_wins_over_the_range(monkeypatch):
+    """打った --until は常に勝つ (範囲の上端で黙って上書きし返さない)。"""
+    monkeypatch.setenv("BEACON_UNTIL_EXPLICIT", "1")
+    since, until = cmd_retro._resolve_window("2026-11-01..2026-11-05", "2026-11-30")
+    assert (since, until) == ("2026-11-01", "2026-11-30")
+
+
+def test_a_non_range_since_is_unchanged(monkeypatch):
+    """範囲でない指定の解決は変えていない (回帰よけ)。"""
+    monkeypatch.delenv("BEACON_UNTIL_EXPLICIT", raising=False)
+    since, until = cmd_retro._resolve_window("2026-11-01", "2026-11-05")
+    assert (since, until) == ("2026-11-01", "2026-11-05")
+
+
+def test_retro_and_recap_agree_on_a_range(monkeypatch):
+    """受入条件 2 の本体: 同じ語を 2 つの verb が同じ意味で読む。"""
+    import date_window as _dw
+    monkeypatch.delenv("BEACON_UNTIL_EXPLICIT", raising=False)
+    spec = "2026-11-01..2026-11-05"
+    assert cmd_retro._resolve_window(spec, "today") == _dw.parse_since(spec)

@@ -41,6 +41,21 @@ from commands_shared import (
 )
 
 
+def _until_was_explicit(until_spec: str, since_spec: str) -> bool:
+    """利用者が ``--until`` を自分で打ったか (= 既定が埋めただけ ではないか)。
+
+    両フロントは ``--until`` 未指定のとき既定 (今日 / catch-up なら昨日) を
+    埋めてから渡すので、ここに届く時点では「打った」と「埋まった」が同じ形に
+    なっている。``BEACON_UNTIL_EXPLICIT`` を見て区別する —— フロントは利用者が
+    実際に旗を打ったときだけこれを立てる。
+
+    立っていない古いフロント (版ズレ) から呼ばれた場合は **既定扱い** にする。
+    そちらに倒すと ``A..B`` の上端が生きるだけで、両端を明示した呼び出しは
+    ``..`` を含まないのでこの分岐に入らない。
+    """
+    return bool(os.environ.get("BEACON_UNTIL_EXPLICIT", "").strip())
+
+
 def _resolve_window(since_spec: str, until_spec: str):
     """Turn the two period strings the CLI front passes into ISO bounds.
 
@@ -92,7 +107,27 @@ def _resolve_window(since_spec: str, until_spec: str):
         return hi if end else lo
 
     since = _bound(since_spec, "--since", end=False)
-    until = _bound(until_spec, "--until", end=True)
+    # ms-181 (独立 AX レビュー 2026-11-17、実測): ``--since A..B`` のように
+    # **両端を 1 つの語で**指定されたとき、上端 B を捨てていた。--until は
+    # フロントが既定 (今日) を埋めて渡すので、ここからは「利用者が --until を
+    # 打った」のか「既定が入っただけ」なのか区別が付かず、既定が B を上書き
+    # していた。結果 `retro --since 2026-11-01..2026-11-05` は 11-05 までの
+    # つもりで**今日まで**を集め、しかも received には打った文字列をそのまま
+    # 返すので、出力を見ても気付けなかった (姉妹の recap は B を尊重する)。
+    # この課題自身が「期間を指定したのに自信のある空の答えが返る」を直すもの
+    # なので、同じ形の silent な取り違えを残さない。
+    #
+    # 明示の --until が来ていれば常にそちらが勝つ (下の explicit 判定)。
+    range_upper = ""
+    if ".." in (since_spec or ""):
+        try:
+            range_upper = _dw.parse_since(since_spec)[1]
+        except ValueError:
+            range_upper = ""
+    if range_upper and not _until_was_explicit(until_spec, since_spec):
+        until = range_upper
+    else:
+        until = _bound(until_spec, "--until", end=True)
     problem = _dw.validate_range(since, until,
                                  lower_flag="--since", upper_flag="--until")
     if problem:
