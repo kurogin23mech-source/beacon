@@ -66,6 +66,7 @@ beacon recap projects --since <period> --json
 - `project_count`: 動いた数
 - `projects_scanned`: 調べた数
 - `unavailable[]`: **読めなかった**プロジェクト。「動いていない」ではなく「判定できていない」。1 件でもあれば必ず報告する。
+- `unattributed.count` / 各プロジェクトの `unattributed_count`: 出荷の記録のうち対象が特定できていない件数。**これが正で `target_count` が 0 のプロジェクトは「出荷だけで動いた」** ので、一覧から落とさず「本番に出した」と書く。
 - `source`: `cloud` (横断) / `local` (このプロジェクト 1 件しか読めていない)
 
 ### ここで必ず区別すること
@@ -86,10 +87,17 @@ beacon recap targets --project <project_id> --since <period> --json
 
 返り JSON の `targets[]` は各要素が `target_id` / `label` / `status` / `evidence_count` / `evidence_by_kind` / `last_evidence_at` / `evidence[]`。`evidence[]` は既定 5 件まで (`--evidence N` で増減、`0` で全件)。`evidence_count` は常に全件数なので、**表示件数を実績として読まない**。
 
-`undated` / `sources_unavailable` も必ず見る:
+`undated` / `unattributed` / `sources_unavailable` も必ず見る:
 
 - `undated.count > 0` → 「日付が無く期間で判定できなかった記録が N 件あります」と添える。黙って落とすと「無かった」と区別できない。
+- `unattributed.count > 0` → **出荷の記録 (push / deploy / release) のうち、どの対象のものか分からないもの**の件数。「プロジェクトは動いているが、対象が特定できていない」と添える。`unattributed.evidence` に中身の行があるので、デプロイした事実は要約に必ず含める (これを落とすと「本番に出した日が何もなかったと返る」= この機能が直した誤答そのものに戻る)。
 - `sources_unavailable` が空でない → その種類 (例 `decision`) の動きは件数に入っていない旨を添える。
+
+### 証跡には出荷が含まれる
+
+証跡の種類は対象配下のもの (コミット / PR / 作業項目 / ドキュメント / 判断記録) だけでなく、**プロジェクト直下の出荷の記録** (`push` / `deploy` / `release`) も含む。1 つのデプロイが複数の対象にまたがることがあるので、その場合は各対象に現れる。
+
+**`target_count` が 0 でも「動いていない」とは限らない。** 出荷だけが起きた日は対象ゼロで `moved` が真になる。要約では「対象別に進んだものは無いが、本番に出した」と書く。
 
 ## Step 4: 復帰点として要約する
 
@@ -143,6 +151,7 @@ Beacon の全Skillの原則どおり、最後に **「この target を次に前
 
 - **読み取り専用。** `beacon recap` は両動詞とも read-only。このSkillから `log` / `task` / `milestone` / `summary` 等の書き込みコマンドを実行してはならない。
 - **日付を計算しない。** 期間はユーザーの言葉をそのまま `--since` に渡す (Step 1)。
-- **読めなかったものを「無かった」にしない。** `unavailable` / `undated` / `sources_unavailable` は必ず報告する。
+- **読めなかったものを「無かった」にしない。** `unavailable` / `undated` / `unattributed` / `sources_unavailable` は必ず報告する。
+- **出荷を落とさない。** デプロイした日に「コミットが N 件」とだけ答えて本番に出したことを書かないのは、この機能が直した誤答そのもの。
 - **横断したふりをしない。** `source == "local"` なら 1 件しか見えていないと言う。
 - **数字を実績として読まない。** `evidence[]` は既定 5 件までの抜粋、`evidence_count` が全件。進捗率 (`progress`) は AI の自己申告なので、このSkillでは使わない (証跡が真値)。

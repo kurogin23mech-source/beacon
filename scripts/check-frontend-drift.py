@@ -71,7 +71,6 @@ WEB_ONLY_ACTIONS = {
 EVENT_LISTENER_ROUTED_ACTIONS = {
     "settings-change-role",
     "settings-remove-member",
-    "settings-set-filter-trek",
     # ms-93 e-3203 — empty-state "copy setup prompt" button; wired via a
     # local addEventListener in index.html (setup-prompt-copy), not the switch.
     "copy-setup-prompt",
@@ -79,19 +78,62 @@ EVENT_LISTENER_ROUTED_ACTIONS = {
 # ms-160 e-5808 — buttons rendered with a `-noop` suffix are visible placeholders
 # whose handler is intentionally deferred: clicking them does nothing YET. Unlike
 # `sales-modal-noop` (which carries an explicit no-op `case`), these have no
-# handler on purpose. The Trek Resume/STOP buttons are the current members;
-# wiring them to real resume/stop behaviour is Trek-refactor work that ms-160
-# SPEC 方針5 explicitly excludes. Listing them keeps the strict CI drift gate
-# green on this known-deferred debt while still catching any NEW unhandled
-# action. Remove an entry here when its real handler lands.
-INTENTIONAL_NOOP_ACTIONS = {
-    "trek-resume-noop",
-    "trek-stop-noop",
-}
+# handler on purpose. Listing one here keeps the strict CI drift gate green on
+# that known-deferred debt while still catching any NEW unhandled action. Remove
+# an entry when its real handler lands — or when the button itself goes away.
+#
+# ms-185: the two entries that used to live here (`trek-resume-noop` /
+# `trek-stop-noop`) are gone with the Trek screens. They had outlived the
+# buttons, and the comment above them still called those buttons "the current
+# members" — an exemption that quietly keeps describing a surface nobody can
+# reach any more. `check_exemptions_are_live` below now fails on that shape, so
+# the next dead entry is caught instead of inherited.
+INTENTIONAL_NOOP_ACTIONS: set[str] = set()
 # Tabs are expected to be 1:1 once e-743 (render() SHARED) completes.
 # Until then, allow-list Web-only tabs that Tauri hasn't caught up to yet.
 WEB_ONLY_TABS: set[str] = set()  # empty: drift treated as error after e-743
 TAURI_ONLY_TABS: set[str] = set()
+
+
+def check_exemptions_are_live(web_actions: set[str], tauri_actions: set[str]) -> list[str]:
+    """Report exemption entries that no front-end emits any more (ms-185).
+
+    An exemption says "this action IS handled / IS deliberately inert, don't
+    flag it". Once the action itself is deleted, the entry stops doing that and
+    starts doing something else: it keeps a name alive in the checker, with a
+    comment describing a button nobody can reach. Two such entries survived the
+    Trek removal through five cleanup rounds precisely because a dead exemption
+    is invisible — subtracting a name that no longer appears changes nothing, so
+    the gate stays green either way.
+
+    So the gate reports them. The direction matters: this cannot be a test of
+    "the lists are empty" (a legitimate exemption must stay allowed), only of
+    "every entry still refers to something that exists".
+    """
+    emitted = web_actions | tauri_actions
+    out = []
+    # Only the two lists whose contract is "this EMITTED action is covered" can
+    # be judged this way. WEB_ONLY_ACTIONS / TAURI_ONLY_ACTIONS are about
+    # asymmetry BETWEEN layers, and an entry there may legitimately name an
+    # action that is only ever a handler (`unarchive-project` is one: it has a
+    # `case` in the web handler and no `data-action` emitter anywhere). Folding
+    # those in produced a false accusation on the first run of this guard — and
+    # a guard that reports live exemptions as dead is worse than no guard,
+    # because the cheapest way to make CI green again is to delete a real
+    # exemption.
+    for label, entries in (
+        ("EVENT_LISTENER_ROUTED_ACTIONS", EVENT_LISTENER_ROUTED_ACTIONS),
+        ("INTENTIONAL_NOOP_ACTIONS", INTENTIONAL_NOOP_ACTIONS),
+    ):
+        dead = sorted(a for a in entries if a not in emitted)
+        if dead:
+            out.append(
+                f"  [exemptions/{label}] entries no front-end emits any more: {dead}\n"
+                f"                → The action is gone; drop the entry (and any comment "
+                f"describing it as current) instead of leaving a name the gate subtracts "
+                f"from nothing."
+            )
+    return out
 
 
 def extract(pattern: str, content: str) -> set[str]:
@@ -168,6 +210,8 @@ def main() -> int:
         extract(r"case\s+'([a-z-]+)'", tauri_handle_match.group(0))
         if tauri_handle_match else set()
     ) | common_actions
+
+    issues.extend(check_exemptions_are_live(web_actions, tauri_actions))
 
     web_unhandled = (web_actions - web_handled - EVENT_LISTENER_ROUTED_ACTIONS
                      - INTENTIONAL_NOOP_ACTIONS)

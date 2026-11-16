@@ -180,6 +180,58 @@ def test_t1_must_have_no_scope():
         )
 
 
+def test_the_retired_tier_cannot_be_issued(nonce_store, parent_lookup):
+    """退役した tier ``T1-system`` が、発行も検証も通らない (ms-185 e-7078)。
+
+    **なぜ「無い」ことを振る舞いで測るのか**: この tier は発行側が Trek の active を
+    要求していたため、Trek を畳んだ時点で発行者が恒久に 0 になった。にもかかわらず
+    規則 0 (= この tier なら cross-user の人間確認を省く / server/dm_gate) だけが
+    生きており、迂回する側の分岐が残る形になっていた。e-7078 で tier ごと落とす
+    判断をしたので、**語彙に戻ってこないこと**を測る必要がある。
+
+    定数の不在 (``hasattr``) だけでは足りない。語彙に戻す戻し方は 1 つではなく、
+    ``VALID_TIERS`` に文字列を直接足すだけでも復活するので、**発行と検証の両方が
+    拒むこと**を振る舞いで押さえる。
+
+    2 つ目の assert が要点: 鍵が漏れた / 旧版が発行した封筒が再生された最悪の
+    ケース (= 署名は正しい) でも、tier が語彙に無いので T5 へ降格し action が
+    拒まれる。つまり削除の向きは緩める側ではなく **厳しくする側**。
+    判断記録 dec-4e7a66391176699a。
+    """
+    assert not hasattr(env_mod, "TIER_T1_SYSTEM")
+    assert not hasattr(env_mod, "issue_t1_system_envelope")
+    assert "T1-system" not in env_mod.VALID_TIERS
+
+    # 発行: 語彙に無い tier は issue 時点で拒まれる。
+    with pytest.raises(ValueError):
+        env_mod.issue_envelope(
+            tier="T1-system", issuer="beacon-system", project_id=PROJECT_ID,
+            actions_authorized=["commit"], scope="trek:tk-abc12345",
+        )
+
+    # 検証: **正しく署名された** 封筒でも通らない (= 鍵が漏れた最悪ケース)。
+    body = {
+        "tier": "T1-system", "issuer": "beacon-system",
+        "scope": "trek:tk-abc12345", "actions_authorized": ["commit"],
+        "data_class": "free", "project_id": PROJECT_ID,
+        "issued_at": "2026-11-04T13:00:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "nonce": "retired-tier-nonce-1", "conversation_id": "c1",
+        "in_reply_to": None, "chain_depth": 0,
+        "tokens": None, "refill_policy": None, "disclosure_contract": None,
+    }
+    body["signature"] = env_mod.sign(body)
+    assert env_mod.verify_signature(body) is True, "前提: 署名は正しい"
+    result = env_mod.verify(
+        body, project_id=PROJECT_ID, payload={"text": "x"},
+        requested_action="commit", nonce_store=nonce_store,
+        parent_lookup=parent_lookup, sender_session_id="s1",
+    )
+    assert result.passed is False
+    assert result.effective_tier == env_mod.TIER_T5, (
+        "退役した tier を名乗る封筒は T5 へ降格しなければならない")
+
+
 def test_t2_requires_scope():
     with pytest.raises(ValueError):
         env_mod.issue_envelope(

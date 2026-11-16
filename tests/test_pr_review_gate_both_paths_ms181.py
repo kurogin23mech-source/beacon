@@ -154,14 +154,29 @@ def test_the_guard_pair_actually_goes_red_when_the_fire_is_removed(tmp_path):
 # 受入条件 2: no window where approve passes with an empty gate
 # ---------------------------------------------------------------------------
 
+# ms-119 e-6859 で関門の読み口が変わった: `_pending_review_types_for_pr` (= 種別の
+# 一覧をそのまま返す) は `pr_review_obligations` (= 義務を **導出** して辞書で返す)
+# と `review_blocking_types` (= そのうち実際に止めている種別) の 2 つに割れた。
+# 判定の所有が導出側に移り、呼び出し側は文面を選ぶだけになっている。
+# ここは新しい口に差し替えただけで、確かめている性質 (記録直後に approve が
+# 止まること / 止まらない方向も測ること / 発火と読み手が同じものを見ること) は
+# 変えていない。
+def _owing(*types):
+    """`pr_review_obligations` の戻り値のうち、関門が読む形だけを作る。"""
+    return {"pr_state": "OPEN", "resolved": True, "head_sha": "deadbeefcafe",
+            "passed": not types, "owed": list(types), "blocking": list(types)}
+
+
 def test_approve_is_refused_while_a_review_is_owed(monkeypatch, capsys):
     """Straight after recording — no tick in between — approve must stop.
 
     This is the half that matters to a caller: the gate existing is only
     useful if the terminal operation actually waits for it.
     """
-    monkeypatch.setattr(cmd_pr, "_pending_review_types_for_pr",
-                        lambda number, repo: ["ax", "maintainability"])
+    monkeypatch.setattr(cmd_pr, "pr_review_obligations",
+                        lambda number, repo="", **k: _owing("ax", "maintainability"))
+    monkeypatch.setattr(cmd_pr, "review_blocking_types",
+                        lambda ob: list(ob.get("blocking") or []))
     monkeypatch.delenv("BEACON_PR_REVIEW_OVERRIDE", raising=False)
 
     with pytest.raises(SystemExit) as exc:
@@ -172,14 +187,20 @@ def test_approve_is_refused_while_a_review_is_owed(monkeypatch, capsys):
     assert "ax" in err and "maintainability" in err
 
 
-def test_firing_at_record_time_is_what_approve_then_reads(tmp_path,
-                                                          monkeypatch):
-    """Close the seam between "the gate was raised" and "approve sees it".
+def test_recording_a_pr_raises_the_review_nudge(tmp_path, monkeypatch):
+    """記録した瞬間に **促しの面** が立つこと。
 
-    The two tests around this one stub ``_pending_review_types_for_pr``, so on
-    their own they leave open the possibility that firing writes something
-    approve never reads. Here the REAL fire runs against a temp trigger
-    directory and the REAL reader is asked — no tick, no stubs in between.
+    **この検査は ms-119 e-6859 で主張を狭めた。** 以前は「発火したものを
+    approve がそのまま読む」= 発火と関門が同じものを見ている、を確かめていた。
+    その後 main 側で両者は **意図的に別の面に分かれた**: 関門は
+    ``pr_review_obligations`` が現在の差分に対して毎回 **導出** する (既定は
+    閉じている) もので、発火は人/AI に気付かせる促しの面になった。したがって
+    「発火 → 関門が開く/閉じる」という継ぎ目はもう存在しない。
+
+    存在しない継ぎ目を測り続けると、設計が変わったことを検査が隠す。ここは
+    #811 が足した性質のうち **いまも真であるもの** —— 記録した時点で促しが
+    立ち、approve の案内がそれを指せること —— だけを測る。関門そのものの
+    振る舞いは上下の 2 つの検査 (owed なら止まる / 無ければ通る) が持つ。
     """
     triggers = tmp_path / "triggers"
     monkeypatch.setattr(commands_shared, "_get_triggers_dir",
@@ -187,24 +208,21 @@ def test_firing_at_record_time_is_what_approve_then_reads(tmp_path,
     monkeypatch.setattr(cmd_pr, "_derive_pr_intent_decision",
                         lambda *a, **k: None)
 
-    before = commands_shared._pending_review_types_for_pr("9001", "o/r")
-    assert before == [], (
-        "a PR nobody recorded already owes reviews — this probe is not "
-        "starting from a clean gate")
-
     cmd_pr._after_pr_recorded(PR_URL, "t", "why", pr_repo="o/r")
 
-    after = commands_shared._pending_review_types_for_pr("9001", "o/r")
-    assert after, (
-        "recording the PR raised no gate that approve can see — the fire and "
-        "the reader are not looking at the same thing")
-    assert "ax" in after, after
+    fired = sorted(p.name for p in triggers.glob("*.json")) if triggers.exists() else []
+    assert fired, (
+        "PR を記録しても促しが 1 つも立たない — レビューが必要なことに"
+        "気付く面が無い")
+    assert any("review" in name for name in fired), fired
 
 
 def test_approve_passes_once_nothing_is_owed(monkeypatch):
     """The other direction, so "always refuses" cannot satisfy the test above."""
-    monkeypatch.setattr(cmd_pr, "_pending_review_types_for_pr",
-                        lambda number, repo: [])
+    monkeypatch.setattr(cmd_pr, "pr_review_obligations",
+                        lambda number, repo="", **k: _owing())
+    monkeypatch.setattr(cmd_pr, "review_blocking_types",
+                        lambda ob: list(ob.get("blocking") or []))
     cmd_pr._review_gate_check("9001", action="approve", pr_repo="o/r")
 
 

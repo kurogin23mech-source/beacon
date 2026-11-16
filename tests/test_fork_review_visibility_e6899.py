@@ -143,7 +143,7 @@ class TestParentSeesTheForksReview:
         """台帳が空なら親は止まる (= 修正前の挙動、赤い側)。"""
         _fire_due(ledger_in_tmp["triggers"], "ax", "787")
         _fire_due(ledger_in_tmp["triggers"], "maintainability", "787")
-        assert sorted(cs._pending_review_types_for_pr("787")) == [
+        assert sorted(cs._pr_open_review_nudge_pending_types("787")) == [
             "ax", "maintainability"]
 
     def test_parent_passes_after_the_fork_records_it(self, ledger_in_tmp):
@@ -156,23 +156,23 @@ class TestParentSeesTheForksReview:
         # 親のトリガーファイルは依然として在る —— ここが肝
         assert (ledger_in_tmp["triggers"]
                 / cs.review_due_filename("ax", "787")).exists()
-        assert cs._pending_review_types_for_pr("787") == []
+        assert cs._pr_open_review_nudge_pending_types("787") == []
 
     def test_partial_fork_review_still_blocks_on_the_rest(self, ledger_in_tmp):
         """1 種別だけ実施した状態では、残りで止まる (差し引きが過剰でない)。"""
         _fire_due(ledger_in_tmp["triggers"], "ax", "787")
         _fire_due(ledger_in_tmp["triggers"], "maintainability", "787")
         cs.record_review_done_across_worktrees("ax", "787")
-        assert cs._pending_review_types_for_pr("787") == ["maintainability"]
+        assert cs._pr_open_review_nudge_pending_types("787") == ["maintainability"]
 
     def test_ledger_for_another_pr_does_not_unblock_this_one(self, ledger_in_tmp):
         """別 PR の実施で誤って通らないこと (境界)。"""
         _fire_due(ledger_in_tmp["triggers"], "ax", "787")
         cs.record_review_done_across_worktrees("ax", "796")
-        assert cs._pending_review_types_for_pr("787") == ["ax"]
+        assert cs._pr_open_review_nudge_pending_types("787") == ["ax"]
 
     def test_no_triggers_means_nothing_pending(self, ledger_in_tmp):
-        assert cs._pending_review_types_for_pr("787") == []
+        assert cs._pr_open_review_nudge_pending_types("787") == []
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ class TestNoNeedForTheSkipEscapeHatch:
         monkeypatch.delenv("BEACON_PR_REVIEW_OVERRIDE", raising=False)
         _fire_due(ledger_in_tmp["triggers"], "ax", "787")
         cs.record_review_done_across_worktrees("ax", "787")
-        assert cs._pending_review_types_for_pr("787") == []
+        assert cs._pr_open_review_nudge_pending_types("787") == []
         assert os.environ.get("BEACON_PR_REVIEW_OVERRIDE") is None
 
 
@@ -373,7 +373,7 @@ class TestSubtractionIsDisclosedWithProvenance:
         _fire_due(ledger_in_tmp["triggers"], "ax", "787")
         cs.record_review_done_across_worktrees("ax", "787")
         capsys.readouterr()
-        assert cs._pending_review_types_for_pr("787") == []
+        assert cs._pr_open_review_nudge_pending_types("787") == []
         err = capsys.readouterr().err
         assert "関門から差し引きました" in err
         assert "ax:" in err
@@ -383,7 +383,7 @@ class TestSubtractionIsDisclosedWithProvenance:
         """境界: 差し引きが無いときは黙る (ノイズを作らない)。"""
         _fire_due(ledger_in_tmp["triggers"], "ax", "787")
         capsys.readouterr()
-        cs._pending_review_types_for_pr("787")
+        cs._pr_open_review_nudge_pending_types("787")
         assert "差し引きました" not in capsys.readouterr().err
 
     def test_a_hand_written_record_is_flagged_as_provenance_less(
@@ -397,7 +397,7 @@ class TestSubtractionIsDisclosedWithProvenance:
             json.dumps({"pr": "787", "review_type": "ax"}), encoding="utf-8")
         _fire_due(ledger_in_tmp["triggers"], "ax", "787")
         capsys.readouterr()
-        assert cs._pending_review_types_for_pr("787") == []
+        assert cs._pr_open_review_nudge_pending_types("787") == []
         err = capsys.readouterr().err
         assert "出自不明" in err or "出自がありません" in err, (
             "出自の無い記録で関門が外れたのに、そのことが開示されていない\n" + err)

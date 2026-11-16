@@ -16,10 +16,10 @@
 //
 // Category signals that are STRUCTURALLY determinable at the reply tool:
 //   * external   — a plain `dm` to a DIFFERENT project (= autonomously messaging
-//                  a stranger's project). Trek-scoped channels (trek-* /
-//                  operation-trigger) are a pre-approved shared scope (the human
-//                  joined the Trek = blanket consent, ms-70 shared_trek), so they
-//                  are NOT external even across projects.
+//                  a stranger's project). Pre-approved channels
+//                  (PRE_APPROVED_CHANNELS, exact match only) are NOT external
+//                  even across projects, because a human already approved the
+//                  firing that rides them (ms-185 e-7067).
 //   * action     — the envelope authorises actions. The MCP reply tool sends
 //                  text-only pings (empty actions), so this rarely fires here,
 //                  but the category is kept for completeness / future callers.
@@ -29,20 +29,24 @@
 //                  intentionally out of scope (that is ms-63's job).
 // Everything else is ``normal_chat`` and flows autonomously (B芯).
 
-// Trek-scoped / operation channels: a shared pre-approved working scope. Sends
-// on these are covered by the Trek's blanket consent, so they are never treated
-// as "external" even cross-project.
-export const TREK_SCOPED_CHANNELS = new Set([
+// 事前承認済みとして扱う channel の**明示一覧** (ms-185 e-7067)。
+//
+// ここに在る channel への送信は「外部宛」と見なさず、人間の確認を省く。根拠は
+// その channel に載る発火を人間が事前に承認していること (operation-trigger は
+// `beacon operation approve` の時点で人間が署名を発行済み)。
+//
+// **名前の前方一致で判定してはならない。** 以前はここに trek-* が並び、さらに
+// `channel.startsWith('trek-')` で判定していた。前方一致は「trek- で始まる名前を
+// 付けた channel なら誰の承認も無いのに確認を省ける」経路で、裏付けと判定が
+// 切り離されている。一覧から trek-* を外すだけでは穴は閉じない (= 危険側に壊れる)
+// ので、判定ごと完全一致に置き換えた。
+// Mirrors lib/dm_qualgate.py PRE_APPROVED_CHANNELS — keep in lockstep.
+export const PRE_APPROVED_CHANNELS = new Set([
   'operation-trigger',
-  'trek-progress-check',
-  'trek-trigger',
-  'trek-task-review',
-  'trek-leader-digest',
 ])
 
-export function isTrekScopedChannel(channel) {
-  const c = String(channel || '')
-  return c.startsWith('trek-') || TREK_SCOPED_CHANNELS.has(c)
+export function isPreApprovedChannel(channel) {
+  return PRE_APPROVED_CHANNELS.has(String(channel || ''))
 }
 
 export const CAT_NORMAL = 'normal_chat'
@@ -76,8 +80,8 @@ export function classifyOutboundReply({
   if (Array.isArray(actionsAuthorized) && actionsAuthorized.length > 0) {
     return CAT_ACTION
   }
-  // Trek-scoped channels are a pre-approved shared scope → never "external".
-  if (isTrekScopedChannel(channel)) return CAT_NORMAL
+  // Pre-approved channels (exact match) → never "external".
+  if (isPreApprovedChannel(channel)) return CAT_NORMAL
   // Plain DM to a different project = autonomously messaging outside our project.
   if (
     recipientProjectId && senderProjectId &&
@@ -114,8 +118,7 @@ export function qualHoldMessage(category) {
     return (
       'reply held: this is an autonomous cross-project message to another ' +
       "project's bus. armed mode holds外部宛 (external) sends for you to review. " +
-      'Send it yourself (e.g. via /beacon-dm-send) if intended, or share a Trek ' +
-      'so the scope is pre-approved.'
+      'Send it yourself (e.g. via /beacon-dm-send) if intended.'
     )
   }
   if (category === CAT_CONFIDENTIAL) {

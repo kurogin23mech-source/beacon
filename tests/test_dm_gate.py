@@ -19,16 +19,20 @@ Four acceptance-criteria branches are pinned:
 (d) ``actions_authorized`` empty → gate skip regardless of (a)/(b)
     (= pure information-sharing DM has nothing to approve).
 
-Plus two helper-level pins:
+Plus one helper-level pin:
 
-(e) ``build_shared_trek_lookup_from_lists`` correctly walks the trek
-    member list to detect shared membership in both creator and member
-    slots.
 (f) ``GATE_REASON_*`` constants are stable strings (audit log relies on
     these strings; renaming silently would break post-hoc analysis).
 
-The judge takes a ``shared_trek_lookup`` callback so tests can inject a
-deterministic in-memory lookup without spinning up Firestore / DynamoDB.
+ms-185 e-7068 / e-7071: there was an (e) — that
+``build_shared_trek_lookup_from_lists`` walked the trek member list — and the
+judge took a ``shared_trek_lookup`` callback so a test could inject an
+in-memory lookup instead of Firestore / DynamoDB. The shared-Trek rule was
+deleted outright, so the callback is not a parameter any more and the walker
+is gone with the body. What stands in their place are three absence guards:
+``test_shared_trek_no_longer_bypasses_the_gate``,
+``test_the_judge_has_no_trek_shaped_input_or_output`` and
+``test_the_convenience_probe_is_gone_with_its_rule``.
 """
 
 from __future__ import annotations
@@ -69,36 +73,61 @@ def test_gate_skip_when_sender_equals_receiver():
     to talk to themselves without the gate firing. This is the dogfood
     backward-compat path that ms-70 must preserve.
     """
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-alice",
         actions_authorized=["commit", "deploy"],
-        shared_trek_lookup=_never_shared,  # irrelevant: same_user wins first
     )
     assert should_gate is False
     assert reason == dm_gate.GATE_REASON_SAME_USER
 
 
 # ---------------------------------------------------------------------------
-# AC (b): sender != receiver + shared Trek → gate skip
+# ms-185 e-7068: 共有 Trek による確認省略は削除された
 # ---------------------------------------------------------------------------
 
-def test_gate_skip_when_sender_and_receiver_share_a_trek():
-    """Different users + shared Trek + actions present → still skip.
+def test_shared_trek_no_longer_bypasses_the_gate():
+    """同じ Trek の参加者同士でも、別人宛の action 付き DM は確認を要する。
 
-    Trek membership is the structural opt-in for cross-user AI action
-    exchange. Once both humans are in the same Trek, the receiver has
-    already consented (at Trek-join time) to having the sender's AI
-    act on their behalf within that scope.
+    **消した裏返しを明示的に固定する。** 以前は「両者が同じ active Trek の
+    参加者なら、受信側の人間は Trek 参加時点で同意済み」として確認を省いて
+    いた。Trek を畳む (ms-185) と同意の根拠そのものが無くなるので、規則を
+    判定ごと削除した。削除の向きは fail-closed = 必ず確認を要求する側。
+
+    判定器が Trek を一切知らないことも併せて固定する — 引数も理由コードも
+    無いので、「常に偽を返す判定が残っている」形にはなっていない。
     """
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=["commit"],
-        shared_trek_lookup=_always_shared,
     )
-    assert should_gate is False
-    assert reason == dm_gate.GATE_REASON_SHARED_TREK
+    assert should_gate is True
+    assert reason == dm_gate.GATE_REASON_CROSS_USER_ACTION
+
+
+def test_the_judge_has_no_trek_shaped_input_or_output():
+    """機械で測る: Trek を渡す口も、Trek を名乗る理由コードも無い。
+
+    ms-185 e-7078 / e-7323 で規則 0 (= サーバ署名 T1-system による確認の省略) も
+    判定ごと落としたので、その引数と理由コードの不在を**同じ試験に足している**
+    (並列に別の試験を作らない — 退役は 1 つの問い「この判定を駆動する口が残って
+    いないか」で測れる)。
+    """
+    import inspect
+    params = set(inspect.signature(dm_gate.should_gate_dm_action).parameters)
+    assert "shared_trek_lookup" not in params
+    assert "sender_session_id" not in params, (
+        "session id は共有 Trek の session 粒度判定のためだけに在った引数で、"
+        "規則が消えたので残っていてはいけない (誰も使わない引数を作らない)")
+    assert not hasattr(dm_gate, "GATE_REASON_SHARED_TREK")
+    assert not hasattr(dm_gate, "build_shared_trek_lookup_from_lists")
+    assert not hasattr(dm_gate, "shared_trek_member")
+    # 規則 0 (ms-185 e-7078) — 発行者が 0 になった tier を見る判定
+    assert "envelope_tier" not in params, (
+        "規則 0 が唯一の読み手だった引数が残っている (誰も使わない引数を作らない)")
+    assert "envelope_issuer" not in params
+    assert not hasattr(dm_gate, "GATE_REASON_T1_SYSTEM")
 
 
 # ---------------------------------------------------------------------------
@@ -113,11 +142,10 @@ def test_gate_triggers_for_cross_user_action_without_shared_trek():
     pending sidecar so a downstream Skill / CLI can read it and prompt
     the receiver's human for y/n.
     """
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=["commit", "push"],
-        shared_trek_lookup=_never_shared,
     )
     assert should_gate is True
     assert reason == dm_gate.GATE_REASON_CROSS_USER_ACTION
@@ -135,11 +163,10 @@ def test_gate_skip_when_actions_authorized_is_empty_even_across_users():
     chat throttling. Tested explicitly here so a future refactor can't
     accidentally turn the bus into a moderation pipeline.
     """
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=[],
-        shared_trek_lookup=_never_shared,
     )
     assert should_gate is False
     assert reason == dm_gate.GATE_REASON_NO_ACTIONS
@@ -151,11 +178,10 @@ def test_gate_skip_when_actions_authorized_is_none():
     Some envelope readers normalize missing key to None rather than
     empty list. The judge must handle both shapes identically.
     """
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=None,
-        shared_trek_lookup=_never_shared,
     )
     assert should_gate is False
     assert reason == dm_gate.GATE_REASON_NO_ACTIONS
@@ -173,237 +199,13 @@ def test_same_user_skip_takes_precedence_over_no_actions():
     "info-sharing skip"; it should be tagged as "same-user skip" so
     the post-hoc trail clearly distinguishes the structural reason.
     """
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-alice",
         actions_authorized=[],
-        shared_trek_lookup=_never_shared,
     )
     assert should_gate is False
     assert reason == dm_gate.GATE_REASON_SAME_USER
-
-
-# ---------------------------------------------------------------------------
-# AC (e): build_shared_trek_lookup_from_lists walks creator + members
-# ---------------------------------------------------------------------------
-
-def test_shared_trek_lookup_detects_receiver_in_members_list():
-    """Receiver is one of the trek's listed members → lookup returns True."""
-    treks_by_uid = {
-        "user-alice": [
-            {
-                "trek_id": "tk-aaa",
-                "creator_actor": {"user_id": "user-alice"},
-                "status": "active",
-                "members": [
-                    {"user_id": "user-alice", "role": "leader",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                    {"user_id": "user-bob", "role": "member",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                ],
-            }
-        ],
-    }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
-        lambda uid: treks_by_uid.get(uid, [])
-    )
-    matched, trek_id = lookup("user-alice", "user-bob")
-    assert matched is True
-    assert trek_id == "tk-aaa"
-    # Receiver NOT in the trek → False.
-    matched_neg, _ = lookup("user-alice", "user-charlie")
-    assert matched_neg is False
-
-
-def test_shared_trek_lookup_detects_receiver_as_creator():
-    """Receiver is the trek's creator (= role=leader stamped via creator_actor)
-    → lookup returns True even if the members list does not duplicate them."""
-    # Sender is a member of a trek created by receiver.
-    treks_by_uid = {
-        "user-alice": [
-            {
-                "trek_id": "tk-bbb",
-                "creator_actor": {"user_id": "user-bob"},  # receiver
-                "status": "active",
-                "members": [
-                    {"user_id": "user-alice", "role": "member",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                ],
-            }
-        ],
-    }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
-        lambda uid: treks_by_uid.get(uid, [])
-    )
-    matched, trek_id = lookup("user-alice", "user-bob")
-    assert matched is True
-    assert trek_id == "tk-bbb"
-
-
-def test_shared_trek_lookup_skips_halted_trek():
-    """ms-97 / e-2612 (AC32) — halted treks must not grant DM bypass.
-
-    Leader pulled the Andon cord → autonomous cross-user action exchange
-    must fall back to the normal cross-user gate. Even if sender +
-    receiver share the trek's members[], the halt flag suspends the
-    bypass for the duration of the halt.
-    """
-    treks_by_uid = {
-        "user-alice": [
-            {
-                "trek_id": "tk-halted",
-                "creator_actor": {"user_id": "user-alice"},
-                "members": [
-                    {"user_id": "user-alice", "role": "leader"},
-                    {"user_id": "user-bob", "role": "member"},
-                ],
-                "halt": {"issued_by_session_id": "sv-alice"},
-                "status": "active",
-            }
-        ],
-    }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
-        lambda uid: treks_by_uid.get(uid, [])
-    )
-    # Halt set → no bypass even though both users are in members[].
-    matched, _ = lookup("user-alice", "user-bob")
-    assert matched is False
-
-
-def test_shared_trek_lookup_skips_archived_trek():
-    """Archived treks no longer grant DM bypass (defence in depth alongside
-    AC32 halt skip). Caller-side filter already hides archived by default
-    but the lookup itself must not depend on the filter being applied."""
-    treks_by_uid = {
-        "user-alice": [
-            {
-                "trek_id": "tk-archived",
-                "creator_actor": {"user_id": "user-alice"},
-                "members": [
-                    {"user_id": "user-alice"},
-                    {"user_id": "user-bob"},
-                ],
-                "status": "archived",
-            }
-        ],
-    }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
-        lambda uid: treks_by_uid.get(uid, [])
-    )
-    matched, _ = lookup("user-alice", "user-bob")
-    assert matched is False
-
-
-def test_shared_trek_lookup_multi_trek_only_one_active_still_grants_bypass():
-    """ms-97 / e-2612 (AC32) — if the user shares multiple treks and at
-    least one is non-halted + non-archived, bypass still applies. Halt
-    only suspends bypass for the specific halted trek, not blanket.
-    """
-    treks_by_uid = {
-        "user-alice": [
-            {
-                "trek_id": "tk-halted",
-                "creator_actor": {"user_id": "user-alice"},
-                "members": [
-                    {"user_id": "user-alice"},
-                    {"user_id": "user-bob"},
-                ],
-                "halt": {"issued_by_session_id": "sv-alice"},
-                "status": "active",
-            },
-            {
-                "trek_id": "tk-active",
-                "creator_actor": {"user_id": "user-alice"},
-                "members": [
-                    {"user_id": "user-alice",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                    {"user_id": "user-bob",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                ],
-                "status": "active",
-            },
-        ],
-    }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
-        lambda uid: treks_by_uid.get(uid, [])
-    )
-    # tk-active grants bypass despite tk-halted being halted.
-    matched, trek_id = lookup("user-alice", "user-bob")
-    assert matched is True
-    assert trek_id == "tk-active"
-
-
-def test_shared_trek_lookup_skips_planning_trek():
-    """e-4116 follow-up (PR #491 parent review 1): a non-active (e.g.
-    ``planning``) trek must NOT grant bypass — it is not yet a live
-    pre-approved work scope. Previously only ``archived`` was excluded."""
-    treks_by_uid = {
-        "user-alice": [
-            {
-                "trek_id": "tk-planning",
-                "creator_actor": {"user_id": "user-alice"},
-                "status": "planning",
-                "members": [
-                    {"user_id": "user-alice",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                    {"user_id": "user-bob",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                ],
-            }
-        ],
-    }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
-        lambda uid: treks_by_uid.get(uid, [])
-    )
-    matched, _ = lookup("user-alice", "user-bob")
-    assert matched is False
-
-
-def test_shared_trek_lookup_skips_invited_not_joined_member_phase_a():
-    """e-4116 follow-up (PR #491 parent re-review): an invited-but-not-joined
-    member does NOT grant bypass — and the session_id grain is what enforces it.
-
-    Per ``trek.accept_invitation``, an invite placeholder carries NEITHER a
-    session_id NOR a joined_at; joining writes both together. So a phase-A
-    invite placeholder (no session_id) simply never matches the requester's
-    session_id, and the bypass is denied structurally — no separate joined_at
-    check needed. Here user-bob was invited (placeholder, no session_id) but
-    the DM targets session sv-bob, which is not in members[]."""
-    treks_by_uid = {
-        "user-alice": [
-            {
-                "trek_id": "tk-invited",
-                "creator_actor": {"user_id": "user-alice"},
-                "status": "active",
-                "meta": {"migration_phase": "A"},
-                "members": [
-                    {"user_id": "user-alice", "session_id": "sv-alice",
-                     "role": "leader", "joined_at": "2026-06-18T00:00:00Z"},
-                    # user-bob invited but never joined: no session_id, joined_at "".
-                    {"user_id": "user-bob", "role": "member",
-                     "invited_at": "2026-06-18T00:00:00Z", "joined_at": ""},
-                ],
-            }
-        ],
-    }
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(
-        lambda uid: treks_by_uid.get(uid, [])
-    )
-    matched, _ = lookup("user-alice", "user-bob", "sv-alice", "sv-bob")
-    assert matched is False
-
-
-def test_shared_trek_lookup_empty_user_ids_return_false():
-    """Blank sender or receiver → cannot be in any shared Trek.
-
-    The dispatcher passes blank strings when session→user resolution
-    fails. The lookup must not crash and must return False so the
-    judge falls through to the no_actions or cross-user-action path.
-    """
-    lookup = dm_gate.build_shared_trek_lookup_from_lists(lambda uid: [])
-    assert lookup("", "user-bob")[0] is False
-    assert lookup("user-alice", "")[0] is False
-    assert lookup("", "")[0] is False
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +216,6 @@ def test_shared_trek_lookup_empty_user_ids_return_false():
     "name,expected",
     [
         ("GATE_REASON_SAME_USER", "same_user"),
-        ("GATE_REASON_SHARED_TREK", "shared_trek_member"),
         ("GATE_REASON_NO_ACTIONS", "no_actions_authorized"),
         ("GATE_REASON_CROSS_USER_ACTION", "cross_user_action_pending_approval"),
     ],
@@ -474,11 +275,10 @@ def test_dispatcher_writes_pending_sidecar_when_gate_triggers(monkeypatch):
     sender_uid = "user-alice"
     receiver_uid = "user-bob"
     actions = ["commit"]
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id=sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=actions,
-        shared_trek_lookup=_never_shared,
     )
     assert should_gate is True
     assert reason == dm_gate.GATE_REASON_CROSS_USER_ACTION
@@ -515,11 +315,10 @@ def test_dispatcher_skips_sidecar_when_no_actions(monkeypatch):
     def fake_put_bus_event_approval(*args, **kwargs):
         call_count["n"] += 1
 
-    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
+    should_gate, reason = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=[],
-        shared_trek_lookup=_never_shared,
     )
     assert should_gate is False
     assert reason == dm_gate.GATE_REASON_NO_ACTIONS
@@ -530,3 +329,27 @@ def test_dispatcher_skips_sidecar_when_no_actions(monkeypatch):
         fake_put_bus_event_approval()
 
     assert call_count["n"] == 0
+
+
+# ms-185 e-7070: 下の 1 件は tests/test_dm_gate_session_grain.py から移設した。
+# あのファイルの他の 9 件は ``lib/trek.build_shared_trek_lookup_from_lists``
+# (= 在籍判定の正本) を駆動していた。その関数の本番呼び出し元は
+# ``/api/system/trek-internal-send`` 1 箇所だけで、e-7070 がその経路ごと落とした
+# ので、正本も呼び出し元ゼロになり本体と一緒に消えた。
+# この 1 件だけは ``dm_gate`` そのものの不在検査 (= trek に依存しない) なので、
+# e-7068 の兄弟ガード (test_shared_trek_no_longer_bypasses_the_gate /
+# test_the_judge_has_no_trek_shaped_input_or_output) と同じ場所へ寄せた。
+def test_the_convenience_probe_is_gone_with_its_rule():
+    """``dm_gate.shared_trek_member`` は規則と一緒に消えた (ms-185 e-7068)。
+
+    AC18 当時この helper は「2 つの session_id が同じ active phase A+ trek に
+    居るか」を 1 行で問うための便利関数で、**呼び出し元はテストだけ**だった
+    (本番コードからの参照ゼロを実測して消した)。規則を消すときに helper だけ
+    残すと、誰も呼ばない判定が 1 つ生き続ける。
+
+    当時この docstring は「判定本体は ``lib/trek`` 側に移してあり、そちらは実際の
+    呼び出し元 (予算の最適化) と一緒に生きている」と書いていた。**それは今は誤り**
+    で、上のコメントが書いている通り ``lib/trek`` ごと消えている (ms-185 e-7070 /
+    e-7071 で突き合わせ)。同じファイルの中で 2 つの記述が食い違っていた。
+    """
+    assert not hasattr(dm_gate, "shared_trek_member")

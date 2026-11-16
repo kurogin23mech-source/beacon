@@ -63,7 +63,6 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -454,153 +453,52 @@ def _ack_cursor(api_url: str, project_id: str, recipient_id: str,
     )
 
 
-# ms-95 / e-2875 layer 3-A — channels emitted by the trek scheduler tick.
-# Events on these channels (whether pre-e-2639 dedicated or post-e-2639
-# dm-transport with ``origin_channel`` hint) are subject to the archived-
-# trek filter below.
-_TREK_SCHEDULER_CHANNELS = {
-    "trek-progress-check",
-    "trek-task-review",
-    "trek-leader-digest",
-    "trek-trigger",
-}
+# ms-185 / PR#840: 退役した trek-* channel の集合は **ここには持たない**。正本は
+# lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS 1 箇所で、このフックはそれを
+# classify_auto_execute 経由で使う (= 退役 channel は auto-execute に到達せず
+# propose-to-ai へ降格され、降格理由つきで AI に開示される)。かつてここに同じ 4 名の
+# literal を置き、専用の開示ブロックへ振り分ける分岐を持っていたが、独立 AX レビューが
+# その分岐が **到達不能** であることを実測した (降格が先に起きるため)。写しと到達不能な
+# 判定を同時に落としてある。
 
 
-# ms-97 P2 (= review finding H2): the Level 3 imperative blocks below inject a
-# "You MUST immediately invoke /beacon-… <id>" instruction straight into the AI
-# context. Those instructions are only safe when the triggering event was minted
-# by the Beacon server itself during a scheduler / operation tick (= a
-# T1-system envelope, ``issuer == "beacon-system"``). A project editor can post
-# an ``auto-execute`` event on these channels, but they can NOT forge a valid
-# T1-system envelope: the server verify-on-post (server/app.py post_bus_event)
+# ms-97 P2 (= review finding H2). HISTORICAL, and it still governs the
+# surviving channels: there used to be imperative blocks on these channels that
+# injected a "you must run this now" instruction straight into the AI context.
+# ms-185 e-7079 removed those blocks (the Skills they named are gone) and left
+# only a disclosure that names no command, so nothing on these channels forces
+# an invoke today. The provenance gate below is NOT dead with them — it decides
+# whether an event keeps ``auto-execute`` at all, which still matters for the
+# operation channels. The reasoning, unchanged in shape: such instructions are
+# only safe when the triggering event carries the proof of human authority ITS
+# channel demands (``bus_delivery.PROVENANCE_REQUIREMENTS``) — for
+# ``operation-trigger`` that is the T2 envelope the human minted at ``beacon
+# operation approve`` for that op_id. A project editor can post an
+# ``auto-execute`` event on these channels, but they can NOT forge a valid
+# envelope: the server verify-on-post (server/app.py post_bus_event)
 # degrades any envelope whose signature/issuer fails to T5, which strips
-# auto-execute before the event is persisted. So requiring T1-system provenance
+# auto-execute before the event is persisted. So requiring the proof
 # on the *persisted* envelope composes with the server's verify to become a real
-# gate, not mere defense-in-depth. Non-system events on these channels are
+# gate, not mere defense-in-depth.
+#
+# ms-185 e-7078: the proof used to be a server-minted ``T1-system`` envelope
+# (``issuer == "beacon-system"``). Trek was its only issuer, so that tier, its
+# mint endpoint and its predicate were all removed together; what remains is the
+# per-channel map above. Non-system events on these channels are
 # downgraded to propose-to-ai (same treatment as an allowlist miss) so a forced
 # Skill invoke with an attacker-controlled id is structurally impossible.
-# ms-160 e-5803: the T1-system provenance constants + gate AND the auto-execute
-# downgrade decision moved to lib/bus_delivery.py (SYSTEM_PROVENANCE_CHANNELS /
-# has_system_provenance / classify_auto_execute) so the Codex inbox hook shares
+# ms-160 e-5803: the provenance constants + gate AND the auto-execute
+# downgrade decision moved to lib/bus_delivery.py (GATED_PROVENANCE_CHANNELS /
+# has_required_provenance / classify_auto_execute) so the Codex inbox hook shares
 # the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
-# Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
-# imperative command strings. Even after the provenance gate, defend the
-# f-string against a malformed id (newline / markdown / shell metacharacter)
-# leaking into the injected instruction by restricting to the id charset Beacon
-# actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
-_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
-
-
-def _sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
-    """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
-
-    Delegates to ``lib/bus_delivery.sanitize_id`` (single source, shared with the
-    Codex hook); the inline regex is the fail-safe fallback if that import fails.
-    """
-    bd = _import_bus_delivery()
-    if bd is not None:
-        return bd.sanitize_id(raw, fallback=fallback, maxlen=maxlen)
-    cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
-    return cleaned or fallback
-
-
-def _is_trek_scheduler_event(ev: dict) -> tuple[bool, str]:
-    """Return ``(is_trek_scheduler, trek_id)`` for one bus event.
-
-    ms-95 / e-2875 layer 3-A helper. The Trek scheduler tick used to
-    write dedicated channels (``trek-progress-check`` etc.); e-2639
-    migrated it to ``channel="dm"`` with ``payload.origin_channel``
-    carrying the original semantic. We accept either signal here so the
-    archived-trek filter works uniformly across pre- and post-migration
-    events.
-
-    Legitimate peer DMs between trek members (= channel="dm" without an
-    origin_channel hint) are *not* trek-scheduler events; they must
-    still reach the AI even after archive so members can wrap up the
-    conversation.
-    """
-    ch = ev.get("channel") or ""
-    payload = ev.get("payload") or {}
-    origin = str(payload.get("origin_channel") or "")
-    trek_id = str(payload.get("trek_id") or "")
-    if not trek_id:
-        return False, ""
-    if ch in _TREK_SCHEDULER_CHANNELS or origin in _TREK_SCHEDULER_CHANNELS:
-        return True, trek_id
-    return False, ""
-
-
-def _lookup_trek_status(api_url: str, trek_id: str, token: str,
-                        cache: dict) -> "str | None":
-    """Return ``trek.status`` for ``trek_id``, or ``None`` on lookup failure.
-
-    ms-95 / e-2875 layer 3-A. Best-effort: any error (network, 403, 404)
-    returns ``None``, and the caller falls open (= keeps the event).
-    The server-side 410 Gone guard (server/app.py) is the structural
-    boundary — this filter is the noise-reduction layer on top.
-
-    ``cache`` is a per-invocation dict keyed on trek_id. One inbox-hook
-    fire may see multiple events for the same trek (typical during
-    burst-delivery after a session wake); memoizing avoids N round trips.
-    """
-    if trek_id in cache:
-        return cache[trek_id]
-    try:
-        result = _api_get(
-            api_url,
-            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}",
-            token,
-        )
-        status = None
-        if isinstance(result, dict):
-            raw = result.get("status")
-            if isinstance(raw, str):
-                status = raw
-        cache[trek_id] = status
-        return status
-    except Exception as exc:
-        _log(
-            f"trek status lookup failed: trek_id={trek_id} "
-            f"{exc.__class__.__name__}: {exc}"
-        )
-        cache[trek_id] = None
-        return None
-
-
-def _filter_archived_trek_events(unread: list[dict], api_url: str,
-                                 token: str) -> tuple[list[dict], list[dict]]:
-    """Split ``unread`` into ``(kept, dropped_archived)``.
-
-    ms-95 / e-2875 layer 3-A — for events identified by
-    :func:`_is_trek_scheduler_event`, look up the trek's status via
-    :func:`_lookup_trek_status`. Events whose trek is ``archived`` are
-    diverted to the dropped bucket so the AI never sees them (=
-    ``/beacon-trek-*`` Skills are not invoked, ``pulse-ack`` /
-    ``task-state`` writes are not attempted).
-
-    Non-trek-scheduler events and lookup failures pass through as
-    ``kept`` (fail-open). The server 410 Gone guard blocks the actual
-    write path even when this filter yields a false negative.
-
-    The caller is responsible for cursor advance across the *full* set
-    (both kept and dropped), for auditing dropped events to the inbox
-    log, and for writing a diagnostic frame.
-    """
-    kept: list[dict] = []
-    dropped: list[dict] = []
-    cache: dict = {}
-    for ev in unread:
-        is_trek, trek_id = _is_trek_scheduler_event(ev)
-        if not is_trek:
-            kept.append(ev)
-            continue
-        status = _lookup_trek_status(api_url, trek_id, token, cache)
-        if status == "archived":
-            dropped.append(ev)
-        else:
-            kept.append(ev)
-    return kept, dropped
+# id の整形 (命令文へ補間する前に注入の足場を落とす) は
+# ``lib/bus_delivery.sanitize_id`` が行う。以前ここに薄いラッパ ``_sanitize_id`` と
+# 正規表現の並行コピーが在ったが、**製品コードから一度も呼ばれていなかった**
+# (PR#842 4 周目の独立保守性レビューが削除して実測: 落ちるのはそのラッパ自身の
+# 単体試験 1 件だけ)。「ここに在るから倣って呼べば守られる」と読める形は、
+# 呼んだつもりで呼ばれていない誤判断を招くので外した。この file で id を扱う
+# 必要が出たら ``bus_delivery.sanitize_id`` を直接呼ぶ。
 
 
 def _ensure_cursor_primed(api_url: str, project_id: str, recipient_id: str,
@@ -686,45 +584,38 @@ def _format_pending_approval_block(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _downgrade_advice(reason: str) -> str:
-    """理由ごとの「何が起きて、どう直すか」の 1 行 (ms-185 e-7077 / AX レビュー)。
+def _downgrade_advice(reason: str, channel: str = "") -> str:
+    """理由 **と channel** ごとの「何が起きて、どう直すか」の 1 行。
 
-    **直した穴**: 以前はここが無く、``_format_event`` が
-    「— channel not in bus_auto_execute_channels」という**固定文**を出していた。
-    降格の理由は 3 つあり、``retired-provenance-channel`` と
-    ``non-system-envelope`` は **どちらも「channel は許可リストに在る」ときにしか
-    起きない**。つまり固定文は事実と正反対で、読んだ AI は「channel を許可リストに
-    足せ」という**真因と逆の回復ループ**に入る。
+    実体は ``lib/bus_delivery.downgrade_advice`` に 1 つだけ置いてある。この関数は
+    そこへの薄い委譲 + lib が読めない環境の fallback だけを担う。
 
-    理由ごとに operator の打つ手が違うので、文言も分ける:
-
-      * 理由タグ空 = 許可リストに無い → 許可する (`bus auto-execute add`)
-      * ``non-system-envelope`` → 許可リストには在るが署名が無い。operator には
-        直せない (サーバが発行していない = 偽装の恐れ)
-      * ``retired-provenance-channel`` → 許可リストに在るが、その channel は
-        サーバ発行ではなくなった。古い許可を外す (`bus auto-execute remove`)
-      * 未知のタグ → bus_delivery に理由が足されてこの関数が追従していない。
-        **黙って許可リスト漏れに畳まない** (畳むと誤案内になる)
+    **どの channel が何を要求し、どう直すか** (= ``channel`` を引数に取る理由、
+    ``trek-*`` の現在の扱い、#812 の経緯と実害) は
+    ``lib/bus_delivery.downgrade_advice`` の docstring が唯一の説明である。
+    ここには写しを置かない —— 以前この説明は両 hook に別コピーで在り、#812 の
+    張り替えにどちらも追従していなかった (ms-185 e-7395 / PR#842 独立保守性レビュー)。
     """
-    if not reason:
-        return "channel not in bus_auto_execute_channels (= 人間が許可する前)"
-    # ``bd`` はこの hook では遅延 import で、**None になりうる** (lib が読めない
-    # 環境では fail-closed に倒す設計)。モジュールスコープに ``bd`` は無いので、
-    # ここで取り直す。None のときは理由タグを言い換えずそのまま出す — 知らない
-    # 定数名で分岐したふりをするより、生のタグを見せる方が誤診を招かない。
     bd = _import_bus_delivery()
     if bd is None:
+        # lib が読めない環境 (fail-closed 側に倒す設計)。知らない定数名で分岐した
+        # ふりをするより、生のタグを見せる方が誤診を招かない。
+        #
+        # **空タグで「許可してください」と言わない (ms-185 e-7395 / PR#844 の独立
+        # AX + 保守性が一致で指摘)**: 空タグは「現役 channel の承認待ち」と「引退
+        # channel」の 2 つを指すが、見分ける材料 (RETIRED_PROVENANCE_CHANNELS) は
+        # lib 側にしか無い。以前はここで常に「人間が許可する前」を返しており、
+        # **lib が読めるかどうかという無関係な事情だけで案内が反転**していた
+        # (judge が実測: 引退 channel でも「まだ許可されていません」が出る)。
+        # それはこの課題がまさに消しに来た誤誘導を fail-closed 経路に残すこと。
+        # 材料が無いときは推測で名乗らない —— Codex 側の render_* と同じ作法。
+        if not reason:
+            return ("降格の理由を解決できません (bus_delivery を読めないため、"
+                    "引退した channel か人間の承認待ちかを見分けられません)。"
+                    "`beacon bus auto-execute add` を自己判断で実行しないでください")
         return (f"理由タグ '{reason}' (bus_delivery を読めないため説明を "
                 "解決できません)")
-    if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
-        return ("channel は allowlist 済だが envelope が T1-system でない "
-                "(= 偽装の恐れ)。opt-in し直しても直りません")
-    if reason == getattr(bd, "DOWNGRADE_RETIRED_CHANNEL", None):
-        return ("channel は allowlist 済だが、サーバが発行する channel では "
-                "なくなっています (= 古い opt-in が残った状態)。"
-                "`beacon bus auto-execute remove --channel <名前>` で外してください")
-    return (f"理由タグ '{reason}' はこの hook が知りません "
-            "(= bus_delivery に理由が足され、hook が追従していない)")
+    return bd.downgrade_advice(reason, channel)
 
 
 def _format_event(ev: dict) -> str:
@@ -748,7 +639,7 @@ def _format_event(ev: dict) -> str:
     if downgraded_from:
         delivery_line += (
             f"  [auto-execute downgraded from '{downgraded_from}'"
-            f" — {_downgrade_advice(ev.get('_downgrade_reason', ''))}]"
+            f" — {_downgrade_advice(ev.get('_downgrade_reason', ''), str(ev.get('channel') or ''))}]"
         )
     return (
         f"{delivery_line}\n"
@@ -840,223 +731,11 @@ def _format_autonomous_action_block(events: list[dict]) -> str:
     return bd.format_operation_trigger_imperative(events)
 
 
-def _format_trek_progress_check_block(events: list[dict]) -> str:
-    """Render the Level 3 imperative inject for ``trek-progress-check`` events
-    (ms-97 / e-2711).
-
-    Twin of ``_format_trek_action_block`` but scoped to the periodic
-    server-cadence "next, please" DM (= ms-83 / e-1999). The block uses
-    Level 3 imperative phrasing (= "You MUST immediately invoke …") so
-    the AI's "framing 慣性" (= mechanical ack pathology) is structurally
-    short-circuited: there is no room left for the AI to decide
-    "should I invoke?" — the answer is built into the inject.
-
-    Each event's trek_id is lifted from the payload so the launched
-    Skill receives the full command form ready to paste.
-    """
-    if not events:
-        return ""
-    lines: list[str] = []
-    lines.append("## TREK PROGRESS CHECK — Level 3 imperative")
-    lines.append("")
-    lines.append(
-        "以下の trek-progress-check event (= server cadence の「次やって」 DM、 "
-        "ms-83 / e-1999) は **必ず即時 Skill を invoke する**。 "
-        "ack だけで終わらせない (= e-2711 の機械 ack 病理対策)。"
-    )
-    lines.append("")
-    for ev in events:
-        payload = ev.get("payload") or {}
-        trek_id = _sanitize_id(payload.get("trek_id"))
-        eid = ev.get("event_id", "?")
-        lines.append(f"- event_id: {eid}")
-        lines.append(f"  - trek_id: {trek_id}")
-        cmd = f"/beacon-trek-execute {trek_id}"
-        lines.append(
-            f"  - **You MUST immediately invoke `{cmd}` as your next "
-            f"action** (= 確認なし、 同ターン内)"
-        )
-    lines.append("")
-    lines.append(
-        "Skill 側 (= /beacon-trek-execute) が pulse-ack / scope check / "
-        "state 更新を全部やる。 この inject に対する応答は invoke 1 件、 "
-        "それ以外は protocol 違反 (= ms-75 / e-2068 forced 3-択)。"
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _format_trek_task_review_block(events: list[dict]) -> str:
-    """Render the Level 3 imperative inject for ``trek-task-review`` events
-    (ms-97 / e-2711).
-
-    Twin of the progress-check block but routes the leader to
-    ``/beacon-trek-review`` (= the forced 3-択 approve / re-work /
-    forward-to-user judgment Skill, ms-75 / e-2048). Each event carries
-    trek_id + task_id in the payload so the Skill is launchable as a
-    one-shot command without re-parsing the raw event.
-    """
-    if not events:
-        return ""
-    lines: list[str] = []
-    lines.append("## TREK TASK REVIEW — Level 3 imperative")
-    lines.append("")
-    lines.append(
-        "以下の trek-task-review event (= executor が task を done / "
-        "leader_review に flip した時の leader 通知、 ms-75 / e-2048) は "
-        "**必ず即時 Skill を invoke する**。 ack で flush しない "
-        "(= e-2711 の leader 機械 ack 病理対策)。"
-    )
-    lines.append("")
-    for ev in events:
-        payload = ev.get("payload") or {}
-        trek_id = _sanitize_id(payload.get("trek_id"))
-        task_id = _sanitize_id(payload.get("task_id"))
-        eid = ev.get("event_id", "?")
-        lines.append(f"- event_id: {eid}")
-        lines.append(f"  - trek_id: {trek_id}")
-        lines.append(f"  - task_id: {task_id}")
-        cmd = f"/beacon-trek-review {trek_id} {task_id}"
-        lines.append(
-            f"  - **You MUST immediately invoke `{cmd}` as your next "
-            f"action** (= 確認なし、 forced 3-択 に直行)"
-        )
-    lines.append("")
-    lines.append(
-        "judgment = approve / re-work / forward-to-user。 "
-        "Skill が 3-択を強制するので「読んだだけ」 で終わるパスは構造的に塞がる。"
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _format_trek_leader_digest_block(events: list[dict]) -> str:
-    """Render the Level 3 imperative inject for ``trek-leader-digest`` events
-    (ms-97 / e-2711, leverages e-2707 payload extension).
-
-    Reads ``payload.task_state_aggregate.leader_review_queue`` (= the
-    new field shipped in e-2707) and surfaces "N 件の leader_review queue
-    があります、 即時 invoke /beacon-trek-review" so the leader cannot
-    miss the queue. When the queue is empty the digest stays informational
-    (= no forced Skill invoke, just the standard event list).
-
-    The Level 3 phrasing is the structural defence against the
-    2026-06-29 LPS dogfood pathology where ``needs_leader_judgment=0``
-    let the leader read past the digest while task_states had a
-    leader_review queue (= e-2707 motivation).
-    """
-    if not events:
-        return ""
-    lines: list[str] = []
-    lines.append("## TREK LEADER DIGEST — Level 3 imperative")
-    lines.append("")
-    lines.append(
-        "以下の trek-leader-digest event (= leader 向け定期サマリ、 "
-        "ms-92 / e-2164) は **task_state_aggregate に leader_review 件数が "
-        "あれば必ず /beacon-trek-review を即時 invoke する**。 "
-        "「needs_leader_judgment=0 だから OK」 と digest を読み流さない "
-        "(= e-2707 motivation / 2026-06-29 LPS dogfood post-mortem)。"
-    )
-    lines.append("")
-    for ev in events:
-        payload = ev.get("payload") or {}
-        trek_id = _sanitize_id(payload.get("trek_id"))
-        eid = ev.get("event_id", "?")
-        agg = payload.get("task_state_aggregate") or {}
-        summary = payload.get("summary") or {}
-        # e-2707 field; fall back to summary.leader_review_queue_count when
-        # the payload originator hasn't yet rolled the aggregate (= old
-        # server build, defensive).
-        queue = agg.get("leader_review_queue") or []
-        queue_count = len(queue) or int(
-            summary.get("leader_review_queue_count") or 0
-        )
-        lines.append(f"- event_id: {eid}")
-        lines.append(f"  - trek_id: {trek_id}")
-        lines.append(f"  - leader_review queue: {queue_count} 件")
-        if queue_count > 0:
-            # Show first 3 task ids so the leader knows what to look for.
-            preview_ids = [r.get("task_id", "?") for r in queue[:3]]
-            if preview_ids:
-                lines.append(f"  - tasks: {', '.join(preview_ids)}"
-                             + (f" (+{queue_count - 3} more)"
-                                if queue_count > 3 else ""))
-            cmd = f"/beacon-trek-review {trek_id}"
-            lines.append(
-                f"  - **You MUST immediately invoke `{cmd} <task-id>` for "
-                f"each queued task as your next action** "
-                f"(= 確認なし、 全件 forced 3-択 を回す)"
-            )
-        else:
-            lines.append(
-                "  - queue 空 → invoke 不要 (= digest 観察のみ、 次の "
-                "tick 待ち)"
-            )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _format_trek_action_block(events: list[dict]) -> str:
-    """Render the "TREK ACTION" inject for armed trek-trigger events
-    (ms-75 / e-1870).
-
-    Twin of ``_format_autonomous_action_block`` but scoped to a Trek
-    (= 缶詰の徹夜作業部屋, the pre-approved AI autonomy workspace) rather
-    than a single Operation. Each event in ``events`` is an opted-in
-    auto-execute event on the ``trek-trigger`` channel. The block tells
-    the AI to run ``/beacon-trek-execute <trek-id>`` **autonomously,
-    without asking the user first**, and lifts the trek_id /
-    trigger_name out of the payload so the Skill starts immediately.
-
-    Visually distinct from the operation block so the AI's launcher does
-    not mix the two (different header, different Skill name).
-    """
-    if not events:
-        return ""
-    lines: list[str] = []
-    lines.append("## TREK ACTION — trek autonomy active")
-    lines.append("")
-    lines.append(
-        "以下の trek-trigger event は `bus_auto_execute_channels` "
-        "allowlist に登録済 (= 人間 opt-in 済) で、**Trek scope 内の "
-        "事前承認に基づき確認なしで autonomous に実行する**。"
-    )
-    lines.append(
-        "Trek scope (= MS / task / Operation) の作業は user 確認なしで "
-        "進めてよい。**例外: デプロイ / リリース** (= 本番環境を触る "
-        "アクション) のみ user 承認境界として escalate する。"
-    )
-    lines.append("Run this autonomously without asking the user first.")
-    lines.append("")
-    for ev in events:
-        payload = ev.get("payload") or {}
-        trek_id = _sanitize_id(payload.get("trek_id"))
-        trigger_name = payload.get("trigger_name", "")
-        eid = ev.get("event_id", "?")
-        lines.append(f"- event_id: {eid}")
-        lines.append(f"  - trek_id: {trek_id}")
-        if trigger_name:
-            lines.append(f"  - trigger_name: {trigger_name}")
-        cmd = f"/beacon-trek-execute {trek_id}"
-        lines.append(f"  - launch: `{cmd}`  (no confirmation prompt)")
-    lines.append("")
-    lines.append(
-        "budget が枯渇していたら Skill 側が自動で停止 → incident open → "
-        "note 残しに降格する。Skill の責務なのでこの inject 側で事前判定はしない。"
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
 def _render_context(events: list[dict], notify_only_count: int,
                     monitor_suggested: bool,
                     budget: dict | None = None,
                     auto_execute_downgraded_count: int = 0,
                     autonomous_actions: list[dict] | None = None,
-                    trek_actions: list[dict] | None = None,
-                    trek_progress_check_actions: list[dict] | None = None,
-                    trek_task_review_actions: list[dict] | None = None,
-                    trek_leader_digest_actions: list[dict] | None = None,
                     cross_user_notices: dict | None = None) -> str:
     """Build the additionalContext markdown for AI inject.
 
@@ -1071,17 +750,6 @@ def _render_context(events: list[dict], notify_only_count: int,
     block is emitted ABOVE the generic event list so the AI sees the
     instruction before the noise.
 
-    ``trek_actions`` is the analogous subset for the ``trek-trigger``
-    channel (ms-75 / e-1870). When non-empty, a "TREK ACTION" block is
-    emitted right after the operation block.
-
-    ``trek_progress_check_actions`` / ``trek_task_review_actions`` /
-    ``trek_leader_digest_actions`` are the ms-97 / e-2711 Level 3
-    imperative dispatches for the periodic trek DMs. Each gets its own
-    block ABOVE the generic event list, ensuring the AI sees "You MUST
-    immediately invoke …" before the noise. The blocks share the
-    visual pattern with TREK ACTION / AUTONOMOUS ACTION so the AI's
-    block-parser handles all four uniformly.
     """
     parts: list[str] = []
     parts.append("BEACON BUS INBOX — 新着 event があります")
@@ -1095,24 +763,6 @@ def _render_context(events: list[dict], notify_only_count: int,
     autonomous_block = _format_autonomous_action_block(autonomous_actions or [])
     if autonomous_block:
         parts.append(autonomous_block)
-    trek_block = _format_trek_action_block(trek_actions or [])
-    if trek_block:
-        parts.append(trek_block)
-    # ms-97 / e-2711 — Level 3 imperative blocks for the periodic trek DMs.
-    # Order: progress-check → task-review → leader-digest. The order
-    # mirrors the "executor-first, then leader" reading flow.
-    progress_check_block = _format_trek_progress_check_block(
-        trek_progress_check_actions or [])
-    if progress_check_block:
-        parts.append(progress_check_block)
-    task_review_block = _format_trek_task_review_block(
-        trek_task_review_actions or [])
-    if task_review_block:
-        parts.append(task_review_block)
-    leader_digest_block = _format_trek_leader_digest_block(
-        trek_leader_digest_actions or [])
-    if leader_digest_block:
-        parts.append(leader_digest_block)
     budget_line = _format_budget_line(budget)
     if budget_line:
         parts.append(budget_line)
@@ -1125,9 +775,17 @@ def _render_context(events: list[dict], notify_only_count: int,
         )
     if auto_execute_downgraded_count:
         parts.append(
+            # ms-185 e-7395: ここは **件数しか知らない**。以前は理由を
+            # 「channel が allowlist に無いため」と 1 つ名乗っていたが、降格の
+            # 理由は 4 通りある (許可リスト漏れ / 引退した channel / 証拠の封筒
+            # 欠落 / 未知のタグ) ので、証拠欠落や引退の降格にも許可リスト漏れだと
+            # 誤った理由を付けていた。引退した channel では実害があり、読んだ人が
+            # `auto-execute add` で登録して次の通知で「外してください」と逆を
+            # 言われる。理由は event ごとのマーカーが channel 別に正しく持っている
+            # ので、ここは数えるだけにして理由の主張をやめる。
             f"(安全側降格: auto-execute → propose-to-ai に変換された event: "
-            f"{auto_execute_downgraded_count} 件 — channel が "
-            "`bus_auto_execute_channels` allowlist に無いため)"
+            f"{auto_execute_downgraded_count} 件 — 理由は各 event の "
+            "`[auto-execute downgraded ...]` マーカーを参照)"
         )
     parts.append("")
     # ms-169 e-6235: the generic event list is free-text received from other
@@ -1350,65 +1008,14 @@ def main() -> None:
     if not isinstance(unread, list) or not unread:
         return
 
-    # ms-95 / e-2875 layer 3-A — silently drop trek-scheduler events
-    # whose trek has been archived. Runs before every downstream stage
-    # (stop-signal / bucketing / inject / audit) so archived-trek events
-    # never invoke ``/beacon-trek-*`` Skills, never surface in the AI
-    # context, and never generate residual pulse-ack + peer DM traffic.
-    # The server 410 Gone guard closes the same hole on the write path;
-    # this layer avoids the round trip entirely on updated bridges.
-    #
-    # Cursor advance below still uses the full ``unread`` list so the
-    # dropped events do not resurface on the next poll.
-    dropped_archived_trek: list[dict] = []
-    try:
-        unread_kept, dropped_archived_trek = _filter_archived_trek_events(
-            unread, api_url, token,
-        )
-    except Exception as exc:
-        _log(
-            f"archived-trek filter failed (fail-open): "
-            f"{exc.__class__.__name__}: {exc}"
-        )
-        unread_kept = unread
-    if dropped_archived_trek:
-        # Audit trail: the dropped events must still be persisted so a
-        # human can review "what did the AI never see" after the fact.
-        _append_to_inbox_log(root, dropped_archived_trek)
-        # Diagnostic frame mirrors the auto_execute_downgrade pattern
-        # (= ms-95 / e-2710) so post-mortems can answer "which trek /
-        # how many events / at what time" without re-deriving.
-        try:
-            diag = {
-                "_diag": "archived_trek_drop",
-                "dropped_count": len(dropped_archived_trek),
-                "dropped_trek_ids": sorted({
-                    str((e.get("payload") or {}).get("trek_id", ""))
-                    for e in dropped_archived_trek
-                    if (e.get("payload") or {}).get("trek_id")
-                }),
-                "dropped_channels": sorted({
-                    str(e.get("channel", "")) for e in dropped_archived_trek
-                }),
-                "session_id": session_id,
-            }
-            _append_to_inbox_log(root, [diag])
-        except Exception as exc:
-            _log(f"archived-trek diag frame write failed: {exc}")
-    # From here on the bucketing / stop-signal / inject stages work on
-    # the filtered list. Cursor advance still uses the original ``unread``.
-    unread_full = unread
-    unread = unread_kept
-    if not unread:
-        # Everything was archived-trek noise; still advance the cursor
-        # past those events so we don't re-poll them next tick.
-        last_seen = unread_full[-1].get("created_at", "")
-        if last_seen:
-            try:
-                _ack_cursor(api_url, project_id, session_id, last_seen, token)
-            except Exception as exc:
-                _log(f"cursor advance (archived-only path) failed: {exc}")
-        return
+    # ms-185: ここに archived-trek フィルタが在った (= trek-* channel の event ごとに
+    # GET /api/treks/{id} を引き、archived な trek の event を AI に見せず落とす層)。
+    # その event を書いていた trek scheduler は e-7070 で撤去されたので、判定する相手が
+    # 居ない。産出者ゼロの判定を配線に残すと、1 event ごとに無駄な API 往復をしながら
+    # 「効いているつもり」の層だけが残る (SPEC 方針 4 が名指しで避けた形)。
+    # 退役 channel が万一届いた場合の扱いは、落とすのではなく開示する
+    # (= 降格経路。退役 channel は classify_auto_execute が propose-to-ai へ落とし、
+    #  降格理由つきで AI に開示される。e-7079 が決めた受信側の振る舞い)。
 
     # ms-55 e-1721: process stop-signal channel events first so the
     # halt-request.json is on disk before the PostToolUse hook fires
@@ -1440,19 +1047,11 @@ def main() -> None:
     inject: list[dict] = []
     notify_only: list[dict] = []
     autonomous_actions: list[dict] = []
-    trek_actions: list[dict] = []
-    # ms-97 / e-2711 — Level 3 imperative dispatch buckets for the
-    # periodic trek DMs. Same opt-in posture as trek-trigger: only
-    # auto-execute + channel in allowlist lands here; otherwise the
-    # event is downgraded to propose-to-ai with the standard marker.
-    trek_progress_check_actions: list[dict] = []
-    trek_task_review_actions: list[dict] = []
-    trek_leader_digest_actions: list[dict] = []
     downgraded_count = 0
     downgraded_audit: list[dict] = []
     for ev in unread:
         # ms-160 e-5803: the auto-execute downgrade decision (allowlist miss +
-        # T1-system provenance gate) is now shared with the Codex inbox hook via
+        # per-channel provenance gate) is now shared with the Codex inbox hook via
         # lib/bus_delivery.classify_auto_execute.
         delivery, downgraded_from, downgrade_reason = _classify_delivery(
             ev, allowlist)
@@ -1480,31 +1079,6 @@ def main() -> None:
                 # generic event list, so the AI launches
                 # /beacon-operation-execute without scanning the noise.
                 autonomous_actions.append(ev)
-            elif channel == "trek-trigger":
-                # ms-75 / e-1870: opted-in trek-trigger events get a
-                # structured "TREK ACTION" block so the AI launches
-                # /beacon-trek-execute <trek-id> without scanning the noise.
-                # Same pattern as operation-trigger, twin scope-level entry.
-                trek_actions.append(ev)
-            elif channel == "trek-progress-check":
-                # ms-97 / e-2711: opted-in trek-progress-check events get a
-                # Level 3 imperative "You MUST immediately invoke
-                # /beacon-trek-execute <trek-id>" block. Closes the
-                # "AI acks the DM but never invokes the Skill" pathology.
-                trek_progress_check_actions.append(ev)
-            elif channel == "trek-task-review":
-                # ms-97 / e-2711: opted-in trek-task-review events get a
-                # Level 3 imperative "You MUST immediately invoke
-                # /beacon-trek-review <trek-id> <task-id>" block. Closes
-                # the leader-side mechanical ack pathology.
-                trek_task_review_actions.append(ev)
-            elif channel == "trek-leader-digest":
-                # ms-97 / e-2711 (× e-2707): opted-in trek-leader-digest
-                # events read payload.task_state_aggregate.leader_review_queue
-                # and force /beacon-trek-review invoke when non-empty.
-                # When queue is empty, the block surfaces "digest only"
-                # without forcing invoke.
-                trek_leader_digest_actions.append(ev)
         if delivery == "notify-user-only":
             notify_only.append(ev)
         else:
@@ -1542,11 +1116,11 @@ def main() -> None:
 
     # Always advance the cursor to the last seen event so neither inject nor
     # notify-only events are replayed; the cursor is delivery-agnostic.
-    # ms-95 / e-2875 layer 3-A — use ``unread_full`` here (= the pre-filter
-    # set) so archived-trek events dropped above still count toward
-    # cursor progress. Otherwise a trailing dropped event would resurface
-    # on the next poll.
-    last_seen = unread_full[-1].get("created_at", "")
+    # ms-185: this used to read ``unread_full`` (= the list before the
+    # archived-trek filter) so a trailing dropped event still counted toward
+    # cursor progress. With that filter gone nothing is dropped here, so the
+    # polled list IS the full list and there is only one name to read.
+    last_seen = unread[-1].get("created_at", "")
     if last_seen:
         try:
             _ack_cursor(api_url, project_id, session_id, last_seen, token)
@@ -1595,10 +1169,6 @@ def main() -> None:
         monitor_suggested, budget,
         downgraded_count,
         autonomous_actions,
-        trek_actions,
-        trek_progress_check_actions,
-        trek_task_review_actions,
-        trek_leader_digest_actions,
         cross_user_notices=cross_user_notices,
     ))
 

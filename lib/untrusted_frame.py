@@ -28,13 +28,27 @@ Scope boundary (kept narrow so A/B tasks stay reviewable):
     are NOT implemented here.
 
 Classification is fail-closed (方針3): a received event is untrusted **unless**
-it is a kept, opt-in, system-minted autonomous imperative (operation-trigger /
-trek-* auto-execute that already passed the T1-system provenance gate). Those
-are rendered in their own dedicated imperative blocks and are trusted by
-explicit human opt-in; everything else surfaced to the AI as free-text content
-is untrusted. Authentication ≠ content-safety (方針4): a perfectly signed DM's
+it is a kept, opt-in, *authorized* autonomous imperative — today that means an
+``operation-trigger`` auto-execute event that passed the receiver's provenance
+gate. (``trek-*`` used to be the other such channel. ms-185 retired those
+channels, so they are downgraded *before* the provenance gate is ever consulted
+and can never be kept again — see ``RETIRED_PROVENANCE_CHANNELS`` in
+lib/bus_delivery.py.) Such events are rendered in their own dedicated imperative
+blocks and are trusted by explicit human opt-in; everything else surfaced to the
+AI as free-text content is untrusted.
+
+Authentication ≠ content-safety (方針4): a perfectly signed DM's
 free-text body is STILL untrusted, so the marker does not consult the envelope
-beyond the system-provenance opt-in check.
+beyond that opt-in check.
+
+**The required proof is NOT uniform across channels** (ms-185 e-7078). It is
+whatever that channel's ``bus_delivery.PROVENANCE_REQUIREMENTS`` entry demands:
+``operation-trigger`` wants the T2 envelope a human minted at ``beacon operation
+approve`` for that very op_id. (The ``trek-*`` family used to want a
+server-minted ``T1-system`` envelope; ms-185 retired those channels and e-7078
+removed that tier, so no channel demands a server signature any more.) Do not
+read "system" anywhere below as "a server signature is required" — that was true
+before the gate was re-pointed, and is now false everywhere.
 """
 
 from __future__ import annotations
@@ -65,19 +79,35 @@ UNTRUSTED_FRAME_HEADER = (
 UNTRUSTED_FRAME_FOOTER = "⚠ 信頼できない外部データ ここまで (end of untrusted content)"
 
 
-def _is_kept_system_imperative(ev: dict) -> bool:
-    """True for a kept, opt-in, system-minted autonomous imperative event.
+def _is_kept_authorized_imperative(ev: dict) -> bool:
+    """True for a kept, opt-in, authorized autonomous imperative event.
 
-    These are ``auto-execute`` events on a system-provenance channel
-    (operation-trigger / trek-*) that survived the receiver's downgrade gate
-    (i.e. the channel is in the project's allowlist AND the event carries a
-    server-minted T1-system envelope). They are rendered in their own dedicated
-    imperative blocks and trusted by explicit human opt-in, so they are the sole
-    exception to the untrusted-by-default rule.
+    These are ``auto-execute`` events on a gated channel (operation-trigger /
+    trek-*) that survived the receiver's downgrade gate: the channel is in the
+    project's allowlist AND the event carries **the proof that channel demands**.
 
-    An event that was downgraded to propose-to-ai (allowlist miss or
-    non-system envelope) has ``delivery == "propose-to-ai"`` here, so it is NOT
-    treated as a kept imperative — it stays untrusted. Fail-closed: any event
+    **What counts as proof differs per channel** — the single source is
+    ``bus_delivery.PROVENANCE_REQUIREMENTS``, which this function consults via
+    ``has_required_provenance`` rather than naming any one envelope shape:
+
+      * ``operation-trigger`` → the T2 envelope a human minted at
+        ``beacon operation approve``, whose scope names the op_id being fired.
+
+    (``trek-*`` used to map to a server-minted T1-system envelope. ms-185
+    retired those channels and e-7078 removed the tier, the mint path and the
+    predicate together, so that entry is gone rather than always-failing.)
+
+    This function was called ``_is_kept_system_imperative`` and its docs said a
+    "server-minted T1-system envelope" was required. ms-185 e-7078 re-pointed
+    ``operation-trigger`` to human approval, which made that description false
+    while the behaviour (delegating to ``has_required_provenance``) stayed
+    correct — an independent maintainability review found the stale wording here
+    five times over. Renamed so that grepping for ``system`` no longer digs up
+    the retired world view.
+
+    An event that was downgraded to propose-to-ai (allowlist miss, retired
+    channel, or missing proof) has ``delivery == "propose-to-ai"`` here, so it is
+    NOT treated as a kept imperative — it stays untrusted. Fail-closed: any event
     whose delivery is not exactly ``auto-execute`` is untrusted.
     """
     if ev.get("delivery") != "auto-execute":
@@ -91,21 +121,25 @@ def _is_kept_system_imperative(ev: dict) -> bool:
         # Without the provenance definitions we cannot confirm the opt-in
         # exception, so fail closed: treat as untrusted.
         return False
-    if channel not in bd.SYSTEM_PROVENANCE_CHANNELS:
+    if channel not in bd.GATED_PROVENANCE_CHANNELS:
         return False
-    return bd.has_system_provenance(ev)
+    # Per-channel proof — see PROVENANCE_REQUIREMENTS, NOT one fixed envelope
+    # shape (the set's name still says "SYSTEM" for wire-compatibility reasons
+    # documented at its definition; the requirement it checks does not).
+    return bd.has_required_provenance(ev)
 
 
 def is_untrusted_event(ev: dict) -> bool:
     """True when ``ev``'s body must be framed as untrusted external data.
 
     Fail-closed: every received event is untrusted EXCEPT a kept, opt-in,
-    system-minted autonomous imperative (see ``_is_kept_system_imperative``).
-    A non-dict / empty event is untrusted (nothing proves it safe).
+    authorized autonomous imperative (see ``_is_kept_authorized_imperative``;
+    what authorizes it differs per channel). A non-dict / empty event is
+    untrusted (nothing proves it safe).
     """
     if not isinstance(ev, dict):
         return True
-    return not _is_kept_system_imperative(ev)
+    return not _is_kept_authorized_imperative(ev)
 
 
 def mark_untrusted(ev: dict) -> dict:

@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
 import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 import core  # noqa: E402
+import _pr_obligations_stub  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,25 @@ def _run_pr_approve(data, *, entry_id="e-400", rationale="LGTM",
     cmd_pr.load_project = lambda: data
     cmd_pr.save_project = lambda d: captured.__setitem__("saved", d)
 
+    # ms-119 e-6859: `beacon pr approve` は独立レビューの関門を通る。関門は
+    # 「必須種別すべてが **現在の head に対して** 実施済みか」を導出で問うように
+    # なったので、何も用意しない fixture では止まる (= 以前は「トリガーが 1 つも
+    # 無い」ことを「義務が無い」と読んでいたので素通りしていた)。
+    #
+    # この file の主題は **approve 時のタスク自動完了** であって関門ではないので、
+    # 関門は充足している状態に差し替えて主題まで到達させる。関門そのものの挙動は
+    # tests/test_review_merge_gate.py が pin している (そちらを消してもここが
+    # 緑のままになるが、それは責務分界どおり —— 関門の試験をこちらに重ねると、
+    # どちらが関門の正典かが読めなくなる)。
+    #
+    # 形は手書きせず共有 factory から採る (ms-119 e-6859、独立保守性レビュー):
+    # 手書きすると、本物の返り値のキーが変わっても fake は黙って古い形を返し続け、
+    # この試験群だけが「偽の緑」になる (judge が反転実験で実測した)。
+    orig_ob = cmd_pr.pr_review_obligations
+    _stub_ob = _pr_obligations_stub.obligations()
+    cmd_pr.pr_review_obligations = (
+        lambda pr_number, pr_repo="", **kw: _stub_ob)
+
     env_backup = {
         k: os.environ.get(k)
         for k in ("BEACON_ENTRY_ID", "BEACON_RATIONALE",
@@ -147,6 +167,7 @@ def _run_pr_approve(data, *, entry_id="e-400", rationale="LGTM",
     finally:
         cmd_pr.load_project = orig_load
         cmd_pr.save_project = orig_save
+        cmd_pr.pr_review_obligations = orig_ob
         for k, v in env_backup.items():
             if v is None:
                 os.environ.pop(k, None)

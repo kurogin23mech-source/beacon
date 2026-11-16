@@ -132,21 +132,40 @@ def test_a_misspelled_channel_is_flagged_instead_of_silently_answering(monkeypat
     assert any("見覚え" in c for c in got["caveats"])
 
 
-@pytest.mark.parametrize("channel", ["dm", "trek-trigger", "operation-trigger"])
+@pytest.mark.parametrize("channel", ["dm", "operation-trigger"])
 def test_known_channels_are_not_flagged(monkeypatch, channel):
     got = _json_run(monkeypatch, env={"BEACON_BUS_CHANNEL": channel})
     assert got["channel_recognized"] is True
     assert not any("見覚え" in c for c in got["caveats"])
 
 
-def test_unchecked_carve_outs_are_disclosed(monkeypatch):
-    """判定に使わなかった 2 軸を出力で明かす (A-4)。
+@pytest.mark.parametrize("channel", ["trek-trigger", "trek-anything"])
+def test_trek_named_channels_are_now_flagged_as_unknown(monkeypatch, channel):
+    """``trek-`` で始まる名前は「見覚えのある channel」ではなくなった (ms-185 e-7067)。
 
-    安全側 (過剰確認) に倒すこと自体は正しいが、倒したと黙っていると、Trek /
+    **消した側の裏返しを明示的に固定する。** 前方一致を外したので、これらは
+    規則上 'dm 以外' に落ちる (= 確認は要らないと答える) が、問い合わせ面は
+    「見覚えが無い」と添える。黙って「不要」と答えると、綴り違いや引退した
+    channel 名を打った呼び手が自信のある誤答を受け取ることになる (A-1 と同じ形)。
+    """
+    got = _json_run(monkeypatch, env={"BEACON_BUS_CHANNEL": channel})
+    assert got["channel_recognized"] is False
+    assert any("見覚え" in c for c in got["caveats"])
+
+
+def test_unchecked_carve_outs_are_disclosed(monkeypatch):
+    """判定に使わなかった軸を出力で明かす (A-4)。
+
+    安全側 (過剰確認) に倒すこと自体は正しいが、倒したと黙っていると、
     Operation 文脈で「必要」と出た呼び手が理由を誤診して無関係な所をデバッグする。
+
+    ms-185 e-7068: 以前は 2 軸 (operation_envelope / shared_trek) だった。
+    共有 Trek の carve-out が規則ごと消えたので、**開示する軸も 1 つに減る** —
+    存在しない carve-out を「未検証」と言い続けると、呼び手は「Trek 参加中なら
+    本当は不要かも」と誤った希望を持つ (= 消えた機構を指す開示は誤誘導)。
     """
     got = _json_run(monkeypatch)
-    assert set(got["carve_outs_not_checked"]) == {"operation_envelope", "shared_trek"}
+    assert set(got["carve_outs_not_checked"]) == {"operation_envelope"}
 
 
 def test_missing_recipient_is_a_usage_error(monkeypatch):

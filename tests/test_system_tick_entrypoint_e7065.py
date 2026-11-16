@@ -40,10 +40,18 @@ HEADERS_OK = {"X-Beacon-Scheduler-Key": "test-scheduler-key"}
 # 応答に必ず載るキー (= 観測側 / 本番の journal がこれを読む)。
 # ``scheduled_fires`` が「ターゲット非依存の発火」の報告で、ms-185 で Trek を
 # 畳んだあとも残らなければならない部分。
+#
+# ms-185 e-7070: Trek の集約が返していた 10 キー (candidates / due / fired /
+# escalations / leader_review_stall_escalations / auto_stalled / errors /
+# quiesced / halted / skipped_no_id) をここから外した。``_run_trek_tick`` ごと
+# 消えたので、要求し続けると**この入口が生きていること**を測るはずのテストが
+# 「消した機能が在ること」を測るテストに化ける。
+#
+# 残した 4 キーが観測の本体: ``now`` (tick が走った時刻) と ``scheduled_*``
+# (= Operation 発火と締切リマインドが回ったことの内訳)。本番の見張り
+# (scripts/tick-health-monitor.py) と journal が読むのはこちらだけ。
 REQUIRED_KEYS = {
-    "now", "candidates", "due", "fired", "escalations",
-    "leader_review_stall_escalations", "auto_stalled", "errors",
-    "quiesced", "halted", "skipped_no_id", "scheduled_fires",
+    "now", "scheduled_fires", "scheduled_sources", "scheduled_by_source",
 }
 
 

@@ -17,7 +17,7 @@ The 5 sharing-scope levels (one axis: how widely a capability may be shared)
   L0  Beacon プロダクト運用 — admin / dev tooling for operating Beacon itself
       (not a general product feature; e.g. doctor / skill install / migrate).
   L1  全職種共通 — the coordination substrate, identical for every profession,
-      does not concretize per profession (bus / dm / auth / trek / session).
+      does not concretize per profession (bus / dm / auth / session).
   L2  クラス抽象化層 — operates on a Target via the ABSTRACTION; instantiated
       per profession (milestone in dev, opportunity in sales) but its RULE is
       profession-common (doc / claim / status / the target_* verbs).
@@ -269,11 +269,6 @@ PROFESSION_CONCRETE_COLLECTIONS = {
 # would miss a sales project's targets. Where the gap is a whole deferred effort
 # it is tracked by its own milestone; the inline note says which.
 KNOWN_COLLECTION_COUPLING = {
-    # trek aggregation is dev-bound (commits/tasks) but Trek is a profession-
-    # generic feature — it should aggregate work-item/evidence across all target
-    # arms. Deferred until cross-profession demand is clear: ms-137 (waiting).
-    ("trek_show", "milestones"),
-    ("trek_timeline", "milestones"),
     # session rescue finds other sessions by session_id in target entries; sales
     # stores those under activities/communications arms, not ``entries``. Needs
     # arm-aware walking. Deferred: ms-138 (waiting).
@@ -1089,10 +1084,13 @@ DECISION_CAPTURE_PRODUCERS = {
                                      "_record_completion_verdict_decision"}),
     "scope-approval": frozenset({"decision_event_from_scope_approval"}),
     "dm-send": frozenset({"decision_event_from_dm_send", "maybe_dm_send_record"}),
-    "trek-review": frozenset({"decision_event_from_trek_review"}),
-    # halt / resume share one builder (decision_event_from_halt, resumed flag flips kind).
-    "halt": frozenset({"decision_event_from_halt"}),
-    "resume": frozenset({"decision_event_from_halt"}),
+    # ms-185 e-7070: "trek-review" / "halt" / "resume" の 3 種別をここから外した。
+    # どれも共同作業空間の判断の継ぎ目 (= leader のレビュー / 綱を引く / 戻す) で、
+    # 呼び出し元ごと消えた。産出者の居ない種別を台帳に残すと、checker が
+    # 「配線されていない producer」として永久に赤くなる — つまり**産出できない判定**
+    # を宣言し続けることになり、この MS が畳もうとしている形そのものになる。
+    # builder (server/decision_event.py の decision_event_from_trek_review /
+    # decision_event_from_halt) も同じ変更で落とした。
     # ms-166 e-6997: 採否は 2 つの漏斗から出る。`pr approve/reject` の
     # `_record_review_decision` と、関門を開ける `review done` の
     # `_record_review_adjudication_decision`。以前は前者だけが台帳に在り、**後者の
@@ -1121,10 +1119,10 @@ DECISION_CAPTURE_PRODUCERS = {
 # 存在し得ないもの。そういう行だけここに理由付きで挙げる。黙って ``any`` に
 # 倒さない (= 緩い側に倒れる既定を持たない)。
 DECISION_CAPTURE_ALTERNATE_PRODUCERS: dict = {
-    # halt / resume は 1 つの builder が resumed フラグで kind を切り替える。
-    # どちらの行も同じ関数名を指すので all/any の違いは出ないが、意図を明示しておく。
-    "halt": "1 つの builder (decision_event_from_halt) が kind を切り替える",
-    "resume": "同上 (halt と同じ builder)",
+    # ms-185 e-7070: halt / resume の行を外した (種別ごと消えた)。この表が空に
+    # なったのは「代替な producer を持つ種別が今は無い」という事実であって、
+    # 仕組みが要らなくなったわけではない — 排他な経路を持つ種別が出たら、
+    # 黙って ``any`` に倒さずここに理由付きで挙げる。
 }
 
 
@@ -1263,7 +1261,7 @@ _NOUN_SCOPE = {
     # ms-151 e-5474: `machine-key issue/list/revoke` — headless machine 認証の鍵
     # 管理。全職種共通の認証基盤 (auth / operation / run と同じ L1 infra)。
     "machine": "L1",
-    "stop": "L1", "trek": "L1", "trigger": "L1",
+    "stop": "L1", "trigger": "L1",
     # ms-180 e-7000 — 道具台帳 (the declared registry of tools a project uses).
     # L1: the ledger declares 道具 (Skills / MCP tools / CLI verbs) and is identical
     # for every profession — it does not touch a Target at all (no phase, no
@@ -1640,7 +1638,6 @@ def summary() -> dict:
 _SKILL_PREFIX_SCOPE = (
     ("beacon-sales-", "L3"),      # sales profession skills
     ("beacon-operation-", "L1"),  # operations = cross-profession scheduling
-    ("beacon-trek-", "L1"),       # trek coordination substrate
     ("beacon-session-", "L1"),    # session management
     ("beacon-dm-", "L1"),         # cross-user DM
     ("beacon-review", "L2"),      # review* verbs/skills = the review PLUMBING +

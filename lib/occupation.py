@@ -94,8 +94,9 @@ def normalize_profession(profession: str | None) -> str:
 # Scope note (honest limitation, not silent): the shared-frame path
 # (project_targets / iter_target_records / owned_target_classes) and the
 # storage decomposition / narrowing LOOKUPS are descriptor-aware here. The
-# server MySQL child-table DDL (server/mysql_client.py) and Trek scope
-# narrowing (trek.py) still consult the built-in seed at import time; wiring
+# server MySQL child-table DDL (server/mysql_client.py) still consults the
+# built-in seed at import time (Trek scope narrowing in trek.py was the other
+# such reader until ms-185 e-7070 removed it); wiring
 # THOSE to descriptors for a new occupation is a follow-up (descriptor targets
 # ride additively in the document store meanwhile, per the compat contract).
 # ---------------------------------------------------------------------------
@@ -1604,9 +1605,11 @@ def collection_kind(data: dict | None, collection: str, *,
 
 
 def non_claimable_protocol_kinds(data: dict | None = None) -> tuple:
-    """Return the claim-PROTOCOL target kinds (``claims.valid_target_kinds`` — ms /
-    task / operation / trek / free) that the claim VIEW does NOT surface, sorted
-    (ms-109 e-5692 / PR#685 review finding C).
+    """Return the claim-PROTOCOL target kinds (= every member of
+    ``claims.valid_target_kinds()``) that the claim VIEW does NOT surface, sorted
+    (ms-109 e-5692 / PR#685 review finding C). The members are **not** re-listed
+    here: ms-185 removed ``trek`` from that set and a hand-written copy in this
+    docstring kept naming it (PR#840, two independent reviews).
 
     The negative-space twin of ``claim_target_kinds``, kept in the SAME place and
     style as the positive side so the ``beacon claim view`` missing-target hint can
@@ -1616,9 +1619,14 @@ def non_claimable_protocol_kinds(data: dict | None = None) -> tuple:
     Vocabulary bridge (written here once): the claim PROTOCOL kinds are a DIFFERENT
     namespace from target-CLASS kinds. A protocol kind is out-of-scope for the view
     exactly when it has no canonical claimable target-class kind
-    (``canonical_claim_kind`` returns ``""``): ``task`` / ``trek`` / ``free`` are not
-    Targets so the view cannot surface them, while ``ms`` / ``operation`` DO bridge
-    to claimable classes and so are NOT out-of-scope."""
+    (``canonical_claim_kind`` returns ``""``). Concretely: the kinds that are not
+    Targets cannot be surfaced by the view, while the ones that DO bridge to a
+    claimable class are NOT out-of-scope. Which kind falls on which side is
+    decided by ``canonical_claim_kind`` alone — run this function to see the
+    current answer rather than trusting a list written here, and note that a
+    kind removed from ``claims.valid_target_kinds()`` drops out of BOTH sides
+    (it is no longer iterated at all, so its absence from the result does not
+    mean ``canonical_claim_kind`` rejected it)."""
     import claims   # lazy: occupation is a base module, claims a leaf protocol
     return tuple(sorted(k for k in claims.valid_target_kinds()
                         if not canonical_claim_kind(k, data)))
@@ -3001,7 +3009,8 @@ def iter_deadline_candidates(data: dict):
 # invariant), and a Trek can span a development and a sales project at once. A
 # scope entry carries only ``{project, <kind>: ref}`` — not the occupation —
 # so the recognised vocabulary is the UNION across occupations. Registering a
-# new occupation's kinds HERE (not editing trek.py) is what keeps Trek from
+# new occupation's kinds HERE (rather than in the since-removed trek.py) is
+# what kept Trek from
 # hardcoding development vocabulary — the exact L1 domain-leak fable B-2 caught.
 NARROWING_KINDS = {
     "dev": ("milestone", "operation", "task"),
@@ -3015,7 +3024,8 @@ def all_narrowing_kinds(data: dict | None = None) -> tuple:
     identity/target_kind resolution order — milestone, operation, task — is
     unchanged for existing dev Treks; sales kinds append after). With ``data``,
     descriptor-defined kinds append after the built-ins (ms-122 e-3957); without
-    it, only the built-in seed (keeps trek.py's import-time call unchanged)."""
+    it, only the built-in seed (this shape was chosen to keep trek.py's
+    import-time call unchanged; that caller is gone — ms-185 e-7070)."""
     out: list = []
     for kinds in NARROWING_KINDS.values():
         for k in kinds:

@@ -295,6 +295,7 @@ VERB_LEDGER = {
     "note_list": {"cls": "Q", "secondary": [], "note": ""},
     "note_restore": {"cls": "R", "secondary": ["B"], "note": "[post-memo/ms-178] note clear が残した退避からメモを復元=台帳への再追記(R)、退避読取と重複判定は機構(B)"},
     "note_purge_probes": {"cls": "B", "secondary": [], "note": "[post-memo/ms-160] 点検機構が書いたゴミメモの除去=台帳の保守操作(B)。既定は下見で、--confirm 時のみ削除"},
+    "note_reap": {"cls": "B", "secondary": [], "note": "[post-memo/ms-178] 終了したセッションのメモの除去=台帳の保守操作(B)。note_clear(B) / note_purge_probes(B) と同族で、違いは述語だけ(生存セッションに属さないメモ)。判断を記録するわけではないので R ではない"},
 
     # --- operation ---
     "operation_approve": {"cls": "C", "secondary": ["B"], "note": "人間承認(C)/gate反映(B)"},
@@ -397,6 +398,7 @@ VERB_LEDGER = {
     "review_context": {"cls": "Q", "secondary": [], "note": "[post-memo] review-kernel(原典+diff)を JSON 出力=read-only 供給(Q)、状態変更なし"},
     "review_done": {"cls": "B", "secondary": [], "note": "[post-memo] review-due トリガ解消=gate 制御の機械操作(B)、review 実施の記録"},
     "review_skip": {"cls": "R", "secondary": ["B"], "note": "[post-memo] 人間の waiver 決定を durable audit に記録(R)/review-due トリガ解消(B)"},
+    "review_status": {"cls": "Q", "secondary": [], "note": "[post-memo] 関門の導出結果を読み取り専用で出す(Q)、状態変更なし。ms-119 e-6859: 関門の状態を知る唯一の経路が副作用のある done/approve/merge だったため"},
 
     # --- rollback ---
     "rollback": {"cls": "C", "secondary": ["B"], "note": ""},
@@ -445,6 +447,7 @@ VERB_LEDGER = {
     "session_fork_cleanup": {"cls": "C", "secondary": ["B"], "note": "[post-memo/ms-178] fork worktree の物理削除=局所破壊(C)、退避と生存判定のゲートが機構(B)。退避が取れなければ削除しない"},
     "session_id": {"cls": "Q", "secondary": [], "note": ""},
     "session_log_list": {"cls": "Q", "secondary": [], "note": ""},
+    "session_log_handoff": {"cls": "Q", "secondary": [], "note": ""},
     "session_log_show": {"cls": "Q", "secondary": [], "note": ""},
     "session_rescue": {"cls": "C", "secondary": ["B"], "note": ""},
 
@@ -500,40 +503,6 @@ VERB_LEDGER = {
     "task_show": {"cls": "Q", "secondary": [], "note": ""},
     "task_update": {"cls": "R", "secondary": [], "note": ""},
 
-    # --- trek ---
-    "trek_archive": {"cls": "B", "secondary": ["C"], "note": ""},
-    "trek_blanket_approve": {"cls": "C", "secondary": ["B"], "note": ""},
-    "trek_blanket_revoke": {"cls": "C", "secondary": ["B"], "note": ""},
-    "trek_block": {"cls": "R", "secondary": ["B"], "note": "依存(blocker)を張る記録(R)/state遷移はserver機構(B)"},
-    "trek_blockers": {"cls": "Q", "secondary": [], "note": ""},
-    "trek_create": {"cls": "C", "secondary": ["R"], "note": ""},
-    "trek_extend_ttl": {"cls": "C", "secondary": ["R"], "note": ""},
-    "trek_invite": {"cls": "C", "secondary": [], "note": ""},
-    "trek_join": {"cls": "C", "secondary": [], "note": ""},
-    "trek_kickoff": {"cls": "C", "secondary": ["R"], "note": ""},
-    "trek_leave": {"cls": "C", "secondary": [], "note": ""},
-    "trek_list": {"cls": "Q", "secondary": [], "note": ""},
-    "trek_plan": {"cls": "C", "secondary": ["R"], "note": ""},
-    "trek_pulse_ack": {"cls": "R", "secondary": [], "note": ""},
-    "trek_reconcile": {"cls": "B", "secondary": [], "note": ""},
-    "trek_resume": {"cls": "C", "secondary": ["B"], "note": ""},
-    "trek_review_verdicts": {"cls": "Q", "secondary": [], "note": "leader_review verdict 集合を read-only で返す (e-4374)"},
-    "trek_scope_approve": {"cls": "R", "secondary": ["C"], "note": "scope承認記録(R)/決定(C)"},
-    "trek_scope_reject": {"cls": "R", "secondary": ["C"], "note": ""},
-    "trek_show": {"cls": "Q", "secondary": [], "note": ""},
-    "trek_slot_add": {"cls": "R", "secondary": ["B"], "note": ""},
-    "trek_slot_amend": {"cls": "R", "secondary": ["B"], "note": ""},
-    "trek_slot_claim": {"cls": "R", "secondary": ["B"], "note": ""},
-    "trek_slot_list": {"cls": "Q", "secondary": [], "note": ""},
-    "trek_start": {"cls": "C", "secondary": ["R"], "note": ""},
-    "trek_stop": {"cls": "C", "secondary": ["B"], "note": ""},
-    "trek_summary_sent": {"cls": "R", "secondary": [], "note": ""},
-    "trek_take_over": {"cls": "C", "secondary": ["R"], "note": ""},
-    "trek_task_add": {"cls": "R", "secondary": [], "note": ""},
-    "trek_task_state": {"cls": "R", "secondary": [], "note": ""},
-    "trek_timeline": {"cls": "Q", "secondary": [], "note": ""},
-    "trek_transfer_leader": {"cls": "C", "secondary": ["R"], "note": ""},
-    "trek_unblock": {"cls": "R", "secondary": ["B"], "note": "依存を外す記録(R)/reconcileはserver機構(B)"},
 
     # --- trigger ---
     "trigger_check": {"cls": "Q", "secondary": [], "note": ""},

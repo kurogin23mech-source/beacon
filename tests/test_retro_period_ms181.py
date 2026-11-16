@@ -163,7 +163,11 @@ def test_retro_reads_the_same_period_words_as_recap(since, monkeypatch, capsys):
     """
     out = _prepare(monkeypatch, capsys, since, "today")
     # Resolved, not echoed: the bounds are ISO dates whatever was typed.
-    assert out["period"]["since"] <= WINDOW[0]
+    # 上端は **今日** で見る。以前はここが「昨日以前」だったが、this-week は
+    # 月曜始まりなので **月曜に走ると今日に解決され、常に落ちた** (2026-11-16 に
+    # 実際に踏んだ)。曜日で結果が変わる検査は、週の 6 日は緑で 1 日だけ赤くなり、
+    # その赤は中身の欠陥ではなくカレンダーの位置を報告しているだけになる。
+    assert out["period"]["since"] <= TODAY.isoformat()
     assert out["period"]["until"] == WINDOW[1]
     assert out["period"]["received"] == {"since": since, "until": "today"}
     assert ENTRY_END_OF_WINDOW["id"] in _entry_ids(out), \

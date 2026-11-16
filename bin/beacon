@@ -158,6 +158,28 @@ _need_flag_value() {
     }
 }
 
+# _need_flag_value の姉妹 (ms-178 e-7150 / AX レビュー 2026-10-26)。
+# _need_flag_value は「残り引数が 2 本以上あるか」だけを見るので、
+# `--since-min --yes` のように **次のフラグが値の位置に来た** ケースを通してしまう。
+# 通すと利用者が明示した `--yes` が値として消え、書いた通りに動かないのにそうと
+# 分からない。値を取るフラグのうち「`--` で始まる値を取ることが有り得ない」ものは
+# こちらを使う (値の型そのものの検査は Python 側が持つ = 2 つのフロントで方針を
+# 割らないため、ここでは形だけを見る)。
+# 既存 9 箇所の _need_flag_value は据え置き: `--desc -- ...` のような値を渡す
+# 呼び出しが在るかを確認できていないので、共有ヘルパの挙動は変えない。
+_need_flag_value_not_flag() {
+    # _need_flag_value_not_flag <remaining-argc "$#"> <flag "$1"> <value "$2">
+    _need_flag_value "$1" "$2"
+    case "$3" in
+        --*)
+            echo "Error: フラグ '$2' の値が '$3' になっています" \
+                 "(別のフラグを値として読み込んでいます)。'$2 <value>' の形で" \
+                 "値を渡してください。" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # ms-120 e-3907: `<entity> status <id> <state>` writes state, which reverses
 # the polarity of the read-only `beacon status`. The canonical path is a named
 # intent verb (activate / close / start / observe / done) — the verb names what
@@ -286,6 +308,8 @@ if [ -n "$_beacon_wants_help" ]; then
     # as "the operator asked for help" and let the python chokepoint refuse any
     # non-read-only verb. The class is then closed for every command, including
     # ones added later: a missing registry entry can degrade help, never data.
+    # The inversion harness scripts/invert-note-backup-ordering.py anchors on
+    # the exact `export` line below (M1). Read it before changing this line.
     export BEACON_HELP_ONLY=1
 fi
 
@@ -472,9 +496,37 @@ case "${1:-}" in
     review)
         case "${2:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
+            status)
+                shift 2
+                # ms-119 e-6859: 関門の状態を副作用なしで読む。促し
+                # (`beacon trigger check`) は別の面なので、関門を確かめたいときは
+                # こちらを使う (促しの空リストを「関門が開いた」と読ませない)。
+                _rst_pr="" _rst_repo="" _rst_json="" _rst_target=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --pr)   _need_flag_value "$#" "$1"; _rst_pr="$2";   shift 2 ;;
+                        --repo) _need_flag_value "$#" "$1"; _rst_repo="$2"; shift 2 ;;
+                        # 兄弟 (`review done` / `review skip`) が (--pr | --target) を
+                        # 取るので、この動詞にも --target を転移して打つ呼び出し側が居る
+                        # (独立 AX レビュー, 2026-11-10)。素の _guard_flag に落とすと
+                        # 「'--target' は valid な flag でない」としか出ず、
+                        # **兄弟では在る文法がここでは未対応**だと伝わらない。
+                        # 受け取って commands.py に渡し、**文面の正本は 1 箇所**
+                        # (cmd_review_status) に置く — 両フロントに同じ説明を
+                        # 書き写すと、片方だけ直って黙ってズレる。
+                        --target) _need_flag_value "$#" "$1"; _rst_target="$2"; shift 2 ;;
+                        --json) _rst_json="1";                              shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)      _guard_no_positional "review status" "$1" ;;
+                    esac
+                done
+                BEACON_PR_NUMBER="$_rst_pr" BEACON_PR_REPO="$_rst_repo" \
+                    BEACON_TARGET_ID="$_rst_target" \
+                    BEACON_JSON="$_rst_json" \
+                    python3 "$COMMANDS_PY" review_status ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj="" _rd_repo="" _rd_target="" _rd_nofind="" _rd_sha=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
@@ -495,6 +547,12 @@ case "${1:-}" in
                         # 「書き忘れた」が記録上まったく同じだった。省略を許さず、
                         # 0 件ならそう宣言してもらう (値を取らない旗)。
                         --no-findings)          _rd_nofind="1";                                shift ;;
+                        # ms-119 e-6859: **どの差分に対する実施か** を明示する。
+                        # 既定は gh に聞いた「いまの PR head」。judge に渡した
+                        # bundle が古い head のものだったときに、正直にその sha を
+                        # 記録できるようにするための上書き口 (関門はこの sha と
+                        # いまの head を突き合わせるので、嘘を書くと通らない)。
+                        --reviewed-sha)         _need_flag_value "$#" "$1"; _rd_sha="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
                         # ms-166 e-6918: 位置引数を黙って捨てない。done だけ
                         # `*) shift ;;` で捨てており `beacon review done ms-166` が
@@ -515,6 +573,7 @@ case "${1:-}" in
                     BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
                     BEACON_REVIEW_NO_FINDINGS="$_rd_nofind" \
+                    BEACON_REVIEWED_SHA="$_rd_sha" \
                     python3 "$COMMANDS_PY" review_done ;;
             skip)
                 shift 2
@@ -1170,761 +1229,6 @@ except ValueError as e:
                 ;;
         esac
         ;;
-    trek)
-        # Trek is a top-level cross-project entity, so we don't call
-        # ensure_project. Storage is ~/.beacon/treks/ (local mode) until
-        # the HTTP path lands in e-1656.
-        case "${2:-}" in
-            create)
-                shift 2
-                title="" type_="" desc="" goal_state=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --type) type_="${2:-}"; shift 2 ;;
-                        --description|--desc) desc="${2:-}"; shift 2 ;;
-                        --goal-state) goal_state="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$title" ]] && title="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_TITLE="$title" \
-                    BEACON_TREK_TYPE="$type_" \
-                    BEACON_TREK_DESCRIPTION="$desc" \
-                    BEACON_TREK_GOAL_STATE="$goal_state" \
-                    python3 "$COMMANDS_PY" trek_create
-                ;;
-            list|ls)
-                shift 2
-                status_filter="" include_archived="" all_actors="" joined_only=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --status) status_filter="${2:-}"; shift 2 ;;
-                        --all|--include-archived) include_archived="1"; shift ;;
-                        --all-actors) all_actors="1"; shift ;;
-                        --joined) joined_only="1"; shift ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*) _guard_flag "$1" ;;
-                        *) shift ;;
-                    esac
-                done
-                BEACON_TREK_STATUS="$status_filter" \
-                    BEACON_TREK_INCLUDE_ARCHIVED="$include_archived" \
-                    BEACON_TREK_ALL_ACTORS="$all_actors" \
-                    BEACON_TREK_JOINED_ONLY="$joined_only" \
-                    python3 "$COMMANDS_PY" trek_list
-                ;;
-            show|get)
-                shift 2
-                trek_id="" show_all=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --all|--detail) show_all="1"; shift ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_ALL="$show_all" \
-                    python3 "$COMMANDS_PY" trek_show
-                ;;
-            review-verdicts)
-                # ms-128 / e-4374: emit the leader's verdict set for a
-                # leader_review target (completion vs halt-rescue, branched on
-                # the halt_reason tag). /beacon-trek-review calls this so the
-                # verdict lists have a single source of truth (lib), not a
-                # hand-copied prose mirror (AX/maintainability review PR#545).
-                shift 2
-                trek_id="" task_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)    _guard_flag "$1" ;;
-                        *)
-                            if [[ -z "$trek_id" ]]; then trek_id="$1"
-                            elif [[ -z "$task_id" ]]; then task_id="$1"
-                            fi
-                            shift
-                            ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
-                    python3 "$COMMANDS_PY" trek_review_verdicts
-                ;;
-            start)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_start
-                ;;
-            archive)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_archive
-                ;;
-            invite)
-                shift 2
-                trek_id="" actor="" notify=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --actor) actor="${2:-}"; shift 2 ;;
-                        --notify) notify="1"; shift ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" \
-                    BEACON_TREK_ACTOR="$actor" \
-                    BEACON_TREK_NOTIFY="$notify" \
-                    python3 "$COMMANDS_PY" trek_invite
-                ;;
-            join)
-                shift 2
-                trek_id=""
-                no_arm=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        --no-arm) no_arm=1; shift ;;
-                        # ms-88 / e-2090 — Trek 参加 consent gate bypass。
-                        # 長い flag は意味理解の forcing function (= 短縮 -y や
-                        # 反射的 typo で抜けない長さ)。 export 経路にして親 env の
-                        # BEACON_TREK_CONSENT_ACK を上書きしない (= bot / fixture
-                        # 経由の env-based bypass と独立 / 共存可)。
-                        --i-understand-the-implications) export BEACON_TREK_CONSENT_ACK=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" \
-                    BEACON_TREK_NO_ARM="$no_arm" \
-                    python3 "$COMMANDS_PY" trek_join
-                ;;
-            leave)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_leave
-                ;;
-            plan)
-                shift 2
-                trek_id="" scope_add="" scope_remove="" goal_state="" goal_state_set=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --add-scope) scope_add="${2:-}"; shift 2 ;;
-                        --remove-scope) scope_remove="${2:-}"; shift 2 ;;
-                        --goal-state) goal_state="${2:-}"; goal_state_set="1"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" \
-                    BEACON_TREK_SCOPE_ADD="$scope_add" \
-                    BEACON_TREK_SCOPE_REMOVE="$scope_remove" \
-                    BEACON_TREK_GOAL_STATE="$goal_state" \
-                    BEACON_TREK_GOAL_STATE_SET="$goal_state_set" \
-                    python3 "$COMMANDS_PY" trek_plan
-                ;;
-            timeline)
-                shift 2
-                trek_id="" limit="50"
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --limit) limit="${2:-50}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_LIMIT="$limit" \
-                    python3 "$COMMANDS_PY" trek_timeline
-                ;;
-            # ms-97 / e-2626 (AC23) — canonical scope-add verb.
-            # Alias of `plan --add-scope <project>:<ref>` with a flag-style
-            # signature (= --project / --milestone / --operation / --task)
-            # so users don't have to hand-assemble the colon-joined ref.
-            # Reuses cmd_trek_plan under the hood (= one code path for the
-            # staging machinery shared with --add-scope).
-            scope-add)
-                shift 2
-                trek_id="" sa_project="" sa_milestone="" sa_operation="" sa_task=""
-                sa_opportunity="" sa_account=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --project) sa_project="${2:-}"; shift 2 ;;
-                        -m|--milestone|--ms) sa_milestone="${2:-}"; shift 2 ;;
-                        --operation|--op) sa_operation="${2:-}"; shift 2 ;;
-                        --task|--e) sa_task="${2:-}"; shift 2 ;;
-                        # ms-109 e-3699 — sales narrowing (商談 / 顧客)
-                        --opportunity|--opp) sa_opportunity="${2:-}"; shift 2 ;;
-                        --account|--acc) sa_account="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                if [[ -z "$sa_project" ]]; then
-                    echo "Error: --project <pid> is required" >&2
-                    exit 1
-                fi
-                # Pick the narrowing key. cmd_trek_plan rejects bare
-                # project-wide entries via parse_scope_arg (AC7 strict), which
-                # also infers the kind from the ref prefix (ms-/op-/e-/opp-/
-                # acc-), so we just forward whichever narrowing ref is set.
-                ref=""
-                if [[ -n "$sa_milestone" ]]; then
-                    ref="$sa_milestone"
-                elif [[ -n "$sa_operation" ]]; then
-                    ref="$sa_operation"
-                elif [[ -n "$sa_task" ]]; then
-                    ref="$sa_task"
-                elif [[ -n "$sa_opportunity" ]]; then
-                    ref="$sa_opportunity"
-                elif [[ -n "$sa_account" ]]; then
-                    ref="$sa_account"
-                else
-                    echo "Error: one of --milestone | --operation | --task | --opportunity | --account is required" >&2
-                    exit 1
-                fi
-                BEACON_TREK_ID="$trek_id" \
-                    BEACON_TREK_SCOPE_ADD="${sa_project}:${ref}" \
-                    python3 "$COMMANDS_PY" trek_plan
-                ;;
-            # ms-97 / e-2611 AC25 — scope mutation approval flow.
-            scope-approve)
-                shift 2
-                trek_id="" pending_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        *)
-                            if [[ -z "$trek_id" ]]; then
-                                trek_id="$1"
-                            elif [[ -z "$pending_id" ]]; then
-                                pending_id="$1"
-                            fi
-                            shift
-                            ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
-                    python3 "$COMMANDS_PY" trek_scope_approve
-                ;;
-            scope-reject)
-                shift 2
-                trek_id="" pending_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        *)
-                            if [[ -z "$trek_id" ]]; then
-                                trek_id="$1"
-                            elif [[ -z "$pending_id" ]]; then
-                                pending_id="$1"
-                            fi
-                            shift
-                            ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
-                    python3 "$COMMANDS_PY" trek_scope_reject
-                ;;
-            # ms-99 / e-2829 — slot verbs (Trek schema v2). Nested
-            # subcommand: `beacon trek slot <add|amend|claim|list>`.
-            slot)
-                _slot_sub="${3:-}"
-                case "$_slot_sub" in
-                    add)
-                        shift 3
-                        trek_id="" project="" ms="" op="" task="" children=""
-                        while [[ $# -gt 0 ]]; do
-                            case "$1" in
-                                --project) project="${2:-}"; shift 2 ;;
-                                -m|--milestone|--ms) ms="${2:-}"; shift 2 ;;
-                                --operation|--op) op="${2:-}"; shift 2 ;;
-                                --task|--e) task="${2:-}"; shift 2 ;;
-                                --children) children="${2:-}"; shift 2 ;;
-                                --json) export BEACON_JSON=1; shift ;;
-                                -?*)           _guard_flag "$1" ;;
-                                *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                            esac
-                        done
-                        BEACON_TREK_ID="$trek_id" \
-                            BEACON_SLOT_PROJECT="$project" \
-                            BEACON_SLOT_MILESTONE="$ms" \
-                            BEACON_SLOT_OPERATION="$op" \
-                            BEACON_SLOT_TASK="$task" \
-                            BEACON_SLOT_CHILDREN="$children" \
-                            python3 "$COMMANDS_PY" trek_slot_add
-                        ;;
-                    amend)
-                        shift 3
-                        trek_id="" slot_id="" add_children="" rem_children=""
-                        while [[ $# -gt 0 ]]; do
-                            case "$1" in
-                                --add-child)
-                                    if [[ -z "$add_children" ]]; then
-                                        add_children="${2:-}"
-                                    else
-                                        add_children="$add_children,${2:-}"
-                                    fi
-                                    shift 2 ;;
-                                --remove-child)
-                                    if [[ -z "$rem_children" ]]; then
-                                        rem_children="${2:-}"
-                                    else
-                                        rem_children="$rem_children,${2:-}"
-                                    fi
-                                    shift 2 ;;
-                                --json) export BEACON_JSON=1; shift ;;
-                                *)
-                                    if [[ -z "$trek_id" ]]; then
-                                        trek_id="$1"
-                                    elif [[ -z "$slot_id" ]]; then
-                                        slot_id="$1"
-                                    fi
-                                    shift ;;
-                            esac
-                        done
-                        BEACON_TREK_ID="$trek_id" \
-                            BEACON_SLOT_ID="$slot_id" \
-                            BEACON_SLOT_ADD_CHILDREN="$add_children" \
-                            BEACON_SLOT_REMOVE_CHILDREN="$rem_children" \
-                            python3 "$COMMANDS_PY" trek_slot_amend
-                        ;;
-                    claim)
-                        shift 3
-                        trek_id="" slot_id="" session_="" unclaim=""
-                        while [[ $# -gt 0 ]]; do
-                            case "$1" in
-                                --session) session_="${2:-}"; shift 2 ;;
-                                --unclaim) unclaim="1"; shift ;;
-                                --json) export BEACON_JSON=1; shift ;;
-                                *)
-                                    if [[ -z "$trek_id" ]]; then
-                                        trek_id="$1"
-                                    elif [[ -z "$slot_id" ]]; then
-                                        slot_id="$1"
-                                    fi
-                                    shift ;;
-                            esac
-                        done
-                        BEACON_TREK_ID="$trek_id" \
-                            BEACON_SLOT_ID="$slot_id" \
-                            BEACON_SLOT_SESSION="$session_" \
-                            BEACON_SLOT_UNCLAIM="$unclaim" \
-                            python3 "$COMMANDS_PY" trek_slot_claim
-                        ;;
-                    list)
-                        shift 3
-                        trek_id=""
-                        while [[ $# -gt 0 ]]; do
-                            case "$1" in
-                                --json) export BEACON_JSON=1; shift ;;
-                                -?*)           _guard_flag "$1" ;;
-                                *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                            esac
-                        done
-                        BEACON_TREK_ID="$trek_id" \
-                            python3 "$COMMANDS_PY" trek_slot_list
-                        ;;
-                    *)
-                        echo "Usage: beacon trek slot <add|amend|claim|list> [args]" >&2
-                        exit 2
-                        ;;
-                esac
-                ;;
-            # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
-            blanket-approve|blanket-revoke)
-                _bk_sub="$2"
-                shift 2
-                trek_id="" category=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --category) category="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                if [[ "$_bk_sub" == "blanket-approve" ]]; then
-                    BEACON_TREK_ID="$trek_id" BEACON_TREK_BLANKET_CATEGORY="$category" \
-                        python3 "$COMMANDS_PY" trek_blanket_approve
-                else
-                    BEACON_TREK_ID="$trek_id" BEACON_TREK_BLANKET_CATEGORY="$category" \
-                        python3 "$COMMANDS_PY" trek_blanket_revoke
-                fi
-                ;;
-            stop)
-                shift 2
-                trek_id="" reason=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --reason) reason="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_TREK_REASON="$reason" \
-                    python3 "$COMMANDS_PY" trek_stop
-                ;;
-            resume)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_resume
-                ;;
-            transfer-leader)
-                shift 2
-                trek_id="" to_sid=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --to) to_sid="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_TREK_TO="$to_sid" \
-                    python3 "$COMMANDS_PY" trek_transfer_leader
-                ;;
-            # ms-88 / e-2089 — fresh session recovery path. 親 dead session を
-            # 引き継いで現在の session を leader_session_id に bind し直す。
-            take-over)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" python3 "$COMMANDS_PY" trek_take_over
-                ;;
-            # ms-88 / e-2138 — Kickoff Ritual completion stamp。
-            # /beacon-trek-pulse Skill の Step 0.4 がこれを叩く。 server
-            # endpoint だけ先に land した PR #177 の follow-up (e-2139 残作業)
-            # で CLI wrapper を補完。
-            kickoff)
-                shift 2
-                trek_id="" session_override="" kickoff_dm_event_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        --session-id) session_override="${2:-}"; shift 2 ;;
-                        --kickoff-dm-event-id) kickoff_dm_event_id="${2:-}"; shift 2 ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                if [[ -n "$session_override" ]]; then
-                    export BEACON_SESSION_ID="$session_override"
-                fi
-                BEACON_TREK_ID="$trek_id" \
-                    BEACON_TREK_KICKOFF_DM_EVENT_ID="$kickoff_dm_event_id" \
-                    python3 "$COMMANDS_PY" trek_kickoff
-                ;;
-            # ms-88 / e-2106 — Layer 2 (= observability) self-report endpoint。
-            # /beacon-trek-pulse Skill が Step 3 でこれを叩く前提。 CLI からも
-            # 直接叩ける (= execute Skill 内で inline 使う / dogfood で test)。
-            pulse-ack)
-                shift 2
-                trek_id="" picked_choice="" note=""
-                # ms-92 / e-2165 — structured payload fields. Each
-                # --blocker appends to the array; the joined value is
-                # passed to the Python helper as a \n-separated string
-                # (= simpler than serialising JSON through env vars).
-                state_summary=""
-                blockers=""
-                needs_leader=""
-                time_on_task=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        --picked-choice) picked_choice="${2:-}"; shift 2 ;;
-                        --note) note="${2:-}"; shift 2 ;;
-                        --state-summary) state_summary="${2:-}"; shift 2 ;;
-                        --blocker)
-                            if [[ -z "$blockers" ]]; then blockers="${2:-}"
-                            else blockers="${blockers}"$'\n'"${2:-}"
-                            fi
-                            shift 2
-                            ;;
-                        --needs-leader-judgment) needs_leader=1; shift ;;
-                        --time-on-task) time_on_task="${2:-0}"; shift 2 ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" \
-                    BEACON_TREK_PICKED_CHOICE="$picked_choice" \
-                    BEACON_TREK_NOTE="$note" \
-                    BEACON_TREK_STATE_SUMMARY="$state_summary" \
-                    BEACON_TREK_BLOCKERS="$blockers" \
-                    BEACON_TREK_NEEDS_LEADER="$needs_leader" \
-                    BEACON_TREK_TIME_ON_TASK="$time_on_task" \
-                    python3 "$COMMANDS_PY" trek_pulse_ack
-                ;;
-            # ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= reconcile)。
-            # 2026-06-19 dogfood で観測した「task pool で done だが Trek stamp
-            # は waiting-review / leader_review / working で残ってる」 stuck
-            # 状態を一括修復する。 default は dry-run、 --apply で実適用。
-            reconcile)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        --apply) export BEACON_TREK_APPLY=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" \
-                    python3 "$COMMANDS_PY" trek_reconcile
-                ;;
-            task-state)
-                shift 2
-                trek_id="" task_id="" state="" note="" verdict="" attainment=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --note) note="${2:-}"; shift 2 ;;
-                        # ms-128 / e-4386 — 完遂ゲート。approve で user_review に倒すには
-                        # --verdict approve + 全 met の --attainment-verdict (JSON list) が要る。
-                        --verdict) verdict="${2:-}"; shift 2 ;;
-                        --attainment-verdict) attainment="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        *)
-                            if [[ -z "$trek_id" ]]; then trek_id="$1"
-                            elif [[ -z "$task_id" ]]; then task_id="$1"
-                            elif [[ -z "$state" ]]; then state="$1"
-                            fi
-                            shift
-                            ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
-                BEACON_TREK_STATE="$state" BEACON_TREK_NOTE="$note" \
-                BEACON_TREK_VERDICT="$verdict" \
-                BEACON_TREK_ATTAINMENT_VERDICT="$attainment" \
-                    python3 "$COMMANDS_PY" trek_task_state
-                ;;
-            # ms-128 方針4 / e-4365 — leader が依存 (blocker) を張る。TARGET が
-            # 各 --on <blocker> に依存する = blocker が取り込み済みになるまで
-            # TARGET を block する。循環・自己ブロックは server/lib が拒否。
-            block)
-                shift 2
-                trek_id="" target_id="" note="" onblockers=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --on)
-                            if [[ -z "$onblockers" ]]; then onblockers="${2:-}"
-                            else onblockers="${onblockers}"$'\n'"${2:-}"
-                            fi
-                            shift 2 ;;
-                        --note) note="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*) _guard_flag "$1" ;;
-                        *)
-                            if [[ -z "$trek_id" ]]; then trek_id="$1"
-                            elif [[ -z "$target_id" ]]; then target_id="$1"
-                            fi
-                            shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_TREK_TARGET_ID="$target_id" \
-                BEACON_TREK_BLOCKER_IDS="$onblockers" BEACON_TREK_NOTE="$note" \
-                    python3 "$COMMANDS_PY" trek_block
-                ;;
-            # ms-128 方針4 / e-4365 — leader が依存 (blocker) を 1 本外す。循環の
-            # 解消や誤登録の訂正に使う。外した後に reconcile が走り block 状態が
-            # 再整定する (最後の未解決 blocker なら自動再開)。
-            unblock)
-                shift 2
-                trek_id="" target_id="" onblockers=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --on)
-                            if [[ -z "$onblockers" ]]; then onblockers="${2:-}"
-                            else onblockers="${onblockers}"$'\n'"${2:-}"
-                            fi
-                            shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*) _guard_flag "$1" ;;
-                        *)
-                            if [[ -z "$trek_id" ]]; then trek_id="$1"
-                            elif [[ -z "$target_id" ]]; then target_id="$1"
-                            fi
-                            shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_TREK_TARGET_ID="$target_id" \
-                BEACON_TREK_BLOCKER_IDS="$onblockers" \
-                    python3 "$COMMANDS_PY" trek_unblock
-                ;;
-            # ms-128 方針4 / e-4365 — 依存待ち (block) の target 一覧 + 循環表示。
-            blockers)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*) _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" \
-                    python3 "$COMMANDS_PY" trek_blockers
-                ;;
-            # ms-95 / e-2308 — TTL safety net deadline 延長 (= leader が Agent
-            # subagent dispatch する際の reaffirm 代替)。 --minutes 0 で clear。
-            extend-ttl)
-                shift 2
-                trek_id="" task_id="" minutes="" reason=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --minutes) minutes="${2:-}"; shift 2 ;;
-                        --reason) reason="${2:-}"; shift 2 ;;
-                        --json) export BEACON_JSON=1; shift ;;
-                        *)
-                            if [[ -z "$trek_id" ]]; then trek_id="$1"
-                            elif [[ -z "$task_id" ]]; then task_id="$1"
-                            fi
-                            shift
-                            ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
-                BEACON_TREK_TTL_MINUTES="$minutes" \
-                BEACON_TREK_TTL_REASON="$reason" \
-                    python3 "$COMMANDS_PY" trek_extend_ttl
-                ;;
-            # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後に
-            # meta.summary_sent_at を stamp し、 completion_notified_at と
-            # 組合せて leader-digest tick を停止する。
-            summary-sent)
-                shift 2
-                trek_id=""
-                while [[ $# -gt 0 ]]; do
-                    case "$1" in
-                        --json) export BEACON_JSON=1; shift ;;
-                        -?*)           _guard_flag "$1" ;;
-                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
-                    esac
-                done
-                BEACON_TREK_ID="$trek_id" \
-                    python3 "$COMMANDS_PY" trek_summary_sent
-                ;;
-            # ms-92 / e-2141 — cross-project task add via Trek scope。
-            # Trek scope に含まれる project の MS 配下にのみ task を起票できる
-            # (= scope-guard で structural enforce、 envelope は T1-system 経由)。
-            # scope 外 / 単独 task 下 への起票は 403 で reject される。
-            task)
-                case "${3:-}" in
-                    add)
-                        shift 3
-                        trek_id="" target="" description="" priority=""
-                        motivation="" acceptance_criteria="" entry_type="task"
-                        while [[ $# -gt 0 ]]; do
-                            case "$1" in
-                                --target) target="${2:-}"; shift 2 ;;
-                                --priority) priority="${2:-}"; shift 2 ;;
-                                --motivation) motivation="${2:-}"; shift 2 ;;
-                                --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
-                                --type) entry_type="${2:-task}"; shift 2 ;;
-                                --json) export BEACON_JSON=1; shift ;;
-                                *)
-                                    if [[ -z "$trek_id" ]]; then trek_id="$1"
-                                    elif [[ -z "$description" ]]; then description="$1"
-                                    fi
-                                    shift
-                                    ;;
-                            esac
-                        done
-                        BEACON_TREK_ID="$trek_id" \
-                            BEACON_TREK_TASK_TARGET="$target" \
-                            BEACON_DESCRIPTION="$description" \
-                            BEACON_PRIORITY="$priority" \
-                            BEACON_MOTIVATION="$motivation" \
-                            BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
-                            BEACON_TYPE="$entry_type" \
-                            python3 "$COMMANDS_PY" trek_task_add
-                        ;;
-                    *)
-                        echo "Usage: beacon trek task add <trek-id> --target <project-id>:<ms-id> \"<description>\" [--motivation \"...\"] [--acceptance-criteria \"...\"] [--priority L] [--type task|...]" >&2
-                        echo "" >&2
-                        echo "  cross-project task add through Trek scope (ms-92 / e-2141)." >&2
-                        echo "  scope-guard: target project + milestone must be enumerated in trek.scope," >&2
-                        echo "  and the matching scope entry must be project-wide or milestone-narrowed." >&2
-                        echo "  scope に含まれる単独 task の下への起票は禁止 (= MS 単位の user 意思を保つ)。" >&2
-                        exit 1
-                        ;;
-                esac
-                ;;
-            *)
-                echo "Usage: beacon trek <subcommand> [args]"
-                echo ""
-                echo "Subcommands:"
-                echo "  create \"<title>\" [--type temporary|persistent] [--description \"...\"]"
-                echo "  list [--status S] [--all] [--all-actors] [--json]"
-                echo "  show <trek-id> [--json]"
-                echo "  start <trek-id>"
-                echo "  archive <trek-id>"
-                echo "  invite <trek-id> --actor <email> [--notify]"
-                echo "  join <trek-id>"
-                echo "  leave <trek-id>"
-                echo "  plan <trek-id> --add-scope <project[:ref]>"
-                echo "  plan <trek-id> --remove-scope <project[:ref]>"
-                echo "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号を立てる)"
-                echo "  resume <trek-id>                     (= halt 信号を clear)"
-                echo "  transfer-leader <trek-id> --to <session-id>"
-                echo "  take-over <trek-id>                  (= dead leader_session_id を fresh session に bind し直す、 ms-88 e-2089)"
-                echo "  kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]  (= Kickoff Ritual 完了 stamp、 /beacon-trek-pulse Step 0.4、 ms-88 e-2138)"
-                echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...'] [--state-summary '...'] [--blocker '...'] [--needs-leader-judgment] [--time-on-task N]  (= /beacon-trek-pulse Skill observability ack、 ms-88 e-2106 + ms-92 e-2165 構造化 payload)"
-                echo "  reconcile <trek-id> [--apply]                  (= task pool ↔ Trek stamp の乖離を修復、 default dry-run、 ms-88 e-2167)"
-                echo "  task-state <trek-id> <task-id> <state> [--note '...'] [--verdict approve|forward-to-user] [--attainment-verdict '<json>']  (= ms-75/e-2048、 state: working|leader_review|user_review。user_review に倒すには全 met の --attainment-verdict 付き approve、 または人間エスカレーションの forward-to-user が必須。re-work は verdict でなく state=working で表す、 ms-128/e-4386)"
-                echo "  block <trek-id> <target-id> --on <blocker-id> [--on ...] [--note '...']  (= leader が依存を張る、 ms-128/e-4365。全依存が取り込み済みで自動再開)"
-                echo "  unblock <trek-id> <target-id> --on <blocker-id>  (= 依存を 1 本外す、 循環解消/誤登録訂正、 ms-128/e-4365)"
-                echo "  blockers <trek-id>                              (= 依存待ちの target 一覧 + 循環表示、 ms-128/e-4365)"
-                echo "  task add <trek-id> --target <pid>:<ms-id> \"<desc>\" [--motivation \"...\"] [--acceptance-criteria \"...\"] [--priority L]  (= cross-project task add via Trek scope、 ms-92/e-2141)"
-                echo ""
-                echo "Env (creator identity, required for 'create'):"
-                echo "  BEACON_USER_EMAIL    creator email"
-                echo "  BEACON_SESSION_ID    creator session id (becomes initial leader)"
-                echo "  BEACON_USER_ID       creator user_id (fallback: whoami)"
-                exit 1
-                ;;
-        esac
-        ;;
     run)
         ensure_project
         case "${2:-}" in
@@ -2157,6 +1461,27 @@ except ValueError as e:
                         BEACON_LIMIT="$_sl_limit" BEACON_JSON="$_sl_json" \
                             python3 "$COMMANDS_PY" session_log_list
                         ;;
+                    handoff)
+                        # ms-160 e-7314: 最新の引き継ぎの「次セッション最優先」節
+                        # だけを本文のまま出す。list は全セッション分を返すので、
+                        # 読む側が切り出す最中に要約へ化けていた。
+                        shift 3
+                        _sn_json=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) _sn_json="1"; shift ;;
+                                -?*) _guard_flag "$1" ;;
+                                # この verb は位置引数を取らない。黙って捨てると
+                                # Python 側 (argparse) は exit 2 で断るので、同じ
+                                # 入力で結果が割れる (独立 AX レビューが実測)。
+                                *) echo "Error: 'beacon session log handoff' takes no arguments (got '$1')." >&2
+                                   echo "Usage: beacon session log handoff [--json]" >&2
+                                   exit 2 ;;
+                            esac
+                        done
+                        BEACON_JSON="$_sn_json" \
+                            python3 "$COMMANDS_PY" session_log_handoff
+                        ;;
                     show|get)
                         shift 3
                         _ss_id=""
@@ -2172,7 +1497,7 @@ except ValueError as e:
                             python3 "$COMMANDS_PY" session_log_show
                         ;;
                     *)
-                        echo "Usage: beacon session log [list|show]"
+                        echo "Usage: beacon session log [list|handoff|show]"
                         ;;
                 esac
                 ;;
@@ -2323,6 +1648,7 @@ except ValueError as e:
                 echo "Usage: beacon session end [--summary <text>] [--session-id <id>] [--json] [--bus-origin]"
                 echo "       beacon session rescue [--json]"
                 echo "       beacon session log list [--limit N] [--json]"
+                echo "       beacon session log handoff [--json]"
                 echo "       beacon session log show <session-id> [--json]"
                 echo "       beacon session id"
                 echo "       beacon session focus \"<text>\" | --clear | --show [--json]"
@@ -2429,18 +1755,57 @@ EOF
                 # dumped the notes instead of explaining the command.
                 shift 2
                 note_json=""
+                note_all=""
+                note_since_days=""
+                note_limit=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) note_json="1"; shift ;;
+                        # ms-178 e-7150 (AC7): the read is windowed by default
+                        # (直近 N 日 かつ 最大 M 件) because session-start pulls
+                        # this into context on every startup. --all opts out.
+                        --all) note_all="1"; shift ;;
+                        --since-days) _need_flag_value_not_flag "$#" "$1" "${2:-}"; note_since_days="$2"; shift 2 ;;
+                        --limit) _need_flag_value_not_flag "$#" "$1" "${2:-}"; note_limit="$2"; shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
                         # ms-178 (AX review PR#766): reject stray positionals
                         # instead of shift-ing them away. Silently swallowing an
                         # unexpected token is the same defect class as the old
                         # `${3:+1}` — a malformed call looks like a correct one.
+                        # scripts/invert-note-backup-ordering.py anchors on the
+                        # exact `*)` line below (M14).
                         *)      _guard_no_positional "note list" "$1" ;;
                     esac
                 done
-                BEACON_JSON="$note_json" python3 "$COMMANDS_PY" note_list
+                BEACON_JSON="$note_json" \
+                    BEACON_NOTE_LIST_ALL="$note_all" \
+                    BEACON_NOTE_LIST_SINCE_DAYS="$note_since_days" \
+                    BEACON_NOTE_LIST_LIMIT="$note_limit" \
+                    python3 "$COMMANDS_PY" note_list
+                ;;
+            reap)
+                # ms-178 e-7150: delete notes no LIVE session can claim. The
+                # missing third option between `clear` (only my own, which a
+                # finished session can no longer run) and
+                # `clear --include-other-sessions` (also takes running
+                # sessions' handoff notes).
+                shift 2
+                note_reap_yes=""
+                note_reap_untagged=""
+                note_reap_window=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -y|--yes|--confirm) note_reap_yes="1"; shift ;;
+                        --include-untagged) note_reap_untagged="1"; shift ;;
+                        --since-min) _need_flag_value_not_flag "$#" "$1" "${2:-}"; note_reap_window="$2"; shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)   _guard_no_positional "note reap" "$1" ;;
+                    esac
+                done
+                BEACON_NOTE_REAP_YES="$note_reap_yes" \
+                    BEACON_NOTE_REAP_UNTAGGED="$note_reap_untagged" \
+                    BEACON_NOTE_REAP_SINCE_MIN="$note_reap_window" \
+                    python3 "$COMMANDS_PY" note_reap
                 ;;
             restore)
                 # ms-178 e-6656: recover from the backups `note clear` left.
@@ -2500,8 +1865,9 @@ EOF
                 ;;
             "")
                 echo "Usage: beacon note \"<text>\" [--context \"<label>\"]"
-                echo "       beacon note list [--json]"
+                echo "       beacon note list [--json] [--all] [--since-days <N>] [--limit <N>]   (既定は直近 3 日 / 最大 20 件)"
                 echo "       beacon note clear -y|--yes [--include-other-sessions]   (既定は自セッション分のみ)"
+                echo "       beacon note reap -y|--yes [--include-untagged] [--since-min <N>]   (終了したセッションのメモのみ)"
                 echo "       beacon note restore"
                 echo "       beacon note purge-probes [--confirm]   (-y / --yes も可)"
                 ;;
@@ -2512,7 +1878,7 @@ EOF
                 note_bus_origin=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        --context)    note_context="${2:-}"; shift 2 ;;
+                        --context)    _need_flag_value "$#" "$1"; note_context="$2"; shift 2 ;;
                         --bus-origin) note_bus_origin="1"; shift ;;
                         -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$note_text" ]] && note_text="$1"; shift ;;
@@ -3254,7 +2620,7 @@ Usage:
                                     blocks. --target narrows to one target;
                                     omit for every target. (ms-112)
 
-target kind: ms | task | operation | trek | free
+target kind: ms | task | operation | free
 EOF
                 ;;
             *)
@@ -3326,12 +2692,9 @@ EOF
         _bus_rationale=""     # ms-90 / e-3246: decision-event の判断理由 (任意)
         _bus_project_id=""
         _bus_to=""
-        # ms-75 / e-1858: --to repeatable + --to-trek expansion.
-        # _bus_to_list collects every --to value newline-separated; --to-trek
-        # appends the trek's joined leader_session_id via `beacon trek show
-        # --json | jq`. send subcommand fans out per-recipient.
+        # ms-75 / e-1858: --to repeatable. _bus_to_list collects every --to
+        # value newline-separated; send fans out per-recipient.
         _bus_to_list=""
-        _bus_to_trek=""
         # ms-54 / e-2934: --to-user for user-scoped (project × user) 宛先。
         # session_id churn (= bclaude 再起動で sid が変わる) しても、受信者側で
         # 新 session が起動すれば inbox に届く。email or user_id 受け付ける
@@ -3374,7 +2737,6 @@ EOF
                 --sender)         _bus_sender="${2:-}"; shift 2 ;;
                 --recipient)      _bus_recipient="${2:-}"; shift 2 ;;
                 --to)             _bus_to="${2:-}"; _bus_to_list="${_bus_to_list}${2:-}"$'\n'; shift 2 ;;
-                --to-trek)        _bus_to_trek="${2:-}"; shift 2 ;;
                 --to-user)        _bus_to_user="${2:-}"; shift 2 ;;
                 --delivery)       _bus_delivery="${2:-}"; shift 2 ;;
                 --interval)       _bus_interval="${2:-}"; shift 2 ;;
@@ -3467,25 +2829,6 @@ EOF
         fi
         case "$_bus_sub" in
             send)
-                # ms-75 / e-1858: --to repeatable + --to-trek expansion.
-                # If --to-trek was passed, append the trek's leader session
-                # id to _bus_to_list. Cloud-mode lookup uses `beacon trek
-                # show --json` which transparently honors the active store.
-                if [[ -n "$_bus_to_trek" ]]; then
-                    if command -v python3 >/dev/null 2>&1; then
-                        _trek_leader=$(BEACON_TREK_ID="$_bus_to_trek" \
-                            python3 "$COMMANDS_PY" trek_show 2>/dev/null \
-                            | python3 -c 'import sys, json, re
-text = sys.stdin.read()
-m = re.search(r"^\s*leader sess:\s*(\S+)", text, re.M)
-print(m.group(1) if m else "")' || true)
-                        if [[ -n "$_trek_leader" ]]; then
-                            _bus_to_list="${_bus_to_list}${_trek_leader}"$'\n'
-                        else
-                            echo "Warning: --to-trek $_bus_to_trek → leader_session_id not resolvable; trek may have no active leader." >&2
-                        fi
-                    fi
-                fi
                 # ms-54 / e-2934: --to と --to-user は相互排他 (どちらか片方のみ)。
                 # 両方 or どちらも無し (channel=dm 時) はここでは通し、 python 側
                 # (cmd_bus_send) が最終判定して親切エラーを出す。
@@ -3688,7 +3031,7 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-user <user-id>] [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <auto-execute|propose-to-ai|notify-user-only; default propose-to-ai>] [--in-reply-to <event_id>] [--manual] [--recipient-confirmed] [--client-event-id <id> --retry] [--action <name>]... [--no-envelope] [--project <id>]
+Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-user <user-id>] [--payload '<json>'] [--sender <id>] [--delivery <auto-execute|propose-to-ai|notify-user-only; default propose-to-ai>] [--in-reply-to <event_id>] [--manual] [--recipient-confirmed] [--client-event-id <id> --retry] [--action <name>]... [--no-envelope] [--project <id>]
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] (--last-seen-at <iso8601> | --event <event_id>) [--project <id>]
@@ -4042,21 +3385,8 @@ EOF
     trigger)
         case "${2:-}" in
             fire)
-                # ms-75 / e-1870: --trek <id> binds the trigger to a Trek scope
-                # so the bus event rides the trek-trigger channel with
-                # delivery=auto-execute (parallel to operation-trigger).
-                # Form 1 (legacy):    beacon trigger fire <name> [msg]
-                # Form 2 (trek-aware): beacon trigger fire --trek <id> <name> [msg]
-                # The flag must come first so positional parsing stays simple.
-                if [ "${3:-}" = "--trek" ]; then
-                    BEACON_TRIGGER_NAME="${5:-}" \
-                        BEACON_TRIGGER_MESSAGE="${6:-}" \
-                        BEACON_TRIGGER_TREK_ID="${4:-}" \
-                        python3 "$COMMANDS_PY" trigger_fire
-                else
-                    BEACON_TRIGGER_NAME="${3:-}" BEACON_TRIGGER_MESSAGE="${4:-}" \
-                        python3 "$COMMANDS_PY" trigger_fire
-                fi
+                BEACON_TRIGGER_NAME="${3:-}" BEACON_TRIGGER_MESSAGE="${4:-}" \
+                    python3 "$COMMANDS_PY" trigger_fire
                 ;;
             check)
                 python3 "$COMMANDS_PY" trigger_check
@@ -4072,7 +3402,7 @@ EOF
                 BEACON_TRIGGER_NAME="${3:-}" python3 "$COMMANDS_PY" trigger_clear
                 ;;
             *)
-                echo "Usage: beacon trigger fire [--trek <trek-id>] <name> [message]"
+                echo "Usage: beacon trigger fire <name> [message]"
                 echo "       beacon trigger check                 (local-only read)"
                 echo "       beacon trigger tick                  (refresh via cloud)"
                 echo "       beacon trigger clear <name>"
@@ -5205,20 +4535,29 @@ EOF
         ensure_project
         shift
         _view_port=""; _view_no_open=""; _view_json=""
-        _view_host=""; _view_expose=""
+        _view_host=""; _view_expose=""; _view_no_reuse=""; _view_idle=""
         while [ $# -gt 0 ]; do
             case "$1" in
                 # help は副作用ゼロで出す (旧: *) で握り潰されサーバ+ブラウザが
                 # 起動していた = ms-170 #742 AX review HIGH)。
+                #
+                # **文面は持たない** (ms-170 e-7147): `beacon view --help` は手前の
+                # 一括処理が台帳 (lib/commands.py _help_registry) から描くので、ここは
+                # 実際には通らない。通らない所に旗の一覧を書き写すと、台帳を直しても
+                # こちらが古いまま残り、どちらが正しいか読む人に分からなくなる。
+                # 万一ここに来たときも同じ台帳から描く。
                 -h|--help)
-                    echo "usage: beacon view [--port N] [--host ADDR] [--expose] [--no-open] [--json]"
-                    echo "  盤をブラウザで見る。既定は 127.0.0.1 (自分の機械の中だけ)。"
-                    echo "  --host で外に開くには --expose の明示が要る (盤は認証を持たない)。"
+                    BEACON_HELP_QUERY="view" python3 "$COMMANDS_PY" help_render
                     exit 0 ;;
                 --port) _need_flag_value "$#" "$1"; _view_port="$2"; shift 2 ;;
                 --port=*) _view_port="${1#*=}"; shift ;;
                 --no-open) _view_no_open="1"; shift ;;
                 --json) _view_json="1"; shift ;;
+                # 盤の二重起動と居残り (ms-170 e-7147)。既定は「既に在る盤を使う」
+                # 「誰も見なければ畳む」。どちらも承知で外せるように口を開けておく。
+                --no-reuse) _view_no_reuse="1"; shift ;;
+                --idle-timeout) _need_flag_value "$#" "$1"; _view_idle="$2"; shift 2 ;;
+                --idle-timeout=*) _view_idle="${1#*=}"; shift ;;
                 # サーバ設置 (e-6345)。--host を自分の機械の外に向けるときは
                 # --expose の明示が要る (盤は認証を持たないため)。
                 --host) _need_flag_value "$#" "$1"; _view_host="$2"; shift 2 ;;
@@ -5234,6 +4573,8 @@ EOF
             BEACON_VIEW_HOST="$_view_host" \
             BEACON_VIEW_EXPOSE="$_view_expose" \
             BEACON_JSON="$_view_json" \
+            BEACON_VIEW_NO_REUSE="$_view_no_reuse" \
+            BEACON_VIEW_IDLE_TIMEOUT="$_view_idle" \
             python3 "$COMMANDS_PY" view
         ;;
     cycle)
@@ -5276,6 +4617,30 @@ EOF
         ;;
     --version|-V)
         python3 "$COMMANDS_PY" version
+        ;;
+    trek)
+        # ms-185 e-7079: `trek` was removed structurally (e-7069), not
+        # renamed. Without this arm it fell to the generic wildcard below,
+        # where "Unknown command: trek" is indistinguishable from a typo for
+        # a verb that never existed — so an AI would retry variants or
+        # invent a workaround instead of learning that the feature is gone.
+        # Mirrors how `cloud push|pull|force-pull` announce their own
+        # structural removal rather than going silent.
+        echo "Error: 'beacon trek' was removed (ms-185 e-7069). This is a"
+        echo "       structural removal, not a rename — there is no"
+        echo "       replacement verb and no soft deprecation."
+        echo ""
+        echo "Why: the shared workspace it drove had zero live instances"
+        echo "     while costing 13% of the test suite, so it was folded."
+        echo ""
+        echo "Still reachable for the records that already exist:"
+        echo "  beacon doc list --trek <id>     (docs tagged to a trek)"
+        echo "  beacon search --include-trek    (trek summaries in history)"
+        echo "  GET /api/treks/{id}             (read-only, server side)"
+        echo ""
+        echo "Writing NEW trek references is refused on purpose: nothing can"
+        echo "create or verify a trek id any more."
+        exit 1
         ;;
     *)
         echo "Unknown command: $1"

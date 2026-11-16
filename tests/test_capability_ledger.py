@@ -48,7 +48,10 @@ def test_every_skill_is_classified():
 def test_key_skills_have_expected_scope():
     assert cl.skill_scope_of("beacon-sales-email") == "L3"
     assert cl.skill_scope_of("beacon-task") == "L3"
-    assert cl.skill_scope_of("beacon-trek-execute") == "L1"
+    # ms-185 e-7069: was beacon-trek-execute (L1 via the beacon-trek- prefix
+    # rule) until the Trek Skills and that prefix rule were removed. The
+    # L1-by-prefix mechanism is still exercised by beacon-session-* below.
+    assert cl.skill_scope_of("beacon-session-start") == "L1"
     assert cl.skill_scope_of("beacon-map") == "L2"
     assert cl.skill_scope_of("_beacon-spec-methodology") == "L1"
 

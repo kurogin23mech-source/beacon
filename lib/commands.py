@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.64.0"
+__version__ = "0.65.0"
 
 import json
 import os
@@ -68,7 +68,7 @@ from commands_shared import (  # noqa: F401  (re-exported for import-path stabil
     _refuse_if_bus_origin,
     _get_notes_path,
     # ms-127 e-4318-foundation: cross-family identity / cloud-project helpers
-    # (used by org/member + deploy/cloud/trek/bus). Re-exported so the callers
+    # (used by org/member + deploy/cloud/bus). Re-exported so the callers
     # remaining in commands.py and external `commands.X` keep resolving them.
     _project_id_for_ops,
     _read_credentials_for_identity,
@@ -101,6 +101,7 @@ from cmd_session import (  # noqa: F401  (re-exported for dispatch + import-path
     cmd_session_end,
     cmd_session_rescue,
     cmd_session_log_list,
+    cmd_session_log_handoff,
     cmd_session_log_show,
     cmd_session_id,
     _resolve_current_session_id,
@@ -179,6 +180,12 @@ from cmd_task import (  # noqa: F401
 from cmd_note import (  # noqa: F401
     cmd_note_add, cmd_note_list, cmd_note_clear, cmd_note_restore,
     cmd_note_purge_probes,
+    cmd_note_reap,
+    # The help registry below interpolates these instead of re-typing the
+    # digits, so a change to a default cannot leave this copy lying
+    # (maintainability review, 2026-10-26).
+    DEFAULT_LIST_SINCE_DAYS, DEFAULT_LIST_LIMIT,
+    DEFAULT_REAP_LIVENESS_WINDOW_MIN,
 )
 from cmd_decision import (cmd_decision_record, cmd_decision_list,  # noqa: F401  (ms-154 e-5594/e-5595)
                           cmd_decision_derive)  # noqa: F401  (ms-166 e-5972)
@@ -201,7 +208,6 @@ from cmd_trigger import (  # noqa: F401
     cmd_trigger_tick,
     cmd_trigger_clear,
     _push_trigger_to_bus,
-    _push_trek_trigger_to_bus,
     _push_operation_trigger_to_bus,
     _claim_operation_fire_for_bus_push,
     _resolve_operation_trigger_recipient,
@@ -231,7 +237,6 @@ from cmd_trigger import (  # noqa: F401
     _count_untriaged_active,
     _iso_week_string,
     _previous_v_tag,
-    _pr_open_reviewed_marker_exists,
 )
 
 # ms-127 e-4321: sessions / push / claim families moved to their own modules.
@@ -256,6 +261,9 @@ from commands_shared import (  # noqa: F401
     _get_triggers_dir, _spec_doc_for_target, _spec_exists_for_op,
     _fire_review_due_trigger, _session_kind_is_human,
     _ai_session_direct_completion_ban_active, _gate_target_class,
+    # ms-119 e-7439: target 側の記録が何をするかを述べる唯一の文。実行時の print と
+    # `beacon review done --help` の両面がこれを参照する (片面だけ直せない形)。
+    TARGET_REVIEW_RECORD_EFFECT,
 )
 # Public operation handlers only (family-private _fetch_active_operation_envelope
 # stays canonical in cmd_operation, patched there — see the e-4320 rule above).
@@ -270,8 +278,9 @@ from cmd_operation import (  # noqa: F401
 
 # ms-127 e-4803: bus family moved to cmd_bus.py, plus its budget/recipient/
 # identity leaf helpers promoted to commands_shared (foundation). Re-export only
-# the 5 promoted helpers that commands.py callers still use by bare name
-# (_arm_for_trek / cmd_acquisition_attack_list_send / _check_recipient_live_health);
+# the promoted helpers that commands.py callers still use by bare name
+# (cmd_acquisition_attack_list_send / _check_recipient_live_health; the list said
+# 5 and led with _arm_for_trek, which ms-185 e-7070 removed with cmd_trek.py);
 # the 6 identity/swap/budget-path helpers those pull in transitively live in
 # commands_shared but are NOT referenced by commands.py, so they are not
 # re-exported. Bus-handler callers resolve all of these inside cmd_bus, so tests
@@ -487,8 +496,28 @@ from commands_shared import (  # noqa: F401
     _clear_review_due_for_pr,
     _fire_pr_open_review_triggers,
     _clear_pr_open_review_triggers,
-    _pending_review_types_for_pr,
+    _pr_open_review_nudge_pending_types,
     _pr_open_reviewed_marker_path,
+    # ms-119 e-6859: 関門は導出 (必須種別 − 現 head の実施 − 理由付き免除) を読む。
+    # 免除ログの住所 (_review_skips_log_path) は書き手 (review skip) と
+    # 読み手 (read_pr_review_skips) の両方が参照するので commands_shared が持つ。
+    _review_skips_log_path,
+    is_commit_sha_shaped,
+    resolve_full_commit_sha,
+    review_blocking_types,
+    # ms-119 e-6859 (独立保守性レビュー): 文面は純粋な builder に切り出す。
+    format_review_sha_unpinned_warning,
+    decide_review_done_report,
+    decide_review_done_argument_error,
+    resolve_reviewed_sha_for_done,
+    write_issued_bundle_sha,
+    issued_bundle_sha,
+    write_reviewed_marker,
+    reviewed_marker_sha,
+    pr_review_obligations,
+    read_pr_review_skips,
+    resolve_pr_head,
+    format_pr_review_obligation_disclosure,
     RECORDED_CWD_ONLY,
     RECORDED_SHARED,
     REF_KIND_PR,
@@ -514,29 +543,18 @@ from commands_shared import (  # noqa: F401
     _spec_updated_at_for_target,
 )
 
-# ms-127 e-4820: trek family moved to cmd_trek.py, plus its docs/frontmatter/
-# project-id leaf helpers + DEFAULT_SCOPE promoted to commands_shared. Re-export
-# the 4 helpers + DEFAULT_SCOPE so the many commands.py callers (cmd_doc_* /
-# _auto_fire_operation_triggers / account / table-doc) keep resolving them by
-# bare name. Trek-handler callers resolve these inside cmd_trek, so tests driving
-# cmd_trek_* patch at cmd_trek._X (the e-4320 monkeypatch-trap rule).
+# ms-185 e-7069 / e-7070: the `from cmd_trek import (...)` re-export that used to
+# sit here is gone — the Trek CLI was removed from both frontends (e-7069) and
+# lib/cmd_trek.py itself was moved to .trash/ with the rest of the body (e-7070).
+# Do not re-add it: the verb is refused with a reason on both frontends, and
+# tests/test_trek_removal_pinned_e7079.py holds that shut.
+# ms-127 e-4820: docs/frontmatter/project-id leaf helpers + DEFAULT_SCOPE live in
+# commands_shared. Re-export the 4 helpers + DEFAULT_SCOPE so the many commands.py
+# callers (cmd_doc_* / _auto_fire_operation_triggers / account / table-doc) keep
+# resolving them by bare name.
 from commands_shared import (  # noqa: F401
     _current_project_id, _get_docs_dir, _parse_frontmatter, _read_local_doc,
     DEFAULT_SCOPE,
-)
-# Public trek handlers only (family-private helpers stay canonical in cmd_trek,
-# patched there — see the e-4320 rule above).
-from cmd_trek import (  # noqa: F401
-    cmd_trek_create, cmd_trek_list, cmd_trek_review_verdicts, cmd_trek_show,
-    cmd_trek_timeline, cmd_trek_start, cmd_trek_archive, cmd_trek_invite,
-    cmd_trek_join, cmd_trek_stop, cmd_trek_resume, cmd_trek_pulse_ack,
-    cmd_trek_kickoff, cmd_trek_take_over, cmd_trek_reconcile,
-    cmd_trek_transfer_leader, cmd_trek_task_state, cmd_trek_block,
-    cmd_trek_unblock, cmd_trek_blockers, cmd_trek_extend_ttl,
-    cmd_trek_summary_sent, cmd_trek_plan, cmd_trek_slot_add, cmd_trek_slot_amend,
-    cmd_trek_slot_claim, cmd_trek_slot_list, cmd_trek_scope_approve,
-    cmd_trek_scope_reject, cmd_trek_blanket_approve, cmd_trek_blanket_revoke,
-    cmd_trek_task_add, cmd_trek_leave,
 )
 
 
@@ -605,8 +623,9 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
 | `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
-| `beacon note list` | Show session notes (cloud mode: 他セッション分も統合) / メモ一覧 |
-| `beacon note clear --yes [--include-other-sessions]` | Clear this session's notes / 自セッション分を削除 (`--yes` 必須、退避を取ってから削除) |
+| `beacon note list` | Show session notes — 既定で直近 @@NOTE_SINCE_DAYS@@ 日 / 最大 @@NOTE_LIMIT@@ 件 (`--all` で全件)、cloud mode では他セッション分も統合 / メモ一覧 |
+| `beacon note clear --yes [--include-other-sessions]` | Clear THIS session's notes / 自セッション分を削除 (`--yes` 必須、退避を取ってから削除。`--include-other-sessions` で全セッション分) |
+| `beacon note reap --yes` | Clear notes of ENDED sessions only (live sessions untouched) / 終了したセッションのメモだけ片付ける |
 | `beacon note restore` | Restore notes from backups / 退避からメモを復元 |
 
 <!-- BEACON_ENTRY_WRITING_PRINCIPLE -->
@@ -623,33 +642,63 @@ When writing task / spec / doc entries (`description` / `motivation` / `acceptan
 Full principle and examples: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`).
 原則の全文と実例: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`)。
 <!-- /BEACON_ENTRY_WRITING_PRINCIPLE -->
-"""
+""".replace("@@NOTE_SINCE_DAYS@@", str(DEFAULT_LIST_SINCE_DAYS)) \
+   .replace("@@NOTE_LIMIT@@", str(DEFAULT_LIST_LIMIT))
+# メモ一覧の窓の 2 つの数字は cmd_note の定数から埋める (手打ちしない)。help の
+# 同じ行が先に同じ理由で interpolate に直されている: 定数を 10/50 に変えた変更が
+# あったとき、repo 中の手打ちコピーは「3 日 / 20 件」と言い続け、どの試験も文句を
+# 言わなかった。ここは AI が毎セッション読む CLAUDE.md に出る文なので、古い数字が
+# 残ると実害が大きい。
+#
+# 埋め方は **% 書式ではなく衝突しないトークンの置換**。一度 % 書式で書いたが、
+# 60 行超の散文全体に % を適用する形になり、本文に百分率や printf の例を 1 つ
+# 書き足すだけで **import の時点で CLI 全体が落ちる** 状態だった (独立レビュー 2 体が
+# 実測、PR#822)。help の同じ行は呼ばれたときだけ評価されるので被害が 1 行に閉じるが、
+# こちらはモジュール読み込み時なので爆発半径が全コマンドに広がる。置換なら本文に
+# % や波括弧を書いても安全で、安全性の制約がこの 2 行に閉じる。埋め残した
+# トークンは tests/test_claude_md_template_parity_e7208.py が捕まえる。
+
+
+def render_claude_md_section(content):
+    """CLAUDE.md の本文に beacon セクションを当てた結果を返す (純関数)。
+
+    **「どう当てるか」をここ 1 つに置く** のが目的。以前はこの規則が書き込み関数
+    (`_append_claude_md`) の中にしか無く、ファイルを書かずに結果を見る手段が無かった
+    ので、雛形 (`CLAUDE_MD_BEACON_SECTION`) とリポジトリの CLAUDE.md が食い違っても
+    誰も気付けなかった。実際に踏んだ形 (e-7208): メモの片付け (`beacon note reap`) の
+    案内を CLAUDE.md に直接足して雛形を直し忘れ、`beacon skill install` を走らせると
+    その行が消えて古い案内に戻った。
+
+    純関数にしてあるので、試験は「このリポジトリの CLAUDE.md に当てても何も変わらない」
+    (= install が巻き戻さない) を書き込み無しで確かめられる。試験と書き込みが同じ関数を
+    通るため、確かめた規則と実際に走る規則がずれない。
+    """
+    marker = "## Beacon Project Management"
+    if marker not in content:
+        # 節がまだ無い本文 (新規 / 他プロジェクト) は末尾に足す。
+        return content + CLAUDE_MD_BEACON_SECTION
+    idx = content.index(marker)
+    prefix = content[:idx].rstrip('\n') + '\n\n'
+    new_section = CLAUDE_MD_BEACON_SECTION.lstrip('\n')
+    after = content[idx + len(marker):]
+    next_h2 = after.find('\n## ')
+    if next_h2 == -1:
+        return prefix + new_section
+    return prefix + new_section + after[next_h2:]
 
 
 def _append_claude_md():
     claude_md = "CLAUDE.md"
-    marker = "## Beacon Project Management"
     if os.path.exists(claude_md):
         with open(claude_md, "r", encoding="utf-8") as f:
             content = f.read()
-        if marker in content:
-            # Replace existing section with latest content
-            idx = content.index(marker)
-            prefix = content[:idx].rstrip('\n') + '\n\n'
-            new_section = CLAUDE_MD_BEACON_SECTION.lstrip('\n')
-            after = content[idx + len(marker):]
-            next_h2 = after.find('\n## ')
-            if next_h2 == -1:
-                new_content = prefix + new_section
-            else:
-                new_content = prefix + new_section + after[next_h2:]
-            if new_content != content:
-                with open(claude_md, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                print(f"Updated {claude_md} with beacon rules")
-            return
-    with open(claude_md, "a", encoding="utf-8") as f:
-        f.write(CLAUDE_MD_BEACON_SECTION)
+    else:
+        content = ""
+    new_content = render_claude_md_section(content)
+    if new_content == content:
+        return
+    with open(claude_md, "w", encoding="utf-8") as f:
+        f.write(new_content)
     print(f"Updated {claude_md} with beacon rules")
 
 
@@ -1701,10 +1750,12 @@ def _collect_whole_target_artifact(target_id: str):
             continue
         seen[key] = []
         refs.append((h, ent.get("description", "") or ""))
+    import review_spine as _rs  # 作業記録の落とし方は _collect_change_diff と同じ源
     commits = []
     spent = 0
     truncated = False
     n_error = 0
+    dropped_all = []  # [(path, chars)] — 何を judge に見せなかったかを後で開示する
     for h, subject in refs:
         entry = {"hash": h, "subject": subject}
         folded = seen.get(h[:_LEDGER_HASH_ABBREV]) or []
@@ -1720,22 +1771,32 @@ def _collect_whole_target_artifact(target_id: str):
         # commit show its first-parent diff instead of the empty combined diff a bare
         # `git show` produces (which would silently drop merge-introduced changes);
         # it is a no-op for regular commits.
-        proc = subprocess.run(
+        # 差分を走らせるのは _run_diff_command 1 箇所だけ (そこで必ず落ちる)。
+        # ここは rc≠0 を許容する点だけが変更スコープの収集と違うので、その旗を渡す。
+        diff, dropped_here, err = _run_diff_command(
             ["git", "show", "--format=", "-U15", "-m", "--first-parent", h],
-            capture_output=True, text=True)
-        if proc.returncode != 0:
-            entry["error"] = (proc.stderr or "").strip()[:200]
+            tolerate_failure=True)
+        if err:
+            entry["error"] = err
             commits.append(entry)
             n_error += 1
             continue
-        diff = proc.stdout or ""
+        if dropped_here:
+            dropped_all.extend(dropped_here)
         spent += len(diff)
         entry["diff"] = diff
         if not diff.strip():
             # successful but empty — distinct from "no diff collected". Tag the
             # reason so "" is not misread as "changed nothing".
-            entry["empty_reason"] = "no-textual-diff (空 / メタのみの commit の可能性)"
+            entry["empty_reason"] = (
+                "bookkeeping-only (この commit は Beacon の作業記録しか変えていない)"
+                if dropped_here else
+                "no-textual-diff (空 / メタのみの commit の可能性)")
         commits.append(entry)
+    bookkeeping_gap = _rs.bookkeeping_drop_gap(dropped_all)
+    if bookkeeping_gap:
+        # 黙って削らない。judge が「この target の変更を全部見た」と誤認しないため。
+        gaps.append(bookkeeping_gap)
     if not refs:
         gaps.append(f"{target_id} に記録された commit がありません。whole-target の "
                     f"照合対象が空です — この target の実装が beacon log されていないか、"
@@ -1757,6 +1818,36 @@ def _collect_whole_target_artifact(target_id: str):
     return artifact, gaps
 
 
+def _run_diff_command(argv: list, *, tolerate_failure: bool = False):
+    """差分を産む git / gh を走らせる **唯一の口**。走らせたら必ず作業記録を落とす。
+
+    返り値は ``(diff_text, dropped, error)``。``error`` が非空なら ``diff_text`` は
+    ``None`` (``tolerate_failure=True`` のときだけ起きる)。
+
+    **なぜ 1 関数に閉じるか** (ms-119 e-7352、独立 AX レビュー 2026-11-16): 以前は
+    「差分を採る関数は全部 strip を呼ぶ」という規律を **静的検査でお願い** していた。
+    その検査は実際には 4 つの形をすり抜けた —— argv を変数に束縛してから渡す / 別の
+    下位コマンド (``git log -p``) で採る / 別モジュールに置く / **strip の名前を
+    docstring に書いただけ** (呼んでいなくても compliant 扱い)。judge が 4 形すべてを
+    実際に書いて緑のまま通ることを実測した。
+
+    緑は信頼されるので、**偽の安全は無ガードより悪い**。そこで「呼んでいるか測る」のを
+    やめ、**落とさずに差分を得る経路を無くす**。差分が欲しい呼び出し元はこの関数を通る
+    しかなく、通れば必ず落ちる。静的検査は「この関数の外に、差分を産しうる git / gh の
+    直接起動が無いこと」だけを見ればよくなる (= 守っているかを測るのでなく、破れない形)。
+    """
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        if tolerate_failure:
+            return None, [], err[:200]
+        print(f"Error: diff collection failed: {err}", file=sys.stderr)
+        sys.exit(1)
+    import review_spine as _rs
+    diff_text, dropped = _rs.strip_bookkeeping_from_diff(proc.stdout or "")
+    return diff_text, dropped, ""
+
+
 def _collect_change_diff(argv: list, target_ref: str, gaps: list,
                          *, empty_is_error: bool = False) -> str:
     """Run a change-scoped diff collector (gh pr diff / git diff) and return its text
@@ -1772,13 +1863,18 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list,
     a judge would then "review" and a ``review done`` would record as performed.
     For ``--diff-ref`` an empty diff is a legitimate answer (the two refs really
     are identical), so that caller keeps the gap and the bundle.
+
+    **This is also where Beacon's own bookkeeping leaves the artifact** (ms-119
+    e-7352). Every change-scoped collector routes through here, so dropping
+    ``.beacon/`` once covers all of them — and a new collector that hand-rolls
+    its own ``git diff`` skips the drop, which is what
+    ``tests/test_review_bundle_bookkeeping_e7352.py`` watches for. What was
+    dropped is disclosed in ``gaps``: a judge handed a silently-trimmed diff
+    believes it saw the whole change.
     """
-    proc = subprocess.run(argv, capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    diff_text = proc.stdout
-    if not diff_text.strip():
+    diff_text, dropped, _err = _run_diff_command(argv)
+    # 落とす前が空だったのか、作業記録しか無かったのかは dropped で分かれる。
+    if not diff_text.strip() and not dropped:
         if empty_is_error:
             print(f"Error: {target_ref} の差分が空です。PR のレビューで差分が空に"
                   f"なるのは「変更が無い」ではなく「差分を取れていない」状態なので、"
@@ -1789,11 +1885,41 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list,
                   file=sys.stderr)
             sys.exit(1)
         gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+        return diff_text
+    # 落とすのは _run_diff_command が済ませている。ここは「何を外したか」の開示だけ。
+    # 黙って削ると judge は「差分の全部を見た」と思ったまま判定する。
+    import review_spine as _rs
+    gap = _rs.bookkeeping_drop_gap(dropped)
+    if gap:
+        gaps.append(gap)
+    if dropped and not diff_text.strip():
+        # 作業記録しか変えていない PR。空の artifact を judge に渡すと、何も見て
+        # いない判定が `review done` で「実施した」として記録され、approve /
+        # merge の関門を外す (e-6971 が閉じたのと同じ穴)。
+        if empty_is_error:
+            print(f"Error: {target_ref} の差分は Beacon の作業記録 (.beacon/) "
+                  f"だけでした。レビューできる変更が無いので止めます。\n"
+                  f"  {gap}", file=sys.stderr)
+            sys.exit(1)
+        gaps.append(f"{target_ref} の差分は作業記録だけで、レビュー対象の変更が"
+                    f"ありません。")
     return diff_text
 
 
 def _pr_diff_collection(pr: str, pr_repo: str, gaps: list) -> tuple:
-    """PR の差分を採るための ``(argv, target_ref, resolved_repo)`` を組む。
+    """PR の差分を採るための ``(argv, target_ref, resolved_repo, head_sha)`` を組む。
+
+    ms-119 e-6859 (独立 AX レビュー 4 周目 high): **head_sha は差分を採るその瞬間に
+    解決する**。judge に渡す bundle が「どの差分を見たか」を sha で名指さないと、
+    judge が読んでいる間に誰かが push した場合、``review done`` は「いまの head」を
+    gh に聞き直して **judge が一度も見ていない sha** を実施済みとして記録する ——
+    この課題が消すと宣言した欠陥クラスが、bundle → done の継ぎ目でそのまま再現する
+    (実際にこの PR 自身の実施記録に、その継ぎ目でズレを起こして手で直した跡が残って
+    いる)。ここで一緒に解決すれば「見た sha」と「記録する sha」が同じ変数の値になる。
+
+    解決は best-effort (取れなければ空)。差分が採れているのに sha が取れないことは
+    ありうる (gh の応答形の違い等) ので、**sha が無いことを理由に bundle を作らない
+    ことはしない** —— 代わりに gaps に 1 行載せて judge に伝える。
 
     ms-166 e-6971: ``gh pr diff <n>`` を **リポジトリ指定なしで** 叩く形が 3 箇所に
     手で書かれていた (review context / review batch context / 目的達成 bundle)。
@@ -1810,7 +1936,201 @@ def _pr_diff_collection(pr: str, pr_repo: str, gaps: list) -> tuple:
     if resolved:
         argv += ["--repo", resolved]
     target_ref = f"{resolved}#{pr}" if resolved else f"PR #{pr} (リポジトリ不明)"
-    return argv, target_ref, resolved
+    head_sha, _state, _err = resolve_pr_head(pr, resolved)
+    if not head_sha:
+        gaps.append(
+            f"この bundle は {target_ref} の差分を運んでいますが、**どの sha の"
+            f"差分か** を記録できませんでした ({_err or '理由不明'})。judge が"
+            f"読んでいる間に push されると、実施の記録が judge の見ていない差分に"
+            f"付きます。`beacon review done --reviewed-sha <sha>` で明示してください。")
+    return argv, target_ref, resolved, head_sha
+
+
+def _git_ok(argv: list) -> tuple:
+    """git を best-effort で叩き ``(成功か, stdout)`` を返す (失敗は静かに潰す)。"""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True)
+    except BaseException:
+        return False, ""
+    return proc.returncode == 0, proc.stdout or ""
+
+
+def _intra_range_moves(base: str, head: str) -> list:
+    """base..head の範囲内で **移動してきた** ファイルを機械的に集める
+    (ms-119 e-7404)。
+
+    返すのは ``[{"path": 移動先, "from": 元パス, "commit": 移動 commit}]``。
+
+    判定規則: 範囲内の rename (old → new) のうち、**old が base に存在しない**もの
+    だけを返す。old が base に在れば base..head の差分はそれを rename として見せる
+    ので (``diff.renames`` 既定 true)、judge は履歴を補う必要がない。old が base に
+    無い場合だけ、差分は new への純粋な新規追加になり「どこから来たか」が消える。
+
+    best-effort: base / head を手元で解決できない (未 fetch 等) なら空を返す
+    —— 推測で埋めるより、載せないほうが安全 (載せた注記が誤っていると judge を
+    逆向きに誤導する)。
+    """
+    base = str(base or "").strip()
+    head = str(head or "").strip()
+    if not base or not head:
+        return []
+    for ref in (base, head):
+        ok, _ = _git_ok(["git", "cat-file", "-e", f"{ref}^{{commit}}"])
+        if not ok:
+            return []
+    # `--reverse` で **古い順** に読み、**前向きに連鎖を組む** (ms-119 e-7404 /
+    # 独立保守性レビュー 収束周 high)。
+    #
+    # **なぜ後ろ向きに辿るのをやめたか**: 初版は「宛先パス → 直前の元パス」の辞書を
+    # 作って後ろ向きに遡っていた。だがその辞書は **宛先パスごとに最後の上書きしか
+    # 持たない** ので、範囲内で同じパスが再利用されると (A が p0→X→Y と動いて X を
+    # 空け、別ファイル B が後から q0→X に入る) 、Y の由来を遡る途中で `parent[X]` が
+    # **B の由来** にすり替わった。judge が 2 通り実行で確認:
+    #   * 無関係な 2 つの rename を 1 本の連鎖として縫い合わせ、真の由来を落とす
+    #     (しかも並びが「古い順」にもならない)
+    #   * 報告されるべき移動が **黙って落ちる** (すり替わった由来が base に在るため
+    #     「差分が rename として見せる」側のフィルタに誤って捕まる)
+    # **パスは時間とともに別のファイルを指す** —— パス文字列をキーに履歴を畳む形は
+    # その事実と噛み合わない。
+    #
+    # 前向き 1 パスなら、各 rename を起きた順に連鎖へ繋ぐだけなので、パスが空いた
+    # 時点で鍵も外れ、後から同じパスに入った別ファイルは **別の連鎖** になる。
+    # 後ろ向きの走査が無くなるので、遡りが輪を回って止まらない形も構造的に消える
+    # (初版はそこを上流の循環検出に一方的に依存していた —— 独立保守性レビュー low)。
+    ok, out = _git_ok(["git", "log", "--reverse", "--diff-filter=R",
+                       "--name-status", "--format=%h", f"{base}..{head}"])
+    if not ok:
+        return []
+    # **差分が実際に rename として見せている組** を実測する (ms-119 e-7404 /
+    # 独立 AX レビュー 最終周 silent)。
+    #
+    # 初版はここを推測で済ませていた: 「出発点が base に在るなら差分が rename として
+    # 見せるので注記は不要」。**この前提は成り立たない** —— git の rename 検出は
+    # base/head 2 ツリー間の **内容類似度** だけで判定し、範囲内に記録された rename
+    # 履歴を見ない。だから移動後に中身を大きく書き換えると、出発点が base に在っても
+    # 差分は単なる削除 + 新規追加に見える。実測 (2026-11-12): 60 行のファイルを移動
+    # してから全行書き換えると `git diff --name-status -M base..head` は
+    # `A new/f.py` + `D old/f.py` を返し、**注記も 0 件** になった ——
+    # この機構が直そうとした「範囲内の移動が新規追加に見えて誤読される」症状が、
+    # 別の誘因でそのまま再発する。merge commit の衝突解消だけで動いた場合も同型。
+    #
+    # そこで **推測をやめて差分に訊く**。注記を省くのは「judge が差分だけで辿れる」
+    # ときだけで、それは差分が rename として見せている組に限る。
+    shown_as_rename = set()
+    ok_d, out_d = _git_ok(["git", "diff", "--name-status", "-M",
+                           f"{base}..{head}"])
+    if ok_d:
+        for line in out_d.splitlines():
+            if not line.startswith("R") or "\t" not in line:
+                continue
+            cols = line.split("\t")
+            if len(cols) >= 3:
+                shown_as_rename.add((cols[1], cols[2]))
+
+    # いま追っている連鎖: 現在のパス -> {"origin": 出発点, "hops": [...]}。
+    chains = {}
+    commit = ""
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if not line.startswith("R") or "\t" not in line:
+            commit = line.strip()  # `--format=%h` の行
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        src, dst = parts[1], parts[2]
+        # **`pop` で元のパスの鍵を外す** のが要点 (独立保守性レビュー 収束周 high)。
+        # パスが空いたら鍵も消えるので、後から同じパスに入った別ファイル (rename で
+        # 入る場合も、新規作成で埋まってから動く場合も) は **別の連鎖** になる。
+        # `get` で残すと、空いたパスの鍵が古い連鎖を指したまま残り、そこに入った
+        # 別のファイルが他人の由来を名乗る。
+        #
+        # 行き先に別の連鎖が居た場合は、直後の `chains[dst] = chain` が上書きする
+        # ので明示的に消す必要は無い (置き換えられたファイルは head に残らないので、
+        # 仮に残っても最後の実在チェックで落ちる)。
+        chain = chains.pop(src, None)
+        if chain is None:
+            chain = {"origin": src, "hops": []}
+        chain["hops"].append({"from": src, "to": dst, "commit": commit})
+        chains[dst] = chain
+
+    moves = []
+    for dst, chain in chains.items():
+        # **head に実在する行き先だけを出す**。範囲内で作られて消えた / さらに動いた
+        # パスを名指すと、judge が探して見つけられず注記全体を疑う。
+        dst_at_head, _ = _git_ok(["git", "cat-file", "-e", f"{head}:{dst}"])
+        if not dst_at_head:
+            continue
+        origin = chain["origin"]
+        # 元の場所へ戻ったなら添える履歴が無い (退避 → 復元は日常操作)。
+        if origin == dst:
+            continue
+        # **差分が rename として見せている組だけ注記を省く**。推測 (= 出発点が
+        # base に在るか) で代用しない —— 移動後に大きく書き換えた場合や merge の
+        # 衝突解消で動いた場合は、出発点が base に在っても差分は削除 + 新規追加に
+        # 見えるので、省くと judge は履歴を辿れない (最終周 silent の指摘)。
+        if (origin, dst) in shown_as_rename:
+            continue
+        moves.append({"path": dst, "from": origin,
+                      "commit": chain["hops"][-1]["commit"],
+                      "hops": list(chain["hops"])})
+    return moves
+
+
+def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
+                             diff_ref: str = "", head_sha: str = "",
+                             gaps: "Optional[list]" = None):
+    """差分の範囲内の移動を judge 向け参照に組む **唯一の入口** (ms-119 e-7404)。
+
+    単一種別の経路 (`cmd_review_context`) と `--batch` の経路
+    (`cmd_review_batch_context`) の **両方がここを通る** —— 片方だけに足すと、
+    節目のバッチ発火 (= 実際に judge を起動する既定経路) で効かない形が作れる。
+
+    範囲の決め方:
+      * ``pr``      — gh に base / head の sha を聞く (手元に無ければ空を返す)
+      * ``diff_ref`` — ``base...head`` / ``base..head`` を割る
+
+    どちらも解決できなければ None (載せない)。
+    """
+    import review_spine
+    base = head = ""
+    if pr:
+        argv = ["gh", "pr", "view", str(pr), "--json", "baseRefOid,headRefOid"]
+        if pr_repo:
+            argv += ["--repo", pr_repo]
+        ok, out = _git_ok(argv)
+        if ok:
+            try:
+                payload = json.loads(out or "{}")
+                base = str(payload.get("baseRefOid") or "")
+                head = str(payload.get("headRefOid") or "")
+            except BaseException:
+                base = head = ""
+        # **差分を採ったのと同じ sha を基準にする** (独立 AX レビュー silent)。
+        # 初版はここで引いた head をそのまま使っていたので、差分採取 (gh pr diff)
+        # とこの問い合わせの間に push が入ると、**judge に渡る差分は古い head の
+        # ままなのに注記は新しい head を基準に組まれた**。e-6859 が「bundle は
+        # どの差分を見たかを sha で名指す」と直した型を、この新しい消費者だけが
+        # 素通りしていた。呼び出し側が既に解決済みの sha を持っているので、
+        # それを基準にし、食い違いは隠さず gaps に出す。
+        if head_sha:
+            if head and head != head_sha and gaps is not None:
+                gaps.append(
+                    f"移動履歴の注記を組むときに見た PR head ({head[:12]}) が、"
+                    f"この bundle が運ぶ差分の head ({head_sha[:12]}) と違いました "
+                    f"(読んでいる間に push された可能性)。注記は差分と同じ "
+                    f"{head_sha[:12]} を基準に組んでいます。")
+            head = head_sha
+    elif diff_ref:
+        sep = "..." if "..." in diff_ref else (".." if ".." in diff_ref else "")
+        if sep:
+            left, _, right = diff_ref.partition(sep)
+            base, head = left.strip(), (right.strip() or "HEAD")
+    if not (base and head):
+        return None
+    return review_spine.build_intra_range_move_reference(
+        _intra_range_moves(base, head))
 
 
 def _resolve_review_pr_repo(explicit: str, gaps: list) -> str:
@@ -1936,16 +2256,18 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
     if pr:
         # ms-166 e-6971: リポジトリ込みで採る (3 箇所に手書きされていた収集を
         # _pr_diff_collection / _collect_change_diff に通す)。
-        argv, pr_ref, _repo = _pr_diff_collection(pr, pr_repo, gaps)
+        argv, pr_ref, _repo, _head_sha = _pr_diff_collection(pr, pr_repo, gaps)
         target_ref = f"{target_id} ({pr_ref})"
         diff_text = _collect_change_diff(argv, pr_ref, gaps, empty_is_error=True)
     elif diff_ref:
         target_ref = f"{target_id} ({diff_ref})"
-        proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-            sys.exit(1)
-        diff_text = proc.stdout
+        # ms-119 e-7352: ここは収集を手書きしていた 5 番目の経路で、e-6971 が
+        # 「3 箇所を 1 つに寄せた」ときに取り残されていた (--pr 側だけ寄せた)。
+        # 寄せる前はこの枝だけが -U25 を持たず、差分が空でも gaps に出ず、
+        # Beacon 自身の作業記録 (.beacon/) も落ちない —— 同じ bundle なのに
+        # --pr で採ったか --diff-ref で採ったかで judge の見るものが違っていた。
+        diff_text = _collect_change_diff(["git", "diff", "-U25", diff_ref],
+                                         target_ref, gaps)
 
     _mi = _model_independence_gap()
     if _mi:
@@ -2097,6 +2419,20 @@ def cmd_review_context():
     # the data-driven registry (skills/*/review-type.json), not a hardcoded
     # if/elif whitelist. A new judge-run review type is added by dropping a
     # descriptor + 原典 + SKILL — this command needs no edit.
+    # ms-119 e-6859: head sha を持つのは pr 経路だけ (--diff-ref / --target /
+    # full-surface は持たないので空のまま運ぶ = 不明。推測で埋めない)。
+    #
+    # **`locals()` を経由しない** (独立保守性レビュー 8 周目 medium)。初版は後段で
+    # `_head_sha = locals().get("_head_sha", "") or ""` と動的に読み直していたので、
+    # 収集の分岐で変数名を変える・削るだけで Python は NameError を出さず、既定値の
+    # 空文字が黙って通った —— 「judge が見た差分を pin する」この課題の中心機構が、
+    # 遠い分岐のリネームで silent に無効化できた。
+    #
+    # 置き場は **関数スコープ** (どの収集分岐より前)。最初は `if pr:` の直前に
+    # 置いたが、あれは収集ブロックの内側なので full-surface 経路が通らず
+    # UnboundLocalError になった (試験が捕まえた)。初期化は、読む場所から見て
+    # 必ず通る高さに置く。
+    _head_sha = ""
     registry = review_spine.judge_run_review_types()
     desc = registry.get(review_type)
     if not desc:
@@ -2116,53 +2452,8 @@ def cmd_review_context():
               f"--diff-ref) です。target 全体の close レビューには --type philosophy "
               f"を使ってください (--target は whole-target 専用)。", file=sys.stderr)
         sys.exit(1)
-    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
-    origin_kind = origin_spec.get("kind", "")
-    if origin_kind == "repo-file":
-        # 原典 is a fixed repo file that travels with the capability (Layer 3).
-        # --origin-doc does not apply; silently ignoring it would let the caller
-        # believe their doc became the 原典 — reject instead.
-        ref = origin_spec.get("ref", "")
-        if not ref:
-            print(f"Error: review type {review_type!r} descriptor has origin.kind"
-                  f"=repo-file but no 'ref' (skills/<type>/review-type.json is "
-                  f"malformed).", file=sys.stderr)
-            sys.exit(1)
-        if origin_doc:
-            print(f"Error: --origin-doc is not valid for --type {review_type} "
-                  f"(its 原典 is fixed to {ref}).", file=sys.stderr)
-            sys.exit(1)
-        install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        origin_path = os.path.join(install_root, *ref.split("/"))
-        origin_id = ref
-        try:
-            with open(origin_path, encoding="utf-8") as f:
-                origin_content = f.read()
-        except OSError as e:
-            print(f"Error: 原典 not found at {origin_id}: {e}", file=sys.stderr)
-            sys.exit(1)
-    elif origin_kind == "doc":
-        # 原典 is a document supplied at review time (a target's SPEC / vision).
-        # Absence is itself a finding (SPEC § 方針5): surface as a gap, don't lie.
-        if not origin_doc:
-            print(f"Error: --type {review_type} needs --origin-doc <doc-id> "
-                  f"(the SPEC / vision the implementation is checked against).",
-                  file=sys.stderr)
-            sys.exit(1)
-        doc = get_store().get_document(origin_doc)
-        if not doc:
-            print(f"Error: origin doc not found: {origin_doc}", file=sys.stderr)
-            sys.exit(1)
-        origin_id = origin_doc
-        origin_content = doc.get("content", "")
-        if not origin_content.strip():
-            gaps.append(f"原典 {origin_doc} は本文が空です。drift の照合基準が"
-                        f"無いため、findings は intent 推定に留まります (SPEC § 方針5)。")
-    else:
-        print(f"Error: review type {review_type!r} descriptor has unknown "
-              f"origin.kind {origin_kind!r} (expected 'repo-file' or 'doc').",
-              file=sys.stderr)
-        sys.exit(1)
+    origin_id, origin_content, origin_provenance = _resolve_review_origin(
+        review_type, desc, origin_doc, gaps)
 
     # --- artifact collection: mechanical, no interpretation ---
     diff_text = ""
@@ -2190,7 +2481,8 @@ def cmd_review_context():
             # 残らない。その上で `beacon review done` が「実施した」と記録して
             # approve / merge の関門を外す = 別のコードを真面目にレビューした結果が
             # 品質の証拠として通る (2026-10-13 実測、別プロジェクトのセッション報告)。
-            argv, target_ref, pr_repo = _pr_diff_collection(pr, pr_repo, gaps)
+            argv, target_ref, pr_repo, _head_sha = _pr_diff_collection(
+                pr, pr_repo, gaps)
             diff_text = _collect_change_diff(argv, target_ref, gaps,
                                              empty_is_error=True)
         elif diff_ref:
@@ -2237,6 +2529,14 @@ def cmd_review_context():
         gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
                     "『既存機能と重複していないか』を repo 参照なしには確認できません "
                     "(/beacon-map で生成すると review 精度が上がります)。")
+    # ms-119 e-7404: 範囲内で移動してきたファイルを judge に伝える (差分では
+    # 移動先への新規追加に見えるので、「置き間違えた」と誤読される)。入口は
+    # `_artifact_move_reference` の 1 箇所で、--batch 経路も同じものを通る。
+    _move_ref = _artifact_move_reference(pr=pr, pr_repo=pr_repo,
+                                         diff_ref=diff_ref,
+                                         head_sha=_head_sha, gaps=gaps)
+    if _move_ref is not None:
+        external_references.append(_move_ref)
 
     bundle = review_spine.assemble_review_context(
         review_type,
@@ -2245,12 +2545,21 @@ def cmd_review_context():
         diff_text=diff_text,
         mode=mode,
         target_ref=target_ref,
+        head_sha=_head_sha,
         gaps=gaps,
         known_judge_types=set(registry.keys()),
         implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
         artifact=artifact,
         external_references=external_references,
+        origin_provenance=origin_provenance,
     )
+    # **発行した差分を刻む** (ms-119、独立 AX レビュー 6 周目 silent)。
+    # ここで刻んだ sha が `review done` の既定の供給源になる。刻まないと done は
+    # 「いまの PR head」を gh に聞き直すので、発行から done までの間に push が
+    # 入ると judge が見ていない差分に対して関門が緑になる (= この MS が閉じたと
+    # 宣言している欠陥クラスの再現)。測定の補助なので、失敗しても発行は止めない。
+    if pr and _head_sha:
+        write_issued_bundle_sha(pr, pr_repo, review_type, _head_sha)
     print(json.dumps(bundle, ensure_ascii=False))
 
 
@@ -2271,7 +2580,12 @@ def _emit_decision_verification_context():
               "(skills/decision-verification/review-type.json missing).",
               file=sys.stderr)
         sys.exit(1)
-    origin_id, origin_content = _repo_file_origin(desc)
+    # ms-119 e-7345 (独立レビュー 2 体の合意指摘): ここは 3 番目の呼び出し元で、
+    # 以前は gaps を渡さず provenance も捨てていた。原典が食い違っていても警告が
+    # 出ず、どの版で判定したかも載らない —— この関数群の目的が、この 1 経路だけで
+    # 無効化されていた。gaps は resolve より前に作って渡す。
+    gaps = []
+    origin_id, origin_content, origin_provenance = _repo_file_origin(desc, gaps)
 
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
     limit_raw = os.environ.get("BEACON_DECISION_LIMIT", "").strip()
@@ -2295,7 +2609,8 @@ def _emit_decision_verification_context():
         "ref": kind or "all",
         "content": json.dumps(decisions, ensure_ascii=False, indent=2),
     }
-    gaps = []
+    # ここで `gaps = []` と書き直すと、原典解決が積んだ食い違いの開示を捨てる。
+    # 実際に 1 度書いてしまった — 配線を足しても、後ろで作り直せば消える。
     if not decisions:
         gaps.append(
             "検証対象の decision がありません "
@@ -2312,30 +2627,208 @@ def _emit_decision_verification_context():
         gaps=gaps,
         known_judge_types=set(registry.keys()),
         artifact=artifact,
+        origin_provenance=origin_provenance,
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
 
-def _repo_file_origin(desc):
-    """(origin_id, origin_content) for a repo-file 原典 descriptor, or exit with a
-    clean error. Used by the BATCH review-context path (e-4125); the single-type
-    path (cmd_review_context) resolves its origin inline because it also handles
-    the doc-origin kind. Extracting the full single-path collection into a shared
-    helper is a worthwhile follow-up (e-4125 maint review)."""
+def _reviewed_repo_root():
+    """The working tree being reviewed (= git toplevel of cwd), or "" if none.
+
+    ms-119 e-7345. The 原典 of a repo-file review type lives in a working tree,
+    and the review runs **somewhere**: a fork's worktree, a clone, the installed
+    capability's own checkout. Those can hold different versions of the same
+    原典, so which tree we read decides what standard the judge applies.
+    """
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _capability_root():
+    """The checkout the running capability was installed from.
+
+    Delegates — the expression lives once in ``review_spine.install_root``.
+    独立レビュー (低) の指摘: 重複を畳むのが主題の変更で、同じ式を別名でもう 1 つ
+    増やしていた。片方だけ直る形を作らないため、呼ぶだけにする。
+    """
+    import review_spine  # local import — matches this file's module-import idiom
+    return review_spine.install_root()
+
+
+def _resolve_review_origin(review_type, desc, origin_doc, gaps):
+    """``(origin_id, origin_content, provenance)`` for one review type's 原典,
+    or exit with a clean error. Used by the SINGLE-TYPE review-context path.
+
+    Every 原典 kind resolves here and **returns the whole triple**, the same
+    shape :func:`_repo_file_origin` hands the batch path. That is the point:
+    this used to be an if/elif that assigned ``origin_id`` / ``origin_content``
+    / ``origin_provenance`` into the caller's locals, and when e-7345 added
+    provenance it was added to the repo-file branch only. The doc branch (思想
+    / philosophy, whose 原典 is a target's SPEC) never bound the name, so
+    **every** ``beacon review context --type philosophy`` died with
+    ``UnboundLocalError: origin_provenance`` at the assemble call — the whole
+    review type was unreachable while ax / maintainability kept working, and
+    nothing said so until a caller read the traceback. A branch that must
+    ``return`` a triple cannot leave one of the three unset; the next 原典 kind
+    added here inherits that for free.
+
+    A doc 原典 has no checkout, so its provenance is ``None`` — exactly the
+    "caller cannot say which working tree" case ``review_spine._origin_slot``
+    documents, which keeps the slot at its two-key shape.
+    """
+    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
+    origin_kind = origin_spec.get("kind", "")
+    if origin_kind == "repo-file":
+        # 原典 is a fixed repo file that travels with the capability (Layer 3).
+        # --origin-doc does not apply; silently ignoring it would let the caller
+        # believe their doc became the 原典 — reject instead.
+        ref = origin_spec.get("ref", "")
+        if not ref:
+            print(f"Error: review type {review_type!r} descriptor has origin.kind"
+                  f"=repo-file but no 'ref' (skills/<type>/review-type.json is "
+                  f"malformed).", file=sys.stderr)
+            sys.exit(1)
+        if origin_doc:
+            print(f"Error: --origin-doc is not valid for --type {review_type} "
+                  f"(its 原典 is fixed to {ref}).", file=sys.stderr)
+            sys.exit(1)
+        # ms-119 e-7345: 解決は 1 箇所 (_resolve_repo_file_origin) に寄せた。
+        # 以前はここと batch 側の _repo_file_origin に同じ解決が手書きで 2 つ
+        # 並んでおり、片方だけ直る形だった (コード内の注記自身が「抽出は価値ある
+        # follow-up」と認めていた)。
+        content, provenance = _resolve_repo_file_origin(ref, gaps)
+        return ref, content, provenance
+    if origin_kind == "doc":
+        # 原典 is a document supplied at review time (a target's SPEC / vision).
+        # Absence is itself a finding (SPEC § 方針5): surface as a gap, don't lie.
+        if not origin_doc:
+            print(f"Error: --type {review_type} needs --origin-doc <doc-id> "
+                  f"(the SPEC / vision the implementation is checked against).",
+                  file=sys.stderr)
+            sys.exit(1)
+        doc = get_store().get_document(origin_doc)
+        if not doc:
+            print(f"Error: origin doc not found: {origin_doc}", file=sys.stderr)
+            sys.exit(1)
+        content = doc.get("content", "")
+        if not content.strip():
+            gaps.append(f"原典 {origin_doc} は本文が空です。drift の照合基準が"
+                        f"無いため、findings は intent 推定に留まります (SPEC § 方針5)。")
+        return origin_doc, content, None
+    print(f"Error: review type {review_type!r} descriptor has unknown "
+          f"origin.kind {origin_kind!r} (expected 'repo-file' or 'doc').",
+          file=sys.stderr)
+    sys.exit(1)
+
+
+def _resolve_repo_file_origin(ref, gaps):
+    """Read a repo-file 原典, preferring the repo under review (ms-119 e-7345).
+
+    Returns ``(content, provenance)`` or exits with a clean error.
+
+    **Why the repo under review wins.** The 原典 is the standard the judge
+    applies, and a change to the 原典 IS reviewable: a PR that rewrites the
+    principles must be judged against what it establishes, and a fork's worktree
+    is the truth for its own review. Reading the capability's checkout instead
+    delivers whatever版 that tree happens to hold — which, when it is behind,
+    silently judges the change by a retired standard.
+
+    **Measured (2026-11-05)**: right after a PR restructured the AX 原典 from
+    6 principles to P1〜P8 and landed on origin/main, a review run from a worktree
+    was handed the 216-line OLD 原典 (the capability's checkout had not pulled;
+    the worktree's own file was 437 lines). ``gaps`` was empty, so neither the
+    judge nor the reader could tell. One review's whole new lens never got
+    applied, and re-running with the right 原典 took findings from 1 to 3.
+
+    **Fallback is still the capability.** Reviewing a repo that is not this tool
+    (no local copy of the 原典) must keep working — the 原典 travels with the
+    capability by design. So: prefer the reviewed tree, fall back, and **always
+    say which**. When both exist and differ, that divergence goes in ``gaps``
+    rather than being resolved quietly: the point is not to pick a winner
+    silently but to stop a review from claiming a standard it did not use.
+    """
+    rel = ref.split("/")
+    reviewed_root = _reviewed_repo_root()
+    cap_root = _capability_root()
+    reviewed_path = os.path.join(reviewed_root, *rel) if reviewed_root else ""
+    cap_path = os.path.join(cap_root, *rel)
+
+    unreadable = []
+
+    def _read(path):
+        """Read ``path``, or return None — distinguishing "absent" from "there
+        but unreadable" (独立レビュー misleading の指摘).
+
+        握り潰すと、権限が壊れたファイルや同名ディレクトリが「無い」と名乗る。
+        読み手は消したパスを疑って探しに行き、`ls -la` で気づくまで空回りする。
+        """
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            unreadable.append((path, type(exc).__name__))
+            return None
+
+    reviewed_text = _read(reviewed_path) if reviewed_path else None
+    cap_text = _read(cap_path)
+    for path, why in unreadable:
+        # 在るのに読めなかったことは、落ちた先が在っても黙らない (= 「無いので
+        # capability を使った」という体で進むのを止める)。
+        gaps.append(f"原典 {ref} の候補 {path} は存在しますが読めませんでした "
+                    f"({why})。権限か、同名のディレクトリを疑ってください。")
+
+    if reviewed_text is not None:
+        chosen, path, source = reviewed_text, reviewed_path, "reviewed-repo"
+        if cap_text is not None and cap_text != reviewed_text:
+            gaps.append(
+                f"原典 {ref} の内容が 2 つの作業ツリーで異なります: レビュー対象の "
+                f"{reviewed_path} ({len(reviewed_text.splitlines())} 行) を使い、"
+                f"インストール元の {cap_path} ({len(cap_text.splitlines())} 行) は "
+                f"使いませんでした。インストール元が古い (未 pull) 可能性があります。"
+                f"揃えるなら `git -C {cap_root} pull`。"
+                f"(行数が同じでも内容は異なりえます — 判定は内容の一致で行っています)")
+    elif cap_text is not None:
+        chosen, path, source = cap_text, cap_path, "capability"
+    else:
+        why = ("読めませんでした (" + ", ".join(f"{p}: {w}" for p, w in unreadable)
+               + ")") if unreadable else "見つかりません"
+        print(f"Error: 原典 {ref} を使えません — {why} "
+              f"(探した場所: {reviewed_path or '(git 管理下でない)'} / {cap_path})",
+              file=sys.stderr)
+        sys.exit(1)
+
+    return chosen, {"resolved_from": source, "path": path}
+
+
+def _repo_file_origin(desc, gaps):
+    """``(origin_id, origin_content, provenance)`` for a repo-file 原典 descriptor,
+    or exit with a clean error. Used by the BATCH review-context path (e-4125).
+
+    ms-119 e-7345: the resolution itself now lives in
+    :func:`_resolve_repo_file_origin`, shared with the single-type path. Before
+    that the two paths each had their own hand-written copy — the follow-up this
+    docstring used to ask for.
+
+    ``gaps`` is a REQUIRED positional argument, deliberately: it used to default
+    to ``None`` and the body then made a throwaway list, so a caller that forgot
+    it got the resolution but **silently lost the divergence disclosure** — which
+    is the whole point of this function. Two independent reviews found exactly
+    that happening in the decision-verification path. A caller that forgets now
+    fails loudly instead of quietly judging by a standard nobody can audit."""
     origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
     ref = origin_spec.get("ref", "")
     if origin_spec.get("kind") != "repo-file" or not ref:
         print(f"Error: batch は原典が repo-file の review type のみ対象です "
               f"(descriptor: {desc.get('id')})。", file=sys.stderr)
         sys.exit(1)
-    install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    origin_path = os.path.join(install_root, *ref.split("/"))
-    try:
-        with open(origin_path, encoding="utf-8") as f:
-            return ref, f.read()
-    except OSError as e:
-        print(f"Error: 原典 not found at {ref}: {e}", file=sys.stderr)
-        sys.exit(1)
+    content, provenance = _resolve_repo_file_origin(ref, gaps)
+    return ref, content, provenance
 
 
 def cmd_review_batch_context():
@@ -2377,7 +2870,7 @@ def cmd_review_batch_context():
     # ms-166 e-6971: batch も同じ収集を通す。ここだけリポジトリ指定なしのままだと、
     # /beacon-review-run が既定で使う経路 (--batch) が取り違えたままになる。
     shared_gaps = []
-    argv, target_ref, _repo = _pr_diff_collection(
+    argv, target_ref, _repo, _head_sha = _pr_diff_collection(
         pr, os.environ.get("BEACON_PR_REPO", "").strip(), shared_gaps)
     diff_text = _collect_change_diff(argv, target_ref, shared_gaps,
                                      empty_is_error=True)
@@ -2390,20 +2883,40 @@ def cmd_review_batch_context():
         shared_gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
                            "既存機能との重複を repo 参照なしには確認できません "
                            "(/beacon-map で生成すると review 精度が上がります)。")
+    # ms-119 e-7404: 単一種別の経路と **同じ入口** を通す。節目のバッチ発火が
+    # judge を起動する既定経路なので、ここに無いと実運用では効かない。
+    # リポジトリは収集が解決した値 (`_repo`) を使う。環境変数を読み直すと、
+    # 差分を採った先と注記を採る先が食い違う形が作れる。
+    _move_ref = _artifact_move_reference(pr=pr, pr_repo=_repo,
+                                         head_sha=_head_sha,
+                                         gaps=shared_gaps)
+    if _move_ref is not None:
+        external_references.append(_move_ref)
 
     registry = review_spine.load_review_types()
     implementer_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
     reviews = []
     for d in due:
         rtype = d["review"]
-        origin_id, origin_content = _repo_file_origin(registry.get(rtype, {}))
+        # 原典の食い違いは review type ごとに出るので、共有 gaps を汚さず
+        # この bundle の gaps にだけ載せる (別の type の原典は別ファイル)。
+        type_gaps = list(shared_gaps)
+        origin_id, origin_content, origin_provenance = _repo_file_origin(
+            registry.get(rtype, {}), type_gaps)
         bundle = review_spine.assemble_review_context(
             rtype, origin_id=origin_id, origin_content=origin_content,
             diff_text=diff_text, mode="diff", target_ref=target_ref,
-            gaps=list(shared_gaps),
+            head_sha=_head_sha,
+            gaps=type_gaps,
             known_judge_types=set(review_spine.judge_run_review_types().keys()),
             implementer_model=implementer_model,
-            external_references=external_references)
+            external_references=external_references,
+            origin_provenance=origin_provenance)
+        # 束でも 1 種別ずつ刻む (ms-119)。同じ差分を 2 種別へ渡すので同じ sha が
+        # 2 つの住所に入るが、あとで片方だけ再発行されたときに、もう片方が
+        # 新しい sha を拾わないために種別ごとに分ける。
+        if pr and _head_sha:
+            write_issued_bundle_sha(pr, _repo, rtype, _head_sha)
         reviews.append({"review_type": rtype, "judge_run": True, "bundle": bundle})
 
     print(json.dumps({
@@ -3387,9 +3900,6 @@ def cmd_channel_status():
 # does not need atomicity.
 
 
-# Trek CLI (ms-69) moved to lib/cmd_trek.py (ms-127 e-4820) — handlers are
-# re-imported for dispatch at the top of this file; family-private helpers and
-# trek-only constants (TREK_AUTO_ARM_CHANNELS etc.) live canonically there.
 
 
 # ---------------------------------------------------------------------------
@@ -3509,15 +4019,6 @@ def cmd_save():
 # interleaved near the trigger block). They may call trigger fns, which
 # resolve via commands.py's cmd_trigger re-import at top.
 # ---------------------------------------------------------------------------
-
-def _review_skips_log_path() -> str:
-    """Durable append-only audit of human-intended review skips (ms-119 e-4124).
-
-    Lives in .beacon/ (not the ephemeral triggers/ dir) so a waiver survives the
-    trigger that it cleared — the skip decision is a permanent governance record,
-    the trigger is a transient 'still owed' marker."""
-    return os.path.join(os.path.dirname(get_project_file()), "review-skips.jsonl")
-
 
 def _review_skip_gate_record() -> dict:
     """Capture HOW a review skip passed the human-intent guard (ms-119 e-4124).
@@ -3675,8 +4176,10 @@ def _review_gate_is_in_use() -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "1"
 
 
-def _ci_flip_review_gate_success(pr_number: str) -> None:
-    """``beacon-review-gate`` の印を PR head に success で押す (ms-119 e-4073)。
+def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
+                                 reviewed_sha: str = "") -> None:
+    """``beacon-review-gate`` の印を **レビューした sha に** success で押す
+    (ms-119 e-4073 / e-6859)。
 
     **押せたか押せなかったかを必ず出力する** (ms-166 e-6873)。旧実装は
     「best-effort、never raises」で 3 つの経路すべてが無言だった:
@@ -3701,6 +4204,16 @@ def _ci_flip_review_gate_success(pr_number: str) -> None:
     そこで **押す前に「GitHub が知っている head」と「手元の HEAD」を照合する**。
     食い違っていたら押さずに断り、先に push することを促す (印を古い sha に付けて
     しまう方が、押さないより始末が悪い)。
+
+    ms-119 e-6859 で **2 つ変えた**:
+
+    1. 押す先は ``reviewed_sha`` (= この実施が pin した差分) にする。以前は
+       「いまの PR head」に押していたので、別種別が古い sha しか見ていなくても、
+       1 つの ``review done`` が今の head を緑にできた (PR #785 の事故)。
+    2. 押す条件は「トリガーファイルが残っていない」ではなく
+       **「その sha に対して全必須種別が充足している」** にする。前者は
+       削除の有無しか見ないので、「この差分をまだ誰も見ていない」状態と区別が
+       付かなかった。
     """
     if not _review_gate_is_in_use():
         print("  (ゲートの印は触っていません: このリポジトリはレビュー関門を"
@@ -3710,31 +4223,36 @@ def _ci_flip_review_gate_success(pr_number: str) -> None:
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "scripts", "review-gate-ci.py")
+
+    reviewed_sha = str(reviewed_sha or "").strip()
+    if not reviewed_sha:
+        print(f"  ⚠ ゲートの印は押していません — この実施がどの差分に対するものか "
+              f"pin できていません (head を確かめられなかった)。印は sha 単位なので、"
+              f"pin できない状態で押すと「judge が見ていない差分」を緑にします "
+              f"(ms-119 e-6859)。出口は 2 つ: head を確かめられる環境で "
+              f"`beacon review done` を打ち直すか、`--reviewed-sha <sha>` で"
+              f"レビューした差分を明示してください "
+              f"(sha が無いままこの印を手で押す経路は **ありません** —— "
+              f"印は sha 単位なので、押す先が決まらないからです)。",
+              file=sys.stderr)
+        return
+
     try:
-        remote_sha = subprocess.run(
-            ["gh", "pr", "view", pr_number, "--json", "headRefOid",
-             "--jq", ".headRefOid"],
-            capture_output=True, text=True, timeout=30).stdout.strip()
         local_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=30).stdout.strip()
     except (OSError, subprocess.SubprocessError) as e:
-        print(f"  ⚠ ゲートの印を押せませんでした (sha を取得できない: {e})。"
-              f"手で押す: python3 {script} set --state success "
-              f"--sha <push 済の head> --pr {pr_number}", file=sys.stderr)
+        print(f"  ⚠ 手元の HEAD を取得できませんでした ({e})。照合できないため"
+              f"印は押していません。手で押す: python3 {script} set --state success "
+              f"--sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
         return
 
-    if not remote_sha:
-        print(f"  ⚠ ゲートの印を押せませんでした (GitHub から PR #{pr_number} の head を"
-              f"取得できない)。gh の設定とリポジトリを確認してください。", file=sys.stderr)
-        return
-
-    if local_sha and local_sha != remote_sha:
+    if local_sha and local_sha != reviewed_sha:
         # ここが e-6873 の本体。押さずに断る。
         print(
             f"  ⚠ ゲートの印は押していません — 手元の HEAD が push されていません。\n"
             f"      手元:   {local_sha[:12]}\n"
-            f"      GitHub: {remote_sha[:12]} (= いまの PR head)\n"
+            f"      GitHub: {reviewed_sha[:12]} (= いまの PR head / レビューした差分)\n"
             f"    このまま押すと **GitHub 側の古い sha に** 印が付きます。印は sha 単位な\n"
             f"    ので、その後 push した head は pending のまま残り「レビューはやったのに\n"
             f"    取り込めない」状態になります (2026-10-06 に PR #786 で実際に起きた)。\n"
@@ -3745,22 +4263,143 @@ def _ci_flip_review_gate_success(pr_number: str) -> None:
             file=sys.stderr)
         return
 
+    # **その sha に対して全必須種別が充足しているか** を見る。1 種別の実施で
+    # 緑を押せてしまう形が PR #785 の事故だった (ms-119 e-6859)。
+    _ob = pr_review_obligations(pr_number, pr_repo, head_sha=reviewed_sha)
+    # ms-119 e-6859 (親レビュー 2026-11-06): 判定に関わる読み手は **blocking** を
+    # 見る。`owed` を直接読むと、`passed` と食い違う文言を作れてしまう。
+    _blocking = review_blocking_types(_ob)
+    if _blocking:
+        print(f"  (ゲートの印はまだ押していません: {reviewed_sha[:12]} に対して "
+              f"{', '.join(_blocking)} が未実施です。全必須種別が **同じ差分に"
+              f"対して** 実施されてから緑になります)", file=sys.stderr)
+        return
+
     try:
         r = subprocess.run(["python3", script, "set", "--state", "success",
-                            "--sha", remote_sha, "--pr", pr_number],
+                            "--sha", reviewed_sha, "--pr", pr_number],
                            capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"  ⚠ ゲートの印を押せませんでした ({e})。手で押す: python3 {script} "
-              f"set --state success --sha {remote_sha} --pr {pr_number}", file=sys.stderr)
+              f"set --state success --sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
         return
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip().splitlines()
         print(f"  ⚠ ゲートの印を押せませんでした "
               f"({detail[-1] if detail else f'exit {r.returncode}'})。"
               f"手で押す: python3 {script} set --state success "
-              f"--sha {remote_sha} --pr {pr_number}", file=sys.stderr)
+              f"--sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
         return
-    print(f"  ✓ ゲートの印を success に押しました ({remote_sha[:12]})")
+    print(f"  ✓ ゲートの印を success に押しました ({reviewed_sha[:12]})")
+
+
+def cmd_review_status():
+    """関門の状態を **副作用なしで** 読む (ms-119 e-6859、独立 AX レビュー high)。
+
+    beacon review status --pr <N> [--repo <owner/name>] [--json]
+
+    **なぜこの動詞が要るか。** 関門を導出に替えたあと、関門の本当の状態を知る手段が
+    ``review done`` / ``pr approve`` / ``pr merge`` を **実際に叩く** 以外に無かった。
+    どれも副作用を持つので、「もうレビュー済み? 取り込んでいい?」と聞かれた AI が
+    気軽に確かめられない。残った読み取り専用の経路は ``beacon trigger check`` だが、
+    あちらは促し (= トリガーファイルの有無) の面であって関門ではない。
+
+    judge が実機で再現した事故の筋道: 古い head に ``review done`` した後、新しい
+    コミットを積んで ``trigger check`` を叩くと促しが 1 件も出ない。そこで
+    「完了しています、マージして大丈夫です」と答えた AI が ``gh pr merge`` を叩くと、
+    ``BEACON_REVIEW_GATE_CI`` 未設定のリポジトリでは関門を経由しないので、
+    この課題が塞いだはずの事故が **読み取り専用の確認経路側から** 再発する。
+
+    だから「関門が何を要求しているか」を、関門と同じ導出で、何も変えずに返す口を
+    置く。促しの再発火も同じ事実 (いまの head) を見るように直したので、
+    **促しと関門が同じ意味** になった。
+    """
+    pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
+    pr_repo = os.environ.get("BEACON_PR_REPO", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # 兄弟 (``review done`` / ``review skip``) は ``(--pr | --target)`` を取るので、
+    # その文法を転移して ``review status --target ms-9`` と打つ呼び出し側が居る
+    # (独立 AX レビュー misleading, 2026-11-10)。初版は ``--target`` を読まずに
+    # 捨てていたので、出るのは ``Usage: ... --pr <n>`` だけ ——
+    # **「--target の代わりに --pr を使え」と読めてしまう**。実際は
+    # 「target スコープの読み取り口がまだ無い」のであって、代用ではない
+    # (義務の導出は ``derive_pr_review_obligations`` が PR head の sha に依る
+    # 形しか持たない)。受け取った値を echo して、未対応を名指して落とす。
+    if target_id:
+        print(f"Error: review status は --target を未対応です (--pr 専用)。"
+              f"受け取った値: {target_id!r}。", file=sys.stderr)
+        print("  これは --pr で代用できるという意味ではありません — 義務の導出が"
+              "PR head の sha に依るため、target スコープには読み取り専用の"
+              "状態確認がまだ在りません。", file=sys.stderr)
+        print("  target への記録 (副作用あり) は `beacon review done --target "
+              "<ms-XX|op-X>` / `beacon review skip --target <ms-XX|op-X>`。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if not pr_number:
+        print("Usage: " + _registry_usage_line("review status"), file=sys.stderr)
+        sys.exit(1)
+    if not pr_number.isdigit():
+        print(f"Error: --pr は PR 番号 (数字) を渡してください "
+              f"(受け取った値: {pr_number!r})。", file=sys.stderr)
+        sys.exit(1)
+    if pr_repo and not core.is_repo_slug(pr_repo):
+        print(f"Error: --repo は owner/name の形で渡してください "
+              f"(受け取った値: {pr_repo!r})。", file=sys.stderr)
+        sys.exit(1)
+    if not pr_repo:
+        pr_repo = _resolve_review_pr_repo("", [])
+
+    ob = pr_review_obligations(pr_number, pr_repo)
+    # **判定は `passed` を読むだけ** (ms-119 e-6859、独立 AX レビュー 2 周目 high)。
+    # 初版は `--json` のとき判定より前に return していたので、owed が非空でも
+    # exit 0 を返した —— README に自分で「Exits 2 while anything is owed」と
+    # 書いておきながら、テキストモードにしか実装していなかった。judge の実測:
+    # `review status --pr 838 --json` が owed 2 件で exit 0、同じ PR の
+    # テキストモードは exit 2。**同じ問いに、出力形式だけで違う答えが返る** 形で、
+    # 「機械可読が欲しいから --json を付ける」という自然な選択が偽の緑を踏む。
+    # 終了コードは両モードで同じ 1 行から決める。
+    _rc = 0 if ob.get("passed") else 2
+    if json_mode:
+        print(json.dumps(ob, ensure_ascii=False))
+        sys.exit(_rc)
+
+    _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
+    print(f"独立レビューの関門: {_where}")
+    if ob.get("pr_state"):
+        print(f"  PR の状態: {ob['pr_state']}")
+    # merge / close 済みの PR に、これから課す義務は無い。関門と同じ判断
+    # (`passed`) を同じ言葉で言う —— ここだけ別に書くと、また 2 つの口が食い違う。
+    if ob.get("pr_state") in ("MERGED", "CLOSED"):
+        print(f"  → この PR は既に {ob['pr_state']} なので、独立レビューの関門は"
+              f"問いません (これから課す義務がありません)。")
+        sys.exit(_rc)
+    if not ob.get("resolved"):
+        # 関門と同じ判断を、同じ言葉で言う (ここだけ緩く答えると、この動詞が
+        # 新しい「嘘の緑」になる)。
+        print(f"  ⚠ 判定できません — いまの差分 (head) を確かめられませんでした "
+              f"({ob.get('head_error') or '理由不明'})。\n"
+              f"  この状態では approve / merge も止まります。「現在の差分に対して"
+              f"実施済み」と言えないためです。", file=sys.stderr)
+        sys.exit(2)
+    print(f"  いまの差分: {ob['head_sha'][:12]}")
+    print(f"  必須の種別: {', '.join(ob.get('required') or []) or '(なし)'}")
+    # **blocking** を読む (`owed` は導出の内訳)。`--json` も同じ値を `blocking` で
+    # 運ぶので、機械読みと人の表示が食い違わない (親レビュー 2026-11-06 AX high)。
+    owed = review_blocking_types(ob)
+    for line in format_pr_review_obligation_disclosure(ob):
+        print(line)
+    if owed:
+        print(f"  → 未実施: {', '.join(owed)} (この状態では approve / merge は"
+              f"止まります)")
+        for t in owed:
+            print(f"      /beacon-review-run --type {t} --pr {pr_number}")
+    else:
+        print("  → この差分に対して全必須種別が実施済み。approve / merge を"
+              "通過できます (この上にコミットを積むと再度要ります)。")
+    sys.exit(_rc)
 
 
 def cmd_review_skip():
@@ -3864,6 +4503,14 @@ def cmd_review_skip():
         # 別リポジトリの同じ番号の免除と区別できない (監査記録として辿れない)。
         # 明示が無ければ cwd のリポジトリを解決し、取れなければ空文字 = 「不明」。
         record["repo"] = pr_repo or _resolve_review_pr_repo("", [])
+        # ms-119 e-6859: **いつの時点の免除か**。免除は sha 単位にしない (人間が
+        # 理由付きで出した判断を push ごとに出し直させるのは現実的でない) ので、
+        # 以後の差分も覆う。だからこそ「どの差分を見てこの判断を出したのか」を
+        # 残し、関門が緑を出すときに開示する —— 覆う範囲が広い判断ほど、いつの
+        # ものかが読めないと監査できない。取れなければ空 = 不明 (推測で埋めない)。
+        _skip_sha, _unused_state, _unused_err = resolve_pr_head(
+            pr_number, record["repo"])
+        record["skipped_at_sha"] = _skip_sha
 
     # Durable audit first (the record must survive even if trigger clearing
     # races); then clear ONLY this type's review-due obligation.
@@ -3911,7 +4558,8 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
                                          summary: str, adjudications: list,
                                          pr_repo: str = "",
                                          ref_kind: str = "pr",
-                                         no_findings: bool = False) -> None:
+                                         no_findings: bool = False,
+                                         reviewed_sha: str = "") -> None:
     """ms-166 e-5971 — weld the finding-level review adjudication onto the decision
     arm at the SAME choke point that clears the review gate (``beacon review done``),
     so recording a review structurally captures WHAT was decided about its findings —
@@ -3999,8 +4647,27 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
             # されていた。`pr:<n>` で引く consumer は milestone の記録まで拾い、
             # `target:<id>` で引く consumer はこれらを 1 件も拾えない。
             # 兄弟の `review skip` は最初から ref_kind を持っていた。
+            # ms-119 e-6859 (独立 AX レビュー high): **どの差分に対する実施か** も
+            # evidence に入れる。
+            #
+            # この事実を持つもう一方の置き場 (作業フォルダ横断の台帳) は
+            # ``(PR, 種別)`` ごとに 1 ファイルを **上書き** する設計なので (冪等な
+            # 打ち直しで判断記録が二重に増えないための性質、ms-166 e-6899)、同じ
+            # 種別を次の sha で記録した瞬間に前の sha が消える。judge の実測:
+            # ``shaAAAA1111`` で記録 → ``shaBBBB2222`` で再記録 → 前者は grep で
+            # 0 件。
+            #
+            # それは台帳としては正しい (台帳は「いまの充足状態」を答える面) が、
+            # **この課題の核心価値が「どの差分を見たかを辿れるようにする」** なので、
+            # 履歴がどこにも残らないと自己矮小化になる —— PR #785 の経緯
+            # (1 周目は古い sha のみ実施、保守性だけ後から再実施) を、まさにそれを
+            # 直した後の仕組みで再現できない。
+            #
+            # decision arm は **追記のみ** なので、ここに sha を載せれば履歴が残る。
+            # 置き場の役割分担: 台帳 = いまの状態 / decision arm = 経緯。
             "evidence": ([f"review:{review_type}", f"{ref_kind}:{pr_number}"]
-                         + ([f"repo:{pr_repo}"] if pr_repo else [])),
+                         + ([f"repo:{pr_repo}"] if pr_repo else [])
+                         + ([f"sha:{reviewed_sha}"] if reviewed_sha else [])),
         })
 
 
@@ -4044,7 +4711,15 @@ def _emit_review_done_for_target(review_type: str, target_id: str, *,
                                  adj_summary: str = "",
                                  adjudications: list = None,
                                  no_findings: bool = False) -> None:
-    """target (PR を作らない作業) のレビュー実施を記録して関門を外す (ms-166 e-6918).
+    """target (PR を作らない作業) のレビュー実施を記録する (ms-166 e-6918).
+
+    **「関門を外す」ではない** (ms-119 e-7439)。この記録が消すのは **促し**
+    (review-due トリガー) で、target の完了 / 承認を止める関門ではない —— 下で
+    印字する文面のとおり、`cmd_target_approve` / `target_transition_approval_approve`
+    / `cmd_milestone_done` はこの記録を読まない。完了を止めるのは目的達成レビューの
+    人間承認だけで、思想は SPEC どおり助言 (非 blocking) に留まる。初版の docstring は
+    PR 側 (そこでは本当に `beacon pr approve` を止める) の言葉をそのまま持ってきて
+    いたので、target 側では偽の主張になっていた。
 
     PR 側と分けてあるのは、PR 側が持つ 2 つの道具 (``beacon-review-gate`` の印は
     PR head の commit に押す / identity はリポジトリ) が target に無いから。
@@ -4139,8 +4814,19 @@ def _emit_review_done_for_target(review_type: str, target_id: str, *,
         print("  ⚠ 共有置き場 (git の共通ディレクトリ) が取れなかったので、この "
               "cwd 限りの記録です — fork / 親の別の作業フォルダからは未実施に"
               "見えます。", file=sys.stderr)
+    # ms-119 e-7439: **存在しない関門を名乗らない**。旧文面は「完了の関門を通過
+    # できます」と印字していたが、target 側のこの記録を読む完了 / 承認の関門は
+    # 無い —— `_target_review_due_*` の読み手は この記録 (review done) と 免除
+    # (review skip) の 2 つだけで、`cmd_target_approve` /
+    # `core.target_transition_approval_approve` / `cmd_milestone_done` はどれも
+    # 読まない (AST で実測、tests/test_target_review_record_claims_e7439.py が
+    # 読み手の集合を固定している)。思想レビューは SPEC が「助言・非 blocking」と
+    # 宣言している機構なので、**gate を作るのではなく文面を実態に合わせた**
+    # (README が review status の契約を偽って書いていた件と同じ family)。
     print(f"  {target_id} の {review_type} の義務を解消しました "
-          f"— 完了の関門を通過できます。")
+          f"— 促し (review-due) は消えます。")
+    # 文面の正本は commands_shared.TARGET_REVIEW_RECORD_EFFECT (help と共有)。
+    print(f"  ※ {TARGET_REVIEW_RECORD_EFFECT}。")
 
 
 def cmd_review_done():
@@ -4184,60 +4870,28 @@ def cmd_review_done():
     # 存在しなかった** (別プロジェクトのセッションが実際に踏み、後から PR を作って
     # 帳尻を合わせた)。gate を扱う 2 兄弟で対象の指定方法が割れていた。
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
-    if pr_number and target_id:
-        print("Error: --pr と --target は同時に指定できません (どちらか一方)。",
-              file=sys.stderr)
-        sys.exit(1)
-    # ms-166 e-6918 (独立 AX レビュー high): --repo は PR 番号を解決する先を指す
-    # 指定なので --target では意味を持たない。初版は受け取って形まで検査しながら
-    # **黙って捨てて成功を名乗っていた** (= silent no-op)。兄弟の `review skip` は
-    # 同じ組み合わせを exit 1 で拒否しており、まさにこの課題が閉じようとした
-    # done/skip の非対称を自分で新しく作っていた。文面も skip と同じにする。
-    if pr_repo and target_id:
-        print("Error: --repo は --pr と一緒に使ってください (PR 番号を解決する先を"
-              "指す指定なので、--target では意味を持ちません)。", file=sys.stderr)
-        sys.exit(1)
-    if not review_type or not (pr_number or target_id):
-        # ms-166 e-6918 (独立 AX レビュー medium): 文法を手で再掲しない。
-        # 初版はここと help registry と bin/beacon の 3 箇所に別々に書いており、
-        # しかも registry 側は `--pr` / `--target` を独立した任意旗として並べていて
-        # **排他でも必須でもないように読めた**。文法は registry を単一ソースにする。
-        print("Usage: " + _registry_usage_line("review done"), file=sys.stderr)
-        sys.exit(1)
-    # ms-166 e-6997: **採否を渡さない限り関門を開けない** (= default-deny)。
-    #
-    # 独立思想レビュー high: この溶接は正しい漏斗に在ったが **中身が空でも通った**。
-    # --adjudications は任意旗で、空なら判断記録を書かずに早期 return する一方、
-    # review-due の印は消え「approve/merge の gate を通過できます」と exit 0 で言って
-    # いた。実測 (throwaway project): 採否を一切渡さずに関門が開き、残るのは stderr の
-    # ℹ 1 行だけ。つまり捕獲は「AI が旗を渡すこと」に依存し、依存先は Skill の散文
-    # ——  この MS が消すと宣言した「お願い依存」そのものだった。実践として毎回渡して
-    # いても、それは構造の証明にならない。
-    #
-    # 「findings が無かった」は正当な状態なので、黙って省略させるのではなく
-    # **明示して記録に残す** (--no-findings)。これで decision arm には必ず 1 行載り、
-    # 「レビューを走らせたが findings 0 件だった」と「採否を書き忘れた」が後から
-    # 区別できる (旧: どちらも記録ゼロで見分けが付かなかった)。
-    #
-    # ここは --pr / --target の **分岐より前**。片方だけに関門を置くと、同じ状態
-    # (関門が開く) に到達する兄弟の経路が素通りする —— この MS が何度も直している型。
     _adj_summary = os.environ.get("BEACON_REVIEW_ADJUDICATION_SUMMARY", "").strip()
     _adjudications = _adjudications_from_env()
     _no_findings = os.environ.get("BEACON_REVIEW_NO_FINDINGS", "") == "1"
-    if _no_findings and (_adj_summary or _adjudications):
-        print("Error: --no-findings は「findings が 0 件だった」の明示なので、"
-              "--adjudication-summary / --adjudications と同時には使えません "
-              "(どちらが本当かを機械が決められません)。", file=sys.stderr)
-        sys.exit(1)
-    if not _no_findings and not _adj_summary and not _adjudications:
-        print("Error: 採否 (adjudication) が未記録のままでは関門を開けません "
-              "(ms-166 e-6997)。judge の findings をどう採否したかは、最も監査が"
-              "要る AI の判断です。次のどちらかを付けて再実行してください:\n"
-              "  findings があった: --adjudication-summary \"<総括 1 行>\" "
-              "[--adjudications '<json>']\n"
-              "  findings が 0 件だった: --no-findings\n"
-              "関門はまだ開いていません (この呼び出しは何も変えていません)。",
-              file=sys.stderr)
+    # 引数の両立規則は **1 箇所** (commands_shared.decide_review_done_argument_error)
+    # が持つ。5 つの規則とその由来 (どれも「黙って捨てて成功を名乗っていた」実害から
+    # 足された) はあちらの docstring に在る。ここに並べていた頃はこの関数が 273 行に
+    # 膨らみ、規則を 1 つ足したい次の AI が「規則の一覧」を読む場所を持てなかった
+    # (独立保守性レビュー medium, 2026-11-10)。
+    #
+    # **採否の default-deny は --pr / --target の分岐より前**に効く必要があり、
+    # それもあちらの規則 5 に含めてある (片方だけに関門を置くと兄弟の経路が
+    # 素通りする —— この MS が何度も直している型)。
+    _argerr = decide_review_done_argument_error(
+        review_type=review_type, pr_number=pr_number, target_id=target_id,
+        pr_repo=pr_repo,
+        reviewed_sha=os.environ.get("BEACON_REVIEWED_SHA", "").strip(),
+        adj_summary=_adj_summary, adjudications=_adjudications,
+        no_findings=_no_findings,
+        usage_line=_registry_usage_line("review done"))
+    if _argerr:
+        for _line in _argerr["lines"]:
+            print(_line, file=sys.stderr)
         sys.exit(1)
     if target_id:
         _emit_review_done_for_target(review_type, target_id,
@@ -4261,7 +4915,26 @@ def cmd_review_done():
     # 「全て実施済み — gate を通過できます」と、別リポジトリの PR には成り立たない
     # ことを言ってしまう (実機で踏んだ: 誤った --repo を渡すと、この PR 番号の
     # 記録が 2 件とも依然 block されているのに「通過できます」と出た)。
-    _owed_before = _pending_review_types_for_pr(pr_number, pr_repo)
+    # ms-119 e-6859: **どの差分に対する実施か** を、何も書く前に確かめる。
+    # 関門は「現在の差分に対して全種別が実施済みか」を問うので、この sha が
+    # 記録の本体になる。明示の --reviewed-sha が在ればそれを使う (judge に
+    # 渡した bundle が古い head のものだった、と正直に記録できるようにする)。
+    # 供給源の決定は commands_shared に 1 箇所 (明示 > 発行時に刻んだ印 > gh)。
+    # ここに直接書くと、2 周目のレビューで切り出した直後の関数が再び膨らむ
+    # (実測: 273 → 223 → 245 行。独立保守性レビュー 7 周目 medium)。
+    _shares = resolve_reviewed_sha_for_done(
+        explicit=os.environ.get("BEACON_REVIEWED_SHA", ""),
+        pr_number=pr_number, pr_repo=pr_repo, review_type=review_type)
+    if _shares["fatal"]:
+        for _line in _shares["fatal"]:
+            print(_line, file=sys.stderr)
+        sys.exit(1)
+    for _line in _shares["notes"]:
+        print(_line)
+    _reviewed_sha = _shares["sha"]
+    _sha_source = _shares["source"]
+    _sha_error = _shares["sha_error"]
+    _owed_before = _pr_open_review_nudge_pending_types(pr_number, pr_repo)
     # 「既に台帳に在るか」も **この実行が書く前に** 見る。後で見ると、この実行自身の
     # 記録で必ず真になり、下の「義務が無かったので非 0 で終える」分岐が死ぬ
     # (自分の試験がこれを捕まえた —— _owed_before と同じ「変える前に測る」の話)。
@@ -4278,15 +4951,32 @@ def cmd_review_done():
     # decision arm に 1 行載せる (= 省略で記録が消える形を無くした)。
     _record_review_adjudication_decision(
         review_type, pr_number, _adj_summary, _adjudications, pr_repo,
-        no_findings=_no_findings)
+        no_findings=_no_findings, reviewed_sha=_reviewed_sha)
     # ms-166 e-6899: 実施した事実を作業フォルダ横断の台帳に足す。これを足すのは
     # トリガーファイルを消した **後** で、かつ remaining を数える **前**。
     # fork で打ったときに親からも実施済みとして見えるようにするのが目的。
     _ledger_state = record_review_done_across_worktrees(
-        review_type, pr_number, pr_repo)
-    remaining = _pending_review_types_for_pr(pr_number, pr_repo)
+        review_type, pr_number, pr_repo, reviewed_sha=_reviewed_sha)
+    remaining = _pr_open_review_nudge_pending_types(pr_number, pr_repo)
     print(f"レビュー実施を記録: {review_type} / "
           f"{pr_repo + '#' if pr_repo else 'PR #'}{pr_number} (review-due 解消)")
+    # ms-119 e-6859: **どの差分に対する実施として記録したか** を必ず言う。
+    # ここを黙ると、利用者は「PR をレビューした」と読み、関門が後で同じ種別を
+    # もう一度要求したときに壊れたと誤解する。
+    if _reviewed_sha:
+        # 供給源を正しく名乗る (ms-119)。刻んだ sha を「いまの PR head」と
+        # 呼ぶと、読み手は「done の時点の head を記録した」と読む —— 実際は
+        # 「judge に渡した差分」で、両者がずれている瞬間こそこの印の存在理由
+        # なので、そこを取り違えさせる文面は名乗りと実態のズレそのものになる。
+        _src_txt = {
+            "explicit": "--reviewed-sha で明示",
+            "issued-bundle": "judge に渡した bundle の差分",
+        }.get(_sha_source, "いまの PR head")
+        print(f"  対象の差分: {_reviewed_sha[:12]} ({_src_txt})。"
+              f"この sha に対する実施として記録しました — 以後コミットを積むと"
+              f"この種別は再度要ります (ms-119 e-6859)。")
+    else:
+        print(format_review_sha_unpinned_warning(_sha_error), file=sys.stderr)
     if not pr_repo:
         print("  ⚠ どのリポジトリの PR かを記録できませんでした — この記録からは"
               "「どの差分に対する実施か」を辿れません。`--repo <owner/name>` を"
@@ -4303,50 +4993,39 @@ def cmd_review_done():
         print("  ⚠ 共有置き場 (git の共通ディレクトリ) が取れなかったので、この "
               "cwd 限りの記録です — fork / 親の別の作業フォルダからは未実施に"
               "見えます。", file=sys.stderr)
-    if remaining:
-        print(f"  残りの未実施レビュー: {', '.join(remaining)}")
-    else:
-        # All reviews for this PR have run — stamp a done-marker so the tick
-        # anchor does NOT re-fire review-due for this (now review-less) PR.
-        try:
-            os.makedirs(_get_triggers_dir(), exist_ok=True)
-            with open(_pr_open_reviewed_marker_path(pr_number, pr_repo), "w",
-                      encoding="utf-8") as f:
-                f.write(review_type)
-        except OSError:
-            pass
-        _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
-        if _owed_before:
-            print(f"  {_where} の独立レビューは全て実施済み "
-                  f"— approve/merge の gate を通過できます。")
-        else:
-            # 元から義務が無かった = この (リポジトリ, 番号) に review-due が
-            # 発火していない。**「全て実施済み」と言ってはいけない** —— 同じ番号の
-            # 別リポジトリの PR は依然 block されていることがあり、その gate を
-            # 通過できるかは何も言えていない。--repo の指定間違いが最も疑わしい。
-            #
-            # 終了コードでも言う (独立 AX レビュー medium): 兄弟の `review skip` は
-            # 同じ意味 (解消すべき義務が無かった) で非 0 を返すのに、こちらは 0 を
-            # 返していた。`$?` だけを見る script / AI が「何も起きなかった」を
-            # 「関門が外れた」と取り違える。
-            #
-            # ただし **冪等な打ち直しは 0 のまま**。台帳に同じ (種別, PR) の記録が
-            # 既にあるなら「さっき実施して解消した」のであって、間違った指定では
-            # ない。ここを分けないと /beacon-review-run の再実行が失敗に見える。
-            print(f"  ℹ {_where} には未実施のレビューが元から在りませんでした "
-                  f"(review-due が発火していない)。この記録は残りますが、"
-                  f"どの PR の gate も新たに外れていません。"
-                  f"--repo の指定が意図と合っているか確認してください "
-                  f"(ms-166 e-6971)。", file=sys.stderr)
-            if not _already_recorded:
-                # CI の関門も倒さずに終える (何も解消していないので)。
-                sys.exit(3)
-        # ms-119 e-4073 (scaffold, opt-in): flip the CI gate status to success so
-        # a branch-protection required check unblocks the merge button on ALL
-        # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by
-        # BEACON_REVIEW_GATE_CI=1 + a resolvable head SHA so default behavior and
-        # tests are unchanged; best-effort (a failed gh post never breaks `done`).
-        _ci_flip_review_gate_success(pr_number)
+    # ms-119 e-6859: **関門が実際に何を要求しているか** は導出側が答える。
+    # `remaining` (= トリガーファイルの残り) は「ナッジがまだ出るか」であって
+    # 関門ではないので、この 2 つを別の名前で持ち、別の文として出す。
+    # 旧実装は `remaining` が空になった時点で「gate を通過できます」と言っていた
+    # ので、他の種別が **古い sha しか見ていない** 場合でも通過を名乗った。
+    #
+    # **関門は「いまの head」に対して問う** (head_sha を渡さない)。この機構の
+    # ドッグフーディングで踏んだ (2026-11-06): 1 周目のレビューを
+    # `--reviewed-sha <古い sha>` で正直に記録したら「gate を通過できます」と出た
+    # のに、同じ瞬間に `beacon review status` は未実施 (exit 2) と答えた。記録した
+    # sha に対する充足は「記録の事実」であって「関門が開いたか」ではない。
+    _gate = pr_review_obligations(pr_number, pr_repo)
+    _where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
+    # **どの行を出すか / どう終わるか** は純粋関数が決める (独立保守性レビュー
+    # 2 周目: 分岐が 8 個の局所状態変数と絡んで 279 行の中に在り、ある分岐の条件
+    # だけ直したい人が他を黙って壊していないか確信できない形だった)。
+    _report = decide_review_done_report(
+        _gate, remaining=remaining, owed_before=_owed_before,
+        reviewed_sha=_reviewed_sha, already_recorded=_already_recorded,
+        where=_where)
+    for _stream, _text in _report["lines"]:
+        print(_text, file=(sys.stderr if _stream == "err" else sys.stdout))
+    if _report["stamp_marker"]:
+        # ナッジの再発火を **この sha に限って** 抑止する (ms-119 e-6859)。
+        # 以前は種別の文字列を書いて永久に抑止していたので、コミットを積んだ後も
+        # 促しが出ず、「促しが消えた」を「関門が開いた」と読ませていた。
+        write_reviewed_marker(pr_number, pr_repo, _reviewed_sha)
+    if _report["flip_gate"]:
+        # ms-119 e-4073 (scaffold, opt-in): CI の印を success に押して、
+        # branch-protection の required check を全経路 (gh / UI / beacon) で外す。
+        _ci_flip_review_gate_success(pr_number, pr_repo, _reviewed_sha)
+    if _report["exit_code"] is not None:
+        sys.exit(_report["exit_code"])
 
 
 
@@ -7145,10 +7824,10 @@ def _help_registry():
         {"command": "beacon init", "flags": [], "description": "Initialize .beacon/ in current directory"},
         {"command": "beacon setup", "flags": [], "description": "First-time setup wizard (auth + hooks + project)"},
         {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
-        {"command": "beacon view", "flags": ["--port <n>", "--host <addr>", "--expose", "--no-open", "--json"], "description": "Open the board in a browser (local by default; --host + --expose to serve externally)"},
+        {"command": "beacon view", "flags": ["--port <n>", "--host <addr>", "--expose", "--no-open", "--json", "--no-reuse", "--idle-timeout <30m|2h|0>"], "description": "Open the board in a browser (reuses a board already serving this project; the board does not close itself — pass --idle-timeout to make it, or --no-reuse to always start a new one)"},
         # ms-184 — 期間に動いたものを返す 2 動詞 (幅 / 深さ)。
-        {"command": "beacon recap projects", "flags": ["--since <period>", "--from <date>", "--to <date>", "--limit <n>", "--json"], "description": "期間に動いたプロジェクトだけを横断で返す (動いていないものは返らない; 「昨日って何やったっけ」)。<period> = today | yesterday | this-week | last-week | this-month | Nd | Nw | Nh | Nm | YYYY-MM-DD | YYYY-MM-DD..YYYY-MM-DD (既定 7d)。--since と --from/--to は排他、--from/--to は両方必須"},
-        {"command": "beacon recap targets", "flags": ["--project <id>", "--since <period>", "--from <date>", "--to <date>", "--evidence <n>", "--limit <n>", "--json"], "description": "1 プロジェクトで期間内に進捗した対象と証跡 (--project で別プロジェクトを cwd 非移動で読む)。<period> は recap projects と同じ。--evidence / --limit は 0 で全件 (負値は拒否)"},
+        {"command": "beacon recap projects", "flags": ["--since <period>", "--from <date>", "--to <date>", "--limit <n>", "--json"], "description": "期間に動いたプロジェクトだけを横断で返す (動いていないものは返らない; 「昨日って何やったっけ」)。<period> = today | yesterday | this-week | last-week | this-month | Nd | Nw | Nh | Nm | YYYY-MM-DD | YYYY-MM-DD..YYYY-MM-DD (既定 7d)。--since と --from/--to は排他、--from/--to は両方必須。出荷 (push / deploy / release) だけが起きたプロジェクトも「動いた」として返る"},
+        {"command": "beacon recap targets", "flags": ["--project <id>", "--since <period>", "--from <date>", "--to <date>", "--evidence <n>", "--limit <n>", "--json"], "description": "1 プロジェクトで期間内に進捗した対象と証跡 (--project で別プロジェクトを cwd 非移動で読む)。<period> は recap projects と同じ。--evidence / --limit は 0 で全件 (負値は拒否)。証跡には出荷 (push / deploy / release) も含む。出力は unattributed (対象が特定できない出荷) / undated (日付が無く判定できない記録) を別に数える"},
         {"command": "beacon milestone add", "flags": [], "description": "Add a new milestone (interactive)"},
         {"command": "beacon milestone list", "flags": ["--json"], "description": "List milestones"},
         {"command": "beacon milestone start <id>", "flags": ["--no-branch", "--no-assignee"], "description": "Activate milestone + auto-create ms-XX-<slug> branch + self-add as assignee"},
@@ -7175,12 +7854,13 @@ def _help_registry():
         {"command": "beacon target approve <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Approve a pending target transition (= executes the transition; --reason alias of --rationale, e-3906)"},
         {"command": "beacon target reject <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Reject a pending target transition (= transition does NOT execute; --reason alias of --rationale, e-3906)"},
         {"command": "beacon target list", "flags": ["--target <id>", "--pending", "--json"], "description": "List target transition-approval requests"},
-        {"command": "beacon review context --type <ax|philosophy>", "flags": ["--pr <n>", "--repo <owner/name>", "--diff-ref <base...head>", "--origin-doc <doc-id>", "--mode diff"], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)。--repo は --pr の番号がどのリポジトリのものかを指す (省略時は cwd のリポジトリ; ms-166 e-6971)"},
+        {"command": "beacon review context [--batch] --type <ax|philosophy|attainment|...> (--pr <n> [--repo <owner/name>] | --diff-ref <base...head> | --target <ms-XX|op-X>) [--origin-doc <doc-id>] [--judge-model <m>] [--mode diff|full-surface]", "flags": [], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)。--repo は --pr の番号がどのリポジトリのものかを指す (省略時は cwd のリポジトリ; ms-166 e-6971)。artifact 源は 1 つだけ指す — `--pr` / `--diff-ref` は 1 変更、`--target` は close 節目の target 全体 (whole-target、思想レビュー専用; ms-119 e-4196)。`--batch` は節目の全種別を 1 回で出す (--pr と --repo だけを取る; e-4125)。以前この行は --target / --judge-model / --batch を**受け取るのに出していなかった**ので、裏取りに --help を見た AI が「この旗は無い」と誤解した (ms-119 e-7438 周回の独立 AX レビュー)"},
         # ms-166 e-6918: done / skip を単一ソースに載せる。載っていなかったため
         # `beacon review done --help` が「`beacon review --help` を見よ」と案内し、
         # その `review --help` は context の 1 行しか出さない **閉じたループ** に
         # なっていた (案内に従うと情報が無い場所に着く)。
-        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings)", "flags": [], "description": "レビュー実施を記録して approve/merge (または完了) の関門を解消する (ms-119 e-4060)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
+        {"command": "beacon review status --pr <n> [--repo <owner/name>] [--json]", "flags": [], "description": "独立レビューの関門がいま何を要求しているかを **副作用なしで** 読む (ms-119 e-6859)。必須種別・いまの差分 (head) に対して実施済みの種別・まだ要る種別・差し引いた根拠 (旧形式の記録 / 理由付き免除) を出す。まだ **止めている** 種別が在れば exit 2 (`owed` は生の内訳で、merge/close 済みの PR では非空でも何も止めないので、読むのは `blocking` か終了コード)。`beacon trigger check` は促し (トリガーファイルの有無) の面で関門ではないため、関門の状態を確かめるにはこちらを使う"},
+        {"command": "beacon review done --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) (--adjudication-summary <text> | --adjudications <json> | --no-findings) [--reviewed-sha <sha>]", "flags": [], "description": "レビュー実施を記録する (ms-119 e-4060)。--pr 側は approve/merge の関門を解消する。" + TARGET_REVIEW_RECORD_EFFECT + " (ms-119 e-7439)。記録は **どの差分に対する実施か** を持つ — 既定は gh に聞いた「いまの PR head」で、`--reviewed-sha` で明示できる。実施後にコミットを積むとその種別は再度「要る」側に戻る (ms-119 e-6859: 以前は PR 単位だったので、judge が見ていない差分に対して関門が緑になった)。対象は --pr か --target のどちらか一方 — PR を作らない作業にも打てる (ms-166 e-6918)。採否の記録は **必須** — findings があれば --adjudication-summary / --adjudications で decision arm に構造記録し、0 件だったなら --no-findings と明示する。どちらも無いと関門は開かない (ms-166 e-6997: 採否を省けば黙って開く形だったため、「0 件だった」と「書き忘れた」が記録で区別できなかった)"},
         {"command": "beacon review skip --type <ax|maintainability|...> (--pr <n> [--repo <owner/name>] | --target <ms-XX|op-X>) --reason <text>", "flags": ["--json"], "description": "人間が意図的にレビューを省く一級経路。--reason 必須で監査ログ (.beacon/review-skips.jsonl) に理由を残す (ms-119 e-4124)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": ["--reason <text>", "--acknowledge", "--ac-verdict <n:verdict[:根拠]>", "--ac-waive <text>", "-p <progress>", "--outcome <text>"], "description": "Mark task as done. 終端遷移なので監査エントリ (--reason か --acknowledge) が要る (ms-166 e-6893)。受入条件が在るなら節ごとの判定 (--ac-verdict を節の数だけ、または --ac-waive) も要る (ms-166 e-6898)。--outcome は「何が得られたか」"},
@@ -7318,13 +7998,19 @@ def _help_registry():
         # criticised elsewhere, made worse by the bash front being the DEFAULT
         # path on macOS: the incomplete list was the one most readers reach.
         {"command": "beacon retro", "flags": ["--prepare", "--catch-up", "--since <period>", "--until <period>"], "description": "Start weekly retrospective (interactive). --since は期間の下端、--until は上端 (--until は時点のみ。3d のような長さは下端専用なので拒否される)。<period> = " + " | ".join(_since_forms_for_help()) + "。解釈できない期間は拒否する (黙って別の期間を答えない)"},
-        {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
+        {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)。**これは促し (トリガーファイルの有無) の面であって関門ではない** — 空配列は「関門が開いている」を意味しない (実施後にコミットを積むと促しは出ないが関門は閉じる)。PR の独立レビュー義務の確定判定は `beacon review status --pr <n>` を使う (ms-119 e-6859)"},
         # ms-178 e-6654: note was absent from this registry, so `--help` missed,
         # fell through to the dispatcher, and `note clear --help` deleted the
         # notes. Registered here so help renders from the single source instead.
         {"command": "beacon note <text>", "flags": ["--context <label>"], "description": "Add an ephemeral session note (survives compaction; cleared at session end)"},
-        {"command": "beacon note list", "flags": ["--json"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud"},
+        # The two digits come from cmd_note's constants, not from prose: a
+        # maintainability review (2026-10-26) set the constants to 10/50 and
+        # every hand-typed copy of "3 days / 20 notes" in this repo kept
+        # claiming the old numbers with no test objecting. Interpolating makes
+        # this copy impossible to leave behind.
+        {"command": "beacon note list", "flags": ["--json", "--all", "--since-days", "--limit"], "description": "List session notes. In cloud mode this merges this working directory's notes with other sessions' notes from the cloud; each carries origin=local|both|cloud. WINDOWED BY DEFAULT to the last %d days and at most %d notes (ms-178 e-7150): /beacon-session-start reads this on every startup, and an unbounded read put the whole store into the context window before any work began (measured 2026-10-25: 180 notes / 370,047 chars = 18-37%% of a 1M context). When anything is withheld the omitted count is always printed, so a window never reads as an empty store. A non-numeric value is reported rather than silently replaced by the default. --all turns both limits off; --since-days <N> / --limit <N> set them (0 disables that one axis)" % (DEFAULT_LIST_SINCE_DAYS, DEFAULT_LIST_LIMIT)},
         {"command": "beacon note clear --yes", "flags": ["--include-other-sessions"], "description": "Delete THIS SESSION's notes (-y is accepted as shorthand; --confirm is an accepted alias). The cloud copy is shared by every session on the project, so clearing everything used to take other sessions' handoff notes with it — and made the session-end routine unperformable while anyone else was working. --include-other-sessions still clears every session's notes and prints a per-session breakdown of whose it is about to take before doing it (deliberately NOT named --all: every other --all in this CLI widens a read). Notes with no recorded session are never assumed to be yours. Both stores are snapshotted first and NOTHING is deleted if that snapshot cannot be taken, so this needs cloud reachability in cloud mode"},
+        {"command": "beacon note reap --yes", "flags": ["--include-untagged", "--since-min"], "description": "Delete notes that no LIVE session can ever claim (ms-178 e-7150). note clear only ever matches the running session's own notes, so a session that ended without clearing leaves notes nothing can reach except --include-other-sessions, which also takes the handoff notes of sessions still working; this is the missing middle. Liveness, never age, is the criterion: an old note belonging to a live session is still that session's note. The live set is the union of this session, .beacon/session.json, alive bridge claims in this cwd and the server's live-session list; a source that was asked and could not answer ABORTS the command rather than reclassifying unlisted live sessions as orphans (cloud mode: the server list; local mode: this working directory's bridge claims, the only place other live sessions here are recorded). Notes with no recorded session are kept unless --include-untagged (never delete on missing information). --since-min <N> sets the server liveness lookback (default %d) — the SAME name and meaning it has on `beacon sessions` and `beacon bus directory`, which is why an AX review's suggestion to rename it here was declined: one concept keeps one name across the commands that share it, and a third spelling would break the pattern an agent already learned from those two. It is NOT the note-age filter `--since-days` is; age is never reap's criterion. Given in a local-mode project, where it has no effect, it says so instead of being silently discarded. Backed up first via the same snapshot path as note clear, recoverable with note restore" % (DEFAULT_REAP_LIVENESS_WINDOW_MIN,)},
         {"command": "beacon note restore", "flags": [], "description": "Restore session notes from the backups left by note clear (additive and idempotent — already-present notes are skipped)"},
         {"command": "beacon note purge-probes", "flags": ["--confirm", "-y", "--yes"], "description": "Remove the junk notes an AX surface audit wrote before the read-only gate existed (text == the probe sentinel; notes merely MENTIONING it are kept). Dry-run by default — prints what would go and changes nothing; --confirm performs it (-y and --yes are accepted aliases, same set as note clear). The notes API has no delete-one, so the cloud leg is clear + re-post the survivors: a note another session writes during that window is lost. Both stores are snapshotted to .purge.bak first (a separate path from note clear's backups, so one cannot destroy the other's recovery route) and nothing is deleted if that snapshot cannot be taken"},
         # ms-178 e-6702/e-6703: the fork family was absent from this registry, so
@@ -7345,33 +8031,6 @@ def _help_registry():
         {"command": "beacon auth status", "flags": [], "description": "Show login status"},
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
         {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
-        # ms-69 e-1652+: Trek = cross-project / cross-session collaboration area
-        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent (default persistent)", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域). Requires an identified live session (the caller's session/email becomes the trek leader, ms-69) — run it from a real bclaude session, not a bare script. --goal-state は ms-75/e-1865 完了マーカー"},
-        {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--joined", "--json"], "description": "List treks visible to the caller. --joined で自分が join 済の trek だけ"},
-        {"command": "beacon trek show <trek-id>", "flags": ["--all", "--json"], "description": "Show trek detail + 集約ビュー (task / commit / doc, ms-75/e-1864). --all で cap 解除"},
-        {"command": "beacon trek review-verdicts <trek-id> <task-id>", "flags": ["--json"], "description": "leader_review target の verdict 集合を返す (completion / halt-rescue を halt_reason で分岐、ms-128/e-4374)。/beacon-trek-review が呼ぶ単一 source"},
-        {"command": "beacon trek timeline <trek-id>", "flags": ["--limit N", "--json"], "description": "Trek の lifecycle / commit / task done / doc を時系列で参照 (ms-75/e-1867)"},
-        {"command": "beacon trek start <trek-id>", "flags": ["--json"], "description": "Transition trek planning → active"},
-        {"command": "beacon trek archive <trek-id>", "flags": ["--json"], "description": "Archive trek (= terminal); restart by creating a new one"},
-        {"command": "beacon trek invite <trek-id> --actor <email>", "flags": ["--notify", "--json"], "description": "Invite a user (by email) into the trek"},
-        {"command": "beacon trek join <trek-id>", "flags": ["--json"], "description": "Accept own invitation"},
-        {"command": "beacon trek leave <trek-id>", "flags": ["--json"], "description": "Remove self from the trek (leader must transfer first)"},
-        {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--goal-state <criterion>", "--json"], "description": "Edit trek scope or goal_state (ms-75/e-1865)"},
-        {"command": "beacon trek scope-add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--json"], "description": "Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23 e-2626). Target = target-entity; legacy task refs are auto-migrated to their parent milestone at read (ms-128 方針3)"},
-        {"command": "beacon trek scope-approve <trek-id> <pending-id>", "flags": ["--json"], "description": "Commit a staged scope op (= apply add or remove, ms-97/AC25 e-2611)"},
-        {"command": "beacon trek scope-reject <trek-id> <pending-id>", "flags": ["--json"], "description": "Drop a staged scope op (ms-97/AC25)"},
-        {"command": "beacon trek blanket-approve <trek-id> --category <cat>", "flags": ["--json"], "description": "Pre-approve scope-add for a category (ms-97/AC24 e-2603). Category: operation | milestone | task | project:<pid> | milestone:<ms-id>"},
-        {"command": "beacon trek blanket-revoke <trek-id> --category <cat>", "flags": ["--json"], "description": "Drop a blanket pre-approval (ms-97/AC24)"},
-        {"command": "beacon trek slot add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--children e-A,e-B", "--json"], "description": "(ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id. Target = target-entity (milestone/operation); --task is rejected (ms-128 方針3, narrow via --children)"},
-        {"command": "beacon trek slot amend <trek-id> <slot-id>", "flags": ["--add-child <e-id>", "--remove-child <e-id>", "--json"], "description": "(ms-99/e-2829) Stage a child-list edit on an existing MS slot"},
-        {"command": "beacon trek slot claim <trek-id> <slot-id>", "flags": ["--session <sid>", "--unclaim", "--json"], "description": "(ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4)"},
-        {"command": "beacon trek slot list <trek-id>", "flags": ["--json"], "description": "(ms-99/e-2829) Materialise slot rows for the trek"},
-        {"command": "beacon trek stop <trek-id>", "flags": ["--reason <text>", "--json"], "description": "Pull the Andon cord (= halt signal, sessions pause)"},
-        {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
-        {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
-        {"command": "beacon trek take-over <trek-id>", "flags": ["--json"], "description": "Fresh session (= same user, leader role) を新 leader_session_id に bind し直す (= dead session 引き継ぎ、ms-88 e-2089)"},
-        {"command": "beacon trek kickoff <trek-id>", "flags": ["--session-id <sid>", "--kickoff-dm-event-id <eid>", "--json"], "description": "Kickoff Ritual の完了 stamp (= /beacon-trek-pulse Step 0.4 が叩く、 ms-88 e-2138)。 server endpoint だけ先に land した PR #177 の CLI wrapper 補完 (e-2139 残作業 #1)"},
-        {"command": "beacon trek reconcile <trek-id>", "flags": ["--apply", "--json"], "description": "task pool ↔ Trek stamp 同期の reconcile (= 「pool で done だが Trek stamp が waiting-review / leader_review / working で残ってる」 stuck 状態を一括修復、 default dry-run、 ms-88 e-2167)"},
         # ms-54 e-1266: DM channel lifecycle commands (install / uninstall / opt-out / opt-in / status)
         {"command": "beacon channel install", "flags": [], "description": "Install beacon-bus MCP entry into .mcp.json (DM channel for multi-session messaging)"},
         {"command": "beacon channel uninstall", "flags": ["--purge-files", "--keep-files"], "description": "Remove beacon-bus MCP entry; --purge-files also wipes channel/node_modules (moved to .trash/)"},
@@ -7388,7 +8047,7 @@ def _help_registry():
         {"command": "beacon resume scoped", "flags": ["--target <ms|task|session>:<id>", "--reason <text>", "--json"], "description": "Clear a scoped STOP, allowing the targeted session(s) to resume work"},
         {"command": "beacon resume global", "flags": ["--reason <text>", "--json"], "description": "Clear a global STOP across every autonomous session"},
         {"command": "beacon rollback", "flags": ["--commits N", "--reason <text>", "--dry-run", "--no-record", "--json"], "description": "Undo working tree (git stash) + N local commits (--soft reset); push past upstream → report-only with compensation proposals"},
-        {"command": "beacon claim request <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Announce intent to take a target (ms/task/operation/trek/free); other sessions can respond"},
+        {"command": "beacon claim request <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Announce intent to take a target (ms/task/operation/free); other sessions can respond"},
         {"command": "beacon claim respond <claim-id>", "flags": ["--accept|--reject", "--reason <text>", "--json"], "description": "Respond to another session's claim request"},
         {"command": "beacon claim post <kind>:<id>", "flags": ["--intent <text>", "--json"], "description": "Post-hoc record that this session already started on the target (no request/response dance)"},
         {"command": "beacon claim handoff <claim-id> --to <session>", "flags": ["--reason <text>", "--json"], "description": "Transfer an active claim to a different session"},
@@ -11664,6 +12323,9 @@ if __name__ == "__main__":
         "review_context": cmd_review_context,
         "review_batch_context": cmd_review_batch_context,  # ms-119 e-4125
         "review_done": cmd_review_done,      # ms-119 e-4060
+        # ms-119 e-6859: 関門の状態を副作用なしで読む (促しと関門が同じ意味に
+        # なったことを、読み手が確かめられる口)。
+        "review_status": cmd_review_status,
         "review_skip": cmd_review_skip,      # ms-119 e-4124
 
         "milestone_observe": cmd_milestone_observe,
@@ -11897,6 +12559,7 @@ if __name__ == "__main__":
         "note_clear": cmd_note_clear,
         "note_restore": cmd_note_restore,
         "note_purge_probes": cmd_note_purge_probes,
+        "note_reap": cmd_note_reap,
         "tool_add": cmd_tool_add,                   # ms-180 e-7000
         "tool_list": cmd_tool_list,                 # ms-180 e-7000
         "tool_show": cmd_tool_show,                 # ms-180 e-7000
@@ -11973,6 +12636,7 @@ if __name__ == "__main__":
         "session_end": cmd_session_end,
         "session_rescue": cmd_session_rescue,
         "session_log_list": cmd_session_log_list,
+        "session_log_handoff": cmd_session_log_handoff,
         "session_log_show": cmd_session_log_show,
         "session_id": cmd_session_id,
         "session_focus": cmd_session_focus,
@@ -12005,45 +12669,6 @@ if __name__ == "__main__":
         "org_remove_member": cmd_org_remove_member,
         "org_delete": cmd_org_delete,
         "org_rehome": cmd_org_rehome,
-        "trek_create": cmd_trek_create,
-        "trek_list": cmd_trek_list,
-        "trek_show": cmd_trek_show,
-        "trek_review_verdicts": cmd_trek_review_verdicts,
-        "trek_start": cmd_trek_start,
-        "trek_archive": cmd_trek_archive,
-        "trek_invite": cmd_trek_invite,
-        "trek_join": cmd_trek_join,
-        "trek_leave": cmd_trek_leave,
-        "trek_plan": cmd_trek_plan,
-        # ms-97 / e-2611 AC25 — scope mutation approval flow.
-        "trek_scope_approve": cmd_trek_scope_approve,
-        "trek_scope_reject": cmd_trek_scope_reject,
-        # ms-99 / e-2829 — slot verbs (schema v2).
-        "trek_slot_add": cmd_trek_slot_add,
-        "trek_slot_amend": cmd_trek_slot_amend,
-        "trek_slot_claim": cmd_trek_slot_claim,
-        "trek_slot_list": cmd_trek_slot_list,
-        # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
-        "trek_blanket_approve": cmd_trek_blanket_approve,
-        "trek_blanket_revoke": cmd_trek_blanket_revoke,
-        "trek_task_state": cmd_trek_task_state,
-        "trek_block": cmd_trek_block,
-        "trek_unblock": cmd_trek_unblock,
-        "trek_blockers": cmd_trek_blockers,
-        "trek_extend_ttl": cmd_trek_extend_ttl,
-        # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後
-        # に meta.summary_sent_at を stamp する CLI wrapper。
-        "trek_summary_sent": cmd_trek_summary_sent,
-        # ms-92 / e-2141 — cross-project task add via Trek scope
-        "trek_task_add": cmd_trek_task_add,
-        "trek_stop": cmd_trek_stop,
-        "trek_resume": cmd_trek_resume,
-        "trek_pulse_ack": cmd_trek_pulse_ack,
-        "trek_take_over": cmd_trek_take_over,
-        "trek_kickoff": cmd_trek_kickoff,
-        "trek_reconcile": cmd_trek_reconcile,
-        "trek_transfer_leader": cmd_trek_transfer_leader,
-        "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
         "help_render": cmd_help_render,

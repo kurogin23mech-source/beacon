@@ -134,14 +134,17 @@ def test_claims_valid_target_kinds_public_accessor():
     so shared surfaces do not reach into claims._VALID_TARGET_KINDS."""
     import claims
     assert claims.valid_target_kinds() == frozenset(
-        {"ms", "task", "operation", "trek", "free"})
+        {"ms", "task", "operation", "free"})
+    # ms-185: trek は新規作成からは外れたが、過去の記録を読む語彙には残る。
+    assert claims.readable_target_kinds() == frozenset(
+        {"ms", "task", "operation", "free", "trek"})
 
 
 def test_non_claimable_protocol_kinds_derivation():
     """finding C: the claim view's out-of-scope hint is a named complement accessor,
     not an inline formula — the claim-protocol kinds this view does NOT surface are
     exactly those with no canonical claimable kind (task / trek / free)."""
-    assert occ.non_claimable_protocol_kinds({}) == ("free", "task", "trek")
+    assert occ.non_claimable_protocol_kinds({}) == ("free", "task")
 
 
 # --------------------------------------------------------------------------

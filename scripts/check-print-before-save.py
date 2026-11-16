@@ -76,9 +76,14 @@ ALLOW = {
 
 # The write primitive this checker understands. Named so the scope is greppable
 # and so widening it later is one edit — NOT a claim that every save-like
-# primitive in the tree is covered. Known out of scope today:
-# ``trek_store.save_trek`` (20+ sites in lib/cmd_trek.py) and the server-side
+# primitive in the tree is covered. Known out of scope today: the server-side
 # stores. Widening means auditing those call sites; see the follow-up task.
+#
+# ms-185 e-7071: この一覧は以前 ``trek_store.save_trek`` (= lib/cmd_trek.py の
+# 20 箇所超) も「今は対象外」として名指ししていた。その書き込み口と呼び出し元は
+# e-7070 で本体ごと落ちたので、名指しを外した。消えたものを「対象外」として
+# 挙げ続けると、広げようとした人がその 20 箇所を探して見つからず、検査器自身が
+# 壊れたと誤解する。
 SAVE_PRIMITIVES = ("save_project",)
 
 # How many levels of module-local indirection to follow. A success line
@@ -432,8 +437,8 @@ def main() -> int:
     if not hits and not stale:
         print("[print-before-save] OK: in lib/*.py, no success line is printed "
               "before its save_project() write ({0} files scanned). Scope is "
-              "lib/ + the save_project primitive only — trek_store.save_trek "
-              "and the server stores are NOT checked.".format(scanned))
+              "lib/ + the save_project primitive only — the server stores are "
+              "NOT checked.".format(scanned))
         return 0
     if hits:
         print("[print-before-save] a success line is printed BEFORE its write:",

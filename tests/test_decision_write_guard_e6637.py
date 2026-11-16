@@ -441,10 +441,47 @@ def test_pending_entries_name_the_task_that_will_triage_them():
         "未仕分けの扉に担当 task がありません: " + repr(orphan))
 
 
+def _methods_calling_a_write_verb_directly() -> set:
+    """``self.post/put/patch/delete`` を**直に**呼ぶメソッド名の集合。
+
+    ms-185 e-7071: 下の空振り検査の床を、手書きの数字から**この独立計算**へ移すために
+    足した。検出器 (``api_client_write_doors``) は共有の輸送路経由や生 HTTP の形も
+    扉に数えるので、こちらは常にその部分集合になる。同義反復ではない — 検出器とは
+    別の素朴な尺度 (正規表現での直接呼び出し検出) なので、検出器が潰れたら差が出る。
+    """
+    import re as _re
+    src = open(os.path.join(_LIB, "api_client.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    lines = src.splitlines()
+    cls = next(n for n in ast.walk(tree)
+               if isinstance(n, ast.ClassDef) and n.name == "ApiClient")
+    out = set()
+    for n in ast.walk(cls):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            seg = "\n".join(lines[n.lineno - 1:n.end_lineno])
+            if _re.search(r"self\.(post|put|patch|delete)\(", seg):
+                out.add(n.name)
+    return out
+
+
 def test_the_guard_detection_is_not_vacuous():
     # 検出器が「全部ガード済み」や「扉ゼロ」を返して無条件に緑になる形を防ぐ。
     doors, helpers = api_client_write_doors()
-    assert len(doors) >= 40, "扉の検出が少なすぎます: " + repr(len(doors))
+    # ms-185 e-7071: 床を手書きの 40 から**導出**に変えた。40 は当時の扉の数より
+    # 少し下に置いた目安で、扉が正当に減る (= 死んだ書き込みメソッドを落とす) たびに
+    # 編集が要り、編集のついでに下げれば床そのものが意味を失う。実際 e-7071 で
+    # lib/api_client.py の死んだ 32 メソッドを落としたら 37 になって割れた。
+    #
+    # 防ぎたいのは「検出器が潰れて一握りしか見えなくなること」なので、**別の素朴な
+    # 尺度で数えた直接の書き込みメソッドを全部見えているか**を床にする。検出器は
+    # 輸送路経由や生 HTTP の形も数えるので常にその上位集合であり、潰れれば差が出る。
+    # これなら扉が増減しても編集不要で、壊れたときだけ落ちる。
+    direct = _methods_calling_a_write_verb_directly()
+    assert direct, "直接の書き込みメソッドが 0 件 (この尺度自体が壊れている疑い)"
+    missed = sorted(direct - set(doors))
+    assert not missed, (
+        "書き込み verb を直に呼ぶメソッドを検出器が扉として見ていません: "
+        + repr(missed))
     # 「十分な数が見えている」は「見落ちが無い」を意味しない (AX-1)。形の違う扉が
     # 覆域から外れていないことは test_every_raw_http_method_is_a_door_... が見る。
     assert raw_http_methods(), "生 HTTP の検出が空です (印の綴り違いの疑い)"

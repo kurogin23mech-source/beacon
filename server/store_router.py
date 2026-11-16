@@ -30,6 +30,10 @@ if _BACKEND == "dynamodb":
         # Projects
         get_project,
         save_project,
+        # 締切リマインドの 2 つの口 (ms-185 e-7066)。全 backend が同じ名前で
+        # 持つので、呼び出し側に「在るか無いか」の分岐が無い。
+        get_project_deadline_scope,
+        save_deadline_reminder_marks,
         list_projects,
         list_all_projects,
         delete_project,
@@ -99,11 +103,10 @@ if _BACKEND == "dynamodb":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
-        # Treks (ms-69 / e-1652)
+        # Treks (ms-69 / e-1652) — 読み出しのみ。ms-185 e-7306 で書き込み
+        # (save_trek / delete_trek / append_trek_log) を 3 backend すべてから外した。
         get_trek,
-        save_trek,
         list_treks,
-        delete_trek,
         # Organizations (ms-113 / e-3731) — top-level tenancy entity
         get_org,
         save_org,
@@ -114,7 +117,6 @@ if _BACKEND == "dynamodb":
         master_put,
         master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
-        append_trek_log,
         list_trek_logs,
         # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
         append_decision_event,
@@ -134,6 +136,10 @@ elif _BACKEND == "mysql":
         # same pure-string helper, so the router exposes it under the same
         # private name to keep call sites symmetrical.
         _extract_frontmatter_field,
+        # 締切リマインドの 2 つの口 (ms-185 e-7066)。全 backend が同じ名前で
+        # 持つので、呼び出し側に「在るか無いか」の分岐が無い。
+        get_project_deadline_scope,
+        save_deadline_reminder_marks,
         # v3 schema constant (ms-96 e-2379、iruca3 提案 entry-level split)。
         # operations.py が dispatch 側で backend + schema 見て v3 経路に振るために参照。
         SCHEMA_V3_ENTRY,
@@ -220,11 +226,10 @@ elif _BACKEND == "mysql":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
-        # Treks (ms-69 / e-1652)
+        # Treks (ms-69 / e-1652) — 読み出しのみ。ms-185 e-7306 で書き込み
+        # (save_trek / delete_trek / append_trek_log) を 3 backend すべてから外した。
         get_trek,
-        save_trek,
         list_treks,
-        delete_trek,
         # Organizations (ms-113 / e-3731) — top-level tenancy entity
         get_org,
         save_org,
@@ -235,7 +240,6 @@ elif _BACKEND == "mysql":
         master_put,
         master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
-        append_trek_log,
         list_trek_logs,
         # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
         append_decision_event,
@@ -272,6 +276,10 @@ elif _BACKEND == "firestore":
         # Projects
         get_project,
         save_project,
+        # 締切リマインドの 2 つの口 (ms-185 e-7066)。全 backend が同じ名前で
+        # 持つので、呼び出し側に「在るか無いか」の分岐が無い。
+        get_project_deadline_scope,
+        save_deadline_reminder_marks,
         list_projects,
         list_all_projects,
         delete_project,
@@ -341,11 +349,10 @@ elif _BACKEND == "firestore":
         revoke_operation_envelope,
         list_operation_envelopes,
         get_operation_envelope,
-        # Treks (ms-69 / e-1652)
+        # Treks (ms-69 / e-1652) — 読み出しのみ。ms-185 e-7306 で書き込み
+        # (save_trek / delete_trek / append_trek_log) を 3 backend すべてから外した。
         get_trek,
-        save_trek,
         list_treks,
-        delete_trek,
         # Organizations (ms-113 / e-3731) — top-level tenancy entity
         get_org,
         save_org,
@@ -356,7 +363,6 @@ elif _BACKEND == "firestore":
         master_put,
         master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
-        append_trek_log,
         list_trek_logs,
         # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
         append_decision_event,

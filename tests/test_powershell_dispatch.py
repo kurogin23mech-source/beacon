@@ -777,10 +777,27 @@ def _strip_git_C_prefix(args):
     ``["git", "-C", "/tmp/xyz", "rev-parse", "--short", "HEAD"]`` back
     into ``("git", "rev-parse", "--short", "HEAD")`` so test fixtures
     stay focused on the git operation, not on the cwd plumbing.
+
+    ``-c <key>=<value>`` is stripped for the same reason (ms-160 e-7406 added
+    ``-c core.quotepath=false`` so non-ASCII paths are not octal-escaped). Both
+    are global options that configure the invocation rather than naming the
+    operation, so keying fixtures on them would make every future global option
+    break unrelated tests. The flags themselves are pinned where they matter —
+    tests/test_log_gate_beacon_churn_e7406.py asserts the predicate-feeding git
+    calls disable path quoting in both frontends.
     """
-    if len(args) >= 3 and args[0] == "git" and args[1] == "-C":
-        return ("git", *args[3:])
-    return tuple(args)
+    rest = list(args)
+    if not rest or rest[0] != "git":
+        return tuple(args)
+    rest = rest[1:]
+    while rest:
+        if rest[0] == "-C" and len(rest) >= 2:
+            rest = rest[2:]
+        elif rest[0] == "-c" and len(rest) >= 2:
+            rest = rest[2:]
+        else:
+            break
+    return ("git", *rest)
 
 
 def test_log_normal(project_dir, no_bash, captured_call, monkeypatch):

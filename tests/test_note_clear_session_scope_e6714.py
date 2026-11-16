@@ -270,10 +270,47 @@ def test_the_policy_literal_cannot_be_mistyped():
                                    rerun_hint="h", on_unconfirmed="typo")
 
 
-def test_both_callers_name_their_policy_explicitly():
-    """既定値に頼らず、各コマンドが自分の安全方針を呼び出し側で明示すること。"""
+def test_every_caller_names_its_policy_explicitly():
+    """既定値に頼らず、各コマンドが自分の安全方針を呼び出し側で明示すること。
+
+    以前ここは ``src.count("on_unconfirmed=UNCONFIRMED_REFUSE") == 2`` と
+    **呼び出しの個数** を数えていた。守りたい性質は個数ではなく
+    「``_selective_delete`` を呼ぶ全員が方針を明示している」ことなので、
+    削除する verb が増えるたびに (ms-178 e-7150 の ``note reap`` で実際に起きた)
+    正しい変更で赤くなり、数字を書き換えて緑に戻す運用になる。それは守っている
+    性質を弱める方向の圧力なので、全呼び出しを構文木で列挙して各々を検査する形に
+    変える。verb が増えても自動的に新しい呼び出しが検査対象になる。
+    """
+    import ast
+
     src = (ROOT / "lib" / "cmd_note.py").read_text(encoding="utf-8")
-    assert src.count("on_unconfirmed=UNCONFIRMED_REFUSE") == 2, src.count(
-        "on_unconfirmed=UNCONFIRMED_REFUSE")
-    assert "on_unconfirmed=UNCONFIRMED_PREVIEW" in src
-    assert 'on_unconfirmed="refuse"' not in src and 'on_unconfirmed="preview"' not in src
+    tree = ast.parse(src)
+
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_selective_delete"
+    ]
+    assert calls, "_selective_delete の呼び出しが 1 件も見つからない (検査が空振り)"
+
+    allowed = {"UNCONFIRMED_REFUSE", "UNCONFIRMED_PREVIEW"}
+    for call in calls:
+        kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        assert "on_unconfirmed" in kwargs, (
+            "line %d の _selective_delete が on_unconfirmed を省略している "
+            "(既定値任せは方針を読み手から隠す)" % call.lineno)
+        value = kwargs["on_unconfirmed"]
+        # 定数リテラルではなく名前付き定数を使わせる: リテラルだと綴り違いが
+        # 黙ってどれかの分岐に落ちる (PR #782 M-2 と同じ穴)。
+        assert isinstance(value, ast.Name) and value.id in allowed, (
+            "line %d の on_unconfirmed が名前付き定数 %s のどれでもない"
+            % (call.lineno, sorted(allowed)))
+
+    # 両方の方針が実際に使われている (= 片方が死文化していない)。
+    used = {
+        kw.value.id
+        for call in calls for kw in call.keywords
+        if kw.arg == "on_unconfirmed" and isinstance(kw.value, ast.Name)
+    }
+    assert used == allowed, used

@@ -95,59 +95,6 @@ def _is_progress_check(e: dict) -> bool:
     return payload.get("origin_channel") == "trek-progress-check"
 
 
-def test_broadcast_fallback_sets_recipient_session_id_to_leader():
-    """Broadcast fallback DM must carry recipient_session_id=leader_sid.
-
-    Without this stamp, _bus_event_addressed_to drops the event silently
-    (= channel="dm" + no recipient → not deliverable). With the fix the
-    broadcast fallback lands as a leader-addressed DM.
-    """
-    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%S.%fZ"
-    )
-    _projects["proj-leader"] = {"name": "proj-leader"}
-    # Phase A+ trek with only a leader member (= no executor target
-    # forces the broadcast fallback path).
-    _treks["tk-bcast-1"] = {
-        "trek_id": "tk-bcast-1",
-        "title": "broadcast fallback test",
-        "description": "",
-        "type": "persistent",
-        "status": "active",
-        "creator_actor": {"user_id": "uid-leader", "email": ""},
-        "leader_session_id": "sv-leader-bcast",
-        "members": [
-            {"user_id": "uid-leader", "session_id": "sv-leader-bcast",
-             "role": "leader", "joined_at": now_iso},
-        ],
-        "scope": [{"project": "proj-leader", "milestone": "ms-x"}],
-        "halt": None,
-        "goal_state": "",
-        "meta": {"cadence_minutes": 10, "migration_phase": "A"},
-        "task_states": {"e-todo1": {"state": "todo"}},
-        "created_at": now_iso,
-        "updated_at": now_iso,
-        "archived_at": None,
-    }
-    _sessions_by_project["proj-leader"] = [
-        {"session_id": "sv-leader-bcast", "user_id": "uid-leader",
-         "last_active": now_iso},
-    ]
-    resp = client.post(
-        "/api/system/trek-scheduler/tick",
-        json={"trek_ids": ["tk-bcast-1"]},
-        headers=HEADERS_OK,
-    )
-    assert resp.status_code == 200, resp.text
-    bus = _bus_events_by_project.get("proj-leader", [])
-    progress = [e for e in bus if _is_progress_check(e)]
-    assert len(progress) == 1, (
-        f"expected 1 broadcast fallback event, got {len(progress)}: {bus}"
-    )
-    payload = progress[0]["payload"]
-    assert payload.get("recipient_session_id") == "sv-leader-bcast", (
-        "broadcast fallback must stamp recipient_session_id=leader_sid"
-    )
 
 
 def test_bus_event_addressed_to_accepts_fixed_broadcast_event():
@@ -180,3 +127,11 @@ def test_bus_event_addressed_to_drops_old_unstamped_broadcast_event():
         },
     }
     assert app_module._bus_event_addressed_to(event, "sv-any") is False
+
+
+# ms-185 e-7070: broadcast fallback は Trek の定期集約 (``_run_trek_tick``) が
+# 唯一の発生源だったので、それを駆動していたテストを落とした。
+#
+# **残した 2 つは Trek 非依存**: ``_bus_event_addressed_to`` が「DM + recipient が
+# stamp 済」を受け、「DM + recipient 未設定」を落とすこと = DM 配送の宛先判定
+# そのもので、すべての DM 経路が通る。Trek が無くなっても守る価値は変わらない。

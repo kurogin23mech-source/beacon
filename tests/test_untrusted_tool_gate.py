@@ -368,7 +368,11 @@ def test_inbox_hook_does_not_arm_on_kept_system_imperative(tmp_path, inbox_hook)
     root = _beacon_root(tmp_path)
     kept = {"event_id": "e-op", "channel": "operation-trigger",
             "delivery": "auto-execute",
-            "envelope": {"tier": "T1-system", "issuer": "beacon-system"},
+            # ms-185 e-7078: the proof operation-trigger demands is the T2
+            # envelope approved for THIS op_id (the T1-system shape it used to
+            # assert can only be minted for a Trek).
+            "envelope": {"tier": "T2", "issuer": "someone@example.com",
+                         "scope": "op-1"},
             "payload": {"op_id": "op-1"}}
     inbox_hook._arm_untrusted_turn(root, {"session_id": "sv-1"}, [kept])
     assert ut.is_armed(root, "sv-1") is None  # opt-in imperative is not untrusted

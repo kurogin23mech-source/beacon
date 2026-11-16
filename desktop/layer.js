@@ -82,27 +82,10 @@ let state = {
   selectedDeployEnv: 'all',
   auth: {},
   projects: [],
-  // ms-86 / e-2253 — Tauri parity for Trek state (mirrors Web SKIP-block init
-  // in server/static/index.html). SHARED openTrek() / closeTrek() / Trek
-  // detail render reach into these slots; missing them throws on .has() /
-  // .find() / array spread the moment the user clicks a Trek row. Same regime
-  // as showCancelled above (= "Web initializes in SKIP, Tauri must mirror").
-  //
-  // Field semantics are identical to Web (= shared across builds):
-  //   treks               — full set visible to the caller (creator or member)
-  //   openTrekId          — null in list view, trek_id while detail is open
-  //   openTrekDocs        — docs of the open Trek (loaded by loadTrekDocs)
-  //   openTrekScope       — cross-project MS/Op/Task aggregate (e-2248/e-2249)
-  //   openTrekExpanded    — Set of accordion-open scope row indices (e-2126)
-  //   openTrekShowDone    — Set of MS ids where "show done" is toggled on
-  //   relatedTreks        — reverse-lookup cache for the Related Treks widget
-  treks: [],
-  openTrekId: null,
-  openTrekDocs: [],
-  openTrekScope: { milestones: [], operations: [], tasks: [] },
-  openTrekExpanded: new Set(),
-  openTrekShowDone: new Set(),
-  relatedTreks: {},
+  // ms-185 e-7325: ここに Trek の画面状態 7 フィールドの Tauri 側 parity 初期化
+  // (treks / openTrekId / openTrekDocs / openTrekScope / openTrekExpanded /
+  // openTrekShowDone / relatedTreks) が在った。SHARED 側 (server/static/index.html)
+  // の Trek 画面ごと落としたので、読む者が居なくなり一緒に落としている。
   // ms-84 / e-2326 — entries lazy-load cache. WS broadcasts a slim payload
   // (no milestones[].entries[]); cached entries are re-attached on slim WS
   // arrival so the SHARED render code keeps working unchanged. See
@@ -375,74 +358,21 @@ const dataSource = {
       throw new Error(`Unknown archive action: ${action}`);
     }
   },
-  // ms-86 / e-2253 — Trek dataSource parity with Web. Trek is a cross-project
-  // entity, so the Rust state.cloud_project_id (= scoped to a single project)
-  // doesn't apply. Rather than wire 4 new Rust commands (= cloud_list_treks,
-  // cloud_get_trek_docs, cloud_get_trek_scope, cloud_get_related_treks) we
-  // call the server REST endpoints directly from JS using the same auth path
-  // already used by connectCloudWebSocket() (= cloud_get_auth_token + bare
-  // fetch). Cloud-mode only; local Tauri mode has no trek backend reachable,
-  // so we degrade to empty arrays (matches the regress regime of loadTreks
-  // / loadTrekDocs in Web when offline).
-  loadTreks: async () => {
-    if (!cloudMode) { state.treks = []; return; }
-    state.treks = await _trekApi('/api/treks?include_archived=true', []);
-  },
-  loadTrekDocs: async (trekId) => {
-    if (!cloudMode) { state.openTrekDocs = []; return; }
-    state.openTrekDocs = await _trekApi(
-      `/api/treks/${encodeURIComponent(trekId)}/documents`, [],
-    );
-  },
-  // Mirrors server/static/index.html loadTrekScope (e-2249). The three
-  // aggregate endpoints (= e-2248) are hit in parallel; per-axis failure
-  // degrades to empty array on that axis so the Trek detail UI still renders.
-  loadTrekScope: async (trekId) => {
-    if (!cloudMode) {
-      state.openTrekScope = { milestones: [], operations: [], tasks: [] };
-      return;
-    }
-    const enc = encodeURIComponent(trekId);
-    const [ms, ops, tasks] = await Promise.all([
-      _trekApi(`/api/treks/${enc}/milestones`, []),
-      _trekApi(`/api/treks/${enc}/operations`, []),
-      _trekApi(`/api/treks/${enc}/tasks`, []),
-    ]);
-    state.openTrekScope = {
-      milestones: Array.isArray(ms) ? ms : [],
-      operations: Array.isArray(ops) ? ops : [],
-      tasks: Array.isArray(tasks) ? tasks : [],
-    };
-  },
-  loadRelatedTreks: async (kind, id) => {
-    const path = kind === 'milestone' ? 'milestones'
-      : kind === 'operation' ? 'operations'
-      : 'entries';
-    const key = (kind === 'milestone' ? 'ms' : kind === 'operation' ? 'op' : 'task') + ':' + id;
-    if (!cloudMode || !state.cloudProjectId) { state.relatedTreks[key] = []; return; }
-    state.relatedTreks[key] = await _trekApi(
-      `/api/projects/${state.cloudProjectId}/${path}/${encodeURIComponent(id)}/related-treks`,
-      [],
-    );
-  },
-  // ms-93 e-3203 — Trek scope approve/reject has no desktop Rust binding yet
-  // (Web-only feature, backend SPEC e-2611). Stub with a clear error so the
-  // SHARED handler's .catch surfaces "not available on desktop" instead of a
-  // ReferenceError (the Tauri layer has no api() helper at all).
-  approveTrekScopeChange: async () => {
-    throw new Error('Trek scope approval is not available in the desktop app yet');
-  },
-  rejectTrekScopeChange: async () => {
-    throw new Error('Trek scope approval is not available in the desktop app yet');
-  },
+  // ms-185 e-7325: ここに Trek の dataSource parity 6 メソッド (loadTreks /
+  // loadTrekDocs / loadTrekScope / loadRelatedTreks / approveTrekScopeChange /
+  // rejectTrekScopeChange) が在った。SHARED 側の呼び出し元ごと落ちたので削除。
 };
 
-// ms-86 / e-2253 — small fetch helper for Trek endpoints. Mirrors Web's api()
-// helper minus the token-expiry / logout dance (= the Tauri auth lifecycle is
-// owned by Rust, not the JS layer). 401 / error → swallow into `fallback`
-// because every caller already treats failure as "empty list, render
-// gracefully" (= same posture as loadTrekDocs / loadRelatedTreks in Web).
-async function _trekApi(path, fallback) {
+// ms-86 / e-2253 — small authed fetch helper. Mirrors Web's api() helper minus
+// the token-expiry / logout dance (= the Tauri auth lifecycle is owned by Rust,
+// not the JS layer). 401 / error → swallow into `fallback` because every caller
+// already treats failure as "nothing to show, render gracefully".
+//
+// ms-185 e-7325: renamed from ``_trekApi``. It was introduced for the Trek
+// endpoints and named after them, but it is a plain authed GET and its
+// remaining caller is ``fetchMilestoneEntries`` — so it is not part of the
+// screen that was removed.
+async function _cloudApi(path, fallback) {
   try {
     const token = await invoke('cloud_get_auth_token');
     const apiUrl = await getApiUrl();
@@ -502,7 +432,7 @@ async function fetchMilestoneEntries(msId) {
   if (state.entriesLoading.has(msId)) return;
   state.entriesLoading.add(msId);
   try {
-    const data = await _trekApi(
+    const data = await _cloudApi(
       `/api/projects/${encodeURIComponent(state.cloudProjectId)}/milestones/${encodeURIComponent(msId)}/entries`,
       null,
     );
@@ -822,16 +752,7 @@ const PLATFORM = {
     state.projectVersion = computeProjectVersion(state.project);
     return renderVersionBadge();
   },
-  // ms-86 / e-2253 — when Trek detail is open, footer left text is replaced
-  // with brand-only "Beacon" to mirror Web (e-2250 AC #1). Trek is a
-  // cross-project entity; surfacing the cloud/local mode (= "which project
-  // backend") drags user cognition back to a project axis the detail view
-  // is explicitly trying to hide. Match the Web getFooterLeftHTML structure
-  // (= `state.openTrekId ? 'Beacon' : <project-id>`); on Tauri the non-Trek
-  // fallback is the cloud/local mode badge instead of a project id.
-  getFooterLeftHTML: () => state.openTrekId
-    ? `<div>Beacon</div>`
-    : `<div>${cloudMode ? 'cloud' : 'local'}</div>`,
+  getFooterLeftHTML: () => `<div>${cloudMode ? 'cloud' : 'local'}</div>`,
   getArchiveButtonHTML: (p) => cloudMode
     ? `<button class="sort-toggle" data-action="archive-cloud-project" style="font-size:0.65rem;color:var(--text-dim);">Archive</button>`
     : '',

@@ -58,6 +58,10 @@ ENTITIES = [
     # 対象外にする (organizations と同じ扱い)。起動時 create_mysql_tables が作る。
     "master_accounts",
     "master_contacts",
+    # ms-187 / e-7488: CLI ログインの合言葉 (ペアリングコード) の表。pk=code, sk=''。
+    # 全サーバー台で共有するため保存先に置く (server/cli_pairing.py)。project 配下では
+    # ないので _SUBCOLLECTION_SK_NAMES には載せない。起動時 create_mysql_tables が作る。
+    "cli_pairing",
     # projects/{pid}/* subcollections
     "retros",
     "documents",
@@ -361,6 +365,29 @@ def _query_rows(entity: str, pk: str) -> list[tuple[str, dict]]:
         cur.execute(
             f"SELECT sk, data FROM `{_table_name(entity)}` WHERE pk=%s",
             (pk,),
+        )
+        rows = cur.fetchall()
+    return [(r["sk"], json.loads(r["data"])) for r in rows]
+
+
+def _query_rows_with_path(entity: str, pk: str,
+                          paths: tuple) -> list[tuple[str, dict]]:
+    """Rows for a pk that contain at least one of ``paths`` — the filtered form
+    of :func:`_query_rows` (ms-185 e-7066).
+
+    Exists so a caller that only needs the rows carrying a particular field does
+    not have to read (and JSON-parse) the whole subcollection. The filter runs in
+    MySQL, so the rows that do not match never cross the wire: for the Beacon
+    project the deadline reminder reads 0 of 4,502 ``entries`` rows instead of
+    all of them (11.3 MB of JSON per tick, every minute).
+    """
+    placeholders = ", ".join(["%s"] * len(paths))
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT sk, data FROM `{_table_name(entity)}` "
+            f"WHERE pk=%s AND JSON_CONTAINS_PATH(data, 'one', {placeholders})",
+            (pk,) + tuple(paths),
         )
         rows = cur.fetchall()
     return [(r["sk"], json.loads(r["data"])) for r in rows]
@@ -1210,6 +1237,114 @@ def get_project_v3(project_id: str) -> dict | None:
         return None
     meta, target_maps, child_maps = state
     return assemble_project_targets(meta, target_maps, child_maps)
+
+
+def _deadline_json_paths() -> tuple:
+    """締切フィールドの JSON path を、L2 締切エンジンの綴り
+    (``deadline.DEADLINE_KEYS``) から**導出**する (ms-185 e-7066)。
+
+    ここに綴りを書き写すと、職種が締切フィールドを足したときに SQL 側だけ古くなり
+    「その締切は永久に発火しない」が静かに起きる。導出なら写し間違いも取りこぼしも
+    構造的に作れない。
+
+    非再帰 (``$.``) で**取りこぼさない**根拠: 行の data はその項目自身であり
+    (Target 行なら Target、子行なら work item)、締切の列挙器
+    ``occupation.iter_work_items`` は ``target[arm]`` を 1 段しか歩かない
+    (入れ子の子 —— task の下の commit —— は work item として yield されない)。
+    つまり絞り込みの深さと列挙の深さが一致しているので、``$**`` にしても拾える
+    ものは増えない (増えるのは走査費用だけ)。
+
+    感度 (安さの前提): ``JSON_CONTAINS_PATH`` は**キーの存在**で一致する。今は
+    締切を持たない work item にキー自体が無いので、Beacon 本番では 4,502 行の
+    子行のうち 0 行しか読まない。もし起票側が ``deadline: ""`` を既定で書くように
+    なると全行が一致し、**正しさは保たれたまま安さだけが静かに失われる**。その時は
+    値が空でないことまで条件に含める (= ここを直す)。"""
+    import deadline as _dl  # noqa: PLC0415
+    return tuple(f"$.{k}" for k in _dl.DEADLINE_KEYS)
+
+
+def get_project_deadline_scope(project_id: str) -> dict | None:
+    """締切リマインドが必要とする分だけを hydrate した project doc を返す
+    (ms-185 e-7066)。見つからなければ None。
+
+    **なぜ専用の読み手が要るか**: 定期発火の締切リマインドは ``db.get_project`` を
+    呼んでいた。これは store_router が「Projects (v1 whole-doc)」と明記している
+    v1 読み取りで、v3 (行分割) の project では ``milestones`` が projects 行に
+    無い。結果、milestone の ``target_date`` も task の ``deadline`` も 1 件も
+    見えず、**締切リマインドは v3 プロジェクトで構造的に発火不能**だった
+    (本番の Beacon プロジェクトがまさに v3)。
+
+    かといって ``get_project_v3`` で丸ごと hydrate すると、毎分 13.7 MB の JSON を
+    読んで捨てることになる。これは 2026-08-20 に本番を落とした読み方そのもの
+    (毎分の全文書展開で RSS が上限まで伸びて 502、e-5367) なので採れない。
+
+    そこで **Target 行は全部 / 子行は締切を持つものだけ** を読む。Beacon の実測で
+    meta 2.06 MB + Target 行 0.36 MB = 2.4 MB (従来の読み取りに対する増分は
+    0.36 MB) で、丸ごと hydrate の 13.7 MB に対し 5.7 倍安い。Target 行を絞らず
+    全部読むのは、子の締切を見つけたとき通知先 (= Target の claim 者) を解決する
+    のに親 Target が要るため (絞ると親が欠けて「宛先なし」に化ける)。
+
+    v1 project では projects 行が既に完全な doc なのでそのまま返す。
+    """
+    meta = _get("projects", project_id)
+    if meta is None:
+        return None
+    if meta.get("schema_version") != SCHEMA_V3_ENTRY:
+        return meta
+    spec = _server_decomposition(meta)
+    target_maps = {coll: {sk: d for sk, d in _query_rows(coll, project_id)}
+                   for coll in spec}
+    paths = _deadline_json_paths()
+    child_maps = {
+        table: {sk: d for sk, d in _query_rows_with_path(table, project_id, paths)}
+        for table in _server_child_tables(spec)
+    }
+    return assemble_project_targets(meta, target_maps, child_maps)
+
+
+def save_deadline_reminder_marks(project_id: str, marks: list,
+                                 now_iso: str) -> int:
+    """締切リマインドの二重配信防止の印を、該当する行だけに書く
+    (ms-185 e-7066)。刻めた件数を返す。
+
+    ``marks`` は ``{"target_id", "item_id", "deadline"}`` の列。``deadline`` が
+    今の値と食い違う項目には刻まない (= 読んだ後に期日が変わったなら、その新しい
+    期日では改めて知らせるのが正しい)。
+
+    :func:`get_project_deadline_scope` と**対**で使う。あちらは締切に関係ない子行を
+    読まない部分 hydrate なので、その dict を whole-doc save すると読まなかった
+    子行が消える。だから書き戻しは「触れた行だけ」のこちらを通す。
+    """
+    import deadline as _dl  # noqa: PLC0415
+    import deadline_marks  # noqa: PLC0415
+    meta = _get("projects", project_id)
+    if meta is None:
+        return 0
+
+    if meta.get("schema_version") != SCHEMA_V3_ENTRY:
+        # v1: project 文書が丸ごと 1 行なので、その 1 行を読み書きする。
+        n = deadline_marks.stamp_whole_doc(meta, marks, now_iso)
+        if n:
+            _put("projects", project_id, {**meta, "project_id": project_id})
+        return n
+
+    spec = _server_decomposition(meta)
+    stamped = 0
+    for coll in spec:                       # Target 行 (milestone の target_date 等)
+        for tid, trow in _query_rows(coll, project_id):
+            if _dl.stamp_marks([(deadline_marks.mark_key(tid, trow), trow)],
+                               marks, now_iso):
+                _put(coll, project_id, trow, sk=tid)
+                stamped += 1
+    paths = _deadline_json_paths()
+    for table in _server_child_tables(spec):   # 子行 (task の deadline 等)
+        for sk, row in _query_rows_with_path(table, project_id, paths):
+            if _dl.stamp_marks(
+                    [(deadline_marks.mark_key(sk.split("#")[0], row), row)],
+                    marks, now_iso):
+                _put(table, project_id, row, sk=sk)
+                stamped += 1
+    return stamped
 
 
 def save_project_v3(project_id: str, data: dict) -> None:
@@ -2599,13 +2734,12 @@ def get_operation_envelope(project_id: str,
 
 def get_trek(trek_id: str) -> dict | None:
     return _get("treks", trek_id)
-
-
-def save_trek(trek_id: str, data: dict) -> None:
-    item = {**data, "trek_id": trek_id}
-    _put("treks", trek_id, item)
-
-
+# ms-185 e-7306: ここに Trek の書き込み 3 関数 (save_trek / delete_trek /
+# append_trek_log) が在った。e-7070 が書き込み経路 (作成・参加・承認・halt・発火)
+# を全部落としたので呼び出し元ゼロになり、ここでも落とした。読み出し 3 関数
+# (get_trek / list_treks / list_trek_logs) は意図して残す面 (e-7081 / SPEC 方針5 =
+# 記録を後から読めなくしない) で、tests/test_trek_record_read_surface_e7081.py が
+# 両 backend について名指しで固定している。
 def list_treks(actor_id: str | None = None, *,
                status: str | None = None,
                include_archived: bool = False) -> list[dict]:
@@ -2633,21 +2767,6 @@ def list_treks(actor_id: str | None = None, *,
     result.sort(key=lambda t: (t.get("created_at", ""), t.get("trek_id", "")),
                 reverse=True)
     return result
-
-
-def delete_trek(trek_id: str) -> bool:
-    if get_trek(trek_id) is None:
-        return False
-    _delete("treks", trek_id)
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Organizations (ms-113 / e-3731) — top-level entity, PK=org_id, sk=''.
-# See firestore_client for semantics; MySQL persists via the generic
-# (pk, sk, data JSON) row model.
-# ---------------------------------------------------------------------------
-
 def get_org(org_id: str) -> dict | None:
     return _get("organizations", org_id)
 
@@ -2710,22 +2829,6 @@ def master_scan(entity: str) -> list[dict]:
 def _mint_trek_log_id() -> str:
     import secrets as _secrets
     return f"log-{_secrets.token_hex(8)}"
-
-
-def append_trek_log(trek_id: str, log_entry: dict) -> str:
-    """treks/{trek_id}/logs に 1 件追記する (= firestore と同じ永続化)。
-
-    dynamodb_client は in-memory fallback だが、MySQL は trek_logs テーブル
-    (pk=trek_id, sk=log_id) に実体化する。log_id / trek_id は未指定なら補完。
-    """
-    payload = dict(log_entry or {})
-    log_id = payload.get("log_id") or _mint_trek_log_id()
-    payload["log_id"] = log_id
-    payload["trek_id"] = trek_id
-    _put("trek_logs", trek_id, payload, sk=log_id)
-    return log_id
-
-
 def list_trek_logs(trek_id: str, *, limit: int = 100,
                    since: str = "") -> list[dict]:
     """treks/{trek_id}/logs を created_at 昇順で返す (= firestore と同じ意味論)。

@@ -24,8 +24,10 @@ Design philosophy (from the e-2726 task spec):
   threshold. The 2nd signal catches the case where the operator wrote a
   good commit message but forgot the id reference.
 
-The companion task e-2650 enforces "Trek slot done requires project task
-done" at the Trek view layer. e-2726 (this module) enforces "project task
+The companion task e-2650 enforced "Trek slot done requires project task
+done" at the Trek view layer; that layer is gone (ms-185 e-7070), so this
+module's own check now stands alone rather than as the inner of two.
+e-2726 (this module) enforces "project task
 done should have physical evidence" at the project pool layer. The two
 defenses stack: Trek slot done → requires project task done → which now
 flags when there is no commit evidence.

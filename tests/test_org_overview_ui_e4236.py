@@ -6,7 +6,8 @@ slice1 (e-4236) は data 層 (GET /api/orgs/{id}/overview) を land した。sli
 ここでは「構造的な配線が index.html (Web) と dist/index.html (Tauri) の両方に
 在る」ことを pin する。JS の実挙動は手動 / e2e で見るが、以下は future の
 "simplify" 編集が黙ってこの view を消したり、二層 parity を割ったりするのを防ぐ
-regression guard (= test_treks_tab_ui.py と同じ狙い):
+regression guard (= 画面を source 読みで固定する同じ狙い。ms-185 e-7325 まで
+test_treks_tab_ui.py が同型の例だったが、Trek 画面ごと退避した):
 
   - dataSource が loadOrgs / loadOrgOverviews を持つ (= 俯瞰が食うデータ取得)
   - overview endpoint (/api/orgs/{id}/overview) を消費している

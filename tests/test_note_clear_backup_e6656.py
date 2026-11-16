@@ -14,10 +14,20 @@ what happened — the same class of split-truth bug as e-6655.
 A backup nobody can restore from is not a backup, so `note restore` is a real
 verb. It is additive and idempotent: notes already present are matched by
 `_note_key` and skipped, so running it twice never duplicates.
+
+The ordering has TWO legs (an unreadable cloud, an unwritable local file) and
+only the first was ever measured — a mutation that kept deleting after the
+local snapshot raised ``OSError`` left all seven note test files green
+(objective-attainment review, 2026-10-27 / ms-178 e-7182). Both legs are pinned
+here now, side by side, and ``scripts/invert-note-backup-ordering.py`` measures
+that breaking either one actually turns these tests red. Run it by hand after
+touching the ordering; it is deliberately NOT wired into pytest because it
+mutates ``lib/cmd_note.py`` in place, which would corrupt a parallel worker.
 """
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import sys
@@ -93,6 +103,25 @@ def _stub_cloud(monkeypatch, notes, error="", clear_raises=None):
     return state
 
 
+def _fail_writing(monkeypatch, target, error="no space left on device"):
+    """Make writes to ``target`` fail the way a full / read-only disk does.
+
+    Patching the builtin rather than the filesystem keeps this honest
+    everywhere: ``chmod`` is a no-op when the test runs as root, and quota
+    tricks are not portable. Every OTHER path stays readable and writable, so
+    the test still drives the real read -> snapshot -> delete sequence and the
+    abort has to come from the snapshot leg itself.
+    """
+    real_open = builtins.open
+
+    def _guarded(file, mode="r", *a, **k):
+        if str(file) == target and any(c in mode for c in "wxa+"):
+            raise OSError(error)
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", _guarded)
+
+
 # --- the cloud snapshot exists and matches the pre-clear content ------------
 
 def test_clear_snapshots_cloud_before_deleting(fake_cloud_config, monkeypatch, capsys):
@@ -136,6 +165,40 @@ def test_unreadable_cloud_aborts_without_deleting_anything(fake_cloud_config, mo
     assert not state["cleared"], "cloud was deleted despite having no backup"
     assert os.path.exists(cmd_note._get_notes_path()), "local was cleared anyway"
     assert not os.path.exists(cmd_note._get_notes_path() + ".bak")
+
+
+def test_unwritable_local_backup_aborts_without_deleting_anything(
+        fake_cloud_config, monkeypatch, capsys):
+    """The other leg of the same ordering: if the LOCAL snapshot cannot be
+    WRITTEN, nothing is deleted either.
+
+    This is the pair of the test above, and it takes two tests because a backup
+    has two legs — "no backup => no delete" is only guarded where it is
+    measured. Only the cloud leg was, and the objective-attainment review's
+    independent judge (2026-10-27) showed what that cost: a mutation that kept
+    deleting after the local snapshot raised ``OSError`` left all seven note
+    test files green (ms-178 e-7182). The behaviour was already correct; the
+    guard was missing, which is the recurring shape in this milestone — a
+    safety device declared once and effective on only one path.
+    """
+    _write_local(fake_cloud_config, MINE)
+    state = _stub_cloud(monkeypatch, [MINE, PARENT])
+    _fail_writing(monkeypatch, cmd_note._get_notes_path() + ".bak")
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_note.cmd_note_clear()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "退避を書けません" in err, err
+    assert "何も削除していません" in err, err
+    # Both stores untouched — the cloud leg matters most here, because its
+    # delete is a whole-store wipe with no undo but the snapshot we failed to
+    # take.
+    assert not state["cleared"], "cloud was wiped with no backup behind it"
+    assert [n["text"] for n in cmd_note._read_local_notes(
+        cmd_note._get_notes_path())] == ["mine"], "local notes were deleted"
+    # And no half-written backup is left behind to be mistaken for a good one.
+    assert not os.path.exists(cmd_note._cloud_backup_path())
 
 
 def test_failed_cloud_delete_is_reported_not_swallowed(fake_cloud_config, monkeypatch, capsys):

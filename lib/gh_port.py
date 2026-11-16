@@ -35,6 +35,8 @@ class GhAdapter(Protocol):
 
     def pr_view(self, url: str) -> dict: ...
 
+    def pr_head(self, ref: str, repo: str = "") -> dict: ...
+
     def pr_list_all(self) -> list: ...
 
     def run(self, argv: list) -> "subprocess.CompletedProcess": ...
@@ -74,6 +76,16 @@ class SubprocessGhAdapter:
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or f"gh pr view {url} failed")
+        return json.loads(result.stdout)
+
+    def pr_head(self, ref: str, repo: str = "") -> dict:
+        argv = ["gh", "pr", "view", str(ref), "--json", "headRefOid,state,url"]
+        if repo:
+            argv += ["--repo", repo]
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip()
+                               or f"gh pr view {ref} (headRefOid) failed")
         return json.loads(result.stdout)
 
     def pr_list_all(self) -> list:
@@ -126,6 +138,19 @@ def issue_list(state: str = "open") -> list:
 def pr_view(url: str) -> dict:
     """Fetch a PR's title/body/commits. Returns gh's JSON dict, raises on failure."""
     return _adapter.pr_view(url)
+
+
+def pr_head(ref: str, repo: str = "") -> dict:
+    """PR の **いまの head sha と状態** を返す (ms-119 e-6859)。
+    ``{"headRefOid", "state", "url"}``、失敗したら RuntimeError。
+
+    独立レビューの関門が「現在の差分に対して実施済みか」を問うために要る。
+    ``pr_view`` と分けてあるのは、あちらが title/body/commits を重く取るのに
+    対してここは関門が毎回聞く軽い問い (sha と状態の 2 つ) だから。
+    ``state`` も同じ呼び出しで返すのが要点 —— merge / close 済みの PR に
+    ひっかかる義務は無いので、関門が 2 回問い合わせずに済む。
+    """
+    return _adapter.pr_head(ref, repo)
 
 
 def pr_list_all() -> list:

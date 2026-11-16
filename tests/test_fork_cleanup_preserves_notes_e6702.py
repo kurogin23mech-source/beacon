@@ -237,13 +237,46 @@ def test_a_non_fork_path_is_refused(repo):
     assert "not an active fork" in r.stderr
 
 
-def test_the_gate_is_reachable_only_through_the_tool(repo):
-    """The deletion must be owned by the CLI, not by Skill markdown. If the Skill
-    still calls `git worktree remove` directly, the guard can be skipped."""
-    skill = ROOT / "skills" / "beacon-session-merge-back.md"
+MERGE_BACK_SKILL_COPIES = (
+    ROOT / "skills" / "beacon-session-merge-back.md",
+    ROOT / "shared" / "skills" / "beacon-session-merge-back" / "SKILL.md",
+    ROOT / "plugins" / "beacon" / "skills" / "beacon-session-merge-back" / "SKILL.md",
+)
+
+
+def _prose_routes_around_the_gate(body: str) -> list:
+    """Lines of Skill prose that tell the reader to bypass the guarded verb.
+
+    The guard lives in ``beacon session fork cleanup``; any instruction to run
+    git's own forced removal skips the note snapshot entirely. Mentioning
+    ``git worktree remove`` in order to *forbid* it is fine — what we pin is
+    the forced form, which only ever appears as a command to run (ms-178
+    e-7183: this Skill's Step 5 used to say exactly that)."""
+    return [ln for ln in body.splitlines() if "worktree remove --force" in ln]
+
+
+@pytest.mark.parametrize("skill", MERGE_BACK_SKILL_COPIES,
+                         ids=lambda p: str(p.relative_to(ROOT)))
+def test_the_gate_is_reachable_only_through_the_tool(skill):
+    """The deletion must be owned by the CLI, not by Skill markdown. Two sides:
+    the Skill routes through the guarded verb (positive), and no line of it
+    tells the reader to run git's forced removal instead (negative — the
+    positive check alone stayed green while Step 5 advertised the bypass)."""
     body = skill.read_text(encoding="utf-8")
     assert "session fork cleanup" in body, (
         "the merge-back Skill does not route through the guarded verb")
+    assert _prose_routes_around_the_gate(body) == [], (
+        "the merge-back Skill still advertises a route around the note-snapshot gate")
+
+
+def test_the_bypass_detector_catches_the_sentence_that_was_actually_there():
+    """test-the-test: the exact Step 5 line this guard exists for must be caught,
+    and the current forbidding mention of the plain command must not be."""
+    old_step5 = ("  - もう要らないなら手動で消す: `git worktree remove --force <wt-path>"
+                 " && git branch -D <branch>`")
+    assert _prose_routes_around_the_gate(old_step5) == [old_step5]
+    assert _prose_routes_around_the_gate(
+        "**`git worktree remove` を直接叩かない (ms-178 e-6702)**。") == []
 
 
 # --- both CLI frontends route through the same guard ------------------------

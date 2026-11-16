@@ -93,6 +93,10 @@ Step 0 のクエリ解釈に加えて、以下のキーワードがクエリに�
 | 「fork で何を」「あの fork セッション」 | session_log + Trek | `--include-session-logs --include-trek` |
 | 「Trek で合意した」「○○ Trek の」 | Trek 取り込み | `--include-trek` |
 
+> `--include-trek` は **過去の記録を読む面** である (ms-185 SPEC 方針5)。Trek 機能自体は
+> 畳まれており新しい Trek は作れないので、ここで返るのは畳む前に作られた記録だけ。
+> 「Trek を使いましょう」と提案してはならない。
+
 これらは ms-79 で新設された retrospect 拡張 (= UC10-F1〜F4) で、cmd_search が指定された時のみ retro_query 共通基盤を経由する形になる。指定無しの普通の検索は従来通り。
 
 ## Step 1: 検索の実行（戦略 A 単発 sweep）

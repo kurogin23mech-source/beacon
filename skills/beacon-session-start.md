@@ -420,27 +420,6 @@ python3 "$(beacon _install-root)/scripts/session-start-dm-inbox.py" 2>/dev/null
 
 local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。この Step は **読み取り専用**。
 
-## Step 1o / 1o-2: Trek 状態の取得 (ms-75 e-1813 + e-1854 + e-2047、ms-85 e-3180 で統合)
-
-Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に関する 2 つの可視化を session-start で行う:
-
-- **join 中 Trek 一覧** (Step 1o / e-1813 + e-1854): join 済 trek のリストと goal_state / halt 状態。ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、「自分が今どの Trek の blanket 例外を受けているか」を毎セッション可視化する。
-- **armed セルフチェック** (Step 1o-2 / e-2047): active Trek に join 中なら、このセッションが armed (= 自律実行モード) かを確認する。`--no-arm` opt-out / 旧バージョン join / 別 worktree の budget 不在で not-armed が起こりうる。
-
-e-3180 でこの 2 つを **1 スクリプトに統合**: `beacon trek list --joined` を 1 回だけ叩き、active trek がある時だけ armed 判定用の `beacon bus auto-execute list` / `beacon bus budget show` を追加取得する。Bash ツールで実行:
-
-```bash
-python3 "$(beacon _install-root)/scripts/session-start-trek-status.py" 2>/dev/null
-```
-
-出力が空ならセクションごと省略。空でなければ **Step 3 ヘッダにそのまま転記**。整形/判定は `lib/trek_status` (`format_joined_treks` / `has_active_trek` / `is_armed`、単体テスト済み) が所管し、以下を保証する:
-
-- 各 trek: `[trek_id] title` / `status` / `halt` non-null 時「⚠ HALTED: {reason}」/ `goal_state` 非空時「目標: {goal_state}」/ 自分以外の数「他 N 名」。
-- active trek が 1 つ以上あれば blanket 自動承認リマインダを 1 行添える (e-1854 AC 1: 「自分が今 blanket 自動承認の対象になっている」ことを毎セッション可視化)。撤回は `beacon trek leave <trek-id>`、デプロイ / リリースのみ user 確認境界。実際の承認は server 側 dm_gate.py が `shared_trek_member` 判定で行う。
-- active trek に join 中かつ not-armed なら「⚠ Trek 参加中だが自律実行モードが not-armed」警告を添える (armed 条件 AND: trek 系 channel が auto-execute allowlist にある かつ budget が total > 0 / used < total)。armed なら何も出さない。planning / archived のみの join は判定不要。
-
-local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。この Step は **読み取り専用**。
-
 ## Step 1p: 締切超過 (overdue) work items の surface (ms-139 e-4952)
 
 期日を過ぎた作業 (開発の milestone `target_date` / task `deadline`、営業の activity
@@ -560,27 +539,31 @@ beacon morning --no-doc --json --since-hours 24 2>/dev/null
 勝手に実行して report doc を書かない)。提案に留め、実際の digest 生成は user / AI が別途
 `beacon morning` を叩いたときに行う。読み取り専用。
 
-## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
+## Step 1j: 前セッションの引き継ぎを読む（ms-43 e-1360 / ms-160 e-7314 で構造修正）
 
-前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
+前セッション末で `/beacon-session-end` が集約した引き継ぎには、**「次セッション最優先」節**が明文化されている。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
 
 Bash ツールで実行:
 ```bash
-beacon session log list --json
+beacon session log handoff
 ```
 
-JSON 配列の **最新エントリ 1 件** (`created_at` 降順 / 配列先頭) の `summary` フィールドを取得する。
-0 件 (= 新規プロジェクト or session-end 未実行) なら何もしない。
+**出力をそのまま Step 3 の出力に貼る。要約・言い換え・括弧内への圧縮をしてはならない。**
 
-`summary` テキストから、以下のキーワード/見出しを含むセクションを **AI が文脈で抽出** する:
+この口は最新 1 件の必要な節だけを数百字で返すので、切り出す必要が無い。節が無い場合は「この引き継ぎに『次セッション最優先』節がありません」と自分で言うので、**空を「無かった」と「拾えなかった」に畳まない**。引き継ぎが 1 件も無い場合もそう言う。
 
-- 「次セッション最優先」「top of queue」「次にやること」「次の一手」
-- 「次の塊」「continue here」「next action」
-- 直後に箇条書き (1. / 2. / - / ▸) で並んでいる task / 作業項目
+機械で読みたいときは `--json` (`required` / `optional` / `missing`)。
 
-抽出したものを **「session log 由来 next-action」リスト** として記憶する。これは Step 2.9 の「次の一手」決定ロジックの **最優先入力** になる。
+出力の「次セッション最優先」節は、Step 2.9 の「次の一手」決定ロジックの **最優先入力** になる。
 
-該当セクションが無い場合 (例: `"no entries"` だけの session log) は、このリストは空のまま次へ進む。
+> **なぜ `session log list` から抽出しないのか (ms-160 e-7314)**: 以前この Step は
+> `beacon session log list --json` を叩いて「AI が文脈で抽出」せよと書いていた。
+> あの口は **全セッション分**を返す (実測 111 件) ので、読む側は必ず切り出す羽目になり、
+> その最中に肝心の数百字が要約へ化けていた —— 利用者から「ちょいちょいこういうことが
+> 起こる」と繰り返し指摘された取りこぼし。散文で「最優先入力として扱え」と頼んでも、
+> 切り出しが要る限り落ちる。**切り出す必要が無い大きさで返せば、言い換えが起きる余地が
+> 無い。** 見出しの定義は `lib/session_handoff.py` が唯一の真実源で、書き口
+> (`/beacon-session-end`) と読み口 (この Step) の両方がそれを参照する。
 
 この Step は **読み取り専用**。
 
@@ -802,6 +785,21 @@ Bash ツールで実行:
 ```bash
 beacon note list --json
 ```
+
+**この読み込みには上限がある (ms-178 e-7150)**: `note list` は既定で **直近 3 日
+かつ最大 20 件** に絞って返す。以前は上限が無く、起動のたびにストア全体が
+コンテキストに入っていた (2026-10-25 実測: 180 件・本文合計 370,047 字 =
+1M コンテキストの 18〜37%)。作業を 1 つも始める前に 24 日分の他セッションのメモで
+埋まる状態だったので、既定を窓にした。
+
+- 省略が起きた場合、stderr (JSON モード) / stdout 先頭 (人間向け) に
+  `… 他 N 件は省略しました` が出る。**この行が出たら出力に 1 行転記する** —
+  転記しないと読み手は「メモはこれだけ」と誤読する。
+- 窓を広げる必要がある場合 (例: 数日空いた後の復帰、過去の経緯を追う) は
+  `beacon note list --json --since-days 14` や `--all` を使う。既定のままで
+  足りないと判断したときだけ広げる。
+- **「表示範囲内のメモはありません」は「メモなし」ではない**。窓の外に存在する
+  ので、必要なら `--all` で確認する。
 
 結果が空でなければ、Step 3 の出力に追加:
 ```

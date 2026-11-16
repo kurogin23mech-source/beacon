@@ -70,6 +70,13 @@ echo "[ci-strict-drift-guards] Windows-unsafe pid liveness probes (ms-133 e-6591
 # (both did, before the 2026-09-29 independent AX review caught the hole).
 python3 "$ROOT/scripts/check-pid-liveness.py" --strict
 
+echo "[ci-strict-drift-guards] 盤に渡す旗が Go 側に実在するか (ms-170 e-7147)…"
+# 旗の名前は 4 箇所に手で書かれている (Go の flag 定義 / bash / Python / help 台帳)。
+# check-cli-help-drift.py は後ろの 3 つだけを突き合わせ、Go 側は見ていないので、
+# Go で旗名を変えても緑のまま通る。壊れるのは `beacon view --no-reuse` を実際に
+# 叩いた瞬間で、go test にも pytest にも出ない (独立レビュー PR#829 保守性)。
+python3 "$ROOT/scripts/check-viewer-flag-parity.py"
+
 echo "[ci-strict-drift-guards] 旗 → env の写像が両フロントで揃っているか (ms-160 e-6674)…"
 # 旗の名前を比べる check-cli-help-drift.py はこの級を原理的に見られない。片方の
 # フロントに無い旗は「不一致」ではなく「不在」で、両方に無ければ揃っていると
@@ -77,6 +84,15 @@ echo "[ci-strict-drift-guards] 旗 → env の写像が両フロントで揃っ�
 # 手書きされている。beacon doc add --force / search --source / cloud list --json
 # ほか約 45 件が bash で通り python で落ちる状態だった。
 python3 "$ROOT/scripts/check-cli-env-parity.py"
+
+echo "[ci-strict-drift-guards] 命じている Skill が実在するか (ms-185 e-7079)…"
+# PR #827 で Skill 4 本を消したあと、受信 hook が「/beacon-trek-execute を
+# 確認なしで起動せよ」という文面をまだ組み立てていた。参照は Python の
+# f-string、Skill は Markdown ファイルで、両者を繋ぐ型も import も無いので
+# 検査が 1 つも気付かなかった (独立レビュー 2 体が同じ high として挙げた)。
+# 壊れたリンクなら人間は肩をすくめるが、存在しないコマンドを自律実行せよと
+# 言われた AI には逃げ道が無い。
+python3 "$ROOT/scripts/check-skill-reference-drift.py" --strict
 
 echo "[ci-strict-drift-guards] 成功表示が書き込みより先に出ていないか (ms-160 e-6688)…"
 # `beacon task done e-5981` が stdout に "Done: [e-5981] ..." を出しつつ、stderr に
@@ -182,5 +198,43 @@ echo "[ci-strict-drift-guards] 動詞 → 内部処理の対応が両フロン�
 # スタブ commands.py と PATH shim (git / 網 / ブラウザを無効化) の 2 枚で、
 # 実データには触らない。標準ライブラリのみ (pytest 非依存)。
 python3 "$ROOT/scripts/check-cli-handler-parity.py" --strict
+
+echo "[ci-strict-drift-guards] 盤の既定と文面が一致しているか (ms-173 e-7265)…"
+# 真実源は Go の defaultIdleTimeout 1 つ。経緯と限界は本体の docstring に 1 箇所
+# (e-7266: 同じ散文が 2 箇所に在ると、理由が変わったとき片方だけ古くなる)。
+python3 "$ROOT/scripts/check-idle-default-claims.py" --strict
+
+echo "[ci-strict-drift-guards] Go の doc comment に gofmt 由来の崩れた引用符が無いこと (ms-173)…"
+# **`` で囲むと gofmt が黙って書き換える。** Go 1.19 以降の gofmt は doc comment を
+# 正規化し、``X`` を “X“ (開きと閉じが同じ字形の壊れた引用) に変換する。実測:
+#   // ``root`` matches. `single` matches.   → gofmt → // “root“ matches. `single` matches.
+# 書いた本人は ``X`` と打ったので気付かず、`X` で grep する次の人はその識別子に
+# 辿り着けない。独立保守性レビューが 4 ファイル 9 箇所を見つけ、履歴から ``X`` に
+# 戻したら gofmt が即座に戻した (= 履歴の形は安定しない) ところまで実測した。
+# 安定する形は 1 つだけ: 単一バックチック `X`。
+# 字形は**リテラルで埋める**。$'\u201c\|\u201d' と書くと、$'...' の中の \| が
+# 壊れてパターンが実質 "“|”" (BRE では縦棒そのもの) になり、**何にも一致せず緑のまま
+# 通る**。反転ハーネスで実測して気付いた (2026-11-03)。
+#
+# **他の worktree を見ない**。.worktrees/ には別ブランチの checkout が居るので、
+# 走査に入れると「今の木」でない字形で赤くなる (最初の版で実際に起きた)。
+_BAD_QUOTES=$(grep -rln '“\|”' --include='*.go' \
+  --exclude-dir='.git' --exclude-dir='.worktrees' --exclude-dir='node_modules' \
+  "$ROOT" 2>/dev/null || true)
+if [ -n "$_BAD_QUOTES" ]; then
+  echo "[go-doc-quotes] NG: Go の doc comment に “ / ” が在ります:" >&2
+  echo "$_BAD_QUOTES" | sed 's/^/  /' >&2
+  echo "  原因: ``X`` と書くと gofmt が “X“ に変換します (Go 1.19+ の doc comment 正規化)。" >&2
+  echo "  直し方: 単一バックチック \`X\` にしてください (gofmt はこの形を変えません)。" >&2
+  echo "  履歴の ``X`` に戻しても gofmt が再変換するので、戻すのではなく 1 本にします。" >&2
+  exit 1
+fi
+echo "[go-doc-quotes] OK: 崩れた引用符はありません (この緑は散文の正しさを主張しません — 字形だけを見ています)。"
+
+echo "[ci-strict-drift-guards] レビュー mode の語彙が層をまたいでズレないこと (ms-119 e-4204)…"
+python3 "$ROOT/scripts/check-review-mode-vocab.py"
+
+echo "[ci-strict-drift-guards] judge instrument が逐語共有する節がズレないこと (ms-119)…"
+python3 "$ROOT/scripts/check-instrument-shared-sections.py"
 
 echo "[ci-strict-drift-guards] all strict drift guards passed."

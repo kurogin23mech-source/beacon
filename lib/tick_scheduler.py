@@ -22,7 +22,8 @@ A **schedule descriptor** is a plain, self-contained dict — no entity coupling
 
 The entity→descriptor mapping (e.g. "an Operation is enabled when status==open
 and meta.server_tick") lives in the caller's adapter, keeping this module pure
-and reusable. Mirrors ``lib/trek_scheduler.py`` so cadence math is unit-tested
+and reusable. It was written to mirror ``lib/trek_scheduler.py`` (removed with
+the rest of the body in ms-185 e-7070) so cadence math is unit-tested
 without an HTTP server.
 """
 
@@ -175,9 +176,11 @@ def validate_cadence_minutes(value) -> int:
     焼き、負値は意味を持たない。
 
     検証をこの module に置くのは、**同じ値を読む側がここに居る** から。
-    ``lib/trek.py:_validate_cadence_minutes`` が同じ規則を独自に持っていたが、
+    ``lib/trek.py:_validate_cadence_minutes`` が同じ規則を独自に持っていたので、
     Operation 側はそれを知らずに素通りしていた (= 同じ 1 つのフィールドについて
-    兄弟機能が別々の規則を持つと、片方だけ緩いまま残る)。trek 側もここを呼ぶ。
+    兄弟機能が別々の規則を持つと、片方だけ緩いまま残る)。trek 側もここを呼んで
+    いたが、ms-185 e-7070 で ``lib/trek.py`` ごと落ちたので、いまの読み手は
+    Operation の発火と締切リマインドだけである。
     """
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
@@ -208,7 +211,7 @@ def is_due(descriptor: dict, now,
       * never fired (no ``last_fired_at``) OR its cadence has elapsed.
 
     ``now`` may be an aware datetime or an ISO8601 string. Minute-resolution
-    comparison (like the Trek scheduler)."""
+    comparison (the Trek scheduler did the same before ms-185 removed it)."""
     descriptor = descriptor or {}
     if not descriptor.get("enabled"):
         return False

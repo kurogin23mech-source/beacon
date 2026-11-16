@@ -82,18 +82,8 @@ def test_no_agent_still_normalizes_to_none_not_keyerror():
 
 # --- trek fire 経路も同じ helper を通す (独立レビュー consensus, e-6012) ---
 
-def test_halt_carries_agent_into_who():
-    ev = de.decision_event_from_halt(
-        resumed=False, trek_id="tk-1", issuer_user_id="100953",
-        agent=de.agent_from_claims({"email": "a@b.com"}))
-    assert ev["who"]["agent"] == "a@b.com"
 
 
-def test_trek_review_carries_agent_into_who():
-    ev = de.decision_event_from_trek_review(
-        decision="approve", trek_id="tk-1", decider_user_id="100953",
-        agent=de.agent_from_claims({"email": "a@b.com"}))
-    assert ev["who"]["agent"] == "a@b.com"
 
 
 def test_all_human_fire_builders_expose_agent_param():
@@ -105,10 +95,17 @@ def test_all_human_fire_builders_expose_agent_param():
         de.decision_event_from_task_done,
         de.decision_event_from_completion_verdict,
         de.decision_event_from_scope_approval,
-        de.decision_event_from_halt,
-        de.decision_event_from_trek_review,
+        # ms-185 e-7070: decision_event_from_halt / _from_trek_review を外した
+        # (builder ごと消えた)。「新しい builder が agent 引数無しで足されたら
+        # ここで落ちる」という役目は変わらない。
     ]
     for fn in builders:
         assert "agent" in inspect.signature(fn).parameters, (
             f"{fn.__name__} は agent 引数を持つべき (who.agent を載せる fire site)"
         )
+
+
+# ms-185 e-7070: test_halt_carries_agent_into_who /
+# test_trek_review_carries_agent_into_who を落とした (builder ごと消えた)。
+# who.agent を載せる契約は test_all_human_fire_builders_expose_agent_param が
+# 残った builder 全数に対して測り続ける。

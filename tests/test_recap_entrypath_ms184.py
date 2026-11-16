@@ -215,7 +215,42 @@ def test_skill_does_not_tell_the_ai_to_compute_dates():
         dw.parse_since(spelling)      # raises if the parser lost it
 
 
-def test_skill_requires_reporting_what_could_not_be_judged():
+def _caveat_keys() -> list:
+    """The caveat keys the derivation actually returns, read from the code.
+
+    This list used to be a hardcoded tuple. That made the guard STALE the
+    moment a new caveat landed: ms-184's ``unattributed`` (shipping records
+    whose Target is unknown) was added beside ``undated`` and this test stayed
+    green while the Skill never mentioned it — the guard built to stop "a
+    signal was added and only one consumer wired" had itself become the
+    unwired consumer (independent maintainability review, PR#810). Deriving
+    the set from a real ``derive`` / ``aggregate`` result means the next caveat
+    makes THIS test fail until the Skill covers it.
+    """
+    import progress_window as pw
+
+    probe = {"project_id": "p", "name": "P", "milestones": []}
+    one = pw.derive(probe, from_date="2026-10-14", to_date="2026-10-14")
+    folded = pw.aggregate([{"project_id": "p", "name": "P", "result": one}])
+
+    keys = []
+    for result in (one, folded):
+        for key, value in result.items():
+            # a caveat is a top-level block that counts what could NOT be
+            # concluded, plus the "sources we did not read" list
+            if key == "sources_unavailable" or (
+                    isinstance(value, dict) and "count" in value):
+                if key not in keys:
+                    keys.append(key)
+    # ``unavailable`` is the fold's unreadable-project list (a list, not a
+    # count block), named separately because the Skill must report it too.
+    if "unavailable" in folded and "unavailable" not in keys:
+        keys.append("unavailable")
+    assert keys, "could not derive the caveat key set from the derivation"
+    return keys
+
+
+def test_skill_mentions_every_caveat_the_derivation_returns():
     """方針 8 reaches the Skill, not just the library.
 
     The library returns `unavailable` / `undated` / `sources_unavailable`; if
@@ -224,8 +259,12 @@ def test_skill_requires_reporting_what_could_not_be_judged():
     is the only step the user sees.
     """
     text = _read("shared/skills/beacon-recap/SKILL.md")
-    for key in ("unavailable", "undated", "sources_unavailable"):
-        assert key in text, f"the Skill never mentions `{key}`"
+    for key in _caveat_keys():
+        assert key in text, (
+            f"the Skill never mentions `{key}` — a caveat the derivation "
+            "returns but the手順書 does not oblige the AI to report. The "
+            "distinction between 'nothing happened' and 'could not tell' dies "
+            "at the last step, which is the only step the user sees.")
     assert "読めなかった分を 0 件側に混ぜない" in text
     assert "横断したふりをしない" in text
 

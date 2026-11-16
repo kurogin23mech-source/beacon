@@ -506,7 +506,7 @@ func TestFilterSessions(t *testing.T) {
 	pA := &ProjectRef{Name: "A"}
 	pB := &ProjectRef{Name: "B"}
 	sessions := []SessionOverview{
-		{Who: "", Project: pA, Running: true, ToolRunning: true},          // 自分/A/作業中
+		{Who: "", Project: pA, Running: true, ToolRunning: true},                // 自分/A/作業中
 		{Who: "me@example.com", Project: pB, Running: true, ToolRunning: false}, // 自分/B/要対応
 		{Who: "other@example.com", Project: pA, Remote: true, Running: true},    // 他人/A
 	}
@@ -615,7 +615,7 @@ func TestOpsRoomAtScale(t *testing.T) {
 				s.Remote = true
 				s.Running = true
 			} else {
-				s.Who = ""     // このマシン = 自分
+				s.Who = "" // このマシン = 自分
 				s.PID = 1000 + p*perProject + k
 				wantSelf++
 				if k%2 == 0 {
@@ -1078,6 +1078,14 @@ func TestStuckRunningSurfacesInPage(t *testing.T) {
 		t.Error("page.html が止まった「作業中」を由来で拾っていない — " +
 			"stale-running の行が待機中に沈み、許可待ちで止まったセッションに " +
 			"誰も気づけない (ms-173 独立レビュー AX-4)")
+	}
+	// e-7262: その推論が、同じ行の**より新しい観測**に負けること。手元の道具が
+	// idle を申告したら「作業中のまま止まっている」の前提は崩れているので、
+	// 確認待ちにしてはならない。この 1 行が落ちると誤発火が戻る。
+	if !strings.Contains(string(page), `&& s.state !== "idle"`) {
+		t.Error("page.html の stale-running 分岐が s.state を見ていない — " +
+			"ローカルが idle と言っている行まで「確認待ち」で出てしまう " +
+			"(推論が同じ行の直接の観測と矛盾してはならない、e-7262)")
 	}
 }
 

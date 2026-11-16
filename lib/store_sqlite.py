@@ -122,13 +122,9 @@ class SqliteStore:
 
     def get_document(self, doc_id: str) -> dict:
         return self._files.get_document(doc_id)
-
-    def list_treks(self, **kwargs):
-        return self._files.list_treks(**kwargs)
-
-    def get_trek(self, trek_id: str) -> dict:
-        return self._files.get_trek(trek_id)
-
+    # ms-185 e-7322: ここに Trek の読み出し passthrough (``list_treks``) が在った。
+    # 落とした経緯と「残置の根拠が誤りだった」話は ``lib/store.py`` の同じ箇所に
+    # 1 本だけ書いてある (写しを増やすと 1 つだけ古くなるので、そちらが正本)。
     def create_org(self, **kwargs) -> dict:
         return self._files.create_org(**kwargs)
 

@@ -85,7 +85,17 @@ def heartbeat_to_server(
     directory, so a user running Codex in several cwds cannot tell which
     session is which (= the multi-cwd identification gap this closes).
     Gated on ``actor`` so it rides the cold-start / refresh path, not
-    every 2s poll — cwd never changes mid-session.
+    every 2s poll.
+
+    ms-159 e-7235: かつてここには「cwd never changes mid-session」と書いてあったが、
+    その前提は否定された。Node bridge 側は「どこで作業しているか」(cwd + git) を
+    心拍ごとに刻み直すようになった — ターミナルを開いたままブランチを切り替えると
+    運用室の行が古い作業内容を出し続け、サーバがその branch から「どの対象か」を
+    毎回導出するため派生表示も一緒に古くなっていたため。
+    **Codex 経路はまだ追従していない** (状態を自己申告する口が無く、cold-start の
+    1 回だけ)。``bus_protocol.heartbeat_body`` には ``where`` の受け口が在るので、
+    この loop が心拍ごとに渡せば同じ鮮度になる。
+    形が離れていかないことは ``tests/test_bus_protocol.py`` が機械で見ている。
 
     Returns ``True`` on success, ``False`` on transport failure
     (= we never raise; the loop must survive transient network blips).

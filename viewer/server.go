@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,7 +38,7 @@ func isLoopback(host string) bool {
 
 // Server は盤を配る受け口。
 //
-// ``src`` は途中で差し替わる。起動時にプロジェクトが見つからなくても受け口は立て、
+// `src` は途中で差し替わる。起動時にプロジェクトが見つからなくても受け口は立て、
 // 画面から場所を選んでもらって開き直せるようにするため (起動し直させない)。
 type Server struct {
 	src      *LocalSource
@@ -48,7 +49,34 @@ type Server struct {
 	Host     string
 	startDir string // 起動した場所。どこを探したかを画面で伝えるのに使う。
 	expose   bool   // 外向きに公開しているか。端末へ飛ぶ操作は公開時に無効化する。
+
+	// probes は端末の種類をプロセスに訊いた結果の短命キャッシュ (e-7265)。
+	// 5 秒ごとの一覧取得で同じ ps を叩き直さないため。詳細は
+	// harness_probe_cache.go。
+	probes     *harnessProbeCache
+	probesOnce sync.Once
+
+	// reuseKey は「この盤が占めている席」。盤が二重に立たないための控え
+	// (portfile.go) と突き合わせる鍵で、**起動時に決めて以後変えない**。
+	//
+	// **なぜ `beaconDir()` では駄目か** (ms-170 思想 review medium): 画面から
+	// クラウドの取得元に切り替えると `s.src = nil` になり `beaconDir()` は空を
+	// 返す。空は「どの席でもない」と読まれるので、クラウドに向けた盤は
+	// (a) 再利用されず (b) 控えを他の盤に上書きされ (c) 居残りとして kill を
+	// 勧められる —— この MS が閉じようとした「使うたびに増える」が、取得元を
+	// クラウドにした盤にだけ残っていた。席は取得元の切り替えで動かない。
+	//
+	// **非公開にしてある** (ms-170 保守性 review high): 以前は公開の可変
+	// フィールドで、「以後変えない」はこのコメントだけが守っていた。独立
+	// レビューが `/api/cloud/open` の直後に 1 行足して席を消し、**全テストが
+	// 緑のまま**この PR が直したバグを再現させた。隣に `s.src = nil` /
+	// `s.cloud = c` という「取得元切り替え時にリセットする」形が在るので、
+	// 席も一緒にリセットする類推は自然に起きる。型で止める。
+	reuseKey string
 }
+
+// ReuseKey は、この盤が占めている席を返す (読み取りのみ)。
+func (s *Server) ReuseKey() string { return s.reuseKey }
 
 // jumpAvailable は「端末へ飛ぶ」を許してよいか。
 //
@@ -68,8 +96,22 @@ func (s *Server) beaconDir() string {
 	return s.src.BeaconDir
 }
 
-// NewServer は受け口を立てる。``expose`` が無いまま外向きの host を指定されたら断る。
-func NewServer(src *LocalSource, host string, port int, expose bool) (*Server, error) {
+// probeCache は導出のキャッシュを遅延で用意する (e-7265)。
+//
+// NewServer を触らずに済ませるため、使う時に作る。盤 1 本に 1 つなので、
+// 競合しないよう sync.Once で囲む。
+func (s *Server) probeCache() *harnessProbeCache {
+	s.probesOnce.Do(func() {
+		s.probes = newHarnessProbeCache(nil)
+	})
+	return s.probes
+}
+
+// NewServer は受け口を立てる。`expose` が無いまま外向きの host を指定されたら
+// 断る。`reuseKey` はこの盤が占める席で、ここで決めて以後変わらない
+// (上のフィールドの説明を参照)。
+func NewServer(src *LocalSource, host string, port int, expose bool,
+	reuseKey string) (*Server, error) {
 	if host == "" {
 		host = loopbackHost
 	}
@@ -84,7 +126,8 @@ func NewServer(src *LocalSource, host string, port int, expose bool) (*Server, e
 		return nil, err
 	}
 	cwd, _ := os.Getwd()
-	s := &Server{src: src, ln: ln, Host: host, startDir: cwd, expose: expose}
+	s := &Server{src: src, ln: ln, Host: host, startDir: cwd, expose: expose,
+		reuseKey: reuseKey}
 	s.URL = fmt.Sprintf("http://%s/", ln.Addr().String())
 	if isLoopback(host) {
 		// 表示用の住所は指定された名前を保つ (localhost と書かれたら localhost と出す)。
@@ -129,6 +172,9 @@ func (s *Server) handler() http.Handler {
 			"has_project": s.src != nil,
 			"path":        s.beaconDir(),
 			"cwd":         s.startDir,
+			// この盤が占めている席 (ms-170 思想 review medium)。`path` は取得元を
+			// クラウドに切り替えると空になるので、席の同一性はこちらで見る。
+			"reuse_key": s.reuseKey,
 			// クラウドから選ぶ経路はまだ無い。**画面に出す前にここで正直に伝える**
 			// (使えない入口を並べておくと、押しても何も起きない状態になる)。
 			"cloud_available": true,
@@ -456,6 +502,14 @@ func (s *Server) handler() http.Handler {
 		view.Total = total
 		view.Shown = len(view.Sessions)
 		view.RosterStatus = rosterStatus
+		// 名乗りが端末を特定していない行だけ、プロセスに訊いて埋める (e-7261)。
+		// **判定より前**に置くこと: 埋める前に判定すると、名乗りが届いていない
+		// 行が一律で「飛べない」に落ちる。逆に埋めずに既定値 (Terminal.app) で
+		// 埋めていたのが、iTerm の機械で黙って外れていた元の不具合。
+		// プローブ専用の実行器 (probeRunner)。上限は termProgramForPIDWith が
+		// 自分で張るので、ここで選ぶことはしない (e-7266 — 以前は呼び出し元に
+		// 上限つき/無しを選ばせており、ジャンプ経路だけ無界になっていた)。
+		resolveHarnessesCached(execProbeRunner, s.probeCache(), view.Sessions)
 		// 「端末へ飛べるか」の最終 1 値をここで確定させる (e-6427)。組み立ては
 		// サーバの環境 (loopback / --expose / OS) を知らないので、知っている
 		// 受け口が全行に書き込む。画面は jumpable / jump_blocked を読むだけ。
@@ -645,20 +699,67 @@ func (s *Server) Serve() error {
 	return http.Serve(s.ln, s.handler())
 }
 
+// ServeWithIdleTimeout は Serve に「誰も見ていなければ畳む」見張りを足したもの
+// (ms-170 e-7147)。`timeout <= 0` なら従来どおり畳まない。
+func (s *Server) ServeWithIdleTimeout(timeout time.Duration) error {
+	if timeout <= 0 {
+		return s.Serve()
+	}
+	tracker := newIdleTracker(time.Now())
+	// 確認の間隔は閾値の 1/10 (最短 5 秒)。細かく見ても早く畳めるわけではないが、
+	// 粗すぎると閾値を大きく超えてから畳むことになる。
+	check := timeout / 10
+	if check < 5*time.Second {
+		check = 5 * time.Second
+	}
+	watchIdle(tracker, timeout, check, time.Now, exitIdle)
+	return http.Serve(s.ln, wrapWithIdleTracking(s.handler(), tracker, time.Now))
+}
+
 // Close は受け口を畳む。
 func (s *Server) Close() error { return s.ln.Close() }
 
 // OpenBrowser は既定のブラウザで盤を開く。
 // 開けなくても盤は住所を打てば見られるので、失敗しても止めない。
+//
+// **終わった子を回収する** (ms-170 e-7147): 以前は `Start()` だけで `Wait()` を
+// していなかった。`open` / `xdg-open` はすぐ終わるのに回収されないので、盤が
+// 動いている間ずっと `<defunct>` が残る (2026-11-02 実測: 盤 1 本につき 1 件)。
+// 待つのは別の筋で行う —— ここで待つと、ブラウザが開くまで盤の起動が止まる。
 func OpenBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
+	openWith(browserCommand(runtime.GOOS, url))
+}
+
+// browserCommand は、その OS で住所を開く道具の組み立て (純関数)。
+func browserCommand(goos, url string) *exec.Cmd {
+	switch goos {
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "darwin":
-		cmd = exec.Command("open", url)
+		return exec.Command("open", url)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		return exec.Command("xdg-open", url)
 	}
-	_ = cmd.Start()
+}
+
+// openWith は起こして **必ず回収する**。
+//
+// 回収を別関数に出した理由 (e-7147 保守性 review medium): `OpenBrowser` のままでは
+// 実ブラウザが起きてしまい試験にできず、`cmd.Wait()` の行を消しても `go test` は
+// 緑のままだった (独立レビューが実測)。受入条件そのものなのに機械的な回帰防止が
+// 無かった。ここを分けると、害のない道具 (`true` など) を渡して回収を確かめられる。
+//
+// 待つのは別の筋で行う —— ここで待つと、ブラウザが開くまで盤の起動が止まる。
+// 返す channel は試験が「回収し終わった」を待つためのもの (本番は無視してよい)。
+func openWith(cmd *exec.Cmd) <-chan struct{} {
+	reaped := make(chan struct{})
+	if err := cmd.Start(); err != nil {
+		close(reaped)
+		return reaped
+	}
+	go func() {
+		_ = cmd.Wait()
+		close(reaped)
+	}()
+	return reaped
 }

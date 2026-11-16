@@ -53,15 +53,29 @@ def test_same_user_skips_consent():
     assert reason == dm_consent.CONSENT_SKIP_SAME_USER
 
 
-def test_shared_trek_skips_consent():
-    """Cross-user but both in the same active Trek → pre-approved scope."""
+def test_shared_trek_is_no_longer_a_carve_out():
+    """同じ Trek の参加者という理由で確認を省く経路が無い (ms-185 e-7068)。
+
+    **消した裏返しを固定する。** 以前は ``shared_trek=True`` を渡すと
+    ``shared_trek_member`` を理由に確認を省いた。Trek を畳むと「双方が同意
+    済み」と言える根拠が消えるので、引数ごと削除した (= 常に偽になる引数を
+    残さない)。渡そうとすると TypeError になるのが正しい状態。
+    """
+    import pytest as _pytest
+    with _pytest.raises(TypeError):
+        dm_consent.classify_send_consent(
+            sender_user_id="uid-alice",
+            recipient_user_id="uid-bob",
+            shared_trek=True,
+        )
+    # 引数が無いので、この組み合わせは確認が必要な側に倒れる。
     required, reason = dm_consent.classify_send_consent(
         sender_user_id="uid-alice",
         recipient_user_id="uid-bob",
-        shared_trek=True,
     )
-    assert required is False
-    assert reason == dm_consent.CONSENT_SKIP_SHARED_TREK
+    assert required is True
+    assert reason == dm_consent.CONSENT_REQUIRED_CROSS_USER
+    assert not hasattr(dm_consent, "CONSENT_SKIP_SHARED_TREK")
 
 
 def test_operation_envelope_skips_consent():
@@ -86,20 +100,47 @@ def test_reply_skips_consent():
     assert reason == dm_consent.CONSENT_SKIP_REPLY
 
 
+def test_pre_approved_channel_skips_consent():
+    """事前承認済み channel は確認を省く (判定は dm_qualgate を再利用)。
+
+    一覧は **operation-trigger だけ** (ms-185 e-7067)。根拠は
+    ``beacon operation approve`` で人間が署名を発行済みであること。
+    """
+    required, reason = dm_consent.classify_send_consent(
+        sender_user_id="uid-alice",
+        recipient_user_id="uid-bob",
+        channel="operation-trigger",
+    )
+    assert required is False
+    assert reason == dm_consent.CONSENT_SKIP_PRE_APPROVED
+
+
 @pytest.mark.parametrize(
     "channel",
-    ["operation-trigger", "trek-progress-check", "trek-trigger",
-     "trek-task-review", "trek-leader-digest", "trek-anything"],
+    ["trek-progress-check", "trek-trigger", "trek-task-review",
+     "trek-leader-digest", "trek-anything"],
 )
-def test_trek_scoped_channel_skips_consent(channel):
-    """Operation / Trek channels are pre-approved scope (reuses dm_qualgate)."""
+def test_trek_named_channel_is_no_longer_pre_approved(channel):
+    """``trek-`` で始まる名前を事前承認済みと見なす判定が存在しない (e-7067)。
+
+    **この固定は「消した」の裏返しではない。** 以前は ``trek-anything`` のような
+    任意の名前が前方一致で事前承認済みになっていた (= 誰の承認も無いのに確認を
+    省ける経路)。ここで見るのは「その理由で免除されないこと」であって、
+    「免除されないこと」そのものではない — 送信側の確認は dm 以外の channel を
+    別の根拠 (特定の相手に向けた送信でない = ``non_dm_channel``) で免除するので、
+    免除自体は残る。**理由が変わったことが本質**で、Trek を根拠にした免除は
+    もう存在しない。
+    """
     required, reason = dm_consent.classify_send_consent(
         sender_user_id="uid-alice",
         recipient_user_id="uid-bob",
         channel=channel,
     )
+    assert reason != dm_consent.CONSENT_SKIP_PRE_APPROVED, (
+        f"{channel} が事前承認済みとして免除されている — 前方一致が復活している")
+    # 免除の根拠は「dm 以外」である (= Trek とは無関係の、もともと在る規則)。
+    assert reason == dm_consent.CONSENT_SKIP_NON_DM
     assert required is False
-    assert reason == dm_consent.CONSENT_SKIP_TREK_SCOPE
 
 
 @pytest.mark.parametrize("channel", ["claim-signal", "ops", "test-broadcast"])
@@ -186,7 +227,7 @@ def test_reply_carveout_survives_unknown_recipient():
     assert reason == dm_consent.CONSENT_SKIP_REPLY
 
 
-def test_trek_channel_carveout_survives_unknown_recipient():
+def test_pre_approved_carveout_survives_unknown_recipient():
     """Operation-trigger delivery with unresolved recipient uid still passes."""
     required, reason = dm_consent.classify_send_consent(
         sender_user_id="uid-alice",
@@ -194,7 +235,7 @@ def test_trek_channel_carveout_survives_unknown_recipient():
         channel="operation-trigger",
     )
     assert required is False
-    assert reason == dm_consent.CONSENT_SKIP_TREK_SCOPE
+    assert reason == dm_consent.CONSENT_SKIP_PRE_APPROVED
 
 
 # ---------------------------------------------------------------------------

@@ -46,9 +46,17 @@ triggers:
   `maintainability` (= AX の兄弟、AI がコードを**変更する**体験) は AX と同じく
   `--pr` / `--diff-ref` を取り、原典は固定 (principles.md)。PR 作成時に AX と並んで
   自動発火する (fires_on=pr-open)。
-- `target`: `--pr <n>` または `--diff-ref <base...head>` (ax/philosophy でどちらか
-  必須)。`attainment` では `--target <ms-XX|op-X>` が必須 (原典 = その target の
+- `target`: artifact 源 (= judge に渡す変更) を 1 つ必ず指定する。`ax` /
+  `maintainability` / `philosophy` は `--pr <n>` または `--diff-ref <base...head>`。
+  **`philosophy` はさらに `--target <ms-XX|op-X>` を取る** (= whole-target mode、
+  e-4196)。close 節目は 1 変更でなく target 全体を見るので、その target の
+  commit 台帳が artifact になり、bundle の `mode` は `whole-target` になる
+  (`--pr` / `--diff-ref` との同時指定は拒否 = scope が黙って狭まらない)。
+  `attainment` では `--target <ms-XX|op-X>` が必須 (原典 = その target の
   SPEC を自動解決)、`--pr` / `--diff-ref` は任意の補助差分。
+  ※ `philosophy` は **原典 (`--origin-doc`) と artifact 源の両方**が必要で、
+  どちらかを欠くと rc=1 で落ちる (e-7438: 節目の 3 入口がこれを欠いた
+  命令を指示していたため、思想レビューが実質実行不能だった)。
 - `--origin-doc <doc-id>`: 思想レビューの原典 (対象 target の SPEC doc)。`philosophy`
   / `both` で必須。AX では不要 (原典は principles.md 固定)。
 - `--models <m1,m2,...>`: 判定サブエージェントのモデル。**既定は type ごとに記述子の
@@ -103,9 +111,23 @@ fi
 ```bash
 # AX:
 beacon review context --type ax --pr <n>            # or --diff-ref <base...head>
-# 思想:
+# 思想 (1 変更を見る):
 beacon review context --type philosophy --origin-doc <spec-doc-id> --pr <n>
+# 思想 (close 節目 = target 全体を見る / whole-target):
+beacon review context --type philosophy --origin-doc <spec-doc-id> --target <ms-XX|op-X>
 ```
+
+思想の close 節目では、**review-due trigger の message が呼び出しを綴る唯一の場所**
+(発火時に target も SPEC doc-id も分かっているので、`lib/commands_shared.py` が埋めた
+形で書く)。`beacon trigger check` の message に `/beacon-review-run --type philosophy ...`
+の行があれば、**自分で組み直さずそのまま使う** (e-7438)。
+
+ただし **常に穴の無い行が入るとは限らない**。message は、綴る前に「その呼び出しが
+通るか」を collector と同じ関数で確かめている (ms-119 e-7438 / 独立 AX レビュー 最終周)。
+`--target` で差分を集められない種類の target (data 定義 descriptor target-class 等) では、
+原典 doc-id は伝えるが **`<base...head>` のようなプレースホルダ入りの案内**になる ——
+その場合は artifact 源 (`--pr` / `--diff-ref`) を自分で選ぶ。穴の無い行だけが
+「そのままコピーして実行してよい」もの。
 
 stdout に 1 行 JSON が返る (`origin` / `artifact` / `independence_contract` /
 `mode` / `external_references` / `gaps`)。`both` の場合は 2 回叩いて 2 bundle を得る。
@@ -331,6 +353,22 @@ PR レビュー (`/review` / `/code-review`) の中で「この変更の AX は�
 
 `--pr <n>` 付きで走らせた場合、judge の verdict をユーザーに提示した**あと**に、
 そのレビューが実施済みであることを記録する:
+
+> **どの差分に対する実施かは、既定で正しくなる** (ms-119)。`beacon review context`
+> が bundle を発行したとき、その差分の sha を刻んでいる。`beacon review done` は
+> `--reviewed-sha` が無ければ **その印** を既定の供給源にするので、bundle 発行から
+> done までの間に誰かが push しても、**judge が実際に見た差分** に対する実施として
+> 記録される。
+>
+> だから通常は `--reviewed-sha` を付けなくてよい。付けるのは、別の経路で採った
+> 差分をレビューした等、印と違う sha を意図して記録したいときだけ (明示が最優先)。
+>
+> 以前はここが「done を打った時点で gh に聞いた head」だった。judge が sha A を
+> 見ている間に B が push されると、**B (judge が一度も見ていない差分) に対して
+> 関門が緑になる** —— PR #785 / #834〜836 で実際に起きた事故。この Skill が
+> `--reviewed-sha` を渡す手順を持っていなかったので、既定経路では必ずその穴を
+> 通っていた (独立 AX レビュー 6 周目 silent, 2026-11-10)。いまは**発行側が刻み、
+> 記録側が読む**ので、この散文を読まなくても正しい差分が記録される。
 
 ```bash
 # findings を採否したら、その採否 (何を採用/却下し・なぜか) も一緒に載せる

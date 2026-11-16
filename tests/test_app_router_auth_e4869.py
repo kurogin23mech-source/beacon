@@ -21,7 +21,26 @@ os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as app_module  # noqa: E402
+import cli_pairing  # noqa: E402
 import routers_auth  # noqa: E402
+
+
+class _DictPersistence:
+    """全サーバー台が共有する保存先の代役 (1 つの dict)。"""
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+
+    def get(self, code):
+        row = self.rows.get(code)
+        return dict(row) if row is not None else None
+
+    def put(self, code, data):
+        self.rows[code] = dict(data)
+
+
+def _shared_table(persistence=None):
+    return cli_pairing.PairingTable(persistence or _DictPersistence())
 
 client = TestClient(app_module.app)
 
@@ -104,6 +123,7 @@ def test_dev_login_mints_token_via_injected_make_cli_token(monkeypatch):
             make_cli_token=_fake_mint,
             get_local_dev_enabled=lambda: True,
             get_auth_provider=lambda: "firebase",
+            pairing_table=_shared_table(),
         )
     )
     import routers_auth as _ra
@@ -122,9 +142,9 @@ def test_dev_login_mints_token_via_injected_make_cli_token(monkeypatch):
 
 
 def test_cli_pairing_round_trip_through_router():
-    """cli-start → cli-approve → cli-poll shares the auth-local _cli_pending state
+    """cli-start → cli-approve → cli-poll shares the injected pairing table
     and issues a token via the injected minter. Exercises the whole CLI-pairing
-    flow through a freshly-mounted router (auth-local state moved with the routes)."""
+    flow through a freshly-mounted router over an injected shared pairing table (ms-187 e-7488)."""
     from fastapi import FastAPI
 
     probe = FastAPI()
@@ -134,6 +154,7 @@ def test_cli_pairing_round_trip_through_router():
             make_cli_token=lambda sub, email: ("bcli.paired", 4102444800),
             get_local_dev_enabled=lambda: True,
             get_auth_provider=lambda: "firebase",
+            pairing_table=_shared_table(),
         )
     )
     c = TestClient(probe)
@@ -156,8 +177,8 @@ def test_cli_approve_requires_auth(monkeypatch):
 
 
 def test_cli_poll_is_one_time_after_consume():
-    """cli-poll consumes the pairing code on success (issues token + deletes it),
-    so a replay (second poll of the same code) must NOT re-issue — it returns 404.
+    """cli-poll consumes the pairing code on success (marks it consumed + issues token),
+    so a replay (second poll of the same code) must NOT re-issue — it returns 409.
     Guards the one-time property of the flow (AX/maintainability review, PR #610)."""
     from fastapi import FastAPI
 
@@ -168,6 +189,7 @@ def test_cli_poll_is_one_time_after_consume():
             make_cli_token=lambda sub, email: ("bcli.once", 4102444800),
             get_local_dev_enabled=lambda: True,
             get_auth_provider=lambda: "firebase",
+            pairing_table=_shared_table(),
         )
     )
     c = TestClient(probe)
@@ -175,9 +197,10 @@ def test_cli_poll_is_one_time_after_consume():
     c.post("/api/auth/cli-approve", json={"code": code})
     first = c.get("/api/auth/cli-poll", params={"code": code})
     assert first.json()["id_token"] == "bcli.once", first.json()
-    # replay: the code was consumed/deleted on the first successful poll.
+    # replay: the code was marked consumed on the first successful poll; a second
+    # poll is refused with 409 "already used" (distinct from 404 "invalid code").
     replay = c.get("/api/auth/cli-poll", params={"code": code})
-    assert replay.status_code == 404, (replay.status_code, replay.text)
+    assert replay.status_code == 409, (replay.status_code, replay.text)
 
 
 def test_no_stale_auth_routes_left_in_app_py():
@@ -203,6 +226,7 @@ def test_make_router_rejects_non_callable_dep():
             make_cli_token=lambda s, e: ("t", 0),
             get_local_dev_enabled=True,  # bug: not a callable
             get_auth_provider=lambda: "firebase",
+            pairing_table=_shared_table(),
         )
 
 
@@ -216,6 +240,7 @@ def test_auth_router_factory_is_standalone_with_injected_deps():
         make_cli_token=lambda s, e: ("t", 0),
         get_local_dev_enabled=lambda: True,
         get_auth_provider=lambda: "firebase",
+        pairing_table=_shared_table(),
     )
     assert isinstance(router, APIRouter)
     paths = {r.path for r in router.routes}

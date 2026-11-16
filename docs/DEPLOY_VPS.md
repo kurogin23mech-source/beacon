@@ -99,13 +99,16 @@ curl -fsS https://beacon-ai.dev/health
 ## 定期ティック (自律の駆動) — e-1391 / ms-66 / ms-185 e-7065
 
 server-side の自律発火は、`POST /api/system/tick` を **定期的に叩く外部ドライバ**
-に依存する。この 1 つの入口が自律の全駆動で、中身は 3 つ:
+に依存する。この 1 つの入口が自律の全駆動で、中身は 2 つ:
 
 | 発火するもの | どこの仕組みか |
 |---|---|
 | Operation (繰り返す運用業務) の発火 | `lib/tick_scheduler` (対象を問わない周期発火の部品) |
 | 締切リマインド (ms-139 e-4953) | 同上 |
-| Trek の集約 (進捗確認 / 停滞検出 / escalation) | `lib/trek_scheduler` |
+
+かつては 3 つ目に「Trek の集約 (進捗確認 / 停滞検出 / escalation)」が在り、
+`lib/trek_scheduler` が担っていた。ms-185 e-7070 で削除済みで、モジュール自体が
+存在しない (ここに現役として残すと、落ちている駆動を探しに行かせてしまう)。
 
 Cloud Run 時代は Cloud Scheduler がこれを叩いていたが、VPS 移行 (ms-102/ms-96) で
 このドライバが**無音で消失**し、本番で自律が発火しなくなっていた (2026-07-24 Trek

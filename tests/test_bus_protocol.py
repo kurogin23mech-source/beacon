@@ -10,7 +10,11 @@ uncovered:
 3. ``opened`` ack stage is a real protocol stage (not just ``delivered``)
 """
 
+import json
 import os
+import pathlib
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -26,6 +30,10 @@ import bus_protocol as bp
 
 class TestHeartbeatBody:
     def test_shape_matches_bus_heartbeat_mjs(self):
+        # 引数を 1 つも渡さないときの既定の姿を固定する。
+        # **JS との一致はこのテストでは見ていない** (名前が紛らわしいが、固定集合との
+        # 比較なので JS を一度も読まない)。両実装の突き合わせは下の
+        # test_emittable_keys_do_not_drift_from_the_js_twin が機械的に行う。
         body = bp.heartbeat_body("2026-06-26T00:00:00Z", poll_interval_ms=2000)
         assert set(body) == {"last_active", "last_poll_at", "poll_interval_ms", "shutdown"}
 
@@ -229,3 +237,133 @@ class TestAck:
     def test_body_rejects_unknown_stage(self):
         with pytest.raises(ValueError):
             bp.ack_body("bogus", "sid-abc")
+
+
+# --- 両実装の形が離れていかないこと (ms-159 e-7235) ----------------------------
+#
+# ``heartbeat_body`` の docstring は自分を単一の真実源と宣言し「JS 写し
+# (buildHeartbeatBody) と同時に増やすこと (片方だけだと drift)」と書いている。
+# ところがそれを機械で確かめるものが無く、既存の
+# ``test_shape_matches_bus_heartbeat_mjs`` は固定集合と比べるだけで **JS を一度も
+# 読まない**自己参照だった。実際 ms-159 で JS だけに足された項目が 4 つ溜まっていた
+# (独立保守性レビュー指摘)。
+#
+# ここでは**両実装を実際に動かして**、出し得るキーの集合を比べる。
+
+_KNOWN_JS_ONLY = {
+    # Codex の受信ループは状態マーカー (.beacon/session-state.json) を読まないので
+    # 自己申告できず、これら 4 つは JS 側 (Node bridge) にしか無い。
+    # ms-159 e-6244 / e-6245 / e-6488 で JS に足された時点から離れている。
+    # **この集合は減る方向にしか動かしてはならない。** 増やすのは「JS にだけ足した」
+    # ことの宣言であり、下のテストがそれを赤で止める。
+    "declared_state",
+    "declared_at",
+    "state_since",
+    "state_detail",
+}
+
+
+def _js_emittable_keys():
+    """JS 側の buildHeartbeatBody を全オプション入りで動かし、出たキーを返す。"""
+    node = shutil.which("node")
+    if node is None:
+        return None
+    script = (
+        "import {buildHeartbeatBody} from './channel/bus-heartbeat.mjs';"
+        "const b = buildHeartbeatBody({nowIso:'t', pollIntervalMs:1, shutdown:true,"
+        " transport:{x:1}, declaredState:'running', declaredAt:'t', stateSince:'t',"
+        " stateDetail:'d', contextPct:5,"
+        " where:{cwd:'/w', git:{branch:'b', head_short:'h', head_subject:'s'}}});"
+        "console.log(JSON.stringify(Object.keys(b)));"
+    )
+    out = subprocess.run([node, "--input-type=module", "-e", script],
+                         cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, f"node 失敗: {out.stderr}"
+    return set(json.loads(out.stdout))
+
+
+def _py_emittable_keys():
+    """Python 側を全オプション入りで動かし、出たキーを返す。"""
+    return set(bp.heartbeat_body(
+        "t", poll_interval_ms=1, shutdown=True, transport={"x": 1},
+        context_pct=5,
+        where={"cwd": "/w",
+               "git": {"branch": "b", "head_short": "h", "head_subject": "s"}},
+    ))
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node が無い環境")
+def test_emittable_keys_do_not_drift_from_the_js_twin():
+    """JS 側だけに在るキーが、既知の 4 つより増えていないこと。
+
+    増えていたら「心拍に項目を足したが Python 写しに足していない」= Codex の
+    受信ループだけが古い形を送り続ける状態。e-7235 で直した「古い情報が権威あるものに
+    見える」が Codex 側だけで再発する形なので、ここで止める。
+    """
+    js = _js_emittable_keys()
+    py = _py_emittable_keys()
+    js_only = js - py
+    assert js_only <= _KNOWN_JS_ONLY, (
+        "JS にだけ在るキーが増えている: "
+        f"{sorted(js_only - _KNOWN_JS_ONLY)}。"
+        "lib/bus_protocol.py::heartbeat_body にも同時に足すこと "
+        "(docstring が『同時に増やすこと』と宣言している)。"
+        "意図的に JS 限定にするなら _KNOWN_JS_ONLY に理由つきで加える")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node が無い環境")
+def test_known_js_only_gap_has_not_silently_grown_or_gone_stale():
+    """既知の欠落の宣言が、実物とずれていないこと (両方向)。
+
+    宣言だけ増やして実物が直っていない / 実物が直ったのに宣言が残っている、
+    のどちらも「宣言と中身の食い違い」なので赤にする。許可リストを隠れ蓑に
+    しないための歯止め。
+    """
+    js, py = _js_emittable_keys(), _py_emittable_keys()
+    stale = _KNOWN_JS_ONLY - (js - py)
+    assert not stale, (
+        f"既知の欠落として宣言されているが実際は両方に在る: {sorted(stale)}。"
+        "_KNOWN_JS_ONLY から削ること (直ったものを債務として残さない)")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node が無い環境")
+def test_where_is_wired_on_both_sides():
+    """e-7235 で足した『どこで作業しているか』が両実装に在ること。
+
+    片方だけに足すと、Codex の受信ループが古い cwd / branch を運用室に出し続ける。
+    """
+    js, py = _js_emittable_keys(), _py_emittable_keys()
+    for key in ("cwd", "git"):
+        assert key in js, f"JS 側に {key} が無い"
+        assert key in py, f"Python 側に {key} が無い (Codex 経路が追従しない)"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node が無い環境")
+def test_both_sides_withhold_an_incomplete_git_map():
+    """3 項目揃わない git は、どちらの実装も載せないこと。
+
+    サーバの upsert はどの保存層でも浅いマージで入れ子のマップを丸ごと置換するため、
+    部分的な map を送ると以前の正しい値ごと消える。HEAD が branch を指していない間
+    (rebase 中 / コミット指定の worktree) に起きる。片方だけ据え置くと、同じ心拍が
+    クライアントによって違う結果を生む。
+    """
+    node = shutil.which("node")
+    out = subprocess.run(
+        [node, "--input-type=module", "-e",
+         "import {buildHeartbeatBody} from './channel/bus-heartbeat.mjs';"
+         "const b = buildHeartbeatBody({nowIso:'t', pollIntervalMs:1,"
+         " where:{cwd:'/w', git:{branch:'', head_short:'h', head_subject:'s'}}});"
+         "console.log(JSON.stringify(Object.keys(b)));"],
+        cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    js_keys = set(json.loads(out.stdout))
+    py_keys = set(bp.heartbeat_body(
+        "t", poll_interval_ms=1,
+        where={"cwd": "/w",
+               "git": {"branch": "", "head_short": "h", "head_subject": "s"}}))
+    assert "git" not in js_keys, "JS 側が不完全な git を載せている"
+    assert "git" not in py_keys, "Python 側が不完全な git を載せている"
+    # cwd は top-level なので浅いマージで安全に更新でき、据え置く理由が無い。
+    assert "cwd" in js_keys and "cwd" in py_keys

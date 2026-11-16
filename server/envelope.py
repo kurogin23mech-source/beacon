@@ -61,25 +61,27 @@ from typing import Any, Optional
 # ---------------------------------------------------------------------------
 
 TIER_T1 = "T1"  # human explicit signature
-TIER_T1_SYSTEM = "T1-system"  # Beacon-server signed (ms-83 / e-1995) — T1 派生
 TIER_T2 = "T2"  # Operation scope envelope
 TIER_T3 = "T3"  # reply chain to T1/T2
 TIER_T5 = "T5"  # AI autonomous send (info-forbidden, action-forbidden)
 
-VALID_TIERS = {TIER_T1, TIER_T1_SYSTEM, TIER_T2, TIER_T3, TIER_T5}
+VALID_TIERS = {TIER_T1, TIER_T2, TIER_T3, TIER_T5}
 
-# ms-83 / e-1995: T1-system envelopes are minted by the Beacon server itself
-# as the structural execution of the user's pre-approval of a Trek (= the
-# user said "Trek で進めて" once, the server re-issues the equivalent T1
-# permission on each scheduler tick). The signed ``issuer`` MUST be this
-# exact string — the receive-side check rejects any other issuer claiming
-# this tier so that a compromised user account can not pose as the server.
-T1_SYSTEM_ISSUER = "beacon-system"
+# ms-185 e-7078 / e-7323: ここに tier ``T1-system`` (= Beacon サーバ自身が署名する
+# T1 派生) と、その発行者を固定する ``T1_SYSTEM_ISSUER`` が在った。発行には必ず
+# ``trek_id`` が要り scope を ``trek:<id>`` に強制していたので、Trek の作成経路を
+# e-7070 で落とした時点で **発行できる者が恒久に 0** になった。tier を語彙に残すと
+# 「満たし手が居ないのに検査だけ在る」形 (= SPEC 設計方針4 が名指しで却下した形)
+# になるため、tier ごと落とした。
+#
+# 過去の記録は読めるまま: ``verify`` の本番呼び出しは 4 箇所すべて受信時
+# (app.py の依存 / post_bus_event / routers_projects の check-task-add) で、
+# 保存済みイベントを後から再検証する経路は無い (= SPEC 方針5 に触れない)。
+# 判断記録 dec-4e7a66391176699a。
 
 # Permission matrix flags. Both are independent (orthogonal) axes per CORE doc.
 TIER_ACTION_PERMISSION = {
     TIER_T1: "auto",         # actions_authorized run without further consent
-    TIER_T1_SYSTEM: "auto",  # T1 派生 — same permission as T1, scoped to a Trek
     TIER_T2: "scope-auto",   # in-scope actions auto, out-of-scope → propose
     TIER_T3: "propose-only", # any action → propose-to-ai (never auto)
     TIER_T5: "forbidden",    # action requests rejected outright
@@ -87,7 +89,6 @@ TIER_ACTION_PERMISSION = {
 
 TIER_INFO_DISCLOSURE = {
     TIER_T1: "free",
-    TIER_T1_SYSTEM: "free",
     TIER_T2: "scope-bound",  # only data_class declared in scope contract
     TIER_T3: "inherit",       # match parent message tier
     TIER_T5: "ping-only",     # short-ping schema, no free text
@@ -112,8 +113,8 @@ HIGH_RISK_ACTIONS = frozenset({
 })
 
 
-# ms-83 / e-2000: AI 自律 task add. action name = "task.add". For T2 /
-# T1-system envelopes, server-side verify additionally requires that the
+# ms-83 / e-2000: AI 自律 task add. action name = "task.add". For T2
+# envelopes, server-side verify additionally requires that the
 # MS the task is being added to is **enumerated in the envelope's scope**.
 # A T2 envelope with scope="ms:ms-83" lets the AI add tasks under ms-83
 # autonomously; adding to a different MS falls through to propose-to-ai
@@ -129,11 +130,6 @@ def check_task_add_scope_match(envelope: dict, target_ms: str) -> bool:
     Match rules:
       * T1 envelopes: always permitted (= user signed explicitly, no
         scope restriction on which MS the AI may add to).
-      * T1-system: scope is ``trek:<id>``. The caller (= app.py)
-        consults the trek's scope list to decide if ``target_ms`` is
-        covered by this trek. This function answers the cheap "tier
-        permits at all?" question; the trek-scope walk is the caller's
-        responsibility because this module deliberately stays I/O-free.
       * T2: scope is the Operation scope string. The Operation SPEC
         enumerates which MS the Operation may add to using the form
         ``ms:<ms-id>``. We accept ``scope="ms:<ms-id>"`` (= scope
@@ -142,8 +138,10 @@ def check_task_add_scope_match(envelope: dict, target_ms: str) -> bool:
       * T3 / T5: never auto-permits; the upstream verify step degrades
         the action to propose-to-ai or rejects outright.
 
-    The decision is pure: the caller stitches in the trek scope walk
-    when the envelope is T1-system.
+    The decision is pure (no I/O). ms-185 e-7078: a T1-system branch used
+    to return "tier permits, defer to the caller's Trek-scope walk"; both
+    the tier and that walk are gone, so an unknown tier simply falls to
+    False (= propose-to-ai downstream).
     """
     if not target_ms:
         return False
@@ -158,12 +156,6 @@ def check_task_add_scope_match(envelope: dict, target_ms: str) -> bool:
         # if the literal "ms:<target_ms>" substring appears bounded by
         # delimiters or string ends.
         return _scope_contains_ms_token(scope, target_ms)
-    if tier == TIER_T1_SYSTEM:
-        # The Trek-scope walk happens in the caller (= app.py) because
-        # this module has no Firestore access. We return True here as
-        # "tier permits, defer to scope walk"; callers must compose with
-        # ``trek_scope_includes_ms`` (see lib/trek_scheduler.py helpers).
-        return True
     return False
 
 
@@ -185,23 +177,11 @@ def _scope_contains_ms_token(scope: str, target_ms: str) -> bool:
     return left_ok and right_ok
 
 
-def trek_scope_includes_ms(trek_doc: dict, target_ms: str) -> bool:
-    """Return True iff ``target_ms`` is enumerated in this trek's scope.
-
-    ms-83 / e-2000: paired with ``check_task_add_scope_match`` for the
-    T1-system path. The trek scope is a list of dicts
-    ``{"project": ..., "milestone": "ms-XX"}``; any entry whose
-    ``milestone`` equals ``target_ms`` makes the task add auto-permitted.
-
-    Lives here (= alongside the envelope rules) so app.py doesn't have
-    to know the trek dict layout for a single yes/no question.
-    """
-    if not target_ms or not trek_doc:
-        return False
-    for entry in trek_doc.get("scope") or []:
-        if entry.get("milestone") == target_ms:
-            return True
-    return False
+# ms-185 e-7078 / e-7323: ここに ``trek_scope_includes_ms`` (= Trek の scope 一覧に
+# 対象 MS が含まれるかを見る判定) が在った。唯一の呼び出し元は
+# routers_projects の check-task-add にあった T1-system 分岐で、その分岐を落とした
+# 時点で呼び出し元 0 になったので一緒に落とした。呼び出し元ゼロの関数を残すのは、
+# この MS が消している残骸そのものなので、自分には適用しないという形は採らない。
 
 # Short-ping schema (T5 disclosure cap). The payload must be a dict whose
 # keys are a subset of this allowlist, and whose values are all primitive
@@ -454,8 +434,14 @@ _DEV_FALLBACK_SCHEDULER_KEY = "dev-scheduler-key-CHANGE-ME"
 
 
 def scheduler_internal_key() -> str:
-    """Return the shared secret the periodic scheduler presents on the
-    T1-system mint endpoint (ms-83 / e-1997).
+    """Return the shared secret the periodic scheduler presents on
+    ``POST /api/system/tick`` (ms-83 / e-1997).
+
+    ms-185 e-7078: this key used to guard two surfaces — the tick and the
+    T1-system mint endpoint. The mint endpoint is gone (its tier had no
+    possible issuer once Trek was retired), so the tick is the only surface
+    left. The key itself stays: production ticks (``scripts/vps-tick.sh``)
+    authenticate with it, so removing it would stop Operation autonomy.
 
     Reads ``BEACON_SCHEDULER_INTERNAL_KEY`` env. The dev fallback lets the
     test suite run without configuration; production must rotate the value
@@ -473,13 +459,14 @@ def is_using_dev_scheduler_key() -> bool:
     """Return True iff the scheduler tick key is unsafe for production.
 
     Twin of ``is_using_dev_fallback()`` for the *other* internal secret. The
-    scheduler key gates ``POST /api/system/tick`` (which fires Operation /
-    Trek autonomy; ms-185 e-7065 moved it off the trek-named path
-    ``/api/system/trek-scheduler/tick``, which now forwards) and the
-    T1-system envelope mint path; the dev
+    scheduler key gates ``POST /api/system/tick`` (which fires Operation
+    autonomy; ms-185 e-7065 moved it off the trek-named path
+    ``/api/system/trek-scheduler/tick``, which now forwards, and e-7078
+    removed the T1-system mint endpoint that shared this key, so the tick is
+    the only surface left). The dev
     fallback (``_DEV_FALLBACK_SCHEDULER_KEY``) is visible in the public repo,
-    so booting production with it would let anyone drive the tick / mint
-    endpoints. Production startup checks this and refuses to boot (e-4115).
+    so booting production with it would let anyone drive the tick
+    endpoint. Production startup checks this and refuses to boot (e-4115).
 
     "Unsafe" means ``BEACON_SCHEDULER_INTERNAL_KEY`` is any of:
       * **unset or empty** (``scheduler_internal_key()`` returns the placeholder);
@@ -607,20 +594,10 @@ def issue_envelope(
         raise ValueError("chain_depth must be >= 0")
     if tier == TIER_T1 and scope is not None:
         raise ValueError("T1 envelope must have scope=None")
-    if tier == TIER_T1_SYSTEM:
-        # ms-83 / e-1995: T1-system mint is structurally limited to a Trek
-        # scope. Caller must supply ``scope='trek:<trek-id>'`` and the
-        # ``issuer`` must be ``beacon-system``.
-        if not scope or not scope.startswith("trek:") \
-                or len(scope) <= len("trek:"):
-            raise ValueError(
-                "T1-system envelope requires scope='trek:<trek-id>'"
-            )
-        if issuer != T1_SYSTEM_ISSUER:
-            raise ValueError(
-                f"T1-system envelope must be issued by "
-                f"{T1_SYSTEM_ISSUER!r}, got {issuer!r}"
-            )
+    # ms-185 e-7078 / e-7323: ここに T1-system の発行時検査 (scope は trek:<id> /
+    # issuer は beacon-system) が在った。tier ごと落としたので、いま同じ文字列を
+    # tier に書いても上の ``tier not in VALID_TIERS`` で弾かれる (= 検査を 1 段
+    # 手前に寄せた形で、緩めていない)。
     if tier == TIER_T2 and not scope:
         raise ValueError("T2 envelope requires non-empty scope")
     if tier in (TIER_T3, TIER_T5) and scope is not None:
@@ -688,49 +665,11 @@ def issue_envelope(
     return body
 
 
-def issue_t1_system_envelope(
-    *,
-    project_id: str,
-    trek_id: str,
-    actions_authorized: list[str],
-    data_class: str = "free",
-    ttl_seconds: int = 3600,
-    conversation_id: Optional[str] = None,
-    disclosure_policy: Optional[dict] = None,
-) -> dict:
-    """Mint a T1-system envelope (ms-83 / e-1995).
-
-    Beacon server signs the envelope on behalf of the user who said
-    "Trek で進めて" at trek-activation time. The receive side treats
-    this envelope as T1-equivalent (= auto-execute) **only when** the
-    scope ``trek:<trek-id>`` matches an active Trek the receiver
-    participates in.
-
-    Discipline knobs:
-      * issuer is forced to ``T1_SYSTEM_ISSUER`` (= the only acceptable
-        value, enforced again at verify time so a leaked user envelope
-        cannot pose as the server).
-      * scope is forced to ``"trek:<trek_id>"``.
-      * actions_authorized enumeration discipline is the same as T1
-        (= strict, no wildcards) — high-risk actions (deploy / etc.)
-        are rejected by the verify pipeline regardless.
-
-    Returns a signed envelope dict ready to attach to a bus event.
-    """
-    if not trek_id:
-        raise ValueError("T1-system envelope requires a trek_id")
-    return issue_envelope(
-        tier=TIER_T1_SYSTEM,
-        issuer=T1_SYSTEM_ISSUER,
-        project_id=project_id,
-        actions_authorized=actions_authorized,
-        data_class=data_class,
-        scope=f"trek:{trek_id}",
-        conversation_id=conversation_id,
-        ttl_seconds=ttl_seconds,
-        disclosure_policy=disclosure_policy,
-    )
-
+# ms-185 e-7078 / e-7323: ここに ``issue_t1_system_envelope`` (= T1-system 封筒を
+# 署名して発行する関数) が在った。``trek_id`` 必須で scope を ``trek:<id>`` に
+# 強制する作りだったので、Trek の作成経路が無くなった時点で呼べる状況が消えた。
+# 唯一の本番呼び出し元 (routers_projects の T1-system 発行口) と同じ変更で落として
+# いる。判断記録 dec-4e7a66391176699a。
 
 # ---------------------------------------------------------------------------
 # Receive-time verify (9-step pipeline per CORE doc)
@@ -769,9 +708,6 @@ def _tier_internal_consistent(envelope: dict) -> Optional[str]:
 
     Rules from CORE doc:
       * T1: scope must be None
-      * T1-system (ms-83 / e-1995): scope must be non-empty AND start with
-        ``trek:`` (= the Trek that anchors the server-mint authority);
-        issuer must equal ``beacon-system``.
       * T2: scope required (non-empty)
       * T3/T5: scope must be None
       * Phase 1: tokens/refill_policy must be None (reserved fields)
@@ -780,16 +716,9 @@ def _tier_internal_consistent(envelope: dict) -> Optional[str]:
     scope = envelope.get("scope")
     if tier == TIER_T1 and scope is not None:
         return "T1 must have scope=None"
-    if tier == TIER_T1_SYSTEM:
-        if not scope:
-            return "T1-system requires non-empty scope=trek:<trek-id>"
-        if not scope.startswith("trek:") or len(scope) <= len("trek:"):
-            return "T1-system scope must be of the form 'trek:<trek-id>'"
-        if envelope.get("issuer") != T1_SYSTEM_ISSUER:
-            return (
-                f"T1-system issuer must be {T1_SYSTEM_ISSUER!r}, "
-                f"got {envelope.get('issuer')!r}"
-            )
+    # ms-185 e-7078 / e-7323: ここに T1-system の受信時検査が在った (scope が
+    # trek:<id> で issuer が beacon-system であること)。tier を語彙から落としたので、
+    # この tier を名乗る封筒は verify の tier 検査で先に落ちる。
     if tier == TIER_T2 and not scope:
         return "T2 requires non-empty scope"
     if tier in (TIER_T3, TIER_T5) and scope is not None:
@@ -855,19 +784,17 @@ def _action_permitted_by_tier(envelope: dict, action: Optional[str]) -> Optional
     tier = envelope.get("tier")
     if tier == TIER_T5:
         return "T5 cannot request actions"
-    # T1 / T1-system / T2 must enumerate the action.
+    # T1 / T2 must enumerate the action.
     authorized = envelope.get("actions_authorized") or []
-    if action not in authorized and tier in (TIER_T1, TIER_T1_SYSTEM, TIER_T2):
+    if action not in authorized and tier in (TIER_T1, TIER_T2):
         return f"action {action!r} not in actions_authorized"
     # T3 actions are always allowed at verify (action will degrade to
     # propose-to-ai downstream — that's a delivery concern not a verify
     # one).
-    # High-risk actions: T1 only (defense in depth).
-    # ms-83 / e-1995: T1-system is NOT allowed to start high-risk actions
-    # (= deploy / project.delete / etc.). The server-mint authority is
-    # bounded by Trek scope, and Trek explicitly carves out deploy / release
-    # as user 介入境界 (CORE doc b1XOKXQeC0JXaKkO0CRt). Even if a SPEC
-    # somehow enumerated deploy, the verify step rejects it.
+    # High-risk actions: T1 only (defense in depth). ms-185 e-7078 removed the
+    # T1-system tier that this rule also had to exclude; the rule itself is
+    # unchanged (anything that is not T1 is refused), so dropping the tier did
+    # not widen it.
     if action in HIGH_RISK_ACTIONS and tier != TIER_T1:
         return f"high-risk action {action!r} requires T1"
     return None

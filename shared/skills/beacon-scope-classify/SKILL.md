@@ -81,7 +81,7 @@ stdout に 1 個の JSON:
 CORE doc `Capability 共有スコープ台帳` (doc_id `37Svg6nD2FccJM27yBjq`) の L0〜L4 定義と依存不変条件。初回に 1 度 `beacon doc show 37Svg6nD2FccJM27yBjq` で読む。要点:
 
 - **L0 — Beacon プロダクト運用**: Beacon という**プロダクト自体を運用・保守する** admin/dev の道具 (doctor / skill install / migrate)。一般の職種フィーチャではない。判別軸は「install でどこでも動くか」ではなく「Beacon 自体の運用が目的か」— 台帳の L0 不変条件は「公開配布パッケージから依存されない運用ツール」であり、`beacon doctor` が pip 版に同梱されることと矛盾しない (= 配布物に紛れる一般機能ではなく、プロダクト運用の道具として在る)。
-- **L1 — 全職種共通**: 職種に依存しない協奏基盤 (bus / dm / auth / trek / session / member / trigger)。職種で具象化しない。
+- **L1 — 全職種共通**: 職種に依存しない協奏基盤 (bus / dm / auth / session / member / trigger)。職種で具象化しない。
 - **L2 — クラス抽象化層**: target 抽象に触れ職種ごとに具象化される (dev=milestone / sales=opportunity) が、**規則は職種共通** (doc / claim / status / target 系)。
 - **L3 — 職種固有デフォルト**: ある職種にデフォルトで備わる (dev: milestone/task/pr/deploy、sales: account/opportunity/meeting)。所有 = **職種**。
 - **L4 — プロジェクト個別最適**: 特定 1 プロジェクト向け。標準出荷ゼロ。所有 = **プロジェクト**。
@@ -97,7 +97,7 @@ CORE doc `Capability 共有スコープ台帳` (doc_id `37Svg6nD2FccJM27yBjq`) �
 ### skill の場合 (`kind == "skill"`)
 
 1. `skills/<name>.md` の本文を読み、それが **駆動する CLI verb 群** を見る。
-2. sales 専用 verb を駆動 → L3/sales。協奏基盤 verb (bus/trek/session) → L1。target 抽象 (doc/status/claim) を扱う知識・計画系 → L2。Beacon の source tree でしか意味がない保守作業 (この台帳自体の編集など) → L4/そのプロジェクト。Beacon プロダクト運用が目的の道具 → L0。
+2. sales 専用 verb を駆動 → L3/sales。協奏基盤 verb (bus/session) → L1。target 抽象 (doc/status/claim) を扱う知識・計画系 → L2。Beacon の source tree でしか意味がない保守作業 (この台帳自体の編集など) → L4/そのプロジェクト。Beacon プロダクト運用が目的の道具 → L0。
 
 ### 判断を書き出す
 

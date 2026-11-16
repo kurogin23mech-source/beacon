@@ -47,9 +47,6 @@ from datetime import datetime, timezone
 DEFAULT_ALLOWED_CHANNELS = (
     "dm",
     "operation-trigger",
-    "trek-progress-check",
-    "trek-trigger",
-    "trek-task-review",
 )
 
 # ms-160 e-5800: the remote-STOP kill-switch channel. It is deliberately NOT in
@@ -91,6 +88,7 @@ def heartbeat_body(
     shutdown: bool = False,
     transport: dict | None = None,
     context_pct: int | None = None,
+    where: dict | None = None,
 ) -> dict:
     """Return the canonical PUT /sessions/<sid> body.
 
@@ -113,6 +111,23 @@ def heartbeat_body(
     行まで運ぶ。「どのセッションが context 逼迫か」を一目で見えるようにするため。
     値が無い (古いクライアント / 未算出) ときは載せない (後方互換で行 shape を
     壊さない)。JS 写し (buildHeartbeatBody) と同時に増やすこと (片方だけだと drift)。
+
+    ms-159 / e-7235 — optional ``where`` (= ``{"cwd", "git": {...}}``) を載せる。
+    「どこで作業しているか」は以前 cold-start の 1 回だけ刻まれており、ターミナルを
+    開いたままブランチを切り替えると運用室の行が古い作業内容を出し続けていた
+    (サーバがこの branch から「どの対象か」を毎回導出するため、派生する表示も
+    一緒に古くなる)。心拍に相乗りさせて追従させる。
+
+    **``git`` は 3 項目すべて揃っているときだけ載せる。** サーバの upsert はどの
+    保存層でも浅いマージで、**入れ子のマップは丸ごと置換される**ので、送った map に
+    無い項目は以前の正しい値ごと消える (``actor.email`` に項目単位で書く専用の口
+    ``stamp_session_actor_email`` が在るのは、この罠への対処)。HEAD が branch を
+    指していない間 (rebase 中 / コミット指定の worktree) に部分的な map を送ると、
+    数秒前まで分かっていた branch が無言で空になる。消すより据え置く方を選ぶ。
+    ``cwd`` は top-level なので浅いマージで安全に更新できる。
+
+    この判断は JS 写し (``channel/bus-heartbeat.mjs::buildHeartbeatBody``) と同じで、
+    ``tests/test_bus_protocol.py`` が両実装のキー集合を機械的に突き合わせる。
     """
     body = {
         "last_active": now_iso,
@@ -124,6 +139,16 @@ def heartbeat_body(
         body["transport"] = transport
     if context_pct is not None:
         body["context_pct"] = int(context_pct)
+    if isinstance(where, dict):
+        # cwd は top-level なので浅いマージで安全。空なら載せない。
+        if where.get("cwd"):
+            body["cwd"] = where["cwd"]
+        # git は入れ子のマップで丸ごと置換されるため、3 項目揃ったときだけ
+        # (= 完全な姿を送れるときだけ) 載せる。詳しい理由は docstring 参照。
+        g = where.get("git")
+        if (isinstance(g, dict) and g.get("branch")
+                and g.get("head_short") and g.get("head_subject")):
+            body["git"] = g
     return body
 
 
@@ -220,7 +245,8 @@ def filter_event(event: dict, config: FilterConfig) -> str:
 
     # Filter 2b (= e-1209): DM with no recipient stamp is treated as
     # malformed-drop. Codex receive loop missed this and ended up
-    # persisting broadcast traffic (operation-trigger / trek-* / test-*)
+    # persisting broadcast traffic (operation-trigger / test-*; trek-* was
+    # here until ms-185 retired the family — lib/bus_delivery.RETIRED_PROVENANCE_CHANNELS)
     # into a Codex DM inbox.
     if is_dm and not intended:
         return FILTER_DROP_DM_UNADDRESSED

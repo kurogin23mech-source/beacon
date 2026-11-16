@@ -3,20 +3,30 @@
 
 Independent watchdog for the 2026-07-24 finding: the server-side periodic tick
 (``POST /api/system/tick``, which drives Operation autonomy + deadline
-reminders and rides along the Trek aggregation; ms-185 e-7065 moved it off the
-trek-named path ``/api/system/trek-scheduler/tick``, which now forwards) lost
-its driver in the Cloud Run → VPS migration and
-silently stopped firing — noticed only by accident during a review. This is
-the *same class* of silent death that ``deploy-health-monitor.py`` guards for
-deploy freshness, so this monitor is deliberately its twin:
+reminders; ms-185 e-7065 moved it off the old
+``/api/system/trek-scheduler/tick`` path, which now forwards) lost its driver
+in the Cloud Run → VPS migration and silently stopped firing — noticed only by
+accident during a review. This is the *same class* of silent death that
+``deploy-health-monitor.py`` guards for deploy freshness, so this monitor is
+deliberately its twin:
 
   1. polls production ``<prod>/api/system/tick-health`` (in-memory last-tick
      timestamp the server records at the end of each tick),
   2. classifies ok / stale / never / unreachable
      (``lib.tick_health.evaluate_tick_health`` / ``should_alert``),
-  3. on a dead tick, resolves the alert recipient (reusing
-     ``lib.deploy_health.resolve_alert_recipient``) and sends a beacon-bus DM,
-  4. dedups on a state file so a persistent dead tick alerts once, not every
+  3. **checks that every required source still rides the tick, and still gets
+     work done on it** (``lib.tick_health.evaluate_scheduled_sources``) — a
+     tick that keeps its cadence while Operation firing or deadline reminders
+     quietly dropped out is green on the liveness axis and broken in fact
+     (ms-185 e-7066). Two shapes count: the source left the registry
+     (``missing``), and the source is still called every tick but errored on
+     every attempt (``failing`` — e-7066 follow-up, independent AX review's
+     high: the registry axis alone reports ``ok`` for a source that is wired,
+     called, and broken 100% of the time),
+  4. on a dead tick, a missing source or a wholly failing source, resolves the
+     alert recipient (reusing ``lib.deploy_health.resolve_alert_recipient``)
+     and sends a beacon-bus DM,
+  5. dedups on a state file so a persistent fault alerts once, not every
      cron tick.
 
 Runs OUTSIDE the monitored box (GitHub Actions cron), because a down /
@@ -147,19 +157,36 @@ def decide_and_alert(
         health = {"status": "unreachable", "seconds_since": None,
                   "last_tick_at": "", "stale_after_seconds": stale_after_seconds}
 
-    verdict = {"reachable": reachable, "health": health, "alerted": False}
+    # ms-185 e-7066 — 相乗りしている source の欠落も見る。``scheduled_sources``
+    # を報告しない旧デプロイでは status=unknown になり alert しない (rollout 中に
+    # 鳴きっぱなしの watchdog は mute され、結果として何も守らなくなる)。
+    #
+    # e-7066 follow-up (独立 AX レビューの high): 登録簿の名前だけでは「配線は
+    # 在るが毎回失敗している」が ok に見える。tick が既に publish している
+    # source ごとの内訳 (last_tick_report.scheduled_by_source) をここで渡して、
+    # その形も鳴るようにする。内訳を publish しない旧デプロイでは None のまま
+    # = 登録簿の軸だけで判定する (沈黙する、鳴きっぱなしにしない)。
+    _report = payload.get("last_tick_report") if reachable else None
+    sources = th.evaluate_scheduled_sources(
+        payload.get("scheduled_sources") if reachable else None,
+        fire_summary=(_report or {}).get("scheduled_by_source")
+        if isinstance(_report, dict) else None,
+    )
 
-    if not th.should_alert(health, reachable):
+    verdict = {"reachable": reachable, "health": health,
+               "sources": sources, "alerted": False}
+
+    if not th.should_alert(health, reachable, sources):
         return verdict
 
-    dedup_key = th.alert_dedup_key(reachable, health)
+    dedup_key = th.alert_dedup_key(reachable, health, sources)
     if last_alerted_key == dedup_key:
         verdict["dedup"] = True
         verdict["dedup_key"] = dedup_key
         return verdict
 
     recipient = dh.resolve_alert_recipient(live_sessions, "", owner_user_id)
-    text = th.format_alert_message(reachable, health, prod_url)
+    text = th.format_alert_message(reachable, health, prod_url, sources)
     verdict["recipient"] = recipient
     verdict["dedup_key"] = dedup_key
     verdict["sent"] = bool(send(recipient, text))
@@ -195,8 +222,9 @@ def main(argv=None) -> int:
         _write_state(args.state_file, verdict.get("dedup_key", ""))
 
     print(json.dumps(verdict, ensure_ascii=False))
-    if verdict.get("health", {}).get("status") in ("stale", "unreachable") \
-            and verdict.get("sent") is False and not verdict.get("dedup"):
+    _faulty = (verdict.get("health", {}).get("status") in ("stale", "unreachable")
+               or verdict.get("sources", {}).get("status") == "missing")
+    if _faulty and verdict.get("sent") is False and not verdict.get("dedup"):
         return 2
     return 0
 

@@ -53,3 +53,22 @@ func processAlive(pid int) bool {
 	}
 	return p.Signal(syscall.Signal(0)) == nil
 }
+
+// boardProcessPIDs は、この機械で動いている beacon-view の番号を返す
+// (自分自身と、動いていないものは含まない)。
+//
+// **何のためか** (ms-170 e-7147): 控え (portfile.go) が効くのは、控えを置いた
+// 盤に対してだけ。控えの仕組みが入る前に立った盤は、ランダムな口で孤児として
+// 残り続け、控えからは見えない。再利用で**新しい孤児は生まれなくなる**が、既に
+// 居るものは誰も教えてくれないと気づけない。だから起動時に一度数えて伝える。
+//
+// 名前で拾う。配布物の名前は `beacon-view-darwin-arm64` / `beacon-view` と揺れる
+// ので、前方一致で見る (受入条件の確認手段 `pgrep -f beacon-view-darwin` と同じ
+// 見方に揃えてある)。
+func boardProcessPIDs(selfPID int) []int {
+	raw, err := exec.Command("ps", "-A", "-o", "pid=,comm=").Output()
+	if err != nil {
+		return nil
+	}
+	return parseBoardPIDs(string(raw), selfPID)
+}

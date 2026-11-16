@@ -221,8 +221,15 @@ def test_reply_cross_user_passes_without_claim(wired):
     assert resp.status_code == 200, resp.text
 
 
-def test_shared_trek_cross_user_passes_without_claim(wired):
-    """Cross-user but both in the same active Trek → pre-approved scope."""
+def test_shared_trek_cross_user_is_now_rejected_without_claim(wired):
+    """同じ Trek の参加者同士でも、確認の証跡が無い新規 DM は拒否される。
+
+    **消した裏返しを実機 (HTTP) で固定する** (ms-185 e-7068)。以前はここで
+    active な共有 Trek を 1 件置くだけで 200 が返っていた — サーバが「双方
+    Trek 参加済みなので事前承認」と判断していたため。その規則を判定ごと削除
+    したので、同じ状況で 403 になるのが正しい。削除の向きが fail-closed だと
+    いう証拠は、単体試験ではなくこの経路で取る (サーバが本当に拒否するか)。
+    """
     _treks.append({
         "trek_id": "tk-shared",
         "status": "active",
@@ -233,7 +240,8 @@ def test_shared_trek_cross_user_passes_without_claim(wired):
         ],
     })
     resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob")
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "sender_consent_required"
 
 
 def test_non_dm_broadcast_cross_user_passes(wired):
@@ -244,10 +252,31 @@ def test_non_dm_broadcast_cross_user_passes(wired):
 
 
 def test_operation_envelope_cross_user_passes(wired):
-    """T1-system (Trek scheduler) / T2 (Operation) envelopes are pre-approved."""
-    env = {"tier": "T1-system", "issuer": "beacon-system", "actions_authorized": []}
+    """T2 (Operation) envelopes are pre-approved.
+
+    ms-185 e-7078 / e-7323: この carve-out は以前 T1-system (= Trek スケジューラ
+    のサーバ署名) と T2 の 2 つを受けていた。T1-system は発行できる者が Trek と
+    一緒に 0 になったので tier ごと落とし、ここも T2 だけにした (満たし手の無い
+    値を列挙に残すと、その経路が生きていると誤読させる)。
+    """
+    env = {"tier": "T2", "issuer": "alice@example.com", "actions_authorized": []}
     resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob", envelope=env)
     assert resp.status_code == 200, resp.text
+
+
+def test_the_retired_server_signature_is_no_longer_a_carve_out(wired):
+    """消えた tier を名乗る封筒が carve-out として通らない (e-7078)。
+
+    「T1-system を列挙から外した」ことを、宣言ではなく**振る舞い**で測る。
+    carve-out に残っていればここが 200 で緑になるので、列挙を戻すと赤くなる。
+    """
+    env = {"tier": "T1-system", "issuer": "beacon-system",
+           "actions_authorized": []}
+    resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob",
+                 envelope=env)
+    assert resp.status_code != 200, (
+        "発行者が 0 になった tier が、いまも事前承認済みとして cross-user を "
+        "通している — carve-out の列挙に残っている疑い")
 
 
 # ---------------------------------------------------------------------------

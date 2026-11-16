@@ -48,6 +48,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -206,6 +207,39 @@ def parse_wedges(text: str) -> list[tuple[str, str]]:
     return [(t, v.strip()) for t, v in WEDGE_RE.findall(text)]
 
 
+HEADING_RE = re.compile(r"^(#{2,3})\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _norm_heading(title: str) -> str:
+    """見出しの綴り揺れを潰した比較キー (全角/半角と空白の差を無視)。"""
+    folded = unicodedata.normalize("NFKC", title)
+    return "".join(folded.split()).lower()
+
+
+def split_sections(map_text: str) -> list:
+    """**同じ節が綴り違いで二重に生えていないか** を見る (PR#823 独立 AX レビュー)。
+
+    地図は成果ログの ``--area`` / ``--category`` (自由入力) から節見出しを起こすので、
+    空白 1 つ・全角半角の違いで «同じ節» が 2 つ生える。楔の集合は変わらないため、
+    書き漏れ / 幽霊の照合はそれを 0 件のまま通してしまい、**Skill が警告している破れを
+    唯一の確認手段が検出できない** 状態だった (judge が実際に 2 件記帳して再現)。
+
+    返すのは ``[{"normalized": キー, "spellings": [実際の見出し, ...]}]``。
+    **綴りが完全に同じ重複は返さない** — 大節見出しは節が切り替わるたびに再掲される
+    描画なので、同一綴りの再掲は正常。問われているのは「綴りが違う双子」。
+    """
+    seen: dict = {}
+    for level, title in HEADING_RE.findall(map_text):
+        key = _norm_heading(title)
+        if not key:
+            continue
+        seen.setdefault(key, [])
+        if title not in seen[key]:
+            seen[key].append(title)
+    return [{"normalized": k, "spellings": v}
+            for k, v in seen.items() if len(v) > 1]
+
+
 def reconcile(map_text: str) -> dict:
     wedges = parse_wedges(map_text)
     real_cli = enumerate_cli()
@@ -280,6 +314,7 @@ def reconcile(map_text: str) -> dict:
     phantom_total = (len(cli_phantom_family) + len(cli_phantom_exact)
                      + len(api_phantom_family) + len(api_phantom_exact)
                      + len(skill_phantom) + len(file_phantom))
+    splits = split_sections(map_text)
 
     return {
         "counts": {
@@ -288,7 +323,9 @@ def reconcile(map_text: str) -> dict:
                        "api_exact": len(api_exact), "api_family": len(api_family),
                        "skill": len(skill_wedges), "file": len(file_wedges)},
             "missing": missing_total, "phantom": phantom_total,
+            "split_sections": len(splits),
         },
+        "split_sections": splits,
         "missing": {"cli": cli_missing, "api": api_missing, "skill": skill_missing},
         "phantom": {
             "cli_family": cli_phantom_family, "cli_exact": cli_phantom_exact,
@@ -296,6 +333,14 @@ def reconcile(map_text: str) -> dict:
             "skill": skill_phantom, "file": file_phantom,
         },
     }
+
+
+def _clean(res: dict) -> bool:
+    """照合が «何も残っていない» か。exit 0 を 1 箇所で決める (--json と人間向けで
+    条件が割れると、片方だけ緑になる経路ができる)。"""
+    c = res["counts"]
+    return (c["missing"] == 0 and c["phantom"] == 0
+            and c.get("split_sections", 0) == 0)
 
 
 def main() -> int:
@@ -362,11 +407,12 @@ def main() -> int:
 
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
-        return 0 if res["counts"]["missing"] == 0 and res["counts"]["phantom"] == 0 else 1
+        return 0 if _clean(res) else 1
 
     c = res["counts"]
     print(f"real: cli={c['real']['cli']} api={c['real']['api']} skill={c['real']['skill']}")
-    print(f"書き漏れ (missing): {c['missing']}  /  幽霊 (phantom): {c['phantom']}")
+    print(f"書き漏れ (missing): {c['missing']}  /  幽霊 (phantom): {c['phantom']}"
+          f"  /  節の二重化 (split): {c.get('split_sections', 0)}")
     if res["missing"]["cli"]:
         print("\n[書き漏れ CLI] 実在するが地図に無い noun/leaf:")
         for k in res["missing"]["cli"]:
@@ -387,7 +433,12 @@ def main() -> int:
             print(f"\n[幽霊 {label}] 地図にあるが実在しない:")
             for it in items:
                 print(f"  - {it}")
-    return 0 if c["missing"] == 0 and c["phantom"] == 0 else 1
+    if res.get("split_sections"):
+        print("\n[節の二重化] 同じ節が綴り違いで二重に生えている "
+              "(成果ログの --area / --category の綴りを既存見出しに揃える):")
+        for sp in res["split_sections"]:
+            print(f"  - {' / '.join(repr(x) for x in sp['spellings'])}")
+    return 0 if _clean(res) else 1
 
 
 if __name__ == "__main__":

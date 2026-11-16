@@ -236,3 +236,57 @@ def test_cli_pr_open_type_rejects_whole_target():
     assert p.returncode == 1
     assert "philosophy" in p.stderr
     assert p.stdout.strip() == ""
+
+
+# --- 作業記録を judge に運ばないこと (ms-119 e-7352 の 6 番目の経路) ----------
+#
+# 変更スコープの収集 (_collect_change_diff) は .beacon/ を落とすが、target 全体の
+# 収集はこの口を通らない (1 commit ずつ `git show`、rc≠0 を許容するのが仕様)。
+# 通らないなら同じ落とし方をここでも行う必要がある。でないと「target 全体の
+# 思想レビュー」だけが、実装者の意図説明 (project.json の behavior / summary /
+# motivation) を受け取る judge になる。
+
+def _beacon_section(path, body="@@ -1 +1 @@\n-old\n+new\n"):
+    return (f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n+++ b/{path}\n{body}")
+
+
+def test_bookkeeping_is_dropped_from_each_commit_and_disclosed(monkeypatch):
+    data = _fake_project()
+    code = _beacon_section("engine/run.py", "@@ -1 +1 @@\n-x\n+y\n")
+    ledger = _beacon_section(".beacon/project.json",
+                             '@@ -1 +1 @@\n-{"summary": "前回"}\n+{"summary": "今回"}\n')
+    diffs = {
+        "aaaaaaa1111": code + ledger,   # 混在 → コードだけ残る
+        "bbbbbbb2222": ledger,          # 作業記録だけ → 空になる
+    }
+    _install_fakes(monkeypatch, data, diffs, errors={"ccccccc3333"})
+
+    artifact, gaps = commands._collect_whole_target_artifact("ms-T")
+    by_hash = {c["hash"]: c for c in artifact["commits"]}
+
+    mixed = by_hash["aaaaaaa1111"]["diff"]
+    assert "engine/run.py" in mixed
+    assert ".beacon/project.json" not in mixed, "作業記録が judge に渡っている"
+    assert "前回" not in mixed and "今回" not in mixed
+
+    only = by_hash["bbbbbbb2222"]
+    assert only["diff"].strip() == ""
+    # 「変更が無かった」と「作業記録しか無かった」を区別する。混ぜると judge は
+    # 「この commit は何も変えていない」と読む。
+    assert "bookkeeping-only" in only["empty_reason"]
+
+    # 黙って削らない — 落としたことが gaps に出る
+    assert any(".beacon" in g for g in gaps), gaps
+
+
+def test_no_disclosure_when_the_target_has_no_bookkeeping(monkeypatch):
+    """落とす物が無いときに gap を作らない (常に出る警告は読まれなくなる)。"""
+    data = _fake_project()
+    code = _beacon_section("engine/run.py", "@@ -1 +1 @@\n-x\n+y\n")
+    _install_fakes(monkeypatch, data, {"aaaaaaa1111": code,
+                                       "bbbbbbb2222": code},
+                   errors={"ccccccc3333"})
+
+    _artifact, gaps = commands._collect_whole_target_artifact("ms-T")
+    assert not any(".beacon" in g for g in gaps), gaps

@@ -18,10 +18,12 @@ project auth-guard family (``_load`` / ``_require_project_role`` /
 ``_require_write`` / ``_require_owner`` / ``_load_meta_only``) is NOT moved — it
 is shared across all three slices and reads ``_auth_enabled``, so it stays owned
 by app.py and is INJECTED into every make_router. This keeps the slices
-independent (no circular imports), the same resolution used for the trek guards.
+independent (no circular imports), the same resolution the trek guards used
+before ms-185 e-7070 removed them.
 
 Module-level helpers below are self-contained (depend only on db / core /
-operations / trek_mod / envelope_mod / master_adapter / work_model) — no auth
+operations / envelope_mod / master_adapter / work_model; trek_mod was one of
+them until ms-185 e-7070) — no auth
 flag, no injected app.py callables — so they live at module scope. All route
 handlers are nested inside make_router so they can close over the injected deps.
 
@@ -72,7 +74,7 @@ _WORK_ITEM_RESERVED_KWARGS = frozenset(
 import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
 import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
-import trek as trek_mod
+
 import envelope as envelope_mod
 import work_model
 import deliverable_capture  # ms-161 e-5823: capture produced value on milestone 完遂
@@ -294,7 +296,8 @@ class PurgeRequest(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Module-level project helpers (self-contained: db / core / operations /
-# trek_mod / envelope_mod / master_adapter). Verbatim from app.py.
+# envelope_mod / master_adapter; trek_mod was in this list until ms-185 e-7070
+# removed it). Verbatim from app.py.
 # ---------------------------------------------------------------------------
 
 def _master_linking_enabled() -> bool:
@@ -341,74 +344,6 @@ def _link_body_accounts_to_master(body: dict) -> None:
     except Exception as exc:  # linking must never break the project write
         logging.getLogger(__name__).warning("master linking failed: %s", exc)
 
-def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
-    """ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= mirror sync).
-
-    task pool 側で task が ``done`` に成った瞬間に、 active な Trek の
-    ``task_states[<entry_id>]`` が ``working`` / ``todo`` で stamp 済 なら
-    自動で ``done`` に mirror する。 「task pool で done だが Trek stamp は
-    working で残ってる」 stuck 状態 (= 2026-06-19 dogfood の e-2045 14h
-    放置事例) を構造的に排除する。
-
-    ms-97 P5 (= review Trek-H3): ``leader_review`` は除外する。 これは
-    executor が忘れた stuck stamp ではなく leader の forced review を待つ
-    意図的な状態なので、 pool done で ``done`` に上書きすると leader review
-    を bypass してしまう (= endpoint 側の P5 gate と同じ穴)。
-
-    state transition validation は bypass する (= 直接書き換え)。 これは
-    server-forced reconciliation であり、 「executor / leader / user が
-    意図的に state を進める」 normal transition とは性質が違う。
-
-    Returns trek_ids that were touched.
-    """
-    touched: list[str] = []
-    try:
-        all_treks = db.list_treks(actor_id=None)
-    except Exception:
-        return touched
-    for t in all_treks:
-        if t.get("status") != "active":
-            continue
-        states = t.get("task_states") or {}
-        existing = states.get(entry_id)
-        if not existing:
-            continue
-        try:
-            current_state = trek_mod.get_task_state(t, entry_id)
-        except Exception:
-            current_state = (existing or {}).get("state") or ""
-        if current_state in trek_mod.TERMINAL_TASK_STATES:
-            continue
-        # ms-97 P5 (= review finding Trek-H3): never auto-mirror a task that
-        # is awaiting the leader's forced review. ``leader_review`` is a
-        # deliberate "human judgment pending" state, not a stuck stamp the
-        # executor forgot to advance — overwriting it to ``done`` on pool sync
-        # bypasses the leader review the same way an executor self-approve
-        # would. The mirror only exists to unstick ``working`` / ``todo``
-        # stamps left behind when the pool moved on; leave the review gate to
-        # the leader (via /beacon-trek-review + the endpoint's P5 gate above).
-        if current_state == "leader_review":
-            continue
-        # Direct mirror write (= bypass transition validation).
-        now_iso = trek_mod.utcnow_iso()
-        states[entry_id] = {
-            **existing,
-            "state": "done",
-            "updated_at": now_iso,
-            "last_activity_at": now_iso,
-            "updated_by_session_id": "task-pool-mirror",
-            "note": (
-                "task pool で done 化、 mirror 同期 (= ms-88 / e-2167)"
-            ),
-        }
-        t["task_states"] = states
-        t["updated_at"] = now_iso
-        try:
-            db.save_trek(t.get("trek_id", ""), t)
-            touched.append(t.get("trek_id", ""))
-        except Exception:
-            continue
-    return touched
 
 def _require_decided_by(value: str) -> str:
     """Validate a caller-supplied ``decided_by`` against the decision-arm enum.
@@ -689,30 +624,19 @@ class CheckTaskAddRequest(BaseModel):
     The endpoint runs the regular 9-step envelope verify pipeline first.
     If verify passes, it then evaluates the action × tier matrix for
     ``task.add`` against the target MS. T1 always permits. T2 permits
-    when the Operation scope enumerates the MS. T1-system permits when
-    the Trek scope (= server-side trek doc) includes the MS. Anything
-    else degrades to propose-to-ai.
+    when the Operation scope enumerates the MS. Anything else degrades to
+    propose-to-ai. (ms-185 e-7078: the T1-system branch, which walked a Trek
+    scope to find the MS, is gone along with the tier itself.)
     """
     envelope: dict
     target_ms: str
     payload: dict = {}
 
 
-class T1SystemEnvelopeRequest(BaseModel):
-    """Body for POST /api/projects/{project_id}/bus/envelope/t1-system/issue.
-
-    ms-83 / e-1995. Used by the server-side scheduler (= the periodic loop
-    that fires "next, please" progress-check DMs into a Trek's claim
-    session) to mint a T1-equivalent envelope for an active Trek scope.
-    The caller must present the shared scheduler key in the
-    ``X-Beacon-Scheduler-Key`` header so a user account cannot pose as
-    the server.
-    """
-    trek_id: str
-    actions_authorized: list[str] = []
-    data_class: str = "free"
-    ttl_seconds: int = 3600
-    conversation_id: Optional[str] = None
+# ms-185 e-7078 / e-7323: ここに T1SystemEnvelopeRequest (= T1-system 発行口の
+# リクエスト本体) が在った。発行口ごと落としたので、本体の型も残していない
+# (呼ばれない口のために型だけ残すと、口が在ると誤読させる)。
+# 判断記録 dec-4e7a66391176699a。
 
 
 class DMRespondBody(BaseModel):
@@ -1667,12 +1591,9 @@ def make_router(
         result = _apply_op_and_broadcast(
             project_id, op, op_name="entry.done", actor=user.get("sub", ""),
         )
-        # ms-88 / e-2167 — mirror task pool done into Trek task_states.
-        # Best-effort: failure does not block the task done response.
-        try:
-            _mirror_task_done_to_treks(entry_id)
-        except Exception:
-            pass
+        # ms-185 e-7070: the mirror that stamped Trek ``task_states`` when a
+        # pool task went done is gone with the Trek body. It was the last
+        # ``save_trek`` writer reachable from a live (non-Trek) endpoint.
         # ms-95 / e-2726 — phantom-done evidence gate. Flag only, no reject.
         # Failure is silently swallowed inside the helper; we surface the
         # assessment in the response so the CLI can echo the warning to the
@@ -3731,97 +3652,27 @@ def make_bus_gate_router(
                 "permit": "propose",
                 "reason": "t2_scope_mismatch_propose_to_ai",
             }
-        if tier == envelope_mod.TIER_T1_SYSTEM:
-            # T1-system requires a Trek scope walk because the envelope only
-            # carries trek:<id>, not the MS list directly.
-            scope = body.envelope.get("scope", "") or ""
-            if not scope.startswith("trek:"):
-                return {
-                    "permit": "reject",
-                    "reason": "t1_system_scope_malformed",
-                }
-            trek_id = scope[len("trek:"):]
-            trek_doc = db.get_trek(trek_id)
-            if trek_doc is None:
-                return {
-                    "permit": "reject",
-                    "reason": "t1_system_trek_not_found",
-                }
-            if trek_doc.get("status") != "active":
-                return {
-                    "permit": "reject",
-                    "reason": "t1_system_trek_not_active",
-                }
-            if envelope_mod.trek_scope_includes_ms(trek_doc, body.target_ms):
-                return {"permit": "auto", "reason": "t1_system_trek_scope_match"}
-            return {
-                "permit": "propose",
-                "reason": "t1_system_trek_scope_mismatch_propose_to_ai",
-            }
+        # ms-185 e-7078 / e-7323: ここに T1-system の分岐が在った。Trek の scope を
+        # 歩いて対象 MS が含まれるかを見る形で、発行できるのは Trek 経路だけだった。
+        # Trek を畳んだ時点で T1-system を発行できる者が 0 になったので、分岐ごと
+        # 落とした (満たし手の無い tier を列挙に残すと、その経路が生きていると
+        # 誤読させる)。落ちた先は下の propose = fail-closed 側。
+        # 判断記録 dec-4e7a66391176699a。
+        #
         # T3 / T5 / unknown → never auto.
         return {"permit": "propose", "reason": "tier_not_eligible_for_auto"}
 
 
-    @router.post("/api/projects/{project_id}/bus/envelope/t1-system/issue")
-    def issue_t1_system_bus_envelope(
-        project_id: str,
-        body: T1SystemEnvelopeRequest,
-        request: Request,
-    ):
-        """Issue a T1-system bus envelope (ms-83 / e-1995).
-
-        Authorization: the request MUST present a matching
-        ``X-Beacon-Scheduler-Key`` header. This endpoint is the only path
-        that mints ``tier=T1-system`` envelopes; receiver-side verify
-        cross-checks that ``issuer=beacon-system`` and ``scope=trek:<id>``.
-
-        Validation:
-          * The trek must exist and be ``active``. ``planning`` / ``archived``
-            Treks cannot have server-mint authority.
-          * ``actions_authorized`` is validated by the envelope module
-            (strict enumeration, no wildcards).
-        """
-        # Internal-only authorization. The shared secret is rotated out of
-        # band in production; the dev fallback lets the test suite run.
-        provided = request.headers.get("X-Beacon-Scheduler-Key", "")
-        expected = envelope_mod.scheduler_internal_key()
-        if not provided or provided != expected:
-            raise HTTPException(
-                status_code=403,
-                detail="T1-system mint requires X-Beacon-Scheduler-Key",
-            )
-        # Trek validity gate. The mint is bounded to active Treks so a
-        # planning Trek can't accidentally receive auto-execute DMs.
-        trek_doc = db.get_trek(body.trek_id)
-        if trek_doc is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Trek {body.trek_id!r} not found",
-            )
-        if trek_doc.get("status") != "active":
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Trek {body.trek_id!r} is not active "
-                    f"(status={trek_doc.get('status')!r})"
-                ),
-            )
-        try:
-            env = envelope_mod.issue_t1_system_envelope(
-                project_id=project_id,
-                trek_id=body.trek_id,
-                actions_authorized=body.actions_authorized,
-                data_class=body.data_class,
-                ttl_seconds=body.ttl_seconds,
-                conversation_id=body.conversation_id,
-            )
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"T1-system envelope issuance rejected: {e}",
-            )
-        return env
-
+    # ms-185 e-7078 / e-7323: ここに T1-system 発行口
+    # (POST /api/projects/{project_id}/bus/envelope/t1-system/issue) が在った。
+    # 発行には status=="active" の Trek が必要で、Trek の作成経路を e-7070 で
+    # 落とした時点で **構造的に 404/400 しか返さない口** になっていた。発行口を
+    # 残したまま消費側 (lib/bus_delivery.has_server_minted_envelope) と規則 0
+    # (server/dm_gate) を落とすと、SPEC 受入条件7 が禁じた「片方だけ残して
+    # 動かない判定」になるので、4 面を同じ変更で落としている。
+    # 鍵 (X-Beacon-Scheduler-Key / scheduler_internal_key) は残す —
+    # POST /api/system/tick が同じ鍵で守られており、本番のティック駆動
+    # (scripts/vps-tick.sh) がそれを使っている。判断記録 dec-4e7a66391176699a。
 
     @router.post("/api/projects/{project_id}/bus/envelope/issue")
     def issue_bus_envelope(
