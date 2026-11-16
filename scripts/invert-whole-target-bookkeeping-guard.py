@@ -21,6 +21,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGET = ROOT / "lib" / "commands.py"
+SPINE = ROOT / "lib" / "review_spine.py"
 TESTS = [
     "tests/test_review_bundle_bookkeeping_e7352.py",
     "tests/test_review_whole_target_artifact.py",
@@ -39,6 +40,10 @@ MUTATIONS = [
     ("作業記録だけの commit の理由を『変更なし』に潰す",
      '                "bookkeeping-only (この commit は Beacon の作業記録しか変えていない)"\n',
      '                "no-textual-diff (空 / メタのみの commit の可能性)"\n',
+     True),
+    ("組み立ての境界の落とし処理を外す (最後の関門)",
+     "    artifact, _late_dropped = strip_artifact_bookkeeping(artifact)\n",
+     "    _late_dropped = []\n",
      True),
     ("中身を変えずに局所変数名だけ変える (契約は保たれる)",
      '    diff_text, dropped = _rs.strip_bookkeeping_from_diff(proc.stdout or "")\n'
@@ -88,6 +93,26 @@ def _probe_branching_argv(ref, want_diff):
         argv = ["git", "diff", "-U25", ref]
     return subprocess.run(argv, capture_output=True, text=True).stdout
 ''', True),
+    ("新しい収集経路: subprocess.check_output で採る", '''
+
+def _probe_check_output(ref):
+    return subprocess.check_output(["git", "diff", "-U25", ref], text=True)
+''', True),
+    ("新しい収集経路: 空リストから append で argv を組む", '''
+
+def _probe_append_argv(ref):
+    argv = []
+    argv.append("git")
+    argv.append("diff")
+    argv.append(ref)
+    return subprocess.run(argv, capture_output=True, text=True).stdout
+''', True),
+    ("新しい収集経路: git diff-tree -p で採る", '''
+
+def _probe_diff_tree(ref):
+    return subprocess.run(["git", "diff-tree", "-p", ref],
+                          capture_output=True, text=True).stdout
+''', True),
     ("落とす処理を 2 箇所目に増やす", '''
 
 def _probe_second_strip(text):
@@ -106,6 +131,19 @@ def _probe_non_diff_var(sha):
 def _probe_show_names_only(sha):
     return subprocess.run(["git", "show", "--name-only", "--format=", sha],
                           capture_output=True, text=True).stdout
+''', False),
+    ("git diff だが統計のみ (本文を出さない)", '''
+
+def _probe_diff_stat(ref):
+    return subprocess.run(["git", "diff", "--stat", ref],
+                          capture_output=True, text=True).stdout
+''', False),
+    ("非差分コマンドに後から引数を足す", '''
+
+def _probe_append_safe(pr):
+    argv = ["gh", "pr", "view", str(pr), "--json", "title"]
+    argv += ["--repo", "o/r"]
+    return subprocess.run(argv, capture_output=True, text=True).stdout
 ''', False),
     ("gh だが差分ではない (変数経由)", '''
 
@@ -127,6 +165,7 @@ def run_tests():
 
 def main():
     original = TARGET.read_text(encoding="utf-8")
+    spine_original = SPINE.read_text(encoding="utf-8")
     rc, summary = run_tests()
     if rc != 0:
         print(f"BASELINE が赤い: {summary}\n  変異を測る前に直すこと。")
@@ -137,12 +176,18 @@ def main():
     try:
         print("--- 変異 (既存実装を壊す) ---")
         for name, before, after, should_fail in MUTATIONS:
-            if original.count(before) != 1:
-                bad.append(f"{name}: 置換前の文字列が {original.count(before)} 回 — "
+            # 毎周の頭で両方を戻す。片方だけ戻すと、前の周の変異が残ったまま
+            # 次を測ることになり、「緑であるべき」が全部赤になる (実際に踏んだ)。
+            TARGET.write_text(original, encoding="utf-8")
+            SPINE.write_text(spine_original, encoding="utf-8")
+            path, base = ((SPINE, spine_original) if before in spine_original
+                          else (TARGET, original))
+            if base.count(before) != 1:
+                bad.append(f"{name}: 置換前の文字列が {base.count(before)} 回 — "
                            f"harness が実装に追随していない (測れていない)")
                 print(f"  [NG] {name}: 置換対象が見つからない")
                 continue
-            TARGET.write_text(original.replace(before, after), encoding="utf-8")
+            path.write_text(base.replace(before, after), encoding="utf-8")
             rc, summary = run_tests()
             got_red = rc != 0
             ok = got_red == should_fail
@@ -155,6 +200,7 @@ def main():
 
         print("\n--- probe (新しい収集経路を足す) ---")
         for name, code, should_fail in PROBES:
+            SPINE.write_text(spine_original, encoding="utf-8")
             TARGET.write_text(original + code, encoding="utf-8")
             rc, summary = run_tests()
             got_red = rc != 0
@@ -167,6 +213,7 @@ def main():
                            f"実測={'赤' if got_red else '緑'}")
     finally:
         TARGET.write_text(original, encoding="utf-8")
+        SPINE.write_text(spine_original, encoding="utf-8")
 
     rc, summary = run_tests()
     if rc != 0:

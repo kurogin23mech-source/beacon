@@ -204,12 +204,19 @@ _PROVEN_NON_DIFF_GIT = {
 # 差分を要求する旗。log / show に付くと差分になる。
 _PATCH_FLAGS = {"-p", "-u", "--patch", "-U", "--unified"}
 # show に付くと差分でなくなる旗。
-_NAMES_ONLY_FLAGS = {"--name-only", "--name-status"}
+# 本文 (hunk) を出さない旗。これが付けば .beacon の中身は judge に渡りえない。
+_NAMES_ONLY_FLAGS = {"--name-only", "--name-status", "--stat", "--numstat",
+                     "--shortstat", "--dirstat", "--summary"}
 # gh の下位コマンドで差分を産むもの。
 _DIFF_GH = {"diff"}
 
 # 差分を採れてしまう汎用ランナー (argv を外から受ける) の名前。呼び出し側を検査する。
 _GENERIC_RUNNERS = {"_git_ok"}
+
+# 外部コマンドを走らせる API。run だけ見ると check_output / Popen で素通りする
+# (独立 judge が実測)。
+_SUBPROCESS_APIS = {"run", "check_output", "check_call", "call", "Popen",
+                    "popen", "getoutput", "getstatusoutput"}
 
 
 def _argv_tokens(node):
@@ -251,10 +258,12 @@ def _git_subcommand(tokens):
 
 
 # 差分 (patch) を出しうる下位コマンド。これ以外は引数が何であれ patch を吐かない。
-_DIFF_CAPABLE_GIT = {"diff", "show", "log", "format-patch", "range-diff", "whatchanged"}
+_DIFF_CAPABLE_GIT = {"diff", "show", "log", "format-patch", "range-diff",
+                     "whatchanged", "diff-tree", "diff-index", "diff-files",
+                     "cherry", "apply"}
 
 
-def _is_provably_non_diff(tokens, opaque):
+def _is_provably_non_diff(tokens, opaque, mutated=False):
     """差分を産まないと **証明できる** か。証明できないものは False (= 拒否)。
 
     引数が変数なだけで拒否すると偽の赤になる (``git cat-file -e <sha>`` や
@@ -278,7 +287,13 @@ def _is_provably_non_diff(tokens, opaque):
     if tokens[0] == "gh":
         return sub not in _DIFF_GH and "diff" not in tokens
     if sub not in _DIFF_CAPABLE_GIT:
-        return True           # 引数が何であれ patch にならない
+        # 下位コマンドが patch を産まないなら、後から足された引数が何であれ
+        # patch にはならない (argv += ["--repo", x] 等は安全)。
+        return True
+    if mutated:
+        # 差分を産みうる下位コマンドに、後から足される引数がある。その中身が
+        # -p かもしれないので通さない。
+        return False
     # ここから下は patch を出しうる。差分でないことを **定数で** 示せたときだけ通す。
     if any(f in tokens for f in _NAMES_ONLY_FLAGS):
         return True
@@ -320,6 +335,24 @@ def _list_assignments(fn):
     return out
 
 
+def _mutated_names(fn):
+    """``argv.append(...)`` / ``argv += [...]`` のように後から中身を変えられた名前。
+
+    空リストを代入してから足していく形は、代入だけ見ると ``[]`` に見えるため
+    「中身を確かめた」と誤認する (独立 judge が実測した穴)。変えられた名前は
+    解決済みとして扱わない。
+    """
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "extend", "insert", "__iadd__")
+                and isinstance(node.func.value, ast.Name)):
+            names.add(node.func.value.id)
+    return names
+
+
 def _invocation_sites(tree):
     """``[(関数名, tokens, opaque)]`` — git/gh を走らせうる箇所。
 
@@ -339,7 +372,8 @@ def _invocation_sites(tree):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not node.args:
             continue
-        is_run = isinstance(node.func, ast.Attribute) and node.func.attr == "run"
+        is_run = (isinstance(node.func, ast.Attribute) and
+                  node.func.attr in _SUBPROCESS_APIS)
         is_runner = isinstance(node.func, ast.Name) and node.func.id in _GENERIC_RUNNERS
         if not (is_run or is_runner):
             continue
@@ -348,13 +382,17 @@ def _invocation_sites(tree):
             continue          # 汎用ランナー本体は素通し (呼び出し側で見る)
         arg = node.args[0]
         if isinstance(arg, ast.Name) and fname in fn_nodes:
-            resolved = _list_assignments(fn_nodes[fname]).get(arg.id)
-            if resolved:
+            assigns = _list_assignments(fn_nodes[fname])
+            resolved = assigns.get(arg.id)
+            mutated = arg.id in _mutated_names(fn_nodes[fname])
+            # 空リストから append で組む形は「中身を確かめた」ことにならない
+            # (独立 judge が実測した穴)。土台が空なら解決扱いにしない。
+            if resolved and all(toks for toks in resolved):
                 for toks in resolved:
-                    sites.append((fname, toks, False))
+                    sites.append((fname, toks, False, mutated))
                 continue
         toks, opaque = _argv_tokens(arg)
-        sites.append((fname, toks, opaque))
+        sites.append((fname, toks, opaque, False))
     return sites
 
 
@@ -388,8 +426,8 @@ def test_no_diff_can_be_obtained_outside_the_chokepoint():
     assert sites, "git/gh の起動が 1 つも見つからない = 述語が壊れている"
     offenders = [
         (fn, " ".join(str(t) for t in toks[:5]) or "(argv を確かめられない)")
-        for fn, toks, opaque in sites
-        if fn != _CHOKEPOINT and not _is_provably_non_diff(toks, opaque)
+        for fn, toks, opaque, mut in sites
+        if fn != _CHOKEPOINT and not _is_provably_non_diff(toks, opaque, mut)
     ]
     assert not offenders, (
         f"唯一の口 ({_CHOKEPOINT}) の外で差分を採りうる箇所: {offenders}。"
@@ -433,3 +471,58 @@ def test_mixed_diff_passes_through_with_disclosure(monkeypatch):
                                         empty_is_error=True)
     assert "engine/run.py" in out and ".beacon/" not in out
     assert len(gaps) == 1 and ".beacon/project.json" in gaps[0]
+
+
+# --- 5. 組み立ての境界で落ちる (経路に依存しない最後の関門) --------------------
+#
+# 独立 AX レビュー (2026-11-16) が、採る側を静的検査で守る形の限界を実測した:
+# subprocess.check_output 等の別 API / 空リストから append で組む argv /
+# git diff-tree -p —— いずれも検査が緑のまま、未加工の .beacon/project.json が
+# judge に渡った。静的検査は有限列挙なので、新しい書き方が出るたびに穴が開く。
+#
+# bundle は必ず assemble_review_context を通る。そこで落とせば **どう採ったかに
+# 依存しない**。以下はその性質を、収集経路を一切使わずに直接確かめる。
+
+def _bundle(artifact, gaps=None):
+    return rs.assemble_review_context(
+        "ax", origin_id="o", origin_content="原典", diff_text="",
+        mode="diff", target_ref="o/r#1", gaps=gaps,
+        known_judge_types={"ax"}, artifact=artifact)
+
+
+def test_unstripped_diff_artifact_is_cleaned_at_assembly():
+    """採る側を一切通さず組み立てても、作業記録は judge に渡らない。"""
+    b = _bundle({"kind": "diff", "ref": "o/r#1", "content": CODE + LEDGER})
+    content = b["artifact"]["content"]
+    assert "engine/run.py" in content
+    assert ".beacon/project.json" not in content
+    assert any(".beacon" in g for g in b["gaps"]), b["gaps"]
+
+
+def test_unstripped_whole_target_artifact_is_cleaned_at_assembly():
+    b = _bundle({"kind": "whole-target", "commits": [
+        {"hash": "a1", "diff": CODE + LEDGER},
+        {"hash": "b2", "diff": LEDGER},
+    ]})
+    by = {c["hash"]: c for c in b["artifact"]["commits"]}
+    assert ".beacon/project.json" not in by["a1"]["diff"]
+    assert "engine/run.py" in by["a1"]["diff"]
+    assert by["b2"]["diff"].strip() == ""
+    assert any(".beacon" in g for g in b["gaps"]), b["gaps"]
+
+
+def test_assembly_is_idempotent_and_silent_when_nothing_to_drop():
+    """採る側が既に落としていれば no-op。常に出る注記は読まれなくなる。"""
+    b = _bundle({"kind": "diff", "ref": "o/r#1", "content": CODE})
+    assert b["artifact"]["content"] == CODE
+    assert not any(".beacon" in g for g in b["gaps"]), b["gaps"]
+    # 二度通しても変わらない
+    again, dropped = rs.strip_artifact_bookkeeping(b["artifact"])
+    assert again["content"] == CODE and dropped == []
+
+
+def test_surface_snapshot_artifact_is_left_alone():
+    """差分でない artifact (全体棚卸し) は触らない。"""
+    art = {"kind": "surface-snapshot", "commands": [{"argv": "beacon --help"}]}
+    b = _bundle(art)
+    assert b["artifact"] == art

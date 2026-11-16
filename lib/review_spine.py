@@ -320,6 +320,44 @@ def _origin_slot(origin_id, origin_content, provenance):
     return slot
 
 
+def strip_artifact_bookkeeping(artifact, prefixes=BOOKKEEPING_PATH_PREFIXES):
+    """``(artifact, dropped)`` — judge に渡る直前の artifact から作業記録を落とす。
+
+    **なぜ組み立ての境界で落とすか** (ms-119 e-7352、独立 AX レビュー 2026-11-16):
+    以前は「差分を採る側が落とす」形にし、それを静的検査で守らせていた。judge が
+    実際に 3 つの経路 (``subprocess.check_output`` 等の別 API / ``argv`` を空リスト
+    から ``append`` で組む / ``git diff-tree -p``) を書いて、検査が緑のまま
+    **未加工の .beacon/project.json が judge に渡る**ことを実測した。静的検査は
+    有限列挙なので、新しい書き方が出るたびに穴が開く。
+
+    bundle は必ず :func:`assemble_review_context` を通る。**そこで落とせば、
+    差分をどう採ったかに依存しない**。採る側の落とし方は残すが (空かどうかの判定に
+    必要)、安全を担保するのはこの層。落とす処理は冪等なので二重に通っても害が無い。
+    """
+    if not isinstance(artifact, dict):
+        return artifact, []
+    dropped = []
+    kind = artifact.get("kind")
+    if kind == "diff":
+        content, d = strip_bookkeeping_from_diff(artifact.get("content") or "", prefixes)
+        if d:
+            artifact = {**artifact, "content": content}
+            dropped.extend(d)
+    elif kind == "whole-target":
+        commits, changed = [], False
+        for entry in artifact.get("commits") or []:
+            if isinstance(entry, dict) and entry.get("diff"):
+                text, d = strip_bookkeeping_from_diff(entry["diff"], prefixes)
+                if d:
+                    entry = {**entry, "diff": text}
+                    dropped.extend(d)
+                    changed = True
+            commits.append(entry)
+        if changed:
+            artifact = {**artifact, "commits": commits}
+    return artifact, dropped
+
+
 def assemble_review_context(review_type, *, origin_id, origin_content,
                             diff_text, mode, target_ref, gaps=None,
                             known_judge_types=None, external_references=None,
@@ -391,6 +429,13 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         # default artifact is the mechanically-collected diff (diff mode). A
         # full-surface caller passes a surface_snapshot_artifact() instead.
         artifact = {"kind": "diff", "ref": target_ref, "content": diff_text}
+    # ms-119 e-7352: judge に渡る **最後の関門**。どんな経路で採られた差分でも、
+    # ここを通らずに bundle にはならないので、ここで落ちれば漏れない。
+    # 採る側が既に落としていれば何も残らず no-op (冪等)。
+    artifact, _late_dropped = strip_artifact_bookkeeping(artifact)
+    if _late_dropped:
+        gaps = list(gaps or [])
+        gaps.append(bookkeeping_drop_gap(_late_dropped))
     return {
         "review_type": review_type,
         "mode": mode,
