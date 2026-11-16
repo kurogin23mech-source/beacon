@@ -1771,22 +1771,16 @@ def _collect_whole_target_artifact(target_id: str):
         # commit show its first-parent diff instead of the empty combined diff a bare
         # `git show` produces (which would silently drop merge-introduced changes);
         # it is a no-op for regular commits.
-        proc = subprocess.run(
+        # 差分を走らせるのは _run_diff_command 1 箇所だけ (そこで必ず落ちる)。
+        # ここは rc≠0 を許容する点だけが変更スコープの収集と違うので、その旗を渡す。
+        diff, dropped_here, err = _run_diff_command(
             ["git", "show", "--format=", "-U15", "-m", "--first-parent", h],
-            capture_output=True, text=True)
-        if proc.returncode != 0:
-            entry["error"] = (proc.stderr or "").strip()[:200]
+            tolerate_failure=True)
+        if err:
+            entry["error"] = err
             commits.append(entry)
             n_error += 1
             continue
-        diff = proc.stdout or ""
-        # ms-119 e-7352 の 6 番目の経路: ここは `git show` で 1 commit ずつ採るので
-        # _collect_change_diff (= 変更スコープの唯一の口) を通らない。通らないなら
-        # **同じ落とし方をここでも行う**。でないと target 全体のレビューだけが、
-        # 実装者の作業記録 (.beacon/ = 作業記録の behavior / セッションログの summary
-        # / タスクの motivation) を judge に運ぶ — judge に「読むな」と頼んで閉じる
-        # 形は、この機構が他のどこでも拒否している形。
-        diff, dropped_here = _rs.strip_bookkeeping_from_diff(diff)
         if dropped_here:
             dropped_all.extend(dropped_here)
         spent += len(diff)
@@ -1824,6 +1818,36 @@ def _collect_whole_target_artifact(target_id: str):
     return artifact, gaps
 
 
+def _run_diff_command(argv: list, *, tolerate_failure: bool = False):
+    """差分を産む git / gh を走らせる **唯一の口**。走らせたら必ず作業記録を落とす。
+
+    返り値は ``(diff_text, dropped, error)``。``error`` が非空なら ``diff_text`` は
+    ``None`` (``tolerate_failure=True`` のときだけ起きる)。
+
+    **なぜ 1 関数に閉じるか** (ms-119 e-7352、独立 AX レビュー 2026-11-16): 以前は
+    「差分を採る関数は全部 strip を呼ぶ」という規律を **静的検査でお願い** していた。
+    その検査は実際には 4 つの形をすり抜けた —— argv を変数に束縛してから渡す / 別の
+    下位コマンド (``git log -p``) で採る / 別モジュールに置く / **strip の名前を
+    docstring に書いただけ** (呼んでいなくても compliant 扱い)。judge が 4 形すべてを
+    実際に書いて緑のまま通ることを実測した。
+
+    緑は信頼されるので、**偽の安全は無ガードより悪い**。そこで「呼んでいるか測る」のを
+    やめ、**落とさずに差分を得る経路を無くす**。差分が欲しい呼び出し元はこの関数を通る
+    しかなく、通れば必ず落ちる。静的検査は「この関数の外に、差分を産しうる git / gh の
+    直接起動が無いこと」だけを見ればよくなる (= 守っているかを測るのでなく、破れない形)。
+    """
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        if tolerate_failure:
+            return None, [], err[:200]
+        print(f"Error: diff collection failed: {err}", file=sys.stderr)
+        sys.exit(1)
+    import review_spine as _rs
+    diff_text, dropped = _rs.strip_bookkeeping_from_diff(proc.stdout or "")
+    return diff_text, dropped, ""
+
+
 def _collect_change_diff(argv: list, target_ref: str, gaps: list,
                          *, empty_is_error: bool = False) -> str:
     """Run a change-scoped diff collector (gh pr diff / git diff) and return its text
@@ -1848,12 +1872,9 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list,
     dropped is disclosed in ``gaps``: a judge handed a silently-trimmed diff
     believes it saw the whole change.
     """
-    proc = subprocess.run(argv, capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    diff_text = proc.stdout
-    if not diff_text.strip():
+    diff_text, dropped, _err = _run_diff_command(argv)
+    # 落とす前が空だったのか、作業記録しか無かったのかは dropped で分かれる。
+    if not diff_text.strip() and not dropped:
         if empty_is_error:
             print(f"Error: {target_ref} の差分が空です。PR のレビューで差分が空に"
                   f"なるのは「変更が無い」ではなく「差分を取れていない」状態なので、"
@@ -1865,12 +1886,9 @@ def _collect_change_diff(argv: list, target_ref: str, gaps: list,
             sys.exit(1)
         gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
         return diff_text
-    # ms-119 e-7352: Beacon 自身の作業記録 (.beacon/) を artifact から外す。
-    # ここは 4 つの差分収集 (review context / batch / 目的達成 / --diff-ref) が
-    # 通る唯一の口なので、1 箇所で全経路に効く。黙って削らず、何を外したかを
-    # gaps に出す (judge が「差分の全部を見た」と誤認しないため)。
+    # 落とすのは _run_diff_command が済ませている。ここは「何を外したか」の開示だけ。
+    # 黙って削ると judge は「差分の全部を見た」と思ったまま判定する。
     import review_spine as _rs
-    diff_text, dropped = _rs.strip_bookkeeping_from_diff(diff_text)
     gap = _rs.bookkeeping_drop_gap(dropped)
     if gap:
         gaps.append(gap)

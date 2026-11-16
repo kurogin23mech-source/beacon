@@ -49,9 +49,13 @@ behavior、セッションログの summary、タスクの motivation —— **�
 from __future__ import annotations
 
 import ast
+import glob
+import os
 import inspect
 
 import pytest
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 import commands
 import review_spine as rs
@@ -135,77 +139,261 @@ def test_many_drops_are_summarised_not_truncated_silently():
 
 # --- 3. 収集の 1 箇所に居ること -----------------------------------------------
 
-def test_both_collectors_strip_and_disclose():
-    """差分を採る 2 つの関数が、どちらも落として・落としたことを言う。
+def test_both_collectors_go_through_the_chokepoint():
+    """差分を採る 2 つの関数が、どちらも唯一の口を通る。
 
     変更スコープの 4 経路は ``_collect_change_diff`` を共有し、target 全体は
-    ``_collect_whole_target_artifact`` が 1 commit ずつ ``git show`` で採る。
-    後者は前者を通せない (rc≠0 の扱いが逆で、未 fetch の commit を許容するのが
-    仕様) ので、**それぞれが落とす**のが正しい形。どちらかが落とさなくなったら
-    その経路の judge だけが実装者の作業記録を受け取る。
+    ``_collect_whole_target_artifact`` が 1 commit ずつ採る。後者は前者を通せない
+    (rc≠0 の扱いが逆で、未 fetch の commit を許容するのが仕様) が、**どちらも
+    ``_run_diff_command`` は通る** —— 落とす処理はそこに 1 つだけ在る。
     """
     for fn in (commands._collect_change_diff,
                commands._collect_whole_target_artifact):
         src = inspect.getsource(fn)
-        assert "strip_bookkeeping_from_diff" in src, fn.__name__
-    # 開示は口ごとに形が違う (片方は 1 本の差分、片方は commit ごとの集計) ので、
-    # 名前の存在だけを見る。中身は下の挙動テストと
-    # tests/test_review_whole_target_artifact.py が measure する。
+        assert _CHOKEPOINT in src, fn.__name__
+        assert "strip_bookkeeping_from_diff" not in src, (
+            f"{fn.__name__} が自前で落としている。落とすのは {_CHOKEPOINT} の 1 箇所だけ")
+    # 唯一の口は、落として・何を落としたかを返す
+    choke = inspect.getsource(commands._run_diff_command)
+    assert "strip_bookkeeping_from_diff" in choke
+    # 開示は呼び出し側が行う (口ごとに形が違うため)
     assert "bookkeeping_drop_gap" in inspect.getsource(commands._collect_change_diff)
     assert "bookkeeping_drop_gap" in inspect.getsource(
         commands._collect_whole_target_artifact)
 
 
-# 差分を吐く git/gh の下位コマンド。`show` が要る: target 全体の収集は
-# `git show --format= -U15 <hash>` で 1 commit ずつ採るので、`diff` だけを見る
-# 述語はこの経路を**構造的に見られない**。以前の版は `'diff'` の有無だけを見て
-# おり、6 番目の経路が落とさないまま緑だった (= 緑が信頼される分、無ガードより
-# 悪い偽の安全)。
-_DIFF_PRODUCING_SUBCOMMANDS = {"diff", "show"}
+# ---------------------------------------------------------------------------
+# 差分を得る経路を 1 つに閉じる (ms-119 e-7352 / 独立 AX レビュー 2026-11-16)
+# ---------------------------------------------------------------------------
+#
+# 以前ここは「差分を採る関数は strip を呼んでいるか」を静的に測っていた。独立 judge が
+# 実際に 4 つの形を書いて、**全部すり抜けて緑のまま通る**ことを実測した:
+#
+#   1. argv を変数に束縛してから渡す      → ast.List の要素を見る判定に掛からない
+#   2. `git log -p` で採る                → 下位コマンドの集合が {diff, show} 固定だった
+#   3. 別モジュールに置く                  → commands.py しか歩いていなかった
+#   4. strip の名前を docstring に書くだけ → `"名前" in ast.dump(fn)` の部分一致で通った
+#
+# 4 は「緩い部分一致は偽の通過を作る」という、この repo が何度も踏んでいる型そのもの。
+# **緑は信頼されるので、偽の安全は無ガードより悪い**。
+#
+# そこで「呼んでいるかを測る」のをやめ、**落とさずに差分を得る経路を無くした**
+# (lib/commands.py の `_run_diff_command` が唯一の口で、そこで必ず落ちる)。
+# 検査はそれに合わせて 2 本になる:
+#
+#   A. strip の呼び出しは repo 全体でちょうど 1 つで、それは唯一の口の中にある
+#   B. commands.py の中で git / gh を走らせる箇所は、唯一の口の中か、
+#      **差分を産まないと証明できる**もののどちらかである (既定は拒否)
+#
+# B の既定を拒否にしたのが 1〜3 への答え: 知らない下位コマンドも、argv が literal で
+# なくて中身を確かめられないものも、「通してよい」ではなく「口を通せ」に倒れる。
+#
+# **閉じていない範囲 (正直に書く)**: B は lib/commands.py だけを歩く。レビューの収集は
+# 現在ここにしか無いが、別モジュールに新しい収集経路を置かれた場合は A しか効かない
+# (A は「strip が増えたか」は見るが「落とさない収集が増えたか」は見ない)。e-7515 で追う (別ファイルの収集経路)。
+
+_CHOKEPOINT = "_run_diff_command"
+
+# git の下位コマンドのうち、差分を産まないと言い切れるもの。**ここに無いものは拒否**。
+_PROVEN_NON_DIFF_GIT = {
+    "rev-parse", "config", "tag", "branch", "fetch", "checkout", "merge-base",
+    "worktree", "describe", "ls-files", "cat-file", "status", "remote",
+    "symbolic-ref", "rev-list", "show-ref", "pull", "push", "merge", "init",
+    "clone", "add", "commit", "stash", "reflog",
+}
+# 差分を要求する旗。log / show に付くと差分になる。
+_PATCH_FLAGS = {"-p", "-u", "--patch", "-U", "--unified"}
+# show に付くと差分でなくなる旗。
+_NAMES_ONLY_FLAGS = {"--name-only", "--name-status"}
+# gh の下位コマンドで差分を産むもの。
+_DIFF_GH = {"diff"}
+
+# 差分を採れてしまう汎用ランナー (argv を外から受ける) の名前。呼び出し側を検査する。
+_GENERIC_RUNNERS = {"_git_ok"}
 
 
-def _diff_collecting_functions(tree):
-    """``[(関数名, 落とすか)]`` — argv を literal で組んで git/gh を直に走らせ、
-    その出力が差分になる関数だけを返す。
+def _argv_tokens(node):
+    """``(tokens, opaque)`` — argv の要素列と、「中身が全く見えないか」。
 
-    ``_collect_change_diff`` は argv を **引数で**受けるので literal が無く、ここに
-    は現れない (呼び出し側が argv を組んで渡す = それが口である形)。
+    リストで渡されていれば要素ごとに定数かを見る (定数でない要素は ``None``)。
+    **リストですらない** (変数そのものを渡している) 場合は ``opaque=True``。
+    opaque は中身を一切確かめられないので拒否側に倒す —— これを通すと
+    ``argv = ["git", "diff", ref]; subprocess.run(argv)`` が素通りする
+    (独立 judge が実際に書いてすり抜けさせた形)。
     """
-    out = []
-    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
-        for node in ast.walk(fn):
-            if not (isinstance(node, ast.Call) and
-                    isinstance(node.func, ast.Attribute) and
-                    node.func.attr == "run"):
-                continue
-            argv = node.args[0] if node.args else None
-            if argv is None:
-                continue
-            lits = [e.value for e in getattr(argv, "elts", [])
-                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-            if not lits or lits[0] not in ("git", "gh"):
-                continue
-            if not any(x in _DIFF_PRODUCING_SUBCOMMANDS for x in lits):
-                continue
-            strips = "strip_bookkeeping_from_diff" in ast.dump(fn)
-            out.append((fn.name, strips))
+    if not isinstance(node, ast.List):
+        return [], True
+    toks = []
+    for e in node.elts:
+        toks.append(e.value if isinstance(e, ast.Constant)
+                    and isinstance(e.value, str) else None)
+    return toks, False
+
+
+def _git_subcommand(tokens):
+    """グローバル旗 (-C <path> 等) を読み飛ばして下位コマンドを返す。"""
+    i = 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t is None:
+            return None
+        if t == "-C" or t == "-c":
+            i += 2
+            continue
+        if t.startswith("--git-dir") or t.startswith("--work-tree"):
+            i += 1
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        return t
+    return None
+
+
+# 差分 (patch) を出しうる下位コマンド。これ以外は引数が何であれ patch を吐かない。
+_DIFF_CAPABLE_GIT = {"diff", "show", "log", "format-patch", "range-diff", "whatchanged"}
+
+
+def _is_provably_non_diff(tokens, opaque):
+    """差分を産まないと **証明できる** か。証明できないものは False (= 拒否)。
+
+    引数が変数なだけで拒否すると偽の赤になる (``git cat-file -e <sha>`` や
+    ``git -C <path> pull`` は中身が何であれ patch を吐かない)。見るべきは
+    「下位コマンドが差分を出しうるか」で、出しうる場合に限って
+    「差分でないこと」を定数で示させる。
+    """
+    if opaque:
+        return False          # 中身が全く見えない = 通さない
+    if not tokens:
+        return True
+    if tokens[0] is None:
+        # リストだがプログラム名が変数。git/gh と静的に言えないので対象外にする
+        # (beacon 自身を叩く probe 等。ここを拒否にすると偽の赤が増える)。
+        return True
+    if tokens[0] not in ("git", "gh"):
+        return True           # 対象外
+    sub = _git_subcommand(tokens)
+    if sub is None:
+        return False          # 下位コマンドを確かめられない
+    if tokens[0] == "gh":
+        return sub not in _DIFF_GH and "diff" not in tokens
+    if sub not in _DIFF_CAPABLE_GIT:
+        return True           # 引数が何であれ patch にならない
+    # ここから下は patch を出しうる。差分でないことを **定数で** 示せたときだけ通す。
+    if any(f in tokens for f in _NAMES_ONLY_FLAGS):
+        return True
+    if sub == "format-patch":
+        return False
+    if any(t is None for t in tokens):
+        return False          # 変数が混ざる = その中身が -p かもしれない
+    if sub == "log":
+        return not any(t in _PATCH_FLAGS or t.startswith("-U") for t in tokens)
+    return False              # diff / show / range-diff / whatchanged は既定で拒否
+
+
+def _enclosing_function(parents, node):
+    f = node
+    while f in parents:
+        f = parents[f]
+        if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return f.name
+    return "<module>"
+
+
+def _list_assignments(fn):
+    """関数内の ``name = [...]`` を ``{name: [tokens, ...]}`` に集める。
+
+    ``argv = ["git", "diff", ref]`` のように一旦変数へ入れてから渡す形を
+    **禁止せず解決する**。禁止すると正当な書き方 (``gh pr view`` を組み立てて
+    渡す既存コード) が偽の赤になり、解決しないと独立 judge が実測した
+    「変数経由ですり抜ける」穴が開いたままになる。
+    同じ名前に複数回代入していれば **全部** を候補に持ち、1 つでも差分を
+    産みうるなら offender 扱いにする (分岐で差し替える形を見逃さない)。
+    """
+    out = {}
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.List):
+            continue
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Name):
+                out.setdefault(tgt.id, []).append(_argv_tokens(node.value)[0])
     return out
 
 
-def test_every_diff_collector_strips():
-    """差分を自前で採る関数は、どれも落とす処理を通っていること。
+def _invocation_sites(tree):
+    """``[(関数名, tokens, opaque)]`` — git/gh を走らせうる箇所。
 
-    不変条件は「落とす呼び出しが 1 箇所」ではなく「**採る関数は全部落とす**」。
-    前者は代理の指標で、新しい収集経路が別の下位コマンド (`git show`) で生えた
-    瞬間に意味を失う。
+    ``subprocess.run(...)`` と、argv を外から受ける汎用ランナー
+    (``_git_ok`` 等) の呼び出しの両方を見る。後者を見ないと
+    ``_git_ok(["git", "diff", ...])`` で採る形が素通りする。
     """
-    found = _diff_collecting_functions(ast.parse(inspect.getsource(commands)))
-    assert found, ("差分を採る関数が 1 つも見つからない = 述語が壊れている "
-                   "(この検査は不在を測るので、壊れると黙って緑になる)")
-    offenders = [name for name, strips in found if not strips]
+    parents = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parents[c] = n
+    fn_nodes = {}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn_nodes[n.name] = n
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        is_run = isinstance(node.func, ast.Attribute) and node.func.attr == "run"
+        is_runner = isinstance(node.func, ast.Name) and node.func.id in _GENERIC_RUNNERS
+        if not (is_run or is_runner):
+            continue
+        fname = _enclosing_function(parents, node)
+        if is_run and fname in _GENERIC_RUNNERS:
+            continue          # 汎用ランナー本体は素通し (呼び出し側で見る)
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and fname in fn_nodes:
+            resolved = _list_assignments(fn_nodes[fname]).get(arg.id)
+            if resolved:
+                for toks in resolved:
+                    sites.append((fname, toks, False))
+                continue
+        toks, opaque = _argv_tokens(arg)
+        sites.append((fname, toks, opaque))
+    return sites
+
+
+def test_strip_is_called_in_exactly_one_place_and_it_is_the_chokepoint():
+    """検査 A: 落とす処理の呼び出しは repo 全体で 1 つ、唯一の口の中。"""
+    hits = []
+    for path in sorted(glob.glob(os.path.join(REPO_ROOT, "lib", "*.py"))):
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        parents = {}
+        for n in ast.walk(tree):
+            for c in ast.iter_child_nodes(n):
+                parents[c] = n
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and
+                    isinstance(node.func, ast.Attribute) and
+                    node.func.attr == "strip_bookkeeping_from_diff"):
+                hits.append((os.path.basename(path),
+                             _enclosing_function(parents, node)))
+    assert hits, "落とす処理の呼び出しが 1 つも無い = 誰も落としていない"
+    assert len(hits) == 1, f"落とす箇所が増えている: {hits}。唯一の口に寄せる"
+    assert hits[0][1] == _CHOKEPOINT, f"落としているのが唯一の口の外: {hits[0]}"
+
+
+def test_no_diff_can_be_obtained_outside_the_chokepoint():
+    """検査 B: 差分を産みうる git/gh の起動は、唯一の口の中にしか無い。
+
+    既定は拒否。知らない下位コマンドも、argv を確かめられない呼び出しも offender。
+    """
+    tree = ast.parse(inspect.getsource(commands))
+    sites = _invocation_sites(tree)
+    assert sites, "git/gh の起動が 1 つも見つからない = 述語が壊れている"
+    offenders = [
+        (fn, " ".join(str(t) for t in toks[:5]) or "(argv を確かめられない)")
+        for fn, toks, opaque in sites
+        if fn != _CHOKEPOINT and not _is_provably_non_diff(toks, opaque)
+    ]
     assert not offenders, (
-        f"差分を採るのに作業記録を落としていない関数: {offenders}。"
-        f"strip_bookkeeping_from_diff を通すか、_collect_change_diff に argv を渡す")
+        f"唯一の口 ({_CHOKEPOINT}) の外で差分を採りうる箇所: {offenders}。"
+        f"差分が要るなら {_CHOKEPOINT} を通す (そこで作業記録が落ちる)")
 
 
 # --- 4. 作業記録だけの PR で空の artifact を渡さない --------------------------
