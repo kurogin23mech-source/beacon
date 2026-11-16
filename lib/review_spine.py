@@ -28,6 +28,7 @@ interface change.
 
 import json as _json
 import os as _os
+import re as _re
 
 import transition_approval as _ta
 
@@ -211,6 +212,150 @@ def whole_target_artifact(commits, *, target_id, truncated=False):
     }
 
 
+# Paths whose diff is Beacon's own bookkeeping, not the change under review
+# (ms-119 e-7352). `.beacon/project.json` carries `beacon log` behavior text,
+# session-log summaries and task motivation — i.e. *the implementer session's
+# explanation of its own intent*, which is exactly what
+# ``INDEPENDENCE_CONTRACT`` tells the judge not to read. A bundle that carries
+# it is the contract's author breaking the contract.
+BOOKKEEPING_PATH_PREFIXES = (".beacon/",)
+
+
+def unquote_git_path(ref):
+    """git が引用符で包んだ path を元に戻す (``core.quotePath`` 既定 true)。
+
+    非 ASCII を含む path を、git は ``"a/.beacon/\\346\\227\\245.json"`` のように
+    ダブルクォートで包み、バイトを 8 進エスケープして出す。素の文字列として
+    扱うと先頭が ``"`` なので ``a/`` の判定が外れ、**作業記録の prefix 一致が
+    起きない** —— 独立 AX レビュー (2026-11-16) が実際に ``.beacon/日本語.json``
+    を含む repo を作り、本文が注記ゼロで judge に渡ることを実測した。
+
+    引用符が無ければそのまま返す (ASCII path は今までどおり)。
+    """
+    if len(ref) < 2 or not (ref.startswith('"') and ref.endswith('"')):
+        return ref
+    body = ref[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out.extend(ch.encode("utf-8"))
+            i += 1
+            continue
+        nxt = body[i + 1:i + 2]
+        if nxt and nxt in "01234567" and len(body) >= i + 4:
+            try:
+                out.append(int(body[i + 1:i + 4], 8))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        simple = {"n": 10, "t": 9, "r": 13, '"': 34, "\\": 92}
+        if nxt in simple:
+            out.append(simple[nxt])
+            i += 2
+            continue
+        out.extend(ch.encode("utf-8"))
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _diff_section_paths(section_lines):
+    """Paths a unified-diff section touches, from its own header lines.
+
+    ``--- a/x`` / ``+++ b/y`` are preferred over the ``diff --git`` line because
+    they survive paths with spaces; the ``diff --git`` line is the fallback for
+    sections that carry no file headers (a pure mode/rename change).
+    """
+    paths = []
+    for line in section_lines:
+        if line.startswith("--- ") or line.startswith("+++ "):
+            ref = unquote_git_path(line[4:].strip())
+            if ref == "/dev/null":
+                continue
+            if ref[:2] in ("a/", "b/"):
+                ref = ref[2:]
+            if ref:
+                paths.append(ref)
+    if not paths and section_lines:
+        head = unquote_git_path(section_lines[0].rstrip("\n"))
+        if head.startswith("diff --git "):
+            # 引用符つきの 2 つの path も復号してから割る
+            rest = head[len("diff --git "):]
+            parts = [unquote_git_path(x) for x in _re.findall(r'"[^"]*"|\S+', rest)]
+            if len(parts) == 2:
+                for pth in parts:
+                    if pth[:2] in ("a/", "b/"):
+                        pth = pth[2:]
+                    if pth:
+                        paths.append(pth)
+                return paths
+        m = _re.match(r"^diff --git a/(.+?) b/(.+)$", section_lines[0].rstrip("\n"))
+        if m:
+            paths.extend([m.group(1), m.group(2)])
+    return paths
+
+
+def strip_bookkeeping_from_diff(diff_text, prefixes=BOOKKEEPING_PATH_PREFIXES):
+    """``(filtered_diff, dropped)`` — drop Beacon's own bookkeeping from a diff.
+
+    ``dropped`` is ``[(path, chars), ...]`` so the caller can **say what the
+    judge was not shown**. Disclosure is half the point: a judge handed a
+    silently-trimmed diff believes it saw the whole change, and the two findings
+    that asked for this filter were themselves about a bundle that misrepresented
+    its own contents.
+
+    Why here and not "the judge skips it": three independent judges reported
+    reading ``.beacon/project.json`` hunks in the artifact and *self-reported*
+    skipping them (2026-11-02 / 2026-11-04 / 2026-11-05, 原典 26% / 16% / 70% of
+    the diff by character count). Closing a hole by asking the reader not to look
+    is the shape Beacon rejects everywhere else — if it must not be read, it must
+    not be sent.
+
+    A rename into or out of a bookkeeping path drops too (either side matching is
+    enough): the section's content is the bookkeeping file's text either way.
+
+    Pure: no file or process access, so the contract is unit-testable without a
+    repo.
+    """
+    if not diff_text:
+        return diff_text, []
+    lines = diff_text.splitlines(keepends=True)
+    # Sections start at each `diff --git`; anything before the first one is a
+    # preamble that belongs to no file and is kept verbatim.
+    starts = [i for i, L in enumerate(lines) if L.startswith("diff --git ")]
+    if not starts:
+        return diff_text, []
+    kept = list(lines[:starts[0]])
+    dropped = []
+    bounds = starts + [len(lines)]
+    for i in range(len(starts)):
+        section = lines[bounds[i]:bounds[i + 1]]
+        paths = _diff_section_paths(section)
+        hit = next((p for p in paths
+                    if any(p.startswith(pre) for pre in prefixes)), None)
+        if hit is None:
+            kept.extend(section)
+        else:
+            dropped.append((hit, sum(len(L) for L in section)))
+    return "".join(kept), dropped
+
+
+def bookkeeping_drop_gap(dropped):
+    """The one-line disclosure for ``dropped``, or ``""`` when nothing was cut."""
+    if not dropped:
+        return ""
+    total = sum(n for _, n in dropped)
+    shown = ", ".join(f"{p} ({n:,} 字)" for p, n in dropped[:5])
+    more = f" ほか {len(dropped) - 5} ファイル" if len(dropped) > 5 else ""
+    return (f"artifact から Beacon 自身の作業記録 {len(dropped)} ファイル "
+            f"(合計 {total:,} 字) を外しました: {shown}{more}。"
+            f"これらは実装者セッションの意図説明 (作業記録の behavior / セッション"
+            f"ログの summary / タスクの motivation) を含むため、独立性の契約が"
+            f"読むなと言う対象です。**差分のこの部分は判定に入っていません。**")
+
+
 def _origin_slot(origin_id, origin_content, provenance):
     """Build the bundle's ``origin`` slot, carrying provenance when the caller
     knows it (ms-119 e-7345).
@@ -225,6 +370,66 @@ def _origin_slot(origin_id, origin_content, provenance):
     if provenance:
         slot.update({k: v for k, v in provenance.items() if v})
     return slot
+
+
+def strip_artifact_bookkeeping(artifact, prefixes=BOOKKEEPING_PATH_PREFIXES):
+    """``(artifact, dropped)`` — judge に渡る直前の artifact から作業記録を落とす。
+
+    **なぜ組み立ての境界で落とすか** (ms-119 e-7352、独立 AX レビュー 2026-11-16):
+    以前は「差分を採る側が落とす」形にし、それを静的検査で守らせていた。judge が
+    実際に 3 つの経路 (``subprocess.check_output`` 等の別 API / ``argv`` を空リスト
+    から ``append`` で組む / ``git diff-tree -p``) を書いて、検査が緑のまま
+    **未加工の .beacon/project.json が judge に渡る**ことを実測した。静的検査は
+    有限列挙なので、新しい書き方が出るたびに穴が開く。
+
+    bundle は必ず :func:`assemble_review_context` を通る。**そこで落とせば、
+    差分をどう採ったかに依存しない**。採る側の落とし方は残すが (空かどうかの判定に
+    必要)、安全を担保するのはこの層。落とす処理は冪等なので二重に通っても害が無い。
+    """
+    if not isinstance(artifact, dict):
+        return artifact, []
+    dropped = []
+    kind = artifact.get("kind")
+    if kind == "diff":
+        content, d = strip_bookkeeping_from_diff(artifact.get("content") or "", prefixes)
+        if d:
+            artifact = {**artifact, "content": content}
+            dropped.extend(d)
+    elif kind == "whole-target":
+        commits, changed = [], False
+        for entry in artifact.get("commits") or []:
+            if isinstance(entry, dict) and entry.get("diff"):
+                text, d = strip_bookkeeping_from_diff(entry["diff"], prefixes)
+                if d:
+                    entry = {**entry, "diff": text}
+                    dropped.extend(d)
+                    changed = True
+            commits.append(entry)
+        if changed:
+            artifact = {**artifact, "commits": commits}
+    return artifact, dropped
+
+
+def judge_artifact(artifact, gaps):
+    """``(artifact, gaps)`` — judge に渡す artifact を仕上げる **共通の仕上げ口**。
+
+    作業記録を落とし、落としたことを ``gaps`` に書き足して返す。
+
+    **なぜ関数に括るか** (ms-119 e-7352、独立保守性レビュー 2026-11-16): 落とす処理を
+    :func:`assemble_review_context` の中に直接置いたところ、**兄弟の
+    :func:`assemble_attainment_context` が同じ防御を持たない** 状態になった。
+    どちらも同じ独立性の契約を運ぶのに、片方だけが閉じている形で、しかも
+    「組み立ての境界で落ちる」と書いた docstring がその誤解を強めていた。
+    1 箇所を直して「全域が閉じた」と名乗る型は、この repo が繰り返し踏んでいる。
+
+    judge に渡る artifact を作る関数は **すべてここを通す**。三つ目の
+    ``assemble_*_context`` が増えても同じ穴が開かないようにするため。
+    """
+    artifact, dropped = strip_artifact_bookkeeping(artifact)
+    if dropped:
+        gaps = list(gaps or [])
+        gaps.append(bookkeeping_drop_gap(dropped))
+    return artifact, list(gaps or [])
 
 
 def assemble_review_context(review_type, *, origin_id, origin_content,
@@ -298,6 +503,8 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         # default artifact is the mechanically-collected diff (diff mode). A
         # full-surface caller passes a surface_snapshot_artifact() instead.
         artifact = {"kind": "diff", "ref": target_ref, "content": diff_text}
+    # ms-119 e-7352: judge に渡る **最後の関門** (兄弟の attainment 側と共通)。
+    artifact, gaps = judge_artifact(artifact, gaps)
     return {
         "review_type": review_type,
         "mode": mode,
@@ -401,13 +608,16 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
             "goal not yet met" prior. The judge proposes a disposition per task
             (done / superseded[理由] / blocks-attainment); the human confirms.
     """
+    # 兄弟の review 側と同じ仕上げ口を通す (片方だけ閉じている形を作らない)。
+    _attainment_artifact, gaps = judge_artifact(
+        {"kind": "diff", "ref": target_ref, "content": diff_text}, gaps)
     return {
         "review_type": REVIEW_ATTAINMENT,
         "target_id": target_id,
         "target_ref": target_ref,
         "origin": {"id": spec_origin_id, "content": spec_content},
         "criteria": list(criteria or []),
-        "artifact": {"kind": "diff", "ref": target_ref, "content": diff_text},
+        "artifact": _attainment_artifact,
         "verdict_ownership": "human",
         "judge_contract": ATTAINMENT_JUDGE_CONTRACT,
         "independence_contract": INDEPENDENCE_CONTRACT,
