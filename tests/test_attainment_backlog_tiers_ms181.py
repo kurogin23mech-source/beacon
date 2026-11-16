@@ -153,6 +153,31 @@ def test_a_stray_task_id_is_still_refused():
 # 受入条件 4: inversion — restore the narrow set and watch a test go red
 # ---------------------------------------------------------------------------
 
+def _copy_tree_snapshot(dest):
+    """``lib`` と ``tests`` の影のコピーを作る。消えたファイルは黙って飛ばす。
+
+    **なぜ「消えた」を許すか** (2026-11-16、PR #811 に main を取り込んで判明):
+    このリポジトリには、実ツリーの ``tests/`` に一時ファイルを書いて消すテストが
+    ある (``tests/test_bus_budget_isolation_e6621.py`` の probe journal)。CI は
+    worker を並列で回すので、こちらが一覧を取った直後に向こうが消すと
+    ``shutil.copytree`` は「そんなファイルは無い」で落ちる。実際に CI で踏んだ。
+
+    消えたファイルはこの検査の対象ではない (見たいのは ``lib`` の定数と
+    ``tests`` の既存の検査)。**存在しなくなったものを待つ理由が無い**ので、
+    その 1 件だけ飛ばして複製を続ける。並列の他 worker を黙らせる方向ではなく、
+    自分の前提 (= 複製中もツリーが不変) を緩める方向で閉じている。
+    """
+    for sub in ("lib", "tests"):
+        try:
+            shutil.copytree(os.path.join(REPO, sub), dest / sub,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        except shutil.Error as e:
+            missing = [a for a in e.args[0]
+                       if "No such file or directory" not in str(a[2])]
+            if missing:
+                raise
+
+
 def test_narrowing_the_gate_back_to_highest_high_goes_red(tmp_path):
     """untriaged を数えない状態に戻したら赤くなることを実走で確かめる。
 
@@ -160,9 +185,7 @@ def test_narrowing_the_gate_back_to_highest_high_goes_red(tmp_path):
     見せないため — scripts/check-tests-dont-mutate-repo.py の要求)。
     """
     tree = tmp_path / "tree"
-    for sub in ("lib", "tests"):
-        shutil.copytree(os.path.join(REPO, sub), tree / sub,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    _copy_tree_snapshot(tree)
 
     target = tree / "lib" / "transition_approval.py"
     src = target.read_text(encoding="utf-8")
@@ -193,9 +216,7 @@ def test_widening_the_gate_to_everything_also_goes_red(tmp_path):
     片側だけの反転だと「全部数える」実装でも両方の試験が通ってしまう。
     """
     tree = tmp_path / "tree"
-    for sub in ("lib", "tests"):
-        shutil.copytree(os.path.join(REPO, sub), tree / sub,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    _copy_tree_snapshot(tree)
 
     target = tree / "lib" / "transition_approval.py"
     src = target.read_text(encoding="utf-8")

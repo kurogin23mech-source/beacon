@@ -158,7 +158,11 @@ def test_every_declared_reason_lands_in_its_own_counter(bd, codex_hook):
 
     folded = []
     for name, value in sorted(_declared_reasons(bd).items()):
-        counts = tally_fn([value], bd=bd)
+        # main 側で入力の契約が変わった: 理由タグ単体ではなく
+        # ``(理由タグ, channel)`` の対を取る (scripts/codex-inbox-hook.py:350)。
+        # channel は空で良い — ここが確かめたいのは「理由ごとに専用の件数が
+        # 在るか」であって channel 別の扱いではない。
+        counts = tally_fn([(value, "")], bd=bd)
         if counts.get("other"):
             folded.append(name)
     assert not folded, (
