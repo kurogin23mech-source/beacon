@@ -261,39 +261,101 @@ def unquote_git_path(ref):
     return out.decode("utf-8", "replace")
 
 
+def _strip_ab_prefix(path):
+    """Drop the ``a/`` / ``b/`` that git puts in front of a diff path."""
+    return path[2:] if path[:2] in ("a/", "b/") else path
+
+
+# ヘッダー無しのセクションで git が出す、1 行 1 path の行。
+_SIDE_LINE_PREFIXES = ("rename from ", "rename to ", "copy from ", "copy to ")
+
+
+def _side_line_paths(section_lines):
+    """``rename from`` / ``rename to`` (``copy`` も) が名指しする path。
+
+    **なぜこれを先に見るか**: 100% 一致の rename では ``---`` / ``+++`` の
+    ヘッダーが出ず、``diff --git a/X b/Y`` の 1 行から 2 つの path を割り出す
+    羽目になる。この行は **1 行に 1 つしか path が無い** ので、割り位置を
+    推測しなくてよい (= 下の曖昧さが最初から起きない)。
+    ヘッダー無しのセクションには hunk が無いので、本文の行がここに紛れ込む
+    ことはない。
+    """
+    out = []
+    for line in section_lines[1:]:
+        for pre in _SIDE_LINE_PREFIXES:
+            if line.startswith(pre):
+                p = unquote_git_path(line[len(pre):].rstrip("\n"))
+                if p:
+                    out.append(p)
+                break
+    return out
+
+
+def _diff_git_line_paths(head):
+    """``diff --git a/X b/Y`` の 1 行から 2 つの path を取り出す。
+
+    **なぜ素朴な割り方では足りないか** (独立保守性レビュー 2026-11-16):
+    以前はこの行を ``a/(.+?) b/(.+)`` の最短一致で割っていた —— 最初に現れる
+    ``" b/"`` で割るのと同じ。X 自身が ``" b/"`` を含むとき (``weird b/`` という
+    ディレクトリの下のファイル等) 割り位置を誤り、移動先が ``.beacon/`` でも
+    prefix 一致が起きない。judge が実在の repo で
+    ``weird b/case.txt`` → ``.beacon/thing.txt`` の rename を作って実測した。
+
+    割り方の決め方:
+
+    1. 空白で 2 つに割れるなら一意 (引用符つきの path も 1 トークンに収まる)。
+    2. 割れないなら path に空白が入っている。``" b/"`` の候補位置を全部挙げ、
+       **両側が同じ path になる割り方** を採る (rename でないセクション ——
+       mode のみの変更など —— は必ず両側が同じ)。
+    3. それでも決まらない形 (両側が違うのに ``rename`` / ``copy`` の行も無い) は
+       git の出力では起きないはずだが、起きたときに黙って取り落とさないよう
+       **候補を全部返す**。落とす側の検査なので多めに挙げるのが安全側で、
+       落としたことは ``gaps`` に出るので黙って消えることはない。
+
+    **閉じていない範囲**: 引用符の中にエスケープされた ``\\"`` を含む path は
+    1 のトークン分割が崩れる (この file の既存の限界で、ここでは変えていない)。
+    """
+    if not head.startswith("diff --git "):
+        return []
+    rest = head[len("diff --git "):]
+    toks = _re.findall(r'"[^"]*"|\S+', rest)
+    if len(toks) == 2:
+        return [p for p in (_strip_ab_prefix(unquote_git_path(t)) for t in toks) if p]
+    if not rest.startswith("a/"):
+        return []
+    cands = [(rest[2:i], rest[i + 3:])
+             for i in range(len(rest)) if rest.startswith(" b/", i)]
+    same = [c for c in cands if c[0] == c[1]]
+    if same:
+        return [p for p in same[0] if p]
+    out = []
+    for src, dst in cands:
+        out.extend(p for p in (src, dst) if p)
+    return out
+
+
 def _diff_section_paths(section_lines):
     """Paths a unified-diff section touches, from its own header lines.
 
     ``--- a/x`` / ``+++ b/y`` are preferred over the ``diff --git`` line because
-    they survive paths with spaces; the ``diff --git`` line is the fallback for
-    sections that carry no file headers (a pure mode/rename change).
+    they survive paths with spaces; the fallback for sections that carry no file
+    headers (a pure mode change, or a 100%-similarity rename) first reads the
+    ``rename from`` / ``rename to`` lines — one path per line, so nothing has to
+    be guessed — and only then falls back to splitting the ``diff --git`` line
+    (see :func:`_diff_git_line_paths` for why that split is not naive).
     """
     paths = []
     for line in section_lines:
         if line.startswith("--- ") or line.startswith("+++ "):
-            ref = unquote_git_path(line[4:].strip())
-            if ref == "/dev/null":
+            ref = _strip_ab_prefix(unquote_git_path(line[4:].strip()))
+            if ref == "/dev/null" or not ref:
                 continue
-            if ref[:2] in ("a/", "b/"):
-                ref = ref[2:]
-            if ref:
-                paths.append(ref)
+            paths.append(ref)
     if not paths and section_lines:
-        head = unquote_git_path(section_lines[0].rstrip("\n"))
-        if head.startswith("diff --git "):
-            # 引用符つきの 2 つの path も復号してから割る
-            rest = head[len("diff --git "):]
-            parts = [unquote_git_path(x) for x in _re.findall(r'"[^"]*"|\S+', rest)]
-            if len(parts) == 2:
-                for pth in parts:
-                    if pth[:2] in ("a/", "b/"):
-                        pth = pth[2:]
-                    if pth:
-                        paths.append(pth)
-                return paths
-        m = _re.match(r"^diff --git a/(.+?) b/(.+)$", section_lines[0].rstrip("\n"))
-        if m:
-            paths.extend([m.group(1), m.group(2)])
+        sides = _side_line_paths(section_lines)
+        if len(sides) >= 2:
+            return sides
+        paths.extend(_diff_git_line_paths(section_lines[0].rstrip("\n")))
     return paths
 
 

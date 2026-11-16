@@ -2452,7 +2452,7 @@ def cmd_review_context():
               f"--diff-ref) です。target 全体の close レビューには --type philosophy "
               f"を使ってください (--target は whole-target 専用)。", file=sys.stderr)
         sys.exit(1)
-    origin_id, origin_content, origin_provenance = _resolve_review_origin(
+    origin_id, origin_content, origin_provenance = _origin_for_review_type(
         review_type, desc, origin_doc, gaps)
 
     # --- artifact collection: mechanical, no interpretation ---
@@ -2585,7 +2585,7 @@ def _emit_decision_verification_context():
     # 出ず、どの版で判定したかも載らない —— この関数群の目的が、この 1 経路だけで
     # 無効化されていた。gaps は resolve より前に作って渡す。
     gaps = []
-    origin_id, origin_content, origin_provenance = _repo_file_origin(desc, gaps)
+    origin_id, origin_content, origin_provenance = _origin_for_batch_descriptor(desc, gaps)
 
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
     limit_raw = os.environ.get("BEACON_DECISION_LIMIT", "").strip()
@@ -2659,12 +2659,16 @@ def _capability_root():
     return review_spine.install_root()
 
 
-def _resolve_review_origin(review_type, desc, origin_doc, gaps):
+def _origin_for_review_type(review_type, desc, origin_doc, gaps):
     """``(origin_id, origin_content, provenance)`` for one review type's 原典,
     or exit with a clean error. Used by the SINGLE-TYPE review-context path.
 
+    A caller-shaped wrapper over the 原典 kinds: it dispatches on
+    ``origin.kind`` and, for repo-file, calls the implementation
+    :func:`_read_repo_file_origin`.
+
     Every 原典 kind resolves here and **returns the whole triple**, the same
-    shape :func:`_repo_file_origin` hands the batch path. That is the point:
+    shape :func:`_origin_for_batch_descriptor` hands the batch path. That is the point:
     this used to be an if/elif that assigned ``origin_id`` / ``origin_content``
     / ``origin_provenance`` into the caller's locals, and when e-7345 added
     provenance it was added to the repo-file branch only. The doc branch (思想
@@ -2696,11 +2700,11 @@ def _resolve_review_origin(review_type, desc, origin_doc, gaps):
             print(f"Error: --origin-doc is not valid for --type {review_type} "
                   f"(its 原典 is fixed to {ref}).", file=sys.stderr)
             sys.exit(1)
-        # ms-119 e-7345: 解決は 1 箇所 (_resolve_repo_file_origin) に寄せた。
-        # 以前はここと batch 側の _repo_file_origin に同じ解決が手書きで 2 つ
+        # ms-119 e-7345: 解決は 1 箇所 (_read_repo_file_origin) に寄せた。
+        # 以前はここと batch 側の _origin_for_batch_descriptor に同じ解決が手書きで 2 つ
         # 並んでおり、片方だけ直る形だった (コード内の注記自身が「抽出は価値ある
         # follow-up」と認めていた)。
-        content, provenance = _resolve_repo_file_origin(ref, gaps)
+        content, provenance = _read_repo_file_origin(ref, gaps)
         return ref, content, provenance
     if origin_kind == "doc":
         # 原典 is a document supplied at review time (a target's SPEC / vision).
@@ -2725,10 +2729,19 @@ def _resolve_review_origin(review_type, desc, origin_doc, gaps):
     sys.exit(1)
 
 
-def _resolve_repo_file_origin(ref, gaps):
+def _read_repo_file_origin(ref, gaps):
     """Read a repo-file 原典, preferring the repo under review (ms-119 e-7345).
 
     Returns ``(content, provenance)`` or exits with a clean error.
+
+    **This is the implementation**; the two ``_origin_for_*`` functions above and
+    below are the callers that shape it for their path. ms-119 e-7520: the three
+    used to be named ``_resolve_repo_file_origin`` / ``_resolve_review_origin`` /
+    ``_repo_file_origin``, and an independent maintainability review could not
+    tell from the names which one did the work — so it was easy to miss that the
+    batch caller is deliberately narrower (repo-file only) when adding a third
+    原典 kind. The names now say it: ``_read_*`` reads, ``_origin_for_<caller>``
+    is what that caller gets.
 
     **Why the repo under review wins.** The 原典 is the standard the judge
     applies, and a change to the 原典 IS reviewable: a PR that rewrites the
@@ -2806,12 +2819,17 @@ def _resolve_repo_file_origin(ref, gaps):
     return chosen, {"resolved_from": source, "path": path}
 
 
-def _repo_file_origin(desc, gaps):
+def _origin_for_batch_descriptor(desc, gaps):
     """``(origin_id, origin_content, provenance)`` for a repo-file 原典 descriptor,
     or exit with a clean error. Used by the BATCH review-context path (e-4125).
 
+    A caller-shaped wrapper, **narrower on purpose**: unlike
+    :func:`_origin_for_review_type` it accepts repo-file 原典 only, and rejects
+    anything else loudly. A third 原典 kind added to the single-type path does
+    NOT reach batch until it is handled here too.
+
     ms-119 e-7345: the resolution itself now lives in
-    :func:`_resolve_repo_file_origin`, shared with the single-type path. Before
+    :func:`_read_repo_file_origin`, shared with the single-type path. Before
     that the two paths each had their own hand-written copy — the follow-up this
     docstring used to ask for.
 
@@ -2827,7 +2845,7 @@ def _repo_file_origin(desc, gaps):
         print(f"Error: batch は原典が repo-file の review type のみ対象です "
               f"(descriptor: {desc.get('id')})。", file=sys.stderr)
         sys.exit(1)
-    content, provenance = _resolve_repo_file_origin(ref, gaps)
+    content, provenance = _read_repo_file_origin(ref, gaps)
     return ref, content, provenance
 
 
@@ -2901,7 +2919,7 @@ def cmd_review_batch_context():
         # 原典の食い違いは review type ごとに出るので、共有 gaps を汚さず
         # この bundle の gaps にだけ載せる (別の type の原典は別ファイル)。
         type_gaps = list(shared_gaps)
-        origin_id, origin_content, origin_provenance = _repo_file_origin(
+        origin_id, origin_content, origin_provenance = _origin_for_batch_descriptor(
             registry.get(rtype, {}), type_gaps)
         bundle = review_spine.assemble_review_context(
             rtype, origin_id=origin_id, origin_content=origin_content,
