@@ -41,9 +41,17 @@ MUTATIONS = [
      '                "bookkeeping-only (この commit は Beacon の作業記録しか変えていない)"\n',
      '                "no-textual-diff (空 / メタのみの commit の可能性)"\n',
      True),
-    ("組み立ての境界の落とし処理を外す (最後の関門)",
-     "    artifact, _late_dropped = strip_artifact_bookkeeping(artifact)\n",
-     "    _late_dropped = []\n",
+    ("共通の仕上げ口から落とし処理を外す (最後の関門)",
+     "    artifact, dropped = strip_artifact_bookkeeping(artifact)\n",
+     "    dropped = []\n",
+     True),
+    ("兄弟の組み立て口 (目的達成) から仕上げ口を外す",
+     "    _attainment_artifact, gaps = judge_artifact(\n",
+     "    _attainment_artifact, gaps = (\n",
+     True),
+    ("引用符つき path の復号を外す (非 ASCII 名の作業記録が漏れる)",
+     "            ref = unquote_git_path(line[4:].strip())\n",
+     "            ref = line[4:].strip()\n",
      True),
     ("中身を変えずに局所変数名だけ変える (契約は保たれる)",
      '    diff_text, dropped = _rs.strip_bookkeeping_from_diff(proc.stdout or "")\n'
@@ -113,6 +121,12 @@ def _probe_diff_tree(ref):
     return subprocess.run(["git", "diff-tree", "-p", ref],
                           capture_output=True, text=True).stdout
 ''', True),
+    ("新しい収集経路: os.system で採る", '''
+
+def _probe_os_system(ref):
+    import os as _os
+    return _os.system("git diff -U25 " + ref)
+''', True),
     ("落とす処理を 2 箇所目に増やす", '''
 
 def _probe_second_strip(text):
@@ -144,6 +158,12 @@ def _probe_append_safe(pr):
     argv = ["gh", "pr", "view", str(pr), "--json", "title"]
     argv += ["--repo", "o/r"]
     return subprocess.run(argv, capture_output=True, text=True).stdout
+''', False),
+    ("gh の引数の値が diff という文字列 (差分ではない)", '''
+
+def _probe_gh_label_diff():
+    return subprocess.run(["gh", "issue", "list", "--label", "diff"],
+                          capture_output=True, text=True).stdout
 ''', False),
     ("gh だが差分ではない (変数経由)", '''
 

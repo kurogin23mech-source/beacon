@@ -194,13 +194,6 @@ def test_both_collectors_go_through_the_chokepoint():
 
 _CHOKEPOINT = "_run_diff_command"
 
-# git の下位コマンドのうち、差分を産まないと言い切れるもの。**ここに無いものは拒否**。
-_PROVEN_NON_DIFF_GIT = {
-    "rev-parse", "config", "tag", "branch", "fetch", "checkout", "merge-base",
-    "worktree", "describe", "ls-files", "cat-file", "status", "remote",
-    "symbolic-ref", "rev-list", "show-ref", "pull", "push", "merge", "init",
-    "clone", "add", "commit", "stash", "reflog",
-}
 # 差分を要求する旗。log / show に付くと差分になる。
 _PATCH_FLAGS = {"-p", "-u", "--patch", "-U", "--unified"}
 # show に付くと差分でなくなる旗。
@@ -208,7 +201,10 @@ _PATCH_FLAGS = {"-p", "-u", "--patch", "-U", "--unified"}
 _NAMES_ONLY_FLAGS = {"--name-only", "--name-status", "--stat", "--numstat",
                      "--shortstat", "--dirstat", "--summary"}
 # gh の下位コマンドで差分を産むもの。
-_DIFF_GH = {"diff"}
+# gh で差分を出す口は実質 `gh pr diff` だけ。argv 全体の生文字列一致にすると
+# `gh issue list --label diff` のような無関係な呼び出しが赤くなる (独立 AX
+# レビューが実測)。偽の赤はガードを緩める動機になるので、下位コマンドで絞る。
+_DIFF_CAPABLE_GH = {("pr", "diff")}
 
 # 差分を採れてしまう汎用ランナー (argv を外から受ける) の名前。呼び出し側を検査する。
 _GENERIC_RUNNERS = {"_git_ok"}
@@ -216,7 +212,11 @@ _GENERIC_RUNNERS = {"_git_ok"}
 # 外部コマンドを走らせる API。run だけ見ると check_output / Popen で素通りする
 # (独立 judge が実測)。
 _SUBPROCESS_APIS = {"run", "check_output", "check_call", "call", "Popen",
-                    "popen", "getoutput", "getstatusoutput"}
+                    "popen", "getoutput", "getstatusoutput",
+                    # os 側の口も見る。os.system は列挙に無く素通りしていた
+                    # (独立保守性レビューが実測)。
+                    "system", "posix_spawn", "posix_spawnp",
+                    "spawnl", "spawnv", "spawnlp", "spawnvp"}
 
 
 def _argv_tokens(node):
@@ -285,7 +285,8 @@ def _is_provably_non_diff(tokens, opaque, mutated=False):
     if sub is None:
         return False          # 下位コマンドを確かめられない
     if tokens[0] == "gh":
-        return sub not in _DIFF_GH and "diff" not in tokens
+        verbs = [t for t in tokens[1:] if t and not t.startswith("-")][:2]
+        return tuple(verbs) not in _DIFF_CAPABLE_GH
     if sub not in _DIFF_CAPABLE_GIT:
         # 下位コマンドが patch を産まないなら、後から足された引数が何であれ
         # patch にはならない (argv += ["--repo", x] 等は安全)。
@@ -526,3 +527,87 @@ def test_surface_snapshot_artifact_is_left_alone():
     art = {"kind": "surface-snapshot", "commands": [{"argv": "beacon --help"}]}
     b = _bundle(art)
     assert b["artifact"] == art
+
+
+# --- 6. 兄弟の組み立て口も同じ関門を通る -------------------------------------
+#
+# 独立保守性レビュー (2026-11-16): 落とす処理を assemble_review_context の中に
+# 直接置いたら、同じ独立性の契約を運ぶ兄弟 assemble_attainment_context が
+# 防御を持たない状態になった (judge が実測)。1 箇所を直して「全域が閉じた」と
+# 名乗る型。judge に渡る artifact を作る関数は **全部** 同じ仕上げ口を通す。
+
+def test_attainment_bundle_is_cleaned_at_assembly():
+    b = rs.assemble_attainment_context(
+        target_id="ms-T", spec_origin_id="s", spec_content="SPEC",
+        criteria={"acceptance": "x"}, target_ref="ms-T",
+        diff_text=CODE + LEDGER)
+    content = b["artifact"]["content"]
+    assert "engine/run.py" in content
+    assert ".beacon/project.json" not in content, "目的達成の束に作業記録が残っている"
+    assert any(".beacon" in g for g in b["gaps"]), b["gaps"]
+
+
+def test_attainment_bundle_is_silent_when_nothing_to_drop():
+    b = rs.assemble_attainment_context(
+        target_id="ms-T", spec_origin_id="s", spec_content="SPEC",
+        criteria={"acceptance": "x"}, target_ref="ms-T", diff_text=CODE)
+    assert b["artifact"]["content"] == CODE
+    assert not any(".beacon" in g for g in b["gaps"]), b["gaps"]
+
+
+def test_every_judge_bundle_builder_goes_through_the_finishing_gate():
+    """judge に渡る束を組む関数が、全部 judge_artifact を通っていること。
+
+    三つ目の ``assemble_*_context`` が増えたとき、仕上げ口を通し忘れたら赤くする。
+    """
+    builders = [n for n in dir(rs)
+                if n.startswith("assemble_") and n.endswith("_context")]
+    assert len(builders) >= 2, builders
+    missing = [n for n in builders
+               if "judge_artifact" not in inspect.getsource(getattr(rs, n))]
+    assert not missing, (
+        f"judge に渡る束を組むのに仕上げ口を通っていない: {missing}。"
+        f"judge_artifact を通す (そこで作業記録が落ちる)")
+
+
+# --- 7. 非 ASCII 名の作業記録も落ちる ----------------------------------------
+#
+# 独立 AX レビュー (2026-11-16): git は core.quotePath 既定 true のもとで、
+# 非 ASCII を含む path をダブルクォートで包み 8 進エスケープして出す。
+# 素の文字列として扱うと先頭が " なので a/ の判定が外れ、prefix 一致が起きない。
+# judge が .beacon/日本語.json を含む repo を実際に作り、**本文が注記ゼロで
+# judge に渡る**ことを実測した。日本語のファイル名はこのプロジェクトで現実的。
+
+QUOTED_LEDGER = (
+    'diff --git "a/.beacon/\\346\\227\\245.json" "b/.beacon/\\346\\227\\245.json"\n'
+    '--- "a/.beacon/\\346\\227\\245.json"\n'
+    '+++ "b/.beacon/\\346\\227\\245.json"\n'
+    '@@ -1 +1 @@\n-{"summary": "前回の経緯"}\n+{"summary": "今回の経緯"}\n'
+)
+
+
+def test_quoted_non_ascii_bookkeeping_path_is_dropped():
+    out, dropped = rs.strip_bookkeeping_from_diff(CODE + QUOTED_LEDGER)
+    assert "engine/run.py" in out
+    assert "前回の経緯" not in out, "非 ASCII 名の作業記録が judge に渡っている"
+    assert dropped, "落としたのに記録されていない"
+    assert any(".beacon/" in path for path, _ in dropped), dropped
+
+
+def test_quoted_path_is_decoded_back_to_its_real_name():
+    assert rs.unquote_git_path('"a/.beacon/\\346\\227\\245.json"') == "a/.beacon/日.json"
+    # 引用符が無ければそのまま (ASCII path の既存挙動を変えない)
+    assert rs.unquote_git_path("a/engine/run.py") == "a/engine/run.py"
+
+
+def test_quoted_non_ascii_is_also_dropped_at_the_assembly_boundary():
+    b = _bundle({"kind": "diff", "ref": "o/r#1", "content": CODE + QUOTED_LEDGER})
+    assert "前回の経緯" not in b["artifact"]["content"]
+    assert any(".beacon" in g for g in b["gaps"]), b["gaps"]
+
+
+def test_gh_call_with_diff_as_an_argument_value_is_not_flagged():
+    """`gh issue list --label diff` は差分を産まない。偽の赤を出さない。"""
+    assert _is_provably_non_diff(["gh", "issue", "list", "--label", "diff"], False)
+    # 本物の差分口は拒否されたまま
+    assert not _is_provably_non_diff(["gh", "pr", "diff", "123"], False)

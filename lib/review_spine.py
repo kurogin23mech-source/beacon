@@ -221,6 +221,46 @@ def whole_target_artifact(commits, *, target_id, truncated=False):
 BOOKKEEPING_PATH_PREFIXES = (".beacon/",)
 
 
+def unquote_git_path(ref):
+    """git が引用符で包んだ path を元に戻す (``core.quotePath`` 既定 true)。
+
+    非 ASCII を含む path を、git は ``"a/.beacon/\\346\\227\\245.json"`` のように
+    ダブルクォートで包み、バイトを 8 進エスケープして出す。素の文字列として
+    扱うと先頭が ``"`` なので ``a/`` の判定が外れ、**作業記録の prefix 一致が
+    起きない** —— 独立 AX レビュー (2026-11-16) が実際に ``.beacon/日本語.json``
+    を含む repo を作り、本文が注記ゼロで judge に渡ることを実測した。
+
+    引用符が無ければそのまま返す (ASCII path は今までどおり)。
+    """
+    if len(ref) < 2 or not (ref.startswith('"') and ref.endswith('"')):
+        return ref
+    body = ref[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out.extend(ch.encode("utf-8"))
+            i += 1
+            continue
+        nxt = body[i + 1:i + 2]
+        if nxt and nxt in "01234567" and len(body) >= i + 4:
+            try:
+                out.append(int(body[i + 1:i + 4], 8))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        simple = {"n": 10, "t": 9, "r": 13, '"': 34, "\\": 92}
+        if nxt in simple:
+            out.append(simple[nxt])
+            i += 2
+            continue
+        out.extend(ch.encode("utf-8"))
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
 def _diff_section_paths(section_lines):
     """Paths a unified-diff section touches, from its own header lines.
 
@@ -231,7 +271,7 @@ def _diff_section_paths(section_lines):
     paths = []
     for line in section_lines:
         if line.startswith("--- ") or line.startswith("+++ "):
-            ref = line[4:].strip()
+            ref = unquote_git_path(line[4:].strip())
             if ref == "/dev/null":
                 continue
             if ref[:2] in ("a/", "b/"):
@@ -239,6 +279,18 @@ def _diff_section_paths(section_lines):
             if ref:
                 paths.append(ref)
     if not paths and section_lines:
+        head = unquote_git_path(section_lines[0].rstrip("\n"))
+        if head.startswith("diff --git "):
+            # 引用符つきの 2 つの path も復号してから割る
+            rest = head[len("diff --git "):]
+            parts = [unquote_git_path(x) for x in _re.findall(r'"[^"]*"|\S+', rest)]
+            if len(parts) == 2:
+                for pth in parts:
+                    if pth[:2] in ("a/", "b/"):
+                        pth = pth[2:]
+                    if pth:
+                        paths.append(pth)
+                return paths
         m = _re.match(r"^diff --git a/(.+?) b/(.+)$", section_lines[0].rstrip("\n"))
         if m:
             paths.extend([m.group(1), m.group(2)])
@@ -358,6 +410,28 @@ def strip_artifact_bookkeeping(artifact, prefixes=BOOKKEEPING_PATH_PREFIXES):
     return artifact, dropped
 
 
+def judge_artifact(artifact, gaps):
+    """``(artifact, gaps)`` — judge に渡す artifact を仕上げる **共通の仕上げ口**。
+
+    作業記録を落とし、落としたことを ``gaps`` に書き足して返す。
+
+    **なぜ関数に括るか** (ms-119 e-7352、独立保守性レビュー 2026-11-16): 落とす処理を
+    :func:`assemble_review_context` の中に直接置いたところ、**兄弟の
+    :func:`assemble_attainment_context` が同じ防御を持たない** 状態になった。
+    どちらも同じ独立性の契約を運ぶのに、片方だけが閉じている形で、しかも
+    「組み立ての境界で落ちる」と書いた docstring がその誤解を強めていた。
+    1 箇所を直して「全域が閉じた」と名乗る型は、この repo が繰り返し踏んでいる。
+
+    judge に渡る artifact を作る関数は **すべてここを通す**。三つ目の
+    ``assemble_*_context`` が増えても同じ穴が開かないようにするため。
+    """
+    artifact, dropped = strip_artifact_bookkeeping(artifact)
+    if dropped:
+        gaps = list(gaps or [])
+        gaps.append(bookkeeping_drop_gap(dropped))
+    return artifact, list(gaps or [])
+
+
 def assemble_review_context(review_type, *, origin_id, origin_content,
                             diff_text, mode, target_ref, gaps=None,
                             known_judge_types=None, external_references=None,
@@ -429,13 +503,8 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         # default artifact is the mechanically-collected diff (diff mode). A
         # full-surface caller passes a surface_snapshot_artifact() instead.
         artifact = {"kind": "diff", "ref": target_ref, "content": diff_text}
-    # ms-119 e-7352: judge に渡る **最後の関門**。どんな経路で採られた差分でも、
-    # ここを通らずに bundle にはならないので、ここで落ちれば漏れない。
-    # 採る側が既に落としていれば何も残らず no-op (冪等)。
-    artifact, _late_dropped = strip_artifact_bookkeeping(artifact)
-    if _late_dropped:
-        gaps = list(gaps or [])
-        gaps.append(bookkeeping_drop_gap(_late_dropped))
+    # ms-119 e-7352: judge に渡る **最後の関門** (兄弟の attainment 側と共通)。
+    artifact, gaps = judge_artifact(artifact, gaps)
     return {
         "review_type": review_type,
         "mode": mode,
@@ -539,13 +608,16 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
             "goal not yet met" prior. The judge proposes a disposition per task
             (done / superseded[理由] / blocks-attainment); the human confirms.
     """
+    # 兄弟の review 側と同じ仕上げ口を通す (片方だけ閉じている形を作らない)。
+    _attainment_artifact, gaps = judge_artifact(
+        {"kind": "diff", "ref": target_ref, "content": diff_text}, gaps)
     return {
         "review_type": REVIEW_ATTAINMENT,
         "target_id": target_id,
         "target_ref": target_ref,
         "origin": {"id": spec_origin_id, "content": spec_content},
         "criteria": list(criteria or []),
-        "artifact": {"kind": "diff", "ref": target_ref, "content": diff_text},
+        "artifact": _attainment_artifact,
         "verdict_ownership": "human",
         "judge_contract": ATTAINMENT_JUDGE_CONTRACT,
         "independence_contract": INDEPENDENCE_CONTRACT,
