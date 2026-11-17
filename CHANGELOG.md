@@ -2,6 +2,185 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.66.0] - 2026-11-17
+
+- Merge pull request #837 from kurogin23mech-source/ms-119-review-kernel-origin-and-bookkeeping
+- fix(ms-119): 日本語名の作業記録が注記ゼロで judge に渡る穴と、組み立て口の数え落とし (独立レビュー 2 体)
+- fix(ms-119): 差分を採る場所でなく judge に渡る境界で落とす (独立 AX レビュー 2 周目 high)
+- fix(ms-119): 「落としているか」を測るのをやめ、落とさずに差分を得る経路を無くす (独立 AX レビュー high)
+- fix(ms-119): target 全体のレビューだけが実装者の作業記録を judge に渡していた経路を閉じる (e-7356 レビュー指摘)
+- Merge remote-tracking branch 'origin/main' into ms-119-review-kernel-origin-and-bookkeeping
+- Merge pull request #848 from kurogin23mech-source/ms-187-beacon-1
+- fix(ms-187): ログインのやり直しが要る場面で、5 分待たせずに理由を言って止まる
+- fix(ms-187): ログインの延長で、認証情報ファイルが他のユーザーから読める権限に緩むのを防ぐ
+- fix(ms-187): 独立レビュー (AX・保守性) の指摘を反映し、ログイン延長に上限を設け、失敗を黙らせない
+- fix(ms-187): beacon を使い続けている間は、ログインが自動で延長されるようにする (e-7490)
+- fix(ms-187): ログインの承認が、サーバーが何台で動いていても 1 回で通るようにする (e-7488)
+- Merge pull request #847 from kurogin23mech-source/ms-119-e7404-move-provenance
+- fix(ms-119): 注記を省く条件が推測だったので、差分に訊く実測に置き換えた (独立 AX レビュー silent)
+- fix(ms-119): パスの再利用で由来がすり替わる件を、後ろ向きの遡りを捨てて直す (独立保守性レビュー high)
+- fix(ms-119): 注記の主張が、添えた commit で裏取りできなかった (独立 AX レビュー misleading)
+- fix(ms-119): 退避して元に戻すと、存在しないパスを由来として名乗っていた (独立保守性レビュー high)
+- fix(ms-119): 注記が「探して見つからないパス」を名指す / 差分と別の sha を基準にする (独立 AX レビュー 2 件)
+- fix(ms-119): 退役させたファイルを judge が「置き間違い」と読む件を、履歴の注記で閉じる (e-7404)
+- Merge pull request #846 from kurogin23mech-source/ms-119-fork-d4bf60
+- fix(ms-119): 契約を書いた側が、message の 2 行のうち 1 行しか守っていなかった (独立 AX レビュー 収束周)
+- fix(ms-119): 「SPEC は在るか」に 2 つの関数が別規約で答えていた — descriptor target では必ず偽になる断定 (独立 AX レビュー 最終周)
+- fix(ms-119): 自分の新しいガードが、主張より狭く測っていた (独立保守性レビュー 3 周目)
+- fix(ms-119): 3 番目の面 (README) と、受け取るのに出していなかった 3 旗 (独立 AX レビュー 2 周目)
+- fix(ms-119): 同じコマンドの 2 面が矛盾していた — help が直っていなかった (独立 AX レビュー misleading)
+- fix(ms-119): 実施したレビューを記録できない状態をなくす — 完了主張の 2 入口が非等価だった (e-7440)
+- fix(ms-119): 完了の記録が、存在しない関門を「通過できます」と名乗っていた (e-7439)
+- fix(ms-119): 節目から思想レビューを呼ぶ 3 入口が、実行すると落ちる命令を指示していた (e-7438)
+- Merge pull request #844 from kurogin23mech-source/ms-185-e7395-retired-advice
+- fix(ms-185): 兄弟キーの誤読を名前で閉じ、嘘になった自分の docstring を直す (PR#844 2 周目, judge 2 体 6 件)
+- Merge pull request #845 from kurogin23mech-source/ms-119-fork-d4bf60
+- fix(ms-119): 思想レビューが 6 日間どの経路からも実行できなかった (独立思想レビュー high)
+- fix(ms-185): 常設の反転ハーネスを一度も走らせず、偽の緑と外れたアンカーを 3 件作っていた (PR#844 1 周目, judge 2 体 5 件)
+- fix(ms-185): 引退した通知に「許可してください」と案内して、許可すると「外してください」と言う往復をやめる (e-7395)
+- Merge pull request #842 from kurogin23mech-source/ms-185-e7396-residue
+- Merge pull request #843 from kurogin23mech-source/fix/git-read-port-invocation-cwd
+- fix(ms-185): 列挙の代わりに置いたコマンドが動かず、撤去が未使用 import を残した (PR#842 5 周目)
+- fix(ms-185): 同じ分類規則の説明が 3 箇所に散文で在り、「ここには置かない」と書いた docstring 自身が長い説明を持っていた (PR#842 2 周目, medium)
+- fix(ms-160): 独立レビュー 8 件 — 直したと主張した範囲が片方のポートと片方のフロントで直っていなかった (e-7423)
+- fix(ms-185): 列挙を 3 度目に「直す」のをやめて撤去し、自分の試験だけで生きていた死んだラッパを外す (PR#842 4 周目, judge 2 体)
+- Merge pull request #838 from kurogin23mech-source/ms-119-fork-d4bf60
+- fix(ms-185): 片方のコメントだけ直して双子が古いまま残った — 同じ家族の 4 件目 (PR#842 3 周目, judge 2 体が一致)
+- fix(ms-160): worktree から叩いた git の読み取りが親リポジトリを見ていたのを直す (e-7423)
+- fix(ms-185): 「委譲しているか」を今日の文面との一致で測っていた — 凍結した瞬間は必ず一致するので永久に検知できない (PR#842 2 周目, high)
+- fix(ms-119): observe の障害になる 2 件を閉じる — 文書が偽だった件と、中心機構の silent 無効化
+- Merge pull request #841 from kurogin23mech-source/fix/log-gate-ignores-beacon-churn
+- fix(ms-119): 7 周目 4 件 — うち 2 件は 6 周目の自分の修正が入れた欠陥
+- fix(ms-185): 保証を過大に名乗る試験を直した直後に、新しい試験で同じ過ちをしていた (PR#842 独立保守性レビュー, medium)
+- fix(ms-160): 独立レビュー 5 件 — 直したはずの症状が non-ASCII パスから戻る穴と、過剰除外を検知しない試験 (e-7406)
+- Merge pull request #840 from kurogin23mech-source/ms-185-residue-cleanup
+- fix(ms-185): 畳んだ仕組みを現役として語る残り 4 箇所 — 修復指示が消えた関数を指し、案内が実装と逆だった (e-7396)
+- fix(ms-119): 既定経路では judge が見ていない差分に関門が緑になっていた (6 周目 3 件)
+- fix(ms-160): コミットしたのに beacon log が「未コミットの変更がある」と言って止まるのを直す (e-7406)
+- docs(ms-119): 5 周で同じ 3 家族が出続けるので、原典に規律を書く (個別修正でなく上流)
+- fix(ms-119): 独立レビュー 5 周目 5 件 — ドリフト検査が自分の対象を見ていなかった (PR#838)
+- fix(ms-185): 5 周目の指摘 — 別名の不統一、形で測れる 1 件、そして docstring が実装と逆だった
+- fix(ms-119): 反転ハーネスの当て先が実装の変更で消えて SKIP になっていた
+- feat(ms-119): judge の計器が kernel に無い mode を名乗っていたのを直す (e-4204)
+- feat(ms-119): backlog 3 件 — 証拠ゼロ承認を数えられるように / 承認の注記の矛盾 / 促しと関門の意味を揃える
+- fix(ms-185): 発明した「散文を測る検査」を落とし、挙動と属性で測るものだけ残す (PR#840 4 周目)
+- fix(ms-185): 「開示は残した」は誤りだった — 到達不能な分岐を保存し、偽の緑で守っていた (PR#840 3 周目)
+- fix(ms-119): 独立レビュー 4 周目 3 件 — bundle が「judge が見た差分」を名指していなかった (PR#838)
+- fix(ms-185): 語彙を直しながら、その語彙を説明する文を 2 箇所で古いまま残していた (PR#840 独立レビュー 2 体)
+- Merge remote-tracking branch 'origin/main' into ms-119-fork-d4bf60
+- fix(ms-185): 受信フックから「産出者ゼロの判定」を外す — 相手が居ない判定が API 往復を続けていた
+- fix(ms-185): 画面と資産に残った「現役として語る」記述を直し、Trek 画面のモックを退避する
+- fix(ms-185): 畳んだ仕組みを「現役」として語る面を直す — 独立レビュー 2 体の指摘 (目的達成 AC2 / 思想 4 件)
+- fix(ms-119): 親レビューの request-changes 3 件 — 判定を畳んだのに読み手 2 つが漏れていた (PR#838)
+- fix(ms-119): 短縮 sha を記録すると関門が一生開かない — 入口で伸ばす (PR#838)
+- fix(ms-119): 独立レビュー 2 周目の指摘 5 件 — 新設した「確かめる口」が本物の関門と食い違っていた (PR#838)
+- fix(ms-119): 自分の機構を使って踏んだ — 「gate を通過できます」が いまの head を見ていなかった
+- Merge pull request #839 from kurogin23mech-source/ms-185-fork-813295
+- fix(ms-119): 独立レビュー 2 体の指摘 7 件 — 促しと関門が別の意味になり、履歴が上書きで消えていた (PR#838)
+- fix(ms-185): 2 周目レビューの指摘 6 件 — 許可型に変えた表そのものが静かに劣化していた (PR#839)
+- fix(ms-185): 独立保守性レビューの指摘 4 件 — 1 経路だけ塞いで「閉じた」と称していた (PR#839)
+- fix(ms-185): 産出者を持つ種別を「引退」に入れても気づけない穴を汎用条件で閉じる (e-7330)
+- fix(ms-185): 旗の検査が姉妹分岐から鍵を借りるのと、反転ハーネスの SKIP 1 件を直す (e-7300/7309)
+- feat(ms-185): 自律 channel の 3 箇所一致を固定し、node の試験を CI に載せる (e-7157/7158/7352)
+- feat(ms-185): 呼び出し元ゼロの保存層・二重実装・誤った根拠コメントを片付ける (e-7306/7322/7327/7324/7308/7326)
+- test(ms-119): 反転ハーネスで e-6859 の試験を測り、自分が書いた偽の緑 2 件を塞ぐ
+- feat(ms-185): 画面に残っていた到達不能な Trek 本体を落とす (e-7325)
+- test(ms-119): 新しい試験の sys.path を conftest に委ねる
+- fix(ms-119): レビュー済みの帳簿を「どの差分を見たか」で持つ — 実施後に積んだコミットが関門から隠れていた (e-6859)
+- fix(ms-185): tests 側の散文も同じ型で直す — 同一ファイル内の食い違いを含む (e-7071)
+- fix(ms-185): 消えた抜け道・事前承認・防御を「在る」と語る記述を直す (e-7071)
+- fix(ms-185): 畳んだ Trek を現役として語る残りの記述を直す — Skill 指示の誤りを含む (e-7071)
+- fix(ms-185): 消えた Trek 一族を現役の利用者として語る記述を直す (e-7071)
+- fix(ms-119): judge に渡す入力を、契約どおりのものに揃える
+- fix(ms-185): 畳んだ産出側を「今も動いている」と語る記述と出力文を直す (e-7071)
+- Merge pull request #835 from kurogin23mech-source/ms-185-fork-07a3a2
+- fix(ms-185): 消した仕組みを「言い換え」で現役として語る 1 行を直す (PR#835 / AX 3 周目)
+- Merge remote-tracking branch 'origin/main' into ms-185-fork-07a3a2
+- Merge pull request #836 from kurogin23mech-source/ms-119-e7345-origin-from-reviewed-repo
+- fix(ms-119): 独立レビュー 2 体の指摘 7 件 — 開示を足した変更が、3 番目の呼び出し元で黙って無効化されていた
+- fix(ms-119): レビューが、使っていない基準で判定したことを隠せないようにする (e-7345)
+- fix(ms-185): AX を改訂後の原典で測り直し、出た 3 件を直す (PR#835)
+- Merge remote-tracking branch 'origin/main' into ms-185-fork-07a3a2
+- fix(ms-185): 独立レビュー 2 体の指摘 3 件 — 機構は消したのに、それを説明する文書が残っていた (PR#835)
+- Merge pull request #834 from kurogin23mech-source/ms-119-capability-ax-ai-target-pr-ax-instance
+- fix(ms-119): 独立レビュー 2 体の指摘 6 件 — 計器を更新した変更が、計器自身の検査を 1 件も持っていなかった
+- docs(ms-119): AX レビューの原典を「AI が言いたいことを言える環境か」を測る形に改める
+- fix(ms-185): 自動返信の予算ゲートに残っていた「通れない迂回路」を撤去する (e-7080 / e-7321)
+- fix(ms-185): 発行できる者が居なくなった署名の層を、4 面そろえて落とす (e-7078 / e-7323)
+- Merge pull request #832 from kurogin23mech-source/ms-185-fork-07a3a2
+- fix(ms-185): 引退種別の開示が、消えても誰も気づかない状態だったのを閉じる (e-7320 / 独立レビュー 2 体)
+- fix(ms-185): 過去に実在した判断の種別を引くと「綴り間違いでは」と誤って疑われるのを直す (e-7320)
+- fix(ms-185): 独立レビュー 2 体の指摘 7 件 — 言語をまたぐ参照と、死んだ呼び出し口の取り残し (PR#832)
+- fix(ms-185): 発行者が居なくなった 4 つの channel を「引退済み」に移す (e-7071 の一部)
+- feat(ms-185): 使われていない作業空間の本体を落とす — 記録を読む面だけ残す (e-7070)
+- Merge pull request #833 from kurogin23mech-source/ms-160-e7314-handoff-narrow-read
+- test(ms-160): 両フロント一致の試験が、前提を自分で用意せず環境に依存していた (e-7314)
+- fix(ms-160): 独立レビュー 2 体の指摘 5 件 — 引き継ぎの取りこぼしを直す機能が、実データの 82% を取りこぼしていた (e-7314)
+- fix(ms-160): ログインが承認する間もなく「コードが無効」で落ちるのを止める (e-7305)
+- feat(ms-160): 前セッションが「最優先」と書いた本文が、起動時に要約されて流れるのを構造で止める (e-7314)
+- Merge pull request #831 from kurogin23mech-source/ms-173-jump-harness-derive
+- fix(ms-173): 正しく書いた人が赤くなる検査を直す — 偽の赤は迂回を訓練する (PR#831)
+- fix(ms-173): 既定を反転したとき、旧既定を主張していたテスト 2 件を直し忘れていた (PR#831)
+- fix(ms-173): 独立レビュー 2 体が同じ場所を指した — 3 値のうち 1 値が行の印で消え、画面が誤った直し方を出していた (PR#831)
+- Merge remote-tracking branch 'origin/main' into ms-173-jump-harness-derive
+- Merge pull request #827 from kurogin23mech-source/ms-185-fork-65b50f
+- fix(ms-185): 独立レビュー 2 体の指摘 — 入口を 1 つだけコメントで閉じていた件と、説明文が片方のフロントで事実と逆だった件 (PR#827)
+- fix(ms-185): 入口の有無を 2 通りに読む走査をやめる — 片側が CI だけ赤く、もう片側は偽の緑だった (PR#827)
+- fix(ms-173): 押したときの経路でプローブの結果を捨てていた (e-7267)
+- fix(ms-173): 2 周目レビューの指摘 17 件 — 安全装置の片側しか閉じていなかった件 (e-7266)
+- fix(ms-173): 独立レビュー 2 体の指摘 8 件 — 説明文が挙動と逆 / 自分で作った理由の合流 (e-7265)
+- fix(ms-173): 盤が 30 分で自分を畳むのをやめる — 既定を「畳まない」に反転 (e-7264)
+- test(ms-173): 名乗り側の下限値は「分からない」であって端末ではない、を契約にする (e-7261)
+- fix(ms-173): バックグラウンドのセッションに「端末が未対応」と表示していたのを直す (e-7263)
+- fix(ms-173): 確認が来ていないセッションを「確認待ち」と表示していたのを直す (e-7262)
+- fix(ms-173): 運用室から iTerm に飛べない — 端末の種類を名乗りでなくプロセスに訊く (e-7261)
+- fix(ms-185): 独立レビューの保守性 10 件 — 半分消した状態が「生きている」と読めた件 (PR#827)
+- fix(ms-185): 独立レビューの AX 5 件 — ガードが「綴りを変えれば黙る」計器だった件 (PR#827)
+- fix(ms-185): 親レビューの指摘 2 件 — 偽の緑を作りうる反転ハーネスと、狭すぎた走査範囲 (PR#827)
+- Merge branch 'main' into ms-185-fork-65b50f
+- Merge pull request #830 from kurogin23mech-source/ms-170-philosophy-fixes
+- chore: 盤の実行ファイルを .gitignore に加える
+- fix(ms-170): 独立レビュー 2 体の指摘 6 件 — 全件採用 (PR#830)
+- fix(ms-170): 思想レビューの指摘 2 件 — クラウド取得元の盤が二級だった件と、設置した盤が勝手に畳む件
+- Merge pull request #829 from kurogin23mech-source/ms-170-e7147-board-reuse
+- fix(ms-170): 独立レビュー 2 体の指摘 11 件 — 全件採用 (PR#829)
+- feat(ms-170): 盤の修正を、動いている盤そのものに問い合わせて確かめる手順を置く (e-7252)
+- feat(ms-170): 盤を何度開き直しても増えず、誰も見ていなければ畳むようにする (e-7147)
+- Merge pull request #828 from kurogin23mech-source/ms-170-e7249-stale-viewer
+- fix(ms-170): 却下した指摘を撤回して共有部品に寄せ、全体を歩くガードを repo のコードだけに絞る
+- fix(ms-170): 独立レビュー 2 体の指摘 5 件 — 4 件採用 / 1 件は一部を意図して却下 (PR#828)
+- fix(ms-185): 独立レビュー 2 体の指摘 4 件 — 全件採用 (PR#827)
+- fix(ms-170): 直したのに古いままの盤が動き続けるのを止める (e-7249)
+- fix(ms-185): 汚染ガードの案内文が消えた fixture を指していたのを直す
+- test(ms-185): 入口が在ることを固定していたテストを入口と一緒に外す (e-7069 / e-7079)
+- refactor(ms-185): Trek の残り入口 5 面を落とす (e-7079 第1段)
+- refactor(ms-185): Trek を CLI 両入口と Skill 置き場 3 箇所から落とす (e-7069)
+- Merge pull request #826 from kurogin23mech-source/fix-send-auth-bypass-and-stale-where
+- fix: 独立レビュー 2 体の指摘 4 件 — 全件採用 (PR#826)
+- fix: ログインしていないと送信が止まる件と、運用室の行が古い作業内容を出す件を直す (e-7234 / e-7235)
+- Merge pull request #825 from kurogin23mech-source/ms-173-iterm-jump-reorder
+- Merge pull request #824 from kurogin23mech-source/ms-185-fork-a47e9c
+- fix(ms-173): 独立レビュー 2 体の指摘 6 件 — 全件採用 (PR#825)
+- fix(ms-173): 端末の実機検証が「タブが足りない」と誤判定するのを直し、Terminal.app の計測結果を残す (e-7219)
+- fix(ms-173): 運用室から端末へ飛ぶのが、窓とタブの並び順によって失敗するのを直す (e-7219)
+- fix(ms-185): 独立レビュー 2 体の指摘 6 件 — 全件採用 (PR#824)
+- fix(ms-185): 締切の読み書きの口を全保存層に揃える — 「在れば使う」をやめる (e-7066)
+- fix(ms-185): 期日を過ぎても誰にも知らされない状態を直す — 定期発火が分割スキーマを読めていなかった (e-7066)
+- Merge pull request #823 from kurogin23mech-source/ms-104-map-skill-derived-contract
+- fix(ms-104): 独立レビュー 2 体の指摘 7 件 — 6 件採用 / 1 件は処方だけ却下 (PR#823)
+- fix(ms-104): 全貌マップの手入れ手順が、消える編集を案内しているのを直す (e-7213)
+- Merge pull request #822 from kurogin23mech-source/ms-10-claude-md-template-drift
+- fix(ms-10): 独立レビュー 2 体の指摘 5 件 — 全件採用 (PR#822)
+- fix(ms-10): beacon skill install が CLAUDE.md の案内を古い内容に巻き戻すのを直す (e-7208)
+- Merge pull request #821 from kurogin23mech-source/ms-67-session-fork-iterm2-default
+- fix(ms-67): 危険だと書いた端末を「前面だから」で選ぶ分岐を消す (PR#821 独立 AX レビュー medium)
+- Merge pull request #820 from kurogin23mech-source/ms-173-iterm2-harness-kind
+- docs(ms-67): session-fork の既定端末を Terminal.app から iTerm2 に変える (3 コピー同期)
+- fix(ms-173): 生の名乗りは既知端末の TERM_PROGRAM と完全一致でだけ受け、突合を driver 単位にする (PR#820 独立レビュー 2 件)
+- fix(ms-173): iTerm2 のセッションにも運用室から端末へ飛べるようにする — 名乗りと受け付けの語彙を揃え、ずれたら赤くなる突合を置く (e-7199)
+- docs(release): update README/CHANGELOG for v0.65.0
+- chore(release): bump formula to 0.65.0
+
 ## [v0.65.0] - 2026-10-28
 
 - Merge pull request #819 from kurogin23mech-source/ms-178-fork-e2d3c6
