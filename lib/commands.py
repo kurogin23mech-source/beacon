@@ -2082,25 +2082,25 @@ def _intra_range_moves(base: str, head: str) -> list:
     return moves
 
 
-def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
-                             diff_ref: str = "", head_sha: str = "",
-                             gaps: "Optional[list]" = None):
-    """差分の範囲内の移動を judge 向け参照に組む **唯一の入口** (ms-119 e-7404)。
+def _resolve_move_range(*, pr: str = "", pr_repo: str = "",
+                        diff_ref: str = "", head_sha: str = "",
+                        gaps: "Optional[list]" = None):
+    """範囲内の移動を数える ``(base, head)`` を、**judge に渡る差分と同じ基準で** 決める。
 
-    単一種別の経路 (`cmd_review_context`) と `--batch` の経路
-    (`cmd_review_batch_context`) の **両方がここを通る** —— 片方だけに足すと、
-    節目のバッチ発火 (= 実際に judge を起動する既定経路) で効かない形が作れる。
+    決められなければ ``None`` (理由は ``gaps`` に出す —— 黙って注記を消さない)。
 
-    範囲の決め方:
-      * ``pr``      — gh に base / head の sha を聞く (手元に無ければ空を返す)
-      * ``diff_ref`` — ``base...head`` / ``base..head`` を割る
-
-    どちらも解決できなければ None (載せない)。
+    段の順:
+      1. ``pr`` — gh に base / head の sha を聞く。head は呼び出し側が差分を採った
+         ``head_sha`` を優先し、食い違いは gaps に出す
+      2. ``diff_ref`` — ``base...head`` / ``base..head`` を割る。単一の ref では範囲が
+         決まらないので注記を組まない
+      3. 三点 (``...`` と PR 経路) なら base を **分岐点** に置き換える (ms-119
+         e-7480)。gh pr diff も ``A...B`` も分岐点からの差分を judge に渡すので、
+         左辺 (本流の先端) を基準に測ると「差分が rename として見せているか」を
+         別の 2 つの木で測ることになり、本流が同じパスを独立に足していると注記を
+         誤って省いた。gh の ``baseRefOid`` は本流の **いまの先端** で、分岐点ではない
     """
-    import review_spine
     base = head = ""
-    # judge に渡る差分が「分岐点からの差分」(三点) かどうか。gh pr diff は PR の
-    # base と head の分岐点からの差分を返すので、PR 経路も三点 (ms-119 e-7480)。
     three_dot = False
     if pr:
         three_dot = True
@@ -2132,17 +2132,18 @@ def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
             head = head_sha
     elif diff_ref:
         sep = "..." if "..." in diff_ref else (".." if ".." in diff_ref else "")
-        if sep:
-            left, _, right = diff_ref.partition(sep)
-            base, head = left.strip(), (right.strip() or "HEAD")
-            three_dot = sep == "..."
+        if not sep:
+            if gaps is not None:
+                gaps.append(
+                    f"範囲内の移動の注記を組めませんでした: --diff-ref {diff_ref} は"
+                    f"範囲 (A..B / A...B) ではないので、どこからの移動かを数える"
+                    f"基準が決まりません。")
+            return None
+        left, _, right = diff_ref.partition(sep)
+        base, head = left.strip(), (right.strip() or "HEAD")
+        three_dot = sep == "..."
     if not (base and head):
         return None
-    # **差分採取と同じ基準で移動を数える** (ms-119 e-7480, PR#847 独立 AX)。
-    # 三点の差分は分岐点が基準なのに、ここで左辺 (PR なら base の先端) をそのまま
-    # 基準にすると、「差分が rename として見せているか」の実測を別の 2 つの木で
-    # 測ることになる。分岐後に本流が同じパスを独立に足していると「rename として
-    # 見せている」と誤判定して注記を省き、しかも gaps にも出なかった。
     if three_dot:
         ok_mb, out_mb = _git_ok(["git", "merge-base", base, head])
         fork_point = (out_mb or "").strip() if ok_mb else ""
@@ -2156,19 +2157,79 @@ def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
                     f"きたものである可能性を judge は確かめられません。")
             return None
         base = fork_point
-    # **取り込み commit の中の移動は検出しない** ことを機械的に開示する
-    # (ms-119 e-7481, PR#847 独立 AX)。git log は既定で取り込み commit の差分を
-    # 見ないので、範囲内で作ったファイルが本流との衝突解消の中で退避されると、
-    # 移動は走査にも差分にも現れず注記が 0 件になる。以前この限界は説明文にだけ
-    # 書かれていて、コードは何も言わなかった。
+    return base, head
+
+
+def _disclose_merges_in_range(base: str, head: str,
+                              gaps: "Optional[list]") -> None:
+    """範囲内の取り込み (merge) commit の **衝突解消の中で** 動いたファイルを開示する
+    (ms-119 e-7481)。
+
+    git log は既定で取り込み commit の差分を見ないので、範囲内で作ったファイルが
+    本流との衝突解消の中で退避されると、``_intra_range_moves`` の走査にも差分にも
+    移動が現れず、注記が 0 件になる。
+
+    **取り込みがあるだけでは何も言わない** (PR #851 独立 AX: 本流を取り込んだだけの
+    普通の PR で毎回警告が出ると、本物と区別できず読み流される)。各取り込み commit
+    について ``git show --remerge-diff`` (自動マージの結果と、実際に commit された
+    結果の差 = 人が衝突解消の中で加えた変更だけ) を見て、そこで rename / 追加 /
+    削除があった場合だけ、そのファイルを名指して出す。
+
+    測れなかったときは「取り込み無し」と畳まず、測れなかったことを出す。
+    """
+    if gaps is None:
+        return
     ok_m, out_m = _git_ok(["git", "rev-list", "--merges", f"{base}..{head}"])
-    merges = [ln for ln in (out_m or "").split() if ln] if ok_m else []
-    if merges and gaps is not None:
+    if not ok_m:
         gaps.append(
-            f"範囲に取り込み (merge) commit が {len(merges)} 件含まれます。取り込みの"
-            f"衝突解消の中で移動したファイルは、範囲内の移動の注記の検出対象外です "
-            f"(差分では移動先への新規追加に見えることがあります)。例: "
-            f"{merges[0][:12]}")
+            f"範囲 {base[:12]}..{head[:12]} に取り込み (merge) commit があるかを"
+            f"測れませんでした。取り込みの衝突解消の中で移動したファイルは、範囲内の"
+            f"移動の注記に出ていない可能性があります。")
+        return
+    for merge in (ln for ln in (out_m or "").split() if ln):
+        ok_r, out_r = _git_ok(["git", "show", "--remerge-diff", "--name-status",
+                               "--format=", merge])
+        if not ok_r:
+            gaps.append(
+                f"取り込み commit {merge[:12]} の衝突解消の中身を測れませんでした "
+                f"(git が --remerge-diff に未対応の可能性)。その中で移動した"
+                f"ファイルは、範囲内の移動の注記に出ていない可能性があります。")
+            continue
+        touched = []
+        for line in (out_r or "").splitlines():
+            cols = line.split("\t")
+            if len(cols) >= 3 and cols[0].startswith("R"):
+                touched.append(f"{cols[1]} → {cols[2]}")
+            elif len(cols) == 2 and cols[0] in ("A", "D"):
+                touched.append(f"{cols[1]} ({'追加' if cols[0] == 'A' else '削除'})")
+        if touched:
+            gaps.append(
+                f"取り込み commit {merge[:12]} の衝突解消の中で、ファイルの移動・"
+                f"追加・削除がありました: {', '.join(touched)}。これらは範囲内の"
+                f"移動の注記の検出対象外です (差分では移動先への新規追加に見える"
+                f"ことがあります)。")
+
+
+def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
+                             diff_ref: str = "", head_sha: str = "",
+                             gaps: "Optional[list]" = None):
+    """差分の範囲内の移動を judge 向け参照に組む **唯一の入口** (ms-119 e-7404)。
+
+    単一種別の経路 (`cmd_review_context`) と `--batch` の経路
+    (`cmd_review_batch_context`) の **両方がここを通る** —— 片方だけに足すと、
+    節目のバッチ発火 (= 実際に judge を起動する既定経路) で効かない形が作れる。
+
+    3 段: 範囲を judge の差分と同じ基準で決める (``_resolve_move_range``) →
+    取り込みの衝突解消の中の移動を開示する (``_disclose_merges_in_range``) →
+    範囲内の移動を組む (``_intra_range_moves``)。範囲が決まらなければ None。
+    """
+    import review_spine
+    rng = _resolve_move_range(pr=pr, pr_repo=pr_repo, diff_ref=diff_ref,
+                              head_sha=head_sha, gaps=gaps)
+    if rng is None:
+        return None
+    base, head = rng
+    _disclose_merges_in_range(base, head, gaps)
     return review_spine.build_intra_range_move_reference(
         _intra_range_moves(base, head))
 

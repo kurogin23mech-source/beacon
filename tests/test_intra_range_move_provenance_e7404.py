@@ -845,13 +845,57 @@ def test_unresolvable_fork_point_is_disclosed_not_guessed(monkeypatch, repo):
     assert any("分岐点" in g for g in gaps), gaps
 
 
-# --- 取り込み commit の中の移動は検出対象外であることを開示する (e-7481) -----
+# --- 取り込みの衝突解消の中で動いたファイルを開示する (e-7481) --------------
+#
+# git log は既定で取り込み commit の差分を見ないので、衝突解消の中で退避した
+# ファイルは注記が 0 件になる。取り込みがあるだけでは何も言わず (本流を取り込んだ
+# だけの普通の PR で毎回警告すると読み流される: PR #851 独立 AX)、衝突解消の中で
+# 実際に移動・追加・削除があったときだけ名指す。
 
-def test_a_merge_in_the_range_is_disclosed_in_gaps(repo):
-    """範囲に取り込み commit があれば、その中の移動は検出しない旨が gaps に出る。"""
-    path, git = repo
-    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+def _rev(path, ref="HEAD"):
+    return subprocess.run(["git", "rev-parse", ref], cwd=str(path),
                           capture_output=True, text=True).stdout.strip()
+
+
+def _merge_with_move_during_resolution(path, git, base):
+    """``base`` から feature を伸ばし、本流との衝突を解消する中で t/y.py を退避する。"""
+    git("checkout", "-q", "-b", "feat", base)
+    (path / "t").mkdir()
+    (path / "t" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create t/y.py")
+    (path / "keep.py").write_text("x = 'feature'\n", encoding="utf-8")
+    git("commit", "-q", "-am", "feature edits keep")
+    git("checkout", "-q", "-b", "mainline2", base)
+    (path / "keep.py").write_text("x = 'mainline'\n", encoding="utf-8")
+    git("commit", "-q", "-am", "mainline edits keep")
+    mainline = _rev(path)
+    git("checkout", "-q", "feat")
+    subprocess.run(["git", "merge", "-q", "mainline2"], cwd=str(path),
+                   capture_output=True)            # 衝突で止まる
+    (path / "keep.py").write_text("x = 'resolved'\n", encoding="utf-8")
+    (path / "trash").mkdir()
+    git("mv", "t/y.py", "trash/y.py")
+    git("add", "-A")
+    git("commit", "-q", "-m", "merge mainline, retire t/y.py while resolving")
+    return mainline, _rev(path)
+
+
+def test_a_move_during_merge_resolution_is_named_in_gaps(repo):
+    """**本体 (e-7481 受入 1)**: 衝突解消の中の移動は、ファイルを名指して gaps に出る。"""
+    path, git = repo
+    base = _rev(path)
+    _mainline, head = _merge_with_move_during_resolution(path, git, base)
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{base}..{head}", gaps=gaps)
+    hit = [g for g in gaps if "衝突解消" in g]
+    assert hit and "t/y.py → trash/y.py" in hit[0], gaps
+
+
+def test_a_clean_merge_says_nothing(repo):
+    """衝突も移動も無い取り込みだけでは何も言わない (PR #851 独立 AX)。"""
+    path, git = repo
+    base = _rev(path)
     git("checkout", "-q", "-b", "side")
     (path / "side.py").write_text("s = 1\n", encoding="utf-8")
     git("add", "-A")
@@ -861,11 +905,41 @@ def test_a_merge_in_the_range_is_disclosed_in_gaps(repo):
     git("add", "-A")
     git("commit", "-q", "-m", "work")
     git("merge", "-q", "--no-edit", "side")
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
-                          capture_output=True, text=True).stdout.strip()
     gaps = []
-    commands._artifact_move_reference(diff_ref=f"{base}...{head}", gaps=gaps)
-    assert any("取り込み" in g and "検出対象外" in g for g in gaps), gaps
+    commands._artifact_move_reference(diff_ref=f"{base}...{_rev(path)}", gaps=gaps)
+    assert gaps == [], gaps
+
+
+def test_a_resolving_merge_before_the_range_is_not_counted(repo):
+    """範囲より前 (base の祖先) の取り込みは数えない (PR #851 独立保守性: 範囲の
+    絞りを外す変異が全試験緑で生き残っていた)。"""
+    path, git = repo
+    base0 = _rev(path)
+    _mainline, merged = _merge_with_move_during_resolution(path, git, base0)
+    (path / "after.py").write_text("a = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "after the merge")
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{merged}..{_rev(path)}", gaps=gaps)
+    assert gaps == [], gaps
+
+
+def test_three_dot_ignores_a_resolving_merge_on_the_mainline_side(repo):
+    """三点では分岐点が基準なので、本流側にだけ在る取り込みは数えない。
+
+    左辺 (本流の先端) を基準にすると数えてしまう —— 基準の補正も守る。
+    """
+    path, git = repo
+    fork = _rev(path)
+    git("checkout", "-q", "-b", "topic")
+    (path / "topic.py").write_text("t = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "topic")
+    topic = _rev(path)
+    _mainline, main_tip = _merge_with_move_during_resolution(path, git, fork)
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{main_tip}...{topic}", gaps=gaps)
+    assert not [g for g in gaps if "衝突解消" in g], gaps
 
 
 def test_no_merge_no_merge_gap(repo):
@@ -878,3 +952,28 @@ def test_no_merge_no_merge_gap(repo):
     gaps = []
     commands._artifact_move_reference(diff_ref=f"{base}...{head}", gaps=gaps)
     assert gaps == [], gaps
+
+
+def test_unmeasurable_merges_are_not_folded_into_none(monkeypatch, repo):
+    """取り込みの有無を測れなかったとき、「取り込み無し」と畳まずに言う (PR #851 独立 AX)。"""
+    path, git = repo
+    (path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    base, head = _base_head(path)
+    real = commands._git_ok
+    monkeypatch.setattr(
+        commands, "_git_ok",
+        lambda argv: (False, "") if argv[:3] == ["git", "rev-list", "--merges"]
+        else real(argv))
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{base}..{head}", gaps=gaps)
+    assert any("測れませんでした" in g for g in gaps), gaps
+
+
+def test_a_single_ref_says_why_there_is_no_note(repo):
+    """範囲でない --diff-ref では注記を組めない理由を言う (黙って消さない)。"""
+    path, git = repo
+    gaps = []
+    assert commands._artifact_move_reference(diff_ref="HEAD", gaps=gaps) is None
+    assert any("範囲" in g for g in gaps), gaps
