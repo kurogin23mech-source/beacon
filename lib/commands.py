@@ -1961,10 +1961,14 @@ def _intra_range_moves(base: str, head: str) -> list:
 
     返すのは ``[{"path": 移動先, "from": 元パス, "commit": 移動 commit}]``。
 
-    判定規則: 範囲内の rename (old → new) のうち、**old が base に存在しない**もの
-    だけを返す。old が base に在れば base..head の差分はそれを rename として見せる
-    ので (``diff.renames`` 既定 true)、judge は履歴を補う必要がない。old が base に
-    無い場合だけ、差分は new への純粋な新規追加になり「どこから来たか」が消える。
+    判定規則: 範囲内の rename の連鎖 (出発点 → head に在る行き先) のうち、
+    **base..head の差分がその組を rename として見せていないもの** を返す。省く条件は
+    推測でなく git の差分に訊いた実測で決める (下の ``shown_as_rename`` の段落が
+    唯一の定義。ここに規則の写しを置かない —— 以前ここに「出発点が base に無いもの
+    だけ」と書いてあり、実装と同じ PR の試験の両方に反証されていた: ms-119 e-7483)。
+
+    ``base`` は **judge に渡る差分と同じ基準** で渡すこと (三点の差分なら分岐点)。
+    基準を合わせるのは呼び出し側 :func:`_artifact_move_reference` の責務。
 
     best-effort: base / head を手元で解決できない (未 fetch 等) なら空を返す
     —— 推測で埋めるより、載せないほうが安全 (載せた注記が誤っていると judge を
@@ -2095,7 +2099,11 @@ def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
     """
     import review_spine
     base = head = ""
+    # judge に渡る差分が「分岐点からの差分」(三点) かどうか。gh pr diff は PR の
+    # base と head の分岐点からの差分を返すので、PR 経路も三点 (ms-119 e-7480)。
+    three_dot = False
     if pr:
+        three_dot = True
         argv = ["gh", "pr", "view", str(pr), "--json", "baseRefOid,headRefOid"]
         if pr_repo:
             argv += ["--repo", pr_repo]
@@ -2127,8 +2135,40 @@ def _artifact_move_reference(*, pr: str = "", pr_repo: str = "",
         if sep:
             left, _, right = diff_ref.partition(sep)
             base, head = left.strip(), (right.strip() or "HEAD")
+            three_dot = sep == "..."
     if not (base and head):
         return None
+    # **差分採取と同じ基準で移動を数える** (ms-119 e-7480, PR#847 独立 AX)。
+    # 三点の差分は分岐点が基準なのに、ここで左辺 (PR なら base の先端) をそのまま
+    # 基準にすると、「差分が rename として見せているか」の実測を別の 2 つの木で
+    # 測ることになる。分岐後に本流が同じパスを独立に足していると「rename として
+    # 見せている」と誤判定して注記を省き、しかも gaps にも出なかった。
+    if three_dot:
+        ok_mb, out_mb = _git_ok(["git", "merge-base", base, head])
+        fork_point = (out_mb or "").strip() if ok_mb else ""
+        if not fork_point:
+            # 推測で埋めない (誤った基準の注記は judge を逆向きに誤導する)。
+            if gaps is not None:
+                gaps.append(
+                    f"範囲内の移動の注記を組めませんでした: {base[:12]} と "
+                    f"{head[:12]} の分岐点を手元の git で解決できません (未 fetch "
+                    f"等)。差分の中で新規追加に見えるファイルが、範囲内で移動して"
+                    f"きたものである可能性を judge は確かめられません。")
+            return None
+        base = fork_point
+    # **取り込み commit の中の移動は検出しない** ことを機械的に開示する
+    # (ms-119 e-7481, PR#847 独立 AX)。git log は既定で取り込み commit の差分を
+    # 見ないので、範囲内で作ったファイルが本流との衝突解消の中で退避されると、
+    # 移動は走査にも差分にも現れず注記が 0 件になる。以前この限界は説明文にだけ
+    # 書かれていて、コードは何も言わなかった。
+    ok_m, out_m = _git_ok(["git", "rev-list", "--merges", f"{base}..{head}"])
+    merges = [ln for ln in (out_m or "").split() if ln] if ok_m else []
+    if merges and gaps is not None:
+        gaps.append(
+            f"範囲に取り込み (merge) commit が {len(merges)} 件含まれます。取り込みの"
+            f"衝突解消の中で移動したファイルは、範囲内の移動の注記の検出対象外です "
+            f"(差分では移動先への新規追加に見えることがあります)。例: "
+            f"{merges[0][:12]}")
     return review_spine.build_intra_range_move_reference(
         _intra_range_moves(base, head))
 

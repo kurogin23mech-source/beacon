@@ -750,3 +750,131 @@ def test_plain_rename_the_diff_already_shows_is_not_reported(repo):
                          cwd=str(path), capture_output=True, text=True)
     assert out.stdout.startswith("R"), out.stdout
     assert commands._intra_range_moves(base, head) == []
+
+
+# --- 三点の差分は分岐点を基準に移動を数える (ms-119 e-7480) -----------------
+#
+# 差分の採取は三点 (`A...B` / gh pr diff) なら分岐点からの差分を judge に渡す。
+# 移動の注記だけが左辺 (= 本流の先端) を基準に「差分が rename として見せているか」を
+# 測っていたので、分岐後に本流が同じパスを独立に足していると、judge に渡る差分では
+# 新規追加に見えるのに「rename として見せている」と誤判定して注記を省いた
+# (PR#847 独立 AX が実機で再現)。
+
+def _diverged_with_independent_add(repo):
+    """分岐点に tests/y.py が無い。feature は作って trash/ へ退避、本流は独立に同名同内容を足す。"""
+    path, git = repo
+    fork = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    git("checkout", "-q", "-b", "feature")
+    (path / "tests").mkdir()
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create in tests/")
+    (path / "trash").mkdir()
+    git("mv", "tests/y.py", "trash/y.py")
+    git("commit", "-q", "-m", "retire to trash/")
+    feature = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                             capture_output=True, text=True).stdout.strip()
+    git("checkout", "-q", fork)
+    git("checkout", "-q", "-b", "mainline")
+    (path / "tests").mkdir(exist_ok=True)
+    (path / "tests" / "y.py").write_text("y = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "mainline adds the same file independently")
+    mainline = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                              capture_output=True, text=True).stdout.strip()
+    return fork, mainline, feature
+
+
+def test_three_dot_ref_measures_against_the_fork_point(repo):
+    """**本体 (e-7480 受入 1)**: 三点指定でも注記が 1 件出る。"""
+    _fork, mainline, feature = _diverged_with_independent_add(repo)
+    # judge に渡る差分 (三点) では trash/y.py は純粋な新規追加に見える
+    shown = subprocess.run(["git", "diff", "--name-status", f"{mainline}...{feature}"],
+                           capture_output=True, text=True).stdout
+    assert shown.split() == ["A", "trash/y.py"], shown
+    gaps = []
+    ref = commands._artifact_move_reference(diff_ref=f"{mainline}...{feature}",
+                                            gaps=gaps)
+    assert ref is not None and "tests/y.py" in ref["content"], (ref, gaps)
+
+
+def test_two_dot_ref_keeps_using_the_left_side(repo):
+    """e-7480 受入 2: 二点指定の既存挙動は変えない (左辺をそのまま基準にする)。
+
+    二点の差分は 2 つの木の比較なので、本流が同名同内容を持っていれば差分自体が
+    rename として見せる —— 注記を省くのが正しい。
+    """
+    _fork, mainline, feature = _diverged_with_independent_add(repo)
+    shown = subprocess.run(["git", "diff", "--name-status", "-M",
+                            f"{mainline}..{feature}"],
+                           capture_output=True, text=True).stdout
+    assert shown.startswith("R"), shown
+    assert commands._artifact_move_reference(
+        diff_ref=f"{mainline}..{feature}") is None
+
+
+def test_pr_path_measures_against_the_fork_point_too(monkeypatch, repo):
+    """gh pr diff も分岐点からの差分なので、PR 経路も同じ基準にする。
+
+    gh の baseRefOid は本流の **いまの先端** で、分岐点ではない。
+    """
+    _fork, mainline, feature = _diverged_with_independent_add(repo)
+    real = commands._git_ok
+    monkeypatch.setattr(
+        commands, "_git_ok",
+        lambda argv: ((True, json.dumps({"baseRefOid": mainline,
+                                         "headRefOid": feature}))
+                      if argv[:3] == ["gh", "pr", "view"] else real(argv)))
+    gaps = []
+    ref = commands._artifact_move_reference(pr="1", head_sha=feature, gaps=gaps)
+    assert ref is not None and "tests/y.py" in ref["content"], (ref, gaps)
+
+
+def test_unresolvable_fork_point_is_disclosed_not_guessed(monkeypatch, repo):
+    """e-7480 受入 3: 分岐点を解決できなければ推測で埋めず、その旨を gaps に出す。"""
+    _fork, mainline, feature = _diverged_with_independent_add(repo)
+    real = commands._git_ok
+    monkeypatch.setattr(
+        commands, "_git_ok",
+        lambda argv: (False, "") if argv[:2] == ["git", "merge-base"] else real(argv))
+    gaps = []
+    ref = commands._artifact_move_reference(diff_ref=f"{mainline}...{feature}",
+                                            gaps=gaps)
+    assert ref is None
+    assert any("分岐点" in g for g in gaps), gaps
+
+
+# --- 取り込み commit の中の移動は検出対象外であることを開示する (e-7481) -----
+
+def test_a_merge_in_the_range_is_disclosed_in_gaps(repo):
+    """範囲に取り込み commit があれば、その中の移動は検出しない旨が gaps に出る。"""
+    path, git = repo
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    git("checkout", "-q", "-b", "side")
+    (path / "side.py").write_text("s = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "side")
+    git("checkout", "-q", "-b", "work", base)
+    (path / "work.py").write_text("w = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "work")
+    git("merge", "-q", "--no-edit", "side")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True).stdout.strip()
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{base}...{head}", gaps=gaps)
+    assert any("取り込み" in g and "検出対象外" in g for g in gaps), gaps
+
+
+def test_no_merge_no_merge_gap(repo):
+    """e-7481 受入 2: 取り込みを含まない範囲では何も足さない (ノイズを出さない)。"""
+    path, git = repo
+    (path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "a")
+    base, head = _base_head(path)
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{base}...{head}", gaps=gaps)
+    assert gaps == [], gaps
