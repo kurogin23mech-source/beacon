@@ -362,3 +362,88 @@ def test_an_unknown_sha_source_is_named_not_disguised(
     line = [ln for ln in out.splitlines() if "対象の差分:" in ln]
     assert line and "表示文が未定義" in line[0], out
     assert "印が見つからなかった" not in line[0], out
+
+
+# ---------------------------------------------------------------------------
+# 片付けは自分の印だけ / 効いていない印は食い違いの候補から外す (AX・保守性 4 周目)
+# ---------------------------------------------------------------------------
+
+def _recorded_sha_line(out):
+    lines = [ln for ln in out.splitlines() if "対象の差分:" in ln]
+    return lines[0] if lines else ""
+
+
+def test_done_does_not_consume_another_issuers_mark_of_the_same_sha(
+        two_checkouts, tmp_path, monkeypatch):
+    """同じ sha で併走している別の作業フォルダの印を消さない (AX 4 周目 高確度)。
+
+    消すと、そちらの done が gh の「いまの head」に黙って落ちる。
+    """
+    main, wt = two_checkouts
+    for root in (wt, main):
+        _stand_in(monkeypatch, root)
+        cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    first = _done_here(tmp_path, monkeypatch, wt)
+    assert ISSUED[:12] in _recorded_sha_line(first), first
+    _stand_in(monkeypatch, main)
+    assert cs.issued_bundle_sha("811", "o/r", "ax") == ISSUED, (
+        "別の作業フォルダの done が、併走中の自分の印を消した")
+
+
+def test_a_mark_already_done_is_not_a_conflict(two_checkouts, tmp_path, monkeypatch):
+    """既に done 記録済みの sha の印は、新しい発行との食い違いに数えない。
+
+    fork と親が同じ sha で発行 → 親が done (自分の印だけ片付く) → 親が新しい head
+    で発行し直す → fork の印 (記録済みの sha) は残っているが、親の done は止まらない。
+    """
+    main, wt = two_checkouts
+    for root in (wt, main):
+        _stand_in(monkeypatch, root)
+        cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    _done_here(tmp_path, monkeypatch, main)
+    _stand_in(monkeypatch, main)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", OTHER)
+    second = _done_here(tmp_path, monkeypatch, main)
+    assert OTHER[:12] in _recorded_sha_line(second), (
+        "記録済みの古い印が新しい発行と食い違い扱いになった:\n" + second)
+
+
+def test_a_mark_from_a_vanished_worktree_is_not_a_conflict(
+        two_checkouts, tmp_path, monkeypatch):
+    """作業フォルダが無くなった発行元 (放棄された fork) の印は候補から外す (AX 4 周目)。"""
+    main, wt = two_checkouts
+    _stand_in(monkeypatch, wt)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    os.rename(str(wt), str(tmp_path / "wt-gone"))     # fork を片付けた状態
+    _stand_in(monkeypatch, main)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", OTHER)
+    out = _done_here(tmp_path, monkeypatch, main)
+    assert OTHER[:12] in _recorded_sha_line(out), out
+
+
+def test_two_live_issuers_with_different_shas_still_stop(
+        two_checkouts, tmp_path, monkeypatch):
+    """外せる理由が無い食い違い (両方とも生きていて未記録) は従来どおり止まる。"""
+    main, wt = two_checkouts
+    _stand_in(monkeypatch, wt)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    _stand_in(monkeypatch, main)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", OTHER)
+    out = _done_here(tmp_path, monkeypatch, main)
+    assert "記録しません" in out and not _recorded_sha_line(out), out
+
+
+def test_done_consumes_its_own_repoless_mark(two_checkouts, tmp_path, monkeypatch):
+    """リポジトリ名無しで書いた自分の印も、repo 付きの done で片付く (保守性 4 周目)。
+
+    読む側は repo 付き → 無し の 2 段で読むので、片付けも同じ 2 段でないと
+    「読めるのに消えない」印が残り、後の発行と食い違いになる。
+    """
+    _main, wt = two_checkouts
+    _stand_in(monkeypatch, wt)
+    cs.write_issued_bundle_sha("811", "", "ax", ISSUED)
+    out = _done_here(tmp_path, monkeypatch, wt)
+    assert ISSUED[:12] in _recorded_sha_line(out), out
+    _stand_in(monkeypatch, wt)
+    assert cs.issued_bundle_candidates("811", "o/r", "ax") == {}, (
+        "repo 無しの自分の印が done で片付かなかった")

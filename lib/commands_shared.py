@@ -3768,14 +3768,20 @@ def consume_issued_bundle_marks(pr_number: str, pr_repo: str,
     あとで親が同じ PR / 種別を新しい head で発行し直すと、古い印と新しい印が
     「食い違い」と判定され、正当な通常手順の done が止まった。
 
-    消すのは **記録した sha と同じ sha の印だけ**。別の sha の印は、別の作業
-    フォルダの judge がまだ読んでいる最中かもしれないので残す (消すと、その
-    作業フォルダの done が gh の「いまの head」に落ちる)。
+    消すのは **この作業フォルダが発行した印のうち、記録した sha と同じもの**
+    だけ。他の発行元の印は、同じ sha であっても消さない (PR #849 独立 AX
+    4 周目, 高確度): 別の作業フォルダが同じ sha で発行して judge を回している
+    最中なら、その印を消すとそちらの done が gh の「いまの head」に黙って落ちる。
+    他の発行元が残した完了済み / 放棄された印は、食い違いの判定
+    (``_settle_issued_sha``) が候補から外す。
     """
     sha = str(reviewed_sha or "").strip()
     if not (pr_number and sha):
         return
-    for d in _issued_bundle_dirs_to_read():
+    own = [_issued_bundle_issuer_dir()]
+    if _get_triggers_dir() not in own:
+        own.append(_get_triggers_dir())   # e-7527 以前の旧い置き場 (この cwd)
+    for d in own:
         for repo in {pr_repo, ""}:
             path = _issued_bundle_sha_path(pr_number, repo, review_type,
                                            directory=d)
@@ -3791,6 +3797,60 @@ class IssuedBundleConflict(ValueError):
     """発行元どうしで「judge に渡した差分」の sha が食い違っている。"""
 
 
+def _review_done_sha(review_type: str, pr_number: str) -> str:
+    """横断台帳に記録された、この (種別, PR) の最新の実施 sha。無ければ空。"""
+    directory, _shared = _review_done_dir()
+    path = os.path.join(directory,
+                        _review_done_marker_name(review_type, pr_number))
+    try:
+        with open(path, encoding="utf-8") as f:
+            return str(json.load(f).get("reviewed_sha") or "").strip()
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _issuer_still_exists(directory: str, pr_number: str, pr_repo: str,
+                         review_type: str) -> bool:
+    """その置き場の印を書いた作業フォルダが、まだ在るか (分からなければ True)。"""
+    for repo in (pr_repo, ""):
+        path = _issued_bundle_sha_path(pr_number, repo, review_type,
+                                       directory=directory)
+        sha, origin = _read_issued_mark(path)
+        if sha:
+            return (not origin) or os.path.isdir(origin)
+    return True
+
+
+def _settle_issued_sha(pr_number: str, pr_repo: str,
+                       review_type: str) -> tuple:
+    """``(sha, 食い違いの候補)`` —— 「judge に渡した差分」を印から決める **唯一の場所**。
+
+    * 印が無い → ``("", {})`` (呼び出し側は gh に落ちる)
+    * 全発行元が同じ sha → ``(sha, {})``
+    * 食い違う → まず **もう効いていない印** を候補から外す:
+        - その sha が既にこの種別で done 記録済み (= 完了済みの古い発行)
+        - 発行した作業フォルダがもう無い (= 放棄された fork)
+      残りが 1 通りならそれを使う。2 通り以上なら ``("", 残りの候補)`` —— どれを
+      judge が読んだかは決められないので、呼び出し側は止まる。
+
+    PR #849 独立保守性 4 周目: 以前はこの判定が ``issued_bundle_sha`` と
+    ``resolve_reviewed_sha_for_done`` の 2 か所に別実装で在り、本番は後者だけを
+    通るのに試験は前者を叩いていた。両方がここを呼ぶ。
+    """
+    cands = issued_bundle_candidates(pr_number, pr_repo, review_type)
+    distinct = set(cands.values())
+    if len(distinct) <= 1:
+        return (distinct.pop() if distinct else ""), {}
+    done_sha = _review_done_sha(review_type, pr_number)
+    live = {d: sha for d, sha in cands.items()
+            if sha != done_sha
+            and _issuer_still_exists(d, pr_number, pr_repo, review_type)}
+    live_distinct = set(live.values())
+    if len(live_distinct) == 1:
+        return live_distinct.pop(), {}
+    return "", (live or cands)
+
+
 def issued_bundle_sha(pr_number: str, pr_repo: str = "",
                       review_type: str = "") -> Optional[str]:
     """「judge に渡した差分」の sha。印が無ければ ``None``。
@@ -3802,10 +3862,10 @@ def issued_bundle_sha(pr_number: str, pr_repo: str = "",
     ``review done`` の既定の解決 (``resolve_reviewed_sha_for_done``) は候補を
     並べて止まるために ``issued_bundle_candidates`` を直接使う。
     """
-    shas = set(issued_bundle_candidates(pr_number, pr_repo, review_type).values())
-    if len(shas) > 1:
-        raise IssuedBundleConflict(sorted(shas))
-    return shas.pop() if shas else None
+    sha, conflict = _settle_issued_sha(pr_number, pr_repo, review_type)
+    if conflict:
+        raise IssuedBundleConflict(sorted(set(conflict.values())))
+    return sha or None
 
 
 # ---------------------------------------------------------------------------
@@ -4596,12 +4656,12 @@ def resolve_reviewed_sha_for_done(*, explicit: str, pr_number: str,
     # **judge に渡した差分を既定の供給源にする** (独立 AX レビュー 6 周目 silent)。
     # 初版の既定は gh に聞いた「いまの PR head」だったので、bundle 発行から done
     # までに push が入ると judge が一度も見ていない差分に対して関門が緑になった。
-    candidates = issued_bundle_candidates(pr_number, pr_repo, review_type)
-    distinct = sorted(set(candidates.values()))
-    if len(distinct) == 1:
-        out["sha"], out["source"] = distinct[0], "issued-bundle"
+    settled, candidates = _settle_issued_sha(pr_number, pr_repo, review_type)
+    if settled:
+        out["sha"], out["source"] = settled, "issued-bundle"
         return out
-    if len(distinct) > 1:
+    distinct = sorted(set(candidates.values()))
+    if candidates:
         # PR #849 独立 AX レビュー 2 周目 (silent): 複数の作業フォルダが同じ PR /
         # 種別を別の差分で発行している。どれを judge が読んだかは印からは決め
         # られないので、黙ってどれかを選ばず (gh にも落ちず) 止まる。
@@ -4617,7 +4677,8 @@ def resolve_reviewed_sha_for_done(*, explicit: str, pr_number: str,
             *[f"  - {_describe_issued_mark(d, pr_number, pr_repo, review_type)}"
               for d in sorted(candidates)],
             f"  judge に渡した bundle の head_sha を --reviewed-sha <sha> で"
-            f"明示して打ち直してください。記録に使った sha の印は done が片付けます。",
+            f"明示して打ち直してください。(既に done 記録済みの sha の印と、"
+            f"作業フォルダが無くなった発行元の印は候補から外してあります)",
         ]
         return out
 
