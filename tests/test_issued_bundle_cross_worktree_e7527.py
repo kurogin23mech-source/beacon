@@ -18,6 +18,9 @@ PR #811 で実際にそうなり、本体の ``.beacon/triggers/`` に印は 0 �
 2. 逆向き (本体で発行 → worktree で done) も成り立つ
 3. 印が本当に無いときは「いまの head」に落ち、落ちたことが出力に出る
 4. 置き場を分裂した形 (cwd の triggers) に戻すと 1 / 2 が赤くなる
+5. (PR #849 独立 AX 2 周目) 共有したことで、別の作業フォルダの再発行が自分の
+   印を黙って上書きしない。発行元どうしで sha が食い違えば、done はどれかを
+   選ばず止まる
    —— これは本 module の 1 / 2 の試験そのものが担う (変異は手で実測済み、
    PR 本文に記録)
 """
@@ -205,3 +208,75 @@ def test_outside_git_it_stays_in_the_cwd_triggers(tmp_path, monkeypatch):
     assert cs._issued_bundle_dir() == str(triggers)
     cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
     assert cs.issued_bundle_sha("811", "o/r", "ax") == ISSUED
+
+
+# ---------------------------------------------------------------------------
+# 発行元ごとの枠: 共有しても上書きしない / 食い違えば止まる (AX 2 周目 silent)
+# ---------------------------------------------------------------------------
+
+OTHER = "5" * 40
+
+
+def test_a_reissue_in_the_other_checkout_does_not_overwrite(
+        two_checkouts, monkeypatch):
+    """fork の judge が走っている間に親が同じ PR を発行し直しても、fork の印は残る。"""
+    main, wt = two_checkouts
+    _stand_in(monkeypatch, wt)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    _stand_in(monkeypatch, main)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", OTHER)
+    got = set(cs.issued_bundle_candidates("811", "o/r", "ax").values())
+    assert got == {ISSUED, OTHER}, (
+        "片方の発行がもう片方の印を上書きした: %r" % (got,))
+
+
+def test_disagreeing_issuers_yield_no_default_sha(two_checkouts, monkeypatch):
+    main, wt = two_checkouts
+    _stand_in(monkeypatch, wt)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    _stand_in(monkeypatch, main)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", OTHER)
+    assert cs.issued_bundle_sha("811", "o/r", "ax") is None, (
+        "食い違う印のどれかを黙って既定に選んでいる")
+
+
+def test_agreeing_issuers_are_used(two_checkouts, monkeypatch):
+    main, wt = two_checkouts
+    for root in (wt, main):
+        _stand_in(monkeypatch, root)
+        cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    assert cs.issued_bundle_sha("811", "o/r", "ax") == ISSUED
+
+
+def test_done_stops_and_lists_candidates_when_issuers_disagree(
+        two_checkouts, tmp_path, monkeypatch):
+    """**本体**: 食い違えば記録せずに止まり、候補と打ち直し方を出す。gh にも落ちない。"""
+    main, wt = two_checkouts
+    _stand_in(monkeypatch, wt)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", ISSUED)
+    _stand_in(monkeypatch, main)
+    cs.write_issued_bundle_sha("811", "o/r", "ax", OTHER)
+    out = _done_here(tmp_path, monkeypatch, wt)
+    assert "記録しません" in out and "--reviewed-sha" in out, out
+    assert ISSUED[:12] in out and OTHER[:12] in out, out
+    assert not any("対象の差分:" in ln for ln in out.splitlines()), (
+        "食い違っているのに何かの sha で記録した:\n" + out)
+    assert not (tmp_path / "ledger").exists() or not any(
+        (tmp_path / "ledger").iterdir()), "止まったはずが実施台帳に書いた"
+
+
+# ---------------------------------------------------------------------------
+# 片付けは旧い置き場も見る (独立保守性 2 周目: 旧置き場の列挙を外す変異が生き残った)
+# ---------------------------------------------------------------------------
+
+def test_a_legacy_stamp_is_swept_on_resolve(two_checkouts, monkeypatch):
+    main, _wt = two_checkouts
+    _stand_in(monkeypatch, main)
+    monkeypatch.setattr(cs, "forget_review_done_across_worktrees",
+                        lambda *a, **k: None)
+    legacy = cs._issued_bundle_sha_path(
+        "811", "o/r", "ax", directory=str(main / ".beacon" / "triggers"))
+    with open(legacy, "w", encoding="utf-8") as f:
+        f.write(ISSUED + "\n")
+    cs._clear_pr_open_review_triggers("811", "o/r")
+    assert not os.path.exists(legacy), "旧い置き場の印が片付かずに残った"

@@ -3285,13 +3285,19 @@ def _clear_pr_open_review_triggers(pr_number: str, pr_repo: str = "",
     # 場所の真横で、繋がっていない状態を作っていた。読み手は「PR スコープの印は
     # ここで片付く」と正しく読むので、片方だけ漏れていると気づけない
     # (ms-80 e-1829 で release-marker が蓄積した前例と同じ型)。
-    try:
-        for marker in (reviewed_marker_paths(pr_number, pr_repo)
-                       | issued_bundle_sha_paths(pr_number)):
-            if os.path.exists(marker):
-                os.remove(marker)
-    except OSError:
-        pass
+    #
+    # 1 件ずつ失敗を許す (PR #849 独立保守性レビュー 2 周目): 以前はループ全体を
+    # 1 つの try で囲んでいたので、1 件の OSError で残りを黙って片付けずに止まった。
+    # 印の置き場が全 worktree 共有になり、別の作業フォルダが同時に片付ける競合
+    # (exists が真のあとに相手が消す) が現実に起きうるので、消えていれば無視して続ける。
+    for marker in (reviewed_marker_paths(pr_number, pr_repo)
+                   | issued_bundle_sha_paths(pr_number)):
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
 
 
 _REVIEW_DUE_SUFFIX = "-review-due-"
@@ -3536,6 +3542,32 @@ def _issued_bundle_dir() -> str:
     return _get_triggers_dir()
 
 
+#: 発行元ごとの下位フォルダの接頭辞 (PR #849 独立 AX レビュー 2 周目 silent)。
+_ISSUER_SUBDIR_PREFIX = "from-"
+
+
+def _issued_bundle_issuer_dir() -> str:
+    """**この作業フォルダが** 印を書く場所 = 共有置き場の下の発行元ごとのフォルダ。
+
+    **なぜ発行元で分けるか** (PR #849 独立 AX レビュー 2 周目, silent): 置き場を
+    全 worktree 共有にした初版は、印の鍵が (PR, 種別, リポジトリ) の 1 枠だった。
+    fork が sha aaaa で bundle を発行して judge に渡している間に、親が同じ PR を
+    新しい head bbbb で発行し直すと、fork の印が **黙って上書き** され、fork の
+    ``review done`` が「judge に渡した bundle の差分」として bbbb を記録した ——
+    e-7527 が塞ごうとした「judge が読んでいない版に判子」そのもの。チェックアウト
+    ごとに別枠だった修正前には起きなかった、共有化が持ち込んだ穴。
+
+    発行元ごとに書けば上書きは起きない。読む側 (``issued_bundle_candidates``) は
+    全発行元を見て、食い違えば **どれかを黙って選ばず止まる**。
+
+    発行元の識別は作業記録の置き場 (``_get_triggers_dir()``) の絶対パスの hash ——
+    チェックアウトごとに必ず別で、同じチェックアウトなら毎回同じ。
+    """
+    origin = os.path.abspath(_get_triggers_dir())
+    tag = hashlib.sha1(origin.encode("utf-8")).hexdigest()[:12]
+    return os.path.join(_issued_bundle_dir(), f"{_ISSUER_SUBDIR_PREFIX}{tag}")
+
+
 def _issued_bundle_prefix(pr_number: str) -> str:
     """この PR の印のファイル名の接頭辞。書く側と片付ける側が共有する唯一の形。
 
@@ -3556,11 +3588,11 @@ def _issued_bundle_sha_path(pr_number: str, pr_repo: str = "",
     で 2 種別を同じ差分で発行したあと片方だけ再発行された場合に、もう片方が
     新しい sha を拾わないため。
 
-    ``directory`` 省略時は ``_issued_bundle_dir()`` (全 worktree 共有)。旧い置き場
-    (cwd の triggers) を読むときだけ明示で渡す。
+    ``directory`` 省略時は ``_issued_bundle_issuer_dir()`` (= 共有置き場の下の、
+    この作業フォルダの発行元フォルダ)。他の発行元や旧い置き場を読むときは明示で渡す。
     """
     if directory is None:
-        directory = _issued_bundle_dir()
+        directory = _issued_bundle_issuer_dir()
     repo = str(pr_repo or "").strip()
     rt = str(review_type or "").strip() or "any"
     base = f"{_issued_bundle_prefix(pr_number)}{rt}"
@@ -3575,7 +3607,8 @@ def _issued_bundle_sha_path(pr_number: str, pr_repo: str = "",
 def _issued_bundle_dirs_to_read() -> list:
     """印を **読む / 片付ける** ときに見るディレクトリ (重複なし、優先順)。
 
-    1. 共有置き場 (今の書き込み先)
+    1. 共有置き場の下の **全発行元** のフォルダ (今の書き込み先。自分の分も他の
+       作業フォルダの分も含む)
     2. cwd の triggers (e-7527 以前に書かれた印の置き場)
 
     2 を残すのは、修正前に発行して done 待ちの印を孤児にしないため。旧い置き場は
@@ -3584,9 +3617,16 @@ def _issued_bundle_dirs_to_read() -> list:
     **撤去条件**: 印は PR の解決 (merge / close) で片付くので、2 が要るのは
     e-7527 (PR #849) の取り込み前に ``review context --pr`` を発行した PR が
     開いている間だけ。それらがすべて解決したら 2 を外し、この関数を
-    ``[_issued_bundle_dir()]`` にしてよい (撤去はこの関数 1 か所で済む)。
+    1 だけを返す形にしてよい (撤去はこの関数 1 か所で済む)。
     """
-    dirs = [_issued_bundle_dir()]
+    root = _issued_bundle_dir()
+    dirs = []
+    try:
+        dirs = [os.path.join(root, n) for n in sorted(os.listdir(root))
+                if n.startswith(_ISSUER_SUBDIR_PREFIX)
+                and os.path.isdir(os.path.join(root, n))]
+    except OSError:
+        pass
     legacy = _get_triggers_dir()
     if legacy not in dirs:
         dirs.append(legacy)
@@ -3653,28 +3693,43 @@ def issued_bundle_sha_paths(pr_number: str) -> set:
     return found
 
 
+def issued_bundle_candidates(pr_number: str, pr_repo: str = "",
+                             review_type: str = "") -> dict:
+    """``{置き場: sha}`` — この PR / 種別について **発行元ごとに** 刻まれた印。
+
+    各置き場ではリポジトリ別の住所を先に見て、無ければ旧式 (リポジトリ無し)
+    を見る —— 読み取り側が両方を見るのは ``reviewed_marker_sha`` と同じ約束。
+    形が壊れた印は使わない (無意味な値を「記録しました」と名乗らない)。
+    """
+    found: dict = {}
+    if not pr_number:
+        return found
+    for d in _issued_bundle_dirs_to_read():
+        for repo in (pr_repo, ""):
+            path = _issued_bundle_sha_path(pr_number, repo, review_type,
+                                           directory=d)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    sha = f.read().strip()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if sha and is_commit_sha_shaped(sha):
+                found[d] = sha
+                break
+    return found
+
+
 def issued_bundle_sha(pr_number: str, pr_repo: str = "",
                       review_type: str = "") -> Optional[str]:
-    """``review done`` が既定で使う「judge に渡した差分」の sha。
+    """``review done`` が既定で使う「judge に渡した差分」の sha。**一意なときだけ**。
 
-    リポジトリ別の住所を先に見て、無ければ旧式 (リポジトリ無し) を見る
-    —— 読み取り側が両方を見るのは ``reviewed_marker_sha`` と同じ約束。
+    発行元が 1 つ、または全発行元が同じ sha を刻んでいればそれを返す。食い違って
+    いれば ``None`` —— どれを judge が読んだかは印からは決められないので、黙って
+    どれかを選ばない (``resolve_reviewed_sha_for_done`` が候補を並べて止まる)。
     見つからなければ ``None`` を返し、呼び出し側は gh に問い合わせる。
     """
-    if not pr_number:
-        return None
-    paths = [_issued_bundle_sha_path(pr_number, repo, review_type, directory=d)
-             for d in _issued_bundle_dirs_to_read()
-             for repo in (pr_repo, "")]
-    for path in paths:
-        try:
-            with open(path, encoding="utf-8") as f:
-                sha = f.read().strip()
-        except (OSError, UnicodeDecodeError):
-            continue
-        if sha and is_commit_sha_shaped(sha):
-            return sha
-    return None
+    shas = set(issued_bundle_candidates(pr_number, pr_repo, review_type).values())
+    return shas.pop() if len(shas) == 1 else None
 
 
 # ---------------------------------------------------------------------------
@@ -4465,9 +4520,24 @@ def resolve_reviewed_sha_for_done(*, explicit: str, pr_number: str,
     # **judge に渡した差分を既定の供給源にする** (独立 AX レビュー 6 周目 silent)。
     # 初版の既定は gh に聞いた「いまの PR head」だったので、bundle 発行から done
     # までに push が入ると judge が一度も見ていない差分に対して関門が緑になった。
-    issued = issued_bundle_sha(pr_number, pr_repo, review_type)
-    if issued:
-        out["sha"], out["source"] = issued, "issued-bundle"
+    candidates = issued_bundle_candidates(pr_number, pr_repo, review_type)
+    distinct = sorted(set(candidates.values()))
+    if len(distinct) == 1:
+        out["sha"], out["source"] = distinct[0], "issued-bundle"
+        return out
+    if len(distinct) > 1:
+        # PR #849 独立 AX レビュー 2 周目 (silent): 複数の作業フォルダが同じ PR /
+        # 種別を別の差分で発行している。どれを judge が読んだかは印からは決め
+        # られないので、黙ってどれかを選ばず (gh にも落ちず) 止まる。
+        out["fatal"] = [
+            f"Error: PR #{pr_number} の {review_type} は、複数の作業フォルダが"
+            f"別々の差分で bundle を発行しています — どれを judge が読んだかを"
+            f"印から決められないので記録しません。",
+            *[f"  - {sha[:12]}  ({os.path.basename(d)})"
+              for d, sha in sorted(candidates.items())],
+            f"  judge に渡した bundle の head_sha を --reviewed-sha <sha> で"
+            f"明示して打ち直してください。",
+        ]
         return out
 
     sha, _state, err = resolve_pr_head(pr_number, pr_repo)
