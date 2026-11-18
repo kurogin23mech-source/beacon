@@ -224,7 +224,7 @@ _RUNNER_MODULES = {"subprocess", "os"}
 
 
 def _runner_bindings(tree):
-    """``(module_aliases, bare_names)`` — import 文から「呼び出し先の素性」を引く表。
+    """``(module_aliases, bare_names, alias_attrs)`` — import 文と代入から「呼び出し先の素性」を引く表。
 
     **なぜ名前だけで判定してはいけないか** (独立 AX レビュー 2026-11-16 が
     両方向から実測):
@@ -926,3 +926,35 @@ def test_batch_origin_rejects_non_repo_file_kinds(capsys):
         commands._origin_for_batch_descriptor(
             {"id": "x", "origin": {"kind": "doc"}}, [])
     assert "repo-file" in capsys.readouterr().err
+
+
+# --- 13. os 側・名前の連鎖・実行しない名前の代入 (PR #850 独立保守性 2 周目) --
+#
+# 挙動は正しかったが、壊しても試験が赤くならなかった枝 (os の束縛 / from os
+# import / 裸の名前の代入連鎖 / 代入元を実行 API に絞る条件)。
+
+@pytest.mark.parametrize("src", [
+    "import os as _os\n"
+    "def collect(ref):\n"
+    "    return _os.system('git diff ' + ref)\n",
+    "from os import system as s\n"
+    "def collect(ref):\n"
+    "    return s('git diff ' + ref)\n",
+    "import subprocess\n"
+    "f = subprocess.run\n"
+    "g = f\n"
+    "def collect(ref):\n"
+    "    return g(['git', 'diff', ref]).stdout\n",
+])
+def test_os_and_chained_runner_names_are_examined(src):
+    assert _offenders_in(src) == ["collect"], src
+
+
+def test_binding_a_non_running_name_is_not_a_runner():
+    """``f = subprocess.PIPE`` の後の ``f(x)`` は実行の口ではない (偽の赤を出さない)。"""
+    assert _offenders_in(
+        "import subprocess\n"
+        "f = subprocess.PIPE\n"
+        "def shape(x):\n"
+        "    return f(x)\n"
+    ) == []
