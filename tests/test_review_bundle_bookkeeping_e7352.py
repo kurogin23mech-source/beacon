@@ -247,13 +247,17 @@ def _runner_bindings(tree):
     束縛された **実行 API だけ** → ``(モジュール, 元の名前)``。``PIPE`` のような
     実行しない名前は入れない。
 
-    **閉じていない範囲 (正直に書く)**: 関数の中の import も同じ 1 つの表に集める
-    ので、別の関数で同じ別名を使うと解決されたことになる (拒否側に倒れるので
-    安全側だが、精度としては粗い)。``from subprocess import *`` と、import した
-    モジュールを別の変数へ代入し直す形 (``sp = subprocess``) は解決しない。
+    ``alias_attrs``: ``self.p = subprocess`` のように **属性へ** モジュールを
+    入れた属性名。受け手を区別せず、``<何か>.p.run(...)`` を実行 API とみなす。
+
+    **閉じていない範囲 (正直に書く)**: 関数の中の import / 代入も同じ 1 つの表に
+    集めるので、別の関数で同じ名前を使うと解決されたことになる (拒否側に倒れるので
+    安全側だが、精度としては粗い)。``from subprocess import *``、関数の引数や戻り値で
+    モジュールを受け渡す形、``getattr(subprocess, "run")`` は解決しない。
     """
     module_aliases = {}
     bare_names = {}
+    alias_attrs = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
@@ -265,7 +269,40 @@ def _runner_bindings(tree):
             for a in node.names:
                 if a.name in _SUBPROCESS_APIS:
                     bare_names[a.asname or a.name] = (node.module, a.name)
-    return module_aliases, bare_names
+    # **代入で別名を作る形も追う** (PR #850 独立 AX、実測): import だけを見ると
+    # ``sp = subprocess`` / ``self.p = subprocess`` / ``f = subprocess.run`` の後の
+    # 呼び出しが視界から外れ、差分を採る経路が緑のまま足せた (属性名だけで
+    # 判定していた変更前は、前の 2 つは拒否側に倒れていた)。代入の連鎖
+    # (``a = subprocess; b = a``) も追えるよう、増えなくなるまで回す。
+    # 属性への代入は受け手を区別しない (``self.p`` に入れて ``s.p.run`` と呼ぶ形を
+    # 拾うため) —— 拒否側に倒れる粗さで、安全側。
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    changed = True
+    while changed:
+        changed = False
+        for node in assigns:
+            val = node.value
+            for tgt in node.targets:
+                if isinstance(val, ast.Name) and val.id in module_aliases:
+                    if isinstance(tgt, ast.Name) and tgt.id not in module_aliases:
+                        module_aliases[tgt.id] = module_aliases[val.id]
+                        changed = True
+                    elif isinstance(tgt, ast.Attribute) and tgt.attr not in alias_attrs:
+                        alias_attrs.add(tgt.attr)
+                        changed = True
+                elif (isinstance(val, ast.Attribute)
+                      and isinstance(val.value, ast.Name)
+                      and val.value.id in module_aliases
+                      and val.attr in _SUBPROCESS_APIS
+                      and isinstance(tgt, ast.Name)
+                      and tgt.id not in bare_names):
+                    bare_names[tgt.id] = (module_aliases[val.value.id], val.attr)
+                    changed = True
+                elif (isinstance(val, ast.Name) and val.id in bare_names
+                      and isinstance(tgt, ast.Name) and tgt.id not in bare_names):
+                    bare_names[tgt.id] = bare_names[val.id]
+                    changed = True
+    return module_aliases, bare_names, alias_attrs
 
 
 def _argv_tokens(node):
@@ -414,7 +451,7 @@ def _invocation_sites(tree):
     (:func:`_runner_bindings` を参照)。名前だけで決めると、別名 import した
     裸の名前を見落とし、同時に無関係な ``.run()`` で偽の赤を出す。
     """
-    module_aliases, bare_names = _runner_bindings(tree)
+    module_aliases, bare_names, alias_attrs = _runner_bindings(tree)
     parents = {}
     for n in ast.walk(tree):
         for c in ast.iter_child_nodes(n):
@@ -432,7 +469,9 @@ def _invocation_sites(tree):
             # ``subprocess.run`` / ``_os.system``。受け手が subprocess / os を
             # 指す名前のときだけ実行 API と認める。``pipeline.run`` は対象外。
             recv = node.func.value
-            is_run = isinstance(recv, ast.Name) and recv.id in module_aliases
+            is_run = ((isinstance(recv, ast.Name) and recv.id in module_aliases)
+                      or (isinstance(recv, ast.Attribute)
+                          and recv.attr in alias_attrs))
         elif isinstance(node.func, ast.Name) and node.func.id in bare_names:
             is_run = True     # ``from subprocess import run as _r`` → ``_r(...)``
         else:
@@ -785,3 +824,105 @@ def test_headerless_mode_change_keeps_both_sides_on_the_same_path():
     # 作業記録ではないので落ちない (偽の drop を出さない)
     out, dropped = rs.strip_bookkeeping_from_diff(TRICKY_MODE_ONLY)
     assert out == TRICKY_MODE_ONLY and dropped == []
+
+
+# --- 10. 代入で作った別名も追う (PR #850 独立 AX、実測で 3 形が素通りした) -------
+
+@pytest.mark.parametrize("src", [
+    # モジュールを別の名前へ代入し直す (変更前は拒否側に倒れていた)
+    "import subprocess\n"
+    "sp = subprocess\n"
+    "def collect(ref):\n"
+    "    return sp.run(['git', 'diff', ref]).stdout\n",
+    # 属性に持たせ、別の受け手から呼ぶ
+    "import subprocess\n"
+    "class C:\n"
+    "    def __init__(self):\n"
+    "        self.p = subprocess\n"
+    "def collect(s, ref):\n"
+    "    return s.p.run(['git', 'diff', ref]).stdout\n",
+    # 実行関数そのものを束縛する
+    "import subprocess\n"
+    "f = subprocess.run\n"
+    "def collect(ref):\n"
+    "    return f(['git', 'diff', ref]).stdout\n",
+    # 代入の連鎖
+    "import subprocess\n"
+    "a = subprocess\n"
+    "b = a\n"
+    "def collect(ref):\n"
+    "    return b.check_output(['git', 'diff', ref])\n",
+])
+def test_rebound_runner_names_are_examined(src):
+    assert _offenders_in(src) == ["collect"], src
+
+
+def test_a_relative_import_named_subprocess_is_not_a_runner():
+    """``from .subprocess import run`` は標準の subprocess ではない (node.level ガード)。"""
+    assert _offenders_in(
+        "from .subprocess import run\n"
+        "def drive(payload):\n"
+        "    return run(payload)\n"
+    ) == []
+
+
+# --- 11. ヘッダー無しセクションの残りの枝 (PR #850 独立保守性: 6 変異が生き残った) --
+
+def test_headerless_copy_reads_copy_lines():
+    sec = ("diff --git a/weird b/src.txt b/.beacon/copy.txt\n"
+           "similarity index 100%\n"
+           "copy from weird b/src.txt\n"
+           "copy to .beacon/copy.txt\n")
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == [
+        "weird b/src.txt", ".beacon/copy.txt"]
+
+
+def test_headerless_quoted_rename_is_unquoted_and_unprefixed():
+    sec = ('diff --git "a/caf\\303\\251.txt" "b/.beacon/caf\\303\\251.txt"\n'
+           "similarity index 100%\n"
+           'rename from "caf\\303\\251.txt"\n'
+           'rename to ".beacon/caf\\303\\251.txt"\n')
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == [
+        "café.txt", ".beacon/café.txt"]
+
+
+def test_headerless_plain_mode_change_strips_the_ab_prefix():
+    """空白の無い 2 トークンの枝は a/ b/ を外す (_strip_ab_prefix を外す変異を捕まえる)。"""
+    sec = ("diff --git a/x.py b/x.py\n"
+           "old mode 100644\n"
+           "new mode 100755\n")
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == ["x.py", "x.py"]
+
+
+def test_a_single_side_line_is_not_enough():
+    """rename 行が片方しか無い壊れた形は、diff --git 行の割り出しに回る (>= 2 の境界)。"""
+    sec = ("diff --git a/old.txt b/.beacon/new.txt\n"
+           "rename from old.txt\n")
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == [
+        "old.txt", ".beacon/new.txt"]
+
+
+def test_undecidable_split_returns_every_candidate():
+    """両側が違い rename 行も無い形は、割り位置を決めず候補を全部返す (落とす側なので多めが安全)。"""
+    sec = "diff --git a/p b/q b/.beacon/r\n"
+    got = rs._diff_section_paths([sec])
+    assert set(got) == {"p", "q b/.beacon/r", "p b/q", ".beacon/r"}, got
+
+
+def test_a_line_not_starting_with_a_slash_yields_nothing():
+    """``a/`` で始まらない (= git の出力でない) 行からは推測で path を作らない。
+
+    ``" b/"`` を含む入力にしないとガードの有無で結果が変わらない (最初に書いた
+    ``x y z`` はガードを外しても [] のままで、この試験自体が偽の緑だった)。
+    """
+    assert rs._diff_section_paths(["diff --git x b/y b/z\n"]) == []
+
+
+# --- 12. batch の原典解決は repo-file に限る (PR #850 独立保守性) -------------
+
+def test_batch_origin_rejects_non_repo_file_kinds(capsys):
+    import commands
+    with pytest.raises(SystemExit):
+        commands._origin_for_batch_descriptor(
+            {"id": "x", "origin": {"kind": "doc"}}, [])
+    assert "repo-file" in capsys.readouterr().err
