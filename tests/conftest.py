@@ -101,6 +101,11 @@ def pytest_configure(config):
         "markers",
         "allow_real_firestore: this test deliberately talks to a real "
         "Firestore instance, so the no-real-client guard is waived for it")
+    config.addinivalue_line(
+        "markers",
+        "real_issued_bundle_dir: this test resolves the cross-worktree "
+        "issued-bundle directory for real (ms-119 e-7527), so the per-test tmp "
+        "redirect is waived for it")
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +156,25 @@ def _ban_real_firestore_client(request, monkeypatch):
     # どちらかが無くなっても壊れない。
     for _name in ("Client", "AsyncClient"):
         monkeypatch.setattr(firestore, _name, _refuse, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_issued_bundle_dir(request, tmp_path, monkeypatch):
+    """ms-119 e-7527: 「judge に渡した差分」の印を per-test の tmp に向ける。
+
+    この印の置き場は全 worktree 共有 (= 実リポジトリの ``.git/beacon-review-issued``)
+    になった。``review context --pr`` を通る試験は十数ファイルあり、差し替え忘れた
+    1 本が実リポジトリの共有置き場に架空 PR の印を書くと、**別の作業フォルダの
+    本物の ``review done`` がそれを拾う** —— 共有にしたこと自体が汚染の到達範囲を
+    広げる。各試験の差し替えに任せる (= お願い) のでなく、既定を tmp にする。
+
+    共有置き場の解決そのものを主題にする試験は ``@pytest.mark.real_issued_bundle_dir``
+    で opt-in する。
+    """
+    if request.node.get_closest_marker("real_issued_bundle_dir"):
+        return
+    target = str(tmp_path / "git-common" / "beacon-review-issued")
+    monkeypatch.setattr("commands_shared._issued_bundle_dir", lambda: target)
 
 
 @pytest.fixture(autouse=True)

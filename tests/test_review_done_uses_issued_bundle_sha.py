@@ -27,6 +27,7 @@
 """
 
 import io
+import os
 import json
 from contextlib import redirect_stdout, redirect_stderr
 
@@ -83,6 +84,7 @@ def test_a_malformed_stamp_is_not_used(tmp_path, monkeypatch):
     """
     tdir = _triggers(tmp_path, monkeypatch)
     path = cs._issued_bundle_sha_path("838", "o/r", "ax")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("not-a-sha\n")
     assert cs.issued_bundle_sha("838", "o/r", "ax") is None

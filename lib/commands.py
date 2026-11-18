@@ -4932,10 +4932,15 @@ def cmd_review_done():
         # 呼ぶと、読み手は「done の時点の head を記録した」と読む —— 実際は
         # 「judge に渡した差分」で、両者がずれている瞬間こそこの印の存在理由
         # なので、そこを取り違えさせる文面は名乗りと実態のズレそのものになる。
+        # ms-119 e-7527: gh に落ちたときは **落ちた理由** まで言う。「いまの PR
+        # head」とだけ書くと、judge に渡した差分の印が見つからなかった (= judge が
+        # 読んだ版と一致する保証が無い) ことが読み手に伝わらない。
         _src_txt = {
             "explicit": "--reviewed-sha で明示",
             "issued-bundle": "judge に渡した bundle の差分",
-        }.get(_sha_source, "いまの PR head")
+        }.get(_sha_source,
+              "いまの PR head — judge に渡した差分の印が見つからなかったため。"
+              "judge が読んだ版と違うなら --reviewed-sha で打ち直してください")
         print(f"  対象の差分: {_reviewed_sha[:12]} ({_src_txt})。"
               f"この sha に対する実施として記録しました — 以後コミットを積むと"
               f"この種別は再度要ります (ms-119 e-6859)。")
