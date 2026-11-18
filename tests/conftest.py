@@ -158,6 +158,40 @@ def _ban_real_firestore_client(request, monkeypatch):
         monkeypatch.setattr(firestore, _name, _refuse, raising=False)
 
 
+def _resolve_repo_git_common_dir():
+    """このリポジトリ (tests/ の在るチェックアウト) の git 共有ディレクトリ。"""
+    import subprocess as _sp
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        out = _sp.run(["git", "rev-parse", "--git-common-dir"], cwd=here,
+                      capture_output=True, text=True, timeout=5)
+    except (OSError, _sp.SubprocessError):
+        return ""
+    path = (out.stdout or "").strip()
+    if out.returncode != 0 or not path:
+        return ""
+    return os.path.abspath(os.path.join(here, path))
+
+
+_REPO_GIT_COMMON_DIR = _resolve_repo_git_common_dir()
+
+
+def _real_issued_dir_state():
+    """このリポジトリ自身の共有置き場の中身 (相対パス -> mtime)。無ければ空。"""
+    if not _REPO_GIT_COMMON_DIR:
+        return {}
+    root = os.path.join(_REPO_GIT_COMMON_DIR, "beacon-review-issued")
+    state = {}
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            full = os.path.join(dirpath, name)
+            try:
+                state[os.path.relpath(full, root)] = os.path.getmtime(full)
+            except OSError:
+                continue
+    return state
+
+
 @pytest.fixture(autouse=True)
 def _isolate_issued_bundle_dir(request, tmp_path, monkeypatch):
     """ms-119 e-7527: 「judge に渡した差分」の印を per-test の tmp に向ける。
@@ -171,10 +205,20 @@ def _isolate_issued_bundle_dir(request, tmp_path, monkeypatch):
     共有置き場の解決そのものを主題にする試験は ``@pytest.mark.real_issued_bundle_dir``
     で opt-in する。
     """
-    if request.node.get_closest_marker("real_issued_bundle_dir"):
-        return
-    target = str(tmp_path / "git-common" / "beacon-review-issued")
-    monkeypatch.setattr("commands_shared._issued_bundle_dir", lambda: target)
+    before = _real_issued_dir_state()
+    if not request.node.get_closest_marker("real_issued_bundle_dir"):
+        target = str(tmp_path / "git-common" / "beacon-review-issued")
+        monkeypatch.setattr("commands_shared._issued_bundle_dir", lambda: target)
+    yield
+    # 試験の後で、このリポジトリ自身の共有置き場が変わっていないことを確かめる
+    # (PR #849 独立 AX 3 周目)。opt-in した試験が tmp の git でなく実リポジトリの
+    # cwd のまま共有置き場を解決すると、別の作業フォルダの本物の review done が
+    # 拾う印を書く。差し替えはお願いでも、汚したことは必ず赤くなる。
+    after = _real_issued_dir_state()
+    assert after == before, (
+        "この試験が実リポジトリの共有置き場 (.git/beacon-review-issued) を"
+        "変えました。tmp の git リポジトリで測ってください: %r -> %r"
+        % (before, after))
 
 
 @pytest.fixture(autouse=True)
