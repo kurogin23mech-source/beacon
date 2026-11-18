@@ -3536,6 +3536,16 @@ def _issued_bundle_dir() -> str:
     return _get_triggers_dir()
 
 
+def _issued_bundle_prefix(pr_number: str) -> str:
+    """この PR の印のファイル名の接頭辞。書く側と片付ける側が共有する唯一の形。
+
+    PR #849 独立保守性レビュー: 以前は path 生成と片付けの列挙で同じ接頭辞を
+    別々の f 文字列で書いていた。形を変える AI が片方だけ直すと印が片付かず、
+    置き場が全 worktree 共有になったいま、溜まった印の被害が全作業フォルダに及ぶ。
+    """
+    return f".issued-pr-{str(pr_number).strip()}."
+
+
 def _issued_bundle_sha_path(pr_number: str, pr_repo: str = "",
                             review_type: str = "",
                             directory: Optional[str] = None) -> str:
@@ -3553,7 +3563,7 @@ def _issued_bundle_sha_path(pr_number: str, pr_repo: str = "",
         directory = _issued_bundle_dir()
     repo = str(pr_repo or "").strip()
     rt = str(review_type or "").strip() or "any"
-    base = f".issued-pr-{pr_number}.{rt}"
+    base = f"{_issued_bundle_prefix(pr_number)}{rt}"
     if not repo:
         return os.path.join(directory, base)
     return os.path.join(
@@ -3570,6 +3580,11 @@ def _issued_bundle_dirs_to_read() -> list:
 
     2 を残すのは、修正前に発行して done 待ちの印を孤児にしないため。旧い置き場は
     その cwd からしか見えないので、作業フォルダ横断の効果は 1 だけが持つ。
+
+    **撤去条件**: 印は PR の解決 (merge / close) で片付くので、2 が要るのは
+    e-7527 (PR #849) の取り込み前に ``review context --pr`` を発行した PR が
+    開いている間だけ。それらがすべて解決したら 2 を外し、この関数を
+    ``[_issued_bundle_dir()]`` にしてよい (撤去はこの関数 1 か所で済む)。
     """
     dirs = [_issued_bundle_dir()]
     legacy = _get_triggers_dir()
@@ -3627,7 +3642,7 @@ def issued_bundle_sha_paths(pr_number: str) -> set:
     num = str(pr_number or "").strip()
     if not num:
         return set()
-    prefix = f".issued-pr-{num}."
+    prefix = _issued_bundle_prefix(num)
     found: set = set()
     for tdir in _issued_bundle_dirs_to_read():
         try:
@@ -3771,9 +3786,14 @@ def _worktree_shared_dir() -> Optional[str]:
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"Warning: レビュー実施台帳の共有置き場を解決できませんでした "
-              f"(git rev-parse 失敗: {type(exc).__name__})。この cwd 限りの "
-              f"置き場に落ちます — fork で実施したレビューは親に伝わりません。",
+        # ms-119 e-7527 (PR #849 独立 AX + 保守性レビュー 2 体一致): この関数の
+        # 利用者は実施台帳と「judge に渡した差分の印」の 2 つになった。台帳だけを
+        # 名指すと、印の置き場が解決できなかったときに原因を辿れない。
+        print(f"Warning: レビューの共有置き場 (実施台帳 / judge に渡した差分の印) を"
+              f"解決できませんでした (git rev-parse 失敗: {type(exc).__name__})。"
+              f"この cwd 限りの置き場に落ちます — fork で実施したレビューは親に"
+              f"伝わりません。別の作業フォルダで review done を打つと、judge に"
+              f"渡した差分ではなく「いまの PR head」が記録されます。",
               file=sys.stderr)
         return None
     if out.returncode != 0:

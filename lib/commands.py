@@ -4935,12 +4935,15 @@ def cmd_review_done():
         # ms-119 e-7527: gh に落ちたときは **落ちた理由** まで言う。「いまの PR
         # head」とだけ書くと、judge に渡した差分の印が見つからなかった (= judge が
         # 読んだ版と一致する保証が無い) ことが読み手に伝わらない。
+        # PR #849 独立保守性レビュー: "gh" を明示の項目にする。既定値に書くと、
+        # 供給源を 1 つ足して表に載せ忘れたとき、その新しい供給源が黙って
+        # 「印が見つからなかった」と誤って名乗る。
         _src_txt = {
             "explicit": "--reviewed-sha で明示",
             "issued-bundle": "judge に渡した bundle の差分",
-        }.get(_sha_source,
-              "いまの PR head — judge に渡した差分の印が見つからなかったため。"
-              "judge が読んだ版と違うなら --reviewed-sha で打ち直してください")
+            "gh": ("いまの PR head — judge に渡した差分の印が見つからなかったため。"
+                   "judge が読んだ版と違うなら --reviewed-sha で打ち直してください"),
+        }.get(_sha_source, f"供給源 {_sha_source!r} (表示文が未定義)")
         print(f"  対象の差分: {_reviewed_sha[:12]} ({_src_txt})。"
               f"この sha に対する実施として記録しました — 以後コミットを積むと"
               f"この種別は再度要ります (ms-119 e-6859)。")
