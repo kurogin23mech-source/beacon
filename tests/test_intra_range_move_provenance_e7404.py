@@ -977,3 +977,82 @@ def test_a_single_ref_says_why_there_is_no_note(repo):
     gaps = []
     assert commands._artifact_move_reference(diff_ref="HEAD", gaps=gaps) is None
     assert any("範囲" in g for g in gaps), gaps
+
+
+# --- 2 周目: 残りの枝を壊したら赤くなるように (PR #851 独立保守性 2 周目) ----
+
+def _merge_resolving_with(path, git, base, action):
+    """``base`` から feature を伸ばし、本流との衝突解消の中で ``action`` を行う。"""
+    git("checkout", "-q", "-b", "feat2", base)
+    (path / "old.py").write_text("o = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "create old.py")
+    (path / "keep.py").write_text("x = 'f'\n", encoding="utf-8")
+    git("commit", "-q", "-am", "feature edits keep")
+    git("checkout", "-q", "-b", "main3", base)
+    (path / "keep.py").write_text("x = 'm'\n", encoding="utf-8")
+    git("commit", "-q", "-am", "mainline edits keep")
+    git("checkout", "-q", "feat2")
+    subprocess.run(["git", "merge", "-q", "main3"], cwd=str(path),
+                   capture_output=True)
+    (path / "keep.py").write_text("x = 'r'\n", encoding="utf-8")
+    action(path, git)
+    git("add", "-A")
+    git("commit", "-q", "-m", "merge with an extra change while resolving")
+    return _rev(path)
+
+
+def test_an_add_during_merge_resolution_is_named(repo):
+    path, git = repo
+    base = _rev(path)
+
+    def _add(p, g):
+        (p / "added.py").write_text("a = 1\n", encoding="utf-8")
+    head = _merge_resolving_with(path, git, base, _add)
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{base}..{head}", gaps=gaps)
+    assert any("added.py (追加)" in g for g in gaps), gaps
+
+
+def test_a_delete_during_merge_resolution_is_named(repo):
+    path, git = repo
+    base = _rev(path)
+
+    def _delete(p, g):
+        g("rm", "-q", "old.py")
+    head = _merge_resolving_with(path, git, base, _delete)
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{base}..{head}", gaps=gaps)
+    assert any("old.py (削除)" in g for g in gaps), gaps
+
+
+def test_an_unmeasurable_resolution_is_disclosed(monkeypatch, repo):
+    """--remerge-diff が失敗する (古い git 等) とき、測れなかったと言う。"""
+    path, git = repo
+    base = _rev(path)
+    head = _merge_resolving_with(path, git, base, lambda p, g: None)
+    real = commands._git_ok
+    monkeypatch.setattr(
+        commands, "_git_ok",
+        lambda argv: (False, "") if "--remerge-diff" in argv else real(argv))
+    gaps = []
+    commands._artifact_move_reference(diff_ref=f"{base}..{head}", gaps=gaps)
+    assert any("衝突解消の中身を測れませんでした" in g for g in gaps), gaps
+
+
+def test_gh_failure_is_disclosed(monkeypatch, repo):
+    """gh が落ちた PR で注記を黙って消さない。"""
+    real = commands._git_ok
+    monkeypatch.setattr(
+        commands, "_git_ok",
+        lambda argv: (False, "") if argv[:3] == ["gh", "pr", "view"] else real(argv))
+    gaps = []
+    assert commands._artifact_move_reference(pr="1", head_sha="", gaps=gaps) is None
+    assert any("gh から解決できません" in g for g in gaps), gaps
+
+
+def test_no_range_requested_says_nothing(repo):
+    """pr も diff_ref も無い (= 範囲を求めていない) 呼び出しはノイズを出さない。"""
+    gaps = []
+    assert commands._artifact_move_reference(gaps=gaps) is None
+    assert gaps == [], gaps

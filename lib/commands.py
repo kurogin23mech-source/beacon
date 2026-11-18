@@ -2087,7 +2087,10 @@ def _resolve_move_range(*, pr: str = "", pr_repo: str = "",
                         gaps: "Optional[list]" = None):
     """範囲内の移動を数える ``(base, head)`` を、**judge に渡る差分と同じ基準で** 決める。
 
-    決められなければ ``None`` (理由は ``gaps`` に出す —— 黙って注記を消さない)。
+    決められなければ ``None``。**範囲を求められたのに決められなかったとき** は
+    必ず理由を ``gaps`` に出す (黙って注記を消さない)。``pr`` も ``diff_ref`` も
+    無い呼び出し (= 全体棚卸しなど、範囲を求めていない) だけは何も言わずに
+    ``None`` を返す —— そこで言うと、範囲の無いレビューの束に毎回ノイズが載る。
 
     段の順:
       1. ``pr`` — gh に base / head の sha を聞く。head は呼び出し側が差分を採った
@@ -2130,6 +2133,15 @@ def _resolve_move_range(*, pr: str = "", pr_repo: str = "",
                     f"(読んでいる間に push された可能性)。注記は差分と同じ "
                     f"{head_sha[:12]} を基準に組んでいます。")
             head = head_sha
+        if not (base and head):
+            # PR #851 独立保守性 2 周目: gh が落ちた PR で注記が黙って消えていた。
+            if gaps is not None:
+                gaps.append(
+                    f"範囲内の移動の注記を組めませんでした: PR #{pr} の base / "
+                    f"head を gh から解決できません (未認証・ネットワーク等)。"
+                    f"差分の中で新規追加に見えるファイルが、範囲内で移動して"
+                    f"きたものである可能性を judge は確かめられません。")
+            return None
     elif diff_ref:
         sep = "..." if "..." in diff_ref else (".." if ".." in diff_ref else "")
         if not sep:
