@@ -89,7 +89,10 @@ def test_skip_records_audit_and_clears_trigger(proj):
     rec = json.loads(log.read_text().strip())
     assert rec["review_type"] == "ax" and rec["ref"] == "42"
     assert rec["reason"] == "docs-only PR, no interface change"
-    assert rec["gate"]["signal"] == "human-session"
+    # ms-119 e-7442: subprocess には端末が無いので、申告だけの human は
+    # human-session-unverified として残る (人間の承認と同形にしない)。
+    assert rec["gate"]["signal"] == "human-session-unverified"
+    assert rec["gate"]["stdin_tty"] is False
 
 
 def test_ai_session_skip_leaves_grep_able_footprint(proj):

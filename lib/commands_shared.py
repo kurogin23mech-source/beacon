@@ -1336,6 +1336,41 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
         f.write("\n")
 
 
+def _stdin_is_a_terminal() -> bool:
+    """標準入力が端末 (人が打っている) か。読めなければ False。"""
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _human_claim_corroborated() -> bool:
+    """「人間のセッション」という申告に **申告以外の裏付け** があるか (ms-119 e-7442)。
+
+    ``BEACON_SESSION_KIND=human`` は呼び出したプロセス自身の環境変数で、AI が自分で
+    立てられる。立てて承認すると、記録上は人間の承認と区別が付かなかった
+    (2026-11-11 の独立思想レビュー / 目的達成 judge が実証)。そこで申告に加えて
+    **標準入力が端末か** を見る。AI のツール実行 (Bash tool 等) やパイプには端末が
+    無く、人が端末で打つときには在る (このリポジトリの
+    ``_caller_is_human_for_untriaged`` と同じ材料)。
+
+    これは **関門ではない** (端末が無い人間の打ち方 —— Claude Code の ``!`` 経由
+    など —— を止めないため、関門は従来どおり申告で開く)。記録の帰属を決めるための
+    材料で、目的は「やれなくする」ではなく「隠せなくする」。
+    """
+    return _session_kind_is_human() and _stdin_is_a_terminal()
+
+
+def human_session_signal() -> str:
+    """申告で人間として通ったときの監査記録の signal (ms-119 e-7442)。
+
+    裏付けがあれば ``human-session``、申告だけなら ``human-session-unverified``。
+    後者は「人間が端末以外から打った」と「AI が環境変数を立てた」のどちらとも
+    区別できない、という事実をそのまま記録に残す (人間の承認と同形にしない)。
+    """
+    return "human-session" if _human_claim_corroborated() else "human-session-unverified"
+
+
 def _session_kind_is_human() -> bool:
     """True when the calling session declares itself human-driven.
 
@@ -4880,4 +4915,9 @@ def decided_by_for_gate() -> str:
     decided_by の意味論を変える者が 3 箇所を手で探す必要があり、1 箇所見落とすと判断の
     帰属が capability ごとに静かに割れる。``decided_by_for_review`` が同じ drift を
     3→1 に畳んだ先例なので、それに倣ってここへ集約した。"""
-    return "human-delegated" if _session_kind_is_human() else "AI-proposed-human-chose"
+    # ms-119 e-7442: 「人間が直接」を名乗るのは申告に裏付けがあるときだけ。申告
+    # だけ (端末が無い) なら AI 補助の側 (人間が選んだ) に倒す —— AI が環境変数を
+    # 立てて完了を書いた記録が、人間の直接の判断と同形で残らないようにする。
+    # 関門 (直接完了の禁止) は申告で開くままなので、使い方は変わらない。
+    return ("human-delegated" if _human_claim_corroborated()
+            else "AI-proposed-human-chose")

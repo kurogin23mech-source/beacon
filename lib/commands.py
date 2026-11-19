@@ -259,7 +259,8 @@ from cmd_claim import (  # noqa: F401
 # cmd_operation._X (see the e-4320 monkeypatch-trap note above).
 from commands_shared import (  # noqa: F401
     _get_triggers_dir, _spec_doc_for_target, _spec_exists_for_op,
-    _fire_review_due_trigger, _session_kind_is_human,
+    _fire_review_due_trigger, _session_kind_is_human, human_session_signal,
+    _stdin_is_a_terminal,
     _ai_session_direct_completion_ban_active, _gate_target_class,
     # ms-119 e-7439: target 側の記録が何をするかを述べる唯一の文。実行時の print と
     # `beacon review done --help` の両面がこれを参照する (片面だけ直せない形)。
@@ -4035,12 +4036,16 @@ def _review_skip_gate_record() -> dict:
     if override:
         signal = "user-override"
     elif _session_kind_is_human():
-        signal = "human-session"
+        # ms-119 e-7442: 申告だけなら human-session-unverified (人間の承認と
+        # 同形で残さない)。裏付け = 標準入力が端末。
+        signal = human_session_signal()
     else:
         signal = "ai-session-unguarded"
     return {
         "signal": signal,
         "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
+        # ms-119 e-7442: 申告以外の材料 (端末が無い skip は申告だけの免除として残る)
+        "stdin_tty": _stdin_is_a_terminal(),
     }
 
 
