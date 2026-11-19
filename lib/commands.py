@@ -4239,9 +4239,15 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
               f"対して** 実施されてから緑になります)", file=sys.stderr)
         return
 
+    # ms-119 e-7462: 印の説明文で **実施と免除を区別する**。`review skip` も
+    # この関数を通るようになったので、免除で通った種別があるのに「記録済み」と
+    # 名乗ると、GitHub 側の監査で「レビューした」と「人間が理由付きで省いた」の
+    # 区別が付かない。種別の内訳は関門と同じ導出 (_ob) から取る。
+    _desc = review_gate_ci_description(_ob)
     try:
         r = subprocess.run(["python3", script, "set", "--state", "success",
-                            "--sha", reviewed_sha, "--pr", pr_number],
+                            "--sha", reviewed_sha, "--pr", pr_number,
+                            "--desc", _desc],
                            capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
         print(f"  ⚠ ゲートの印を押せませんでした ({e})。手で押す: python3 {script} "
@@ -4254,7 +4260,28 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
               f"手で押す: python3 {script} set --state success "
               f"--sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
         return
-    print(f"  ✓ ゲートの印を success に押しました ({reviewed_sha[:12]})")
+    print(f"  ✓ ゲートの印を success に押しました ({reviewed_sha[:12]}: {_desc})")
+
+
+def review_gate_ci_description(obligations: dict) -> str:
+    """beacon-review-gate の success に添える説明文 (ms-119 e-7462)。純粋。
+
+    免除 (``review skip``) で通った種別があれば、それを **「人間の理由付き免除
+    (未実施)」** と名指す。GitHub の check の説明は PR の画面に出る唯一の文で、
+    ここが「記録済み」だけだと、免除で通った PR がレビュー済みに見える。
+    """
+    skipped = []
+    for s in obligations.get("skipped") or []:
+        name = s.get("review") if isinstance(s, dict) else s
+        if name and name not in skipped:
+            skipped.append(str(name))
+    done = [t for t in (obligations.get("satisfied") or []) if t not in skipped]
+    parts = []
+    if done:
+        parts.append("実施: " + ", ".join(done))
+    if skipped:
+        parts.append("人間の理由付き免除 (未実施): " + ", ".join(skipped))
+    return "独立レビュー " + (" / ".join(parts) if parts else "充足")
 
 
 def cmd_review_status():
@@ -4496,6 +4523,32 @@ def cmd_review_skip():
         _remove_binding_from_target_review_due(target_id, review_type)
 
     where = f"PR #{pr_number}" if pr_number else target_id
+    if pr_number:
+        # ms-119 e-7462: 免除でも **CI の印を同じ経路で押す**。以前は印を押す経路が
+        # `review done` にしか無く、skip を打っても GitHub の必須チェック
+        # (beacon-review-gate) は pending のまま残った。`review status` は「通過
+        # できます」と言うのに PR は BLOCKED で取り込めず、宣言された一級経路が
+        # 使えなかった (PR #846 で実際に起き、手で review-gate-ci.py を叩いた)。
+        # 押すかどうか (env の opt-in / 手元 HEAD との照合 / 全必須種別の充足) の
+        # 判断は done と同じ関数に任せる —— 免除用に別の条件を書くと 2 経路が
+        # ずれる。押す先は免除を出した時点の PR head (= skipped_at_sha)。
+        #
+        # --json のときも押す (押さない形にすると「JSON で打つと黙って印が進まない」
+        # 同じ型の穴になる)。印の処理が出す行は JSON を壊さないよう記録の
+        # ``gate_ci_notes`` に収める (stdout / stderr のどちらに出しても Bash
+        # tool が流れを結合して JSON を壊すため)。
+        if json_mode:
+            import contextlib
+            import io as _io
+            _buf = _io.StringIO()
+            with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
+                _ci_flip_review_gate_success(pr_number, record.get("repo", ""),
+                                             record.get("skipped_at_sha", ""))
+            record["gate_ci_notes"] = [ln.strip() for ln in _buf.getvalue().splitlines()
+                                       if ln.strip()]
+        else:
+            _ci_flip_review_gate_success(pr_number, record.get("repo", ""),
+                                         record.get("skipped_at_sha", ""))
     if json_mode:
         print(json.dumps(record, ensure_ascii=False))
     else:
