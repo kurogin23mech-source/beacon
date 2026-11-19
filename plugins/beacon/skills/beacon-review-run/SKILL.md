@@ -251,9 +251,15 @@ judge に入れると bundle の外から実装者由来の文脈が再流入し
 
 #### 4-b. `record_only` (記録して終わり、直さない)
 
-**件数と 1 行ずつの要約だけを、`findings` とは別の見出しの下に出す。** 各要素の
-`why_no_behavior_change` / `why_no_change_risk` / `why_promise_kept` は doc に残れば
-よく、画面に広げない (広げると、直す候補と同じ重みで読まれる)。
+**件数と 1 行ずつの要約だけを、`findings` とは別の見出しの下に出す。** 各要素が持つ
+「なぜ直さなくてよいか」の欄は doc に残ればよく、画面に広げない (広げると、直す候補と
+同じ重みで読まれる)。
+
+**その欄の名前をここに書き写さない。** 名前を決めているのは各 instrument の SKILL.md
+で、ここは受け取った要素を**そのまま doc に転記する**だけにする。写すと、instrument 側
+で改名したときにこちらが黙って古くなる —— 同じ Step の severity について「種別名を
+添えて値を言い換えずに出す」と決めたのと同じ理由 (独立保守性レビュー 2026-11-19
+medium: 初版はここで 3 種別の欄名を列挙しており、その非対称を突かれた)。
 
 ```
 記録のみ (直しません) — 3 件
@@ -298,9 +304,21 @@ findings を対象リポ / チームに運べる形に配線する。ユーザ�
 
 - **PR コメント**: `gh pr comment <n> -b "<findings 要約>"` で PR に残す (PR レビュー
   の一部として)。
-- **レポート doc**: `beacon doc add --scope report --title "AX review: <target>"
-  --stdin` で監査可能な記録として保存。**`record_only` が 1 件でもあればこれは必須**
-  (Step 4-b)。doc には `findings` と `record_only` を **別の節に分けて** 書き、
+- **レポート doc**: `beacon doc add "<種別> review: <target>" --scope report --stdin`
+  で監査可能な記録として保存。**`record_only` が 1 件でもあればこれは必須**
+  (Step 4-b)。
+
+  **題名は位置引数**。`--title` という旗は存在せず、渡すと
+  `Error: '--title' is not a valid flag for 'beacon doc'.` で落ちる
+  (`beacon doc add --help` 自身が「title is positional, NOT --title」と明記している)。
+  初版のこの行は `--title` を使っていて、独立 AX レビューが**実際に実行して** exit 1 を
+  確認した (2026-11-19)。保存を「任意」から「`record_only` が在れば必須」に格上げした
+  のと同じ変更の中で壊れたコマンドを必須経路に置いていたので、**この PR が禁じた結果
+  (記録されずに終わる) を自分で起きやすくしていた**。
+
+  同じ誤り (`--title`) は他の Skill にも写っている。直すのはこの Skill の範囲だけで、
+  横断の掃除と機械照合 (Skill 本文のコマンド例と実 CLI の旗を突き合わせるガード) は
+  別の課題に切り出す。doc には `findings` と `record_only` を **別の節に分けて** 書き、
   `record_only` 側には各要素の「なぜ直さなくてよいか」の根拠も全文入れる (後から
   「この判断は妥当だったか」を監査できるようにするため)。
 - **Beacon task 化 (optional 増強)**: high / misleading の finding を
