@@ -6,6 +6,7 @@ __version__ = "0.66.0"
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -4141,7 +4142,7 @@ def _remove_binding_from_target_review_due(target_id: str, review_type: str) -> 
 
 
 def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
-                                 reviewed_sha: str = "") -> None:
+                                 reviewed_sha: str = "") -> bool:
     """``beacon-review-gate`` の印を **レビューした sha に** success で押す
     (ms-119 e-4073 / e-6859)。
 
@@ -4183,7 +4184,7 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
         print("  (ゲートの印は触っていません: BEACON_REVIEW_GATE_CI=1 が無いため。"
               "この PR がゲート必須なら push 済の head に対して "
               "BEACON_REVIEW_GATE_CI=1 を付けて再実行してください)", file=sys.stderr)
-        return
+        return False
     script = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "scripts", "review-gate-ci.py")
@@ -4199,7 +4200,29 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
               f"(sha が無いままこの印を手で押す経路は **ありません** —— "
               f"印は sha 単位なので、押す先が決まらないからです)。",
               file=sys.stderr)
-        return
+        return False
+
+    # **その sha に対して全必須種別が充足しているか** を見る。1 種別の実施で
+    # 緑を押せてしまう形が PR #785 の事故だった (ms-119 e-6859)。
+    _ob = pr_review_obligations(pr_number, pr_repo, head_sha=reviewed_sha)
+    # ms-119 e-6859 (親レビュー 2026-11-06): 判定に関わる読み手は **blocking** を
+    # 見る。`owed` を直接読むと、`passed` と食い違う文言を作れてしまう。
+    _blocking = review_blocking_types(_ob)
+    if _blocking:
+        print(f"  (ゲートの印はまだ押していません: {reviewed_sha[:12]} に対して "
+              f"{', '.join(_blocking)} が未実施です。全必須種別が **同じ差分に"
+              f"対して** 実施されてから緑になります)", file=sys.stderr)
+        return False
+
+    # ms-119 e-7462: 印の説明文で **実施と免除を区別する**。`review skip` も
+    # この関数を通るようになったので、免除で通った種別があるのに「記録済み」と
+    # 名乗ると、GitHub 側の監査で「レビューした」と「人間が理由付きで省いた」の
+    # 区別が付かない。種別の内訳は関門と同じ導出 (_ob) から取る。
+    _desc = review_gate_ci_description(_ob)
+    # 手で押す案内にも同じ説明文を付ける (PR #853 独立 AX): --desc を付けずに
+    # 案内すると、スクリプト既定の「記録済み」が付き、免除がレビュー済みに見える。
+    _manual = (f"python3 {script} set --state success --sha {reviewed_sha} "
+               f"--pr {pr_number} --desc {shlex.quote(_desc)}")
 
     try:
         local_sha = subprocess.run(
@@ -4207,9 +4230,8 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
             capture_output=True, text=True, timeout=30).stdout.strip()
     except (OSError, subprocess.SubprocessError) as e:
         print(f"  ⚠ 手元の HEAD を取得できませんでした ({e})。照合できないため"
-              f"印は押していません。手で押す: python3 {script} set --state success "
-              f"--sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
-        return
+              f"印は押していません。手で押す: {_manual}", file=sys.stderr)
+        return False
 
     if local_sha and local_sha != reviewed_sha:
         # ここが e-6873 の本体。押さずに断る。
@@ -4222,45 +4244,29 @@ def _ci_flip_review_gate_success(pr_number: str, pr_repo: str = "",
             f"    取り込めない」状態になります (2026-10-06 に PR #786 で実際に起きた)。\n"
             f"    先に push してから、この印だけを押し直してください:\n"
             f"      git push && python3 {script} set --state success "
-            f"--sha \"$(git rev-parse HEAD)\" --pr {pr_number}\n"
+            f"--sha \"$(git rev-parse HEAD)\" --pr {pr_number} "
+            f"--desc {shlex.quote(_desc)}\n"
             f"    (`beacon review done` の再実行は採否の記録が二重になるので避けてください)",
             file=sys.stderr)
-        return
+        return False
 
-    # **その sha に対して全必須種別が充足しているか** を見る。1 種別の実施で
-    # 緑を押せてしまう形が PR #785 の事故だった (ms-119 e-6859)。
-    _ob = pr_review_obligations(pr_number, pr_repo, head_sha=reviewed_sha)
-    # ms-119 e-6859 (親レビュー 2026-11-06): 判定に関わる読み手は **blocking** を
-    # 見る。`owed` を直接読むと、`passed` と食い違う文言を作れてしまう。
-    _blocking = review_blocking_types(_ob)
-    if _blocking:
-        print(f"  (ゲートの印はまだ押していません: {reviewed_sha[:12]} に対して "
-              f"{', '.join(_blocking)} が未実施です。全必須種別が **同じ差分に"
-              f"対して** 実施されてから緑になります)", file=sys.stderr)
-        return
-
-    # ms-119 e-7462: 印の説明文で **実施と免除を区別する**。`review skip` も
-    # この関数を通るようになったので、免除で通った種別があるのに「記録済み」と
-    # 名乗ると、GitHub 側の監査で「レビューした」と「人間が理由付きで省いた」の
-    # 区別が付かない。種別の内訳は関門と同じ導出 (_ob) から取る。
-    _desc = review_gate_ci_description(_ob)
     try:
         r = subprocess.run(["python3", script, "set", "--state", "success",
                             "--sha", reviewed_sha, "--pr", pr_number,
                             "--desc", _desc],
                            capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
-        print(f"  ⚠ ゲートの印を押せませんでした ({e})。手で押す: python3 {script} "
-              f"set --state success --sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
-        return
+        print(f"  ⚠ ゲートの印を押せませんでした ({e})。手で押す: {_manual}",
+              file=sys.stderr)
+        return False
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip().splitlines()
         print(f"  ⚠ ゲートの印を押せませんでした "
               f"({detail[-1] if detail else f'exit {r.returncode}'})。"
-              f"手で押す: python3 {script} set --state success "
-              f"--sha {reviewed_sha} --pr {pr_number}", file=sys.stderr)
-        return
+              f"手で押す: {_manual}", file=sys.stderr)
+        return False
     print(f"  ✓ ゲートの印を success に押しました ({reviewed_sha[:12]}: {_desc})")
+    return True
 
 
 def review_gate_ci_description(obligations: dict) -> str:
@@ -4533,22 +4539,55 @@ def cmd_review_skip():
         # 判断は done と同じ関数に任せる —— 免除用に別の条件を書くと 2 経路が
         # ずれる。押す先は免除を出した時点の PR head (= skipped_at_sha)。
         #
-        # --json のときも押す (押さない形にすると「JSON で打つと黙って印が進まない」
-        # 同じ型の穴になる)。印の処理が出す行は JSON を壊さないよう記録の
-        # ``gate_ci_notes`` に収める (stdout / stderr のどちらに出しても Bash
-        # tool が流れを結合して JSON を壊すため)。
+        # **ただし skip 固有の 2 条件では押さない** (PR #853 独立 AX):
+        #   * 人間と申告していないセッションの skip (ai-session-unguarded)。
+        #     以前は AI の skip は監査ログに残るだけで GitHub は pending のまま
+        #     だった = 人の目を通る最後の一枚。それを AI の 1 コマンドで緑にでき、
+        #     しかも説明文が「人間の理由付き免除」と名乗っていた
+        #   * 一致する義務が無い skip (PR 番号の打ち間違い等、waived_obligation=false)。
+        #     何も免除していないのに、その PR の head を緑にしていた
+        #
+        # --json のときも同じ判断で押す。印の処理が出す行は記録の
+        # ``gate_ci_notes`` に、押せたかは ``gate_ci_pushed`` に収める
+        # (stdout / stderr のどちらに出しても Bash tool が流れを結合して JSON を
+        # 壊すため。押さない形にすると「JSON で打つと黙って進まない」穴になる)。
+        _push_refusal = ""
+        if gate["signal"] not in ("human-session", "user-override"):
+            _push_refusal = (
+                "  (ゲートの印は押していません: 人間と申告していないセッションの"
+                "免除だからです (signal=ai-session-unguarded)。免除で GitHub の"
+                "必須チェックを通すのは人間の判断に限ります。人間が "
+                "BEACON_SESSION_KIND=human で打ち直すか、BEACON_REVIEW_SKIP_USER_"
+                "OVERRIDE=1 を明示してください)")
+        elif not owed:
+            _push_refusal = (
+                "  (ゲートの印は押していません: 一致する review-due が無く、"
+                "何も免除していないためです)")
+        _buf = None
         if json_mode:
             import contextlib
             import io as _io
             _buf = _io.StringIO()
+        if _push_refusal:
+            if _buf is not None:
+                _buf.write(_push_refusal + "\n")
+            else:
+                print(_push_refusal, file=sys.stderr)
+            _pushed = False
+        elif _buf is not None:
             with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
-                _ci_flip_review_gate_success(pr_number, record.get("repo", ""),
-                                             record.get("skipped_at_sha", ""))
-            record["gate_ci_notes"] = [ln.strip() for ln in _buf.getvalue().splitlines()
-                                       if ln.strip()]
+                _pushed = _ci_flip_review_gate_success(
+                    pr_number, record.get("repo", ""),
+                    record.get("skipped_at_sha", ""))
         else:
-            _ci_flip_review_gate_success(pr_number, record.get("repo", ""),
-                                         record.get("skipped_at_sha", ""))
+            _pushed = _ci_flip_review_gate_success(
+                pr_number, record.get("repo", ""),
+                record.get("skipped_at_sha", ""))
+        if _buf is not None:
+            record["gate_ci_pushed"] = bool(_pushed)
+            record["gate_ci_notes"] = [ln.strip()
+                                       for ln in _buf.getvalue().splitlines()
+                                       if ln.strip()]
     if json_mode:
         print(json.dumps(record, ensure_ascii=False))
     else:

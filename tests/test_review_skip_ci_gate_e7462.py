@@ -152,3 +152,74 @@ def test_description_for_an_all_done_pr_does_not_mention_a_waiver():
     desc = commands.review_gate_ci_description(
         {"satisfied": ["ax", "maintainability"], "skipped": []})
     assert "免除" not in desc and "ax" in desc and "maintainability" in desc, desc
+
+
+# --- skip 固有の「押さない」条件 (PR #853 独立 AX) -------------------------
+
+def test_an_unguarded_ai_skip_does_not_push_the_gate(world, monkeypatch):
+    """人間と申告していないセッションの免除では GitHub の必須チェックを緑にしない。
+
+    以前は AI の skip は監査ログに残るだけで GitHub は pending のまま = 人の目を
+    通る最後の一枚だった。それを AI の 1 コマンドで緑にでき、しかも説明文が
+    「人間の理由付き免除」と名乗っていた (独立 AX が実測)。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+    monkeypatch.delenv("BEACON_REVIEW_SKIP_USER_OVERRIDE", raising=False)
+    code, _out, err = _skip()
+    assert code == 0
+    assert not _gate_pushes(world), world
+    assert "人間と申告していない" in err, err
+
+
+def test_an_explicit_user_override_still_pushes(world, monkeypatch):
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+    monkeypatch.setenv("BEACON_REVIEW_SKIP_USER_OVERRIDE", "1")
+    _skip()
+    assert _gate_pushes(world), world
+
+
+def test_a_skip_that_waived_nothing_does_not_push(world, monkeypatch, tmp_path):
+    """一致する義務が無い skip (PR 番号の打ち間違い等) で、その PR を緑にしない。"""
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    for f in (tmp_path / "triggers").iterdir():
+        f.rename(tmp_path / f.name)                  # review-due を退避
+    code, _out, err = _skip()
+    assert code == 3, err
+    assert not _gate_pushes(world), world
+
+
+def test_json_mode_reports_whether_the_gate_was_pushed(world, monkeypatch):
+    """--json では押せたかを構造化して返す (notes の文字列を読まなくても分かる)。"""
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    _code, out, _err = _skip()
+    assert json.loads(out)["gate_ci_pushed"] is True
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+    _code, out, _err = _skip()
+    rec = json.loads(out)
+    assert rec["gate_ci_pushed"] is False, rec
+    assert any("人間と申告していない" in n for n in rec["gate_ci_notes"]), rec
+
+
+def test_the_manual_push_hint_carries_the_waiver_description(world, monkeypatch):
+    """押せなかったときの「手で押す」案内に説明文が付く。
+
+    付けずに案内すると、スクリプト既定の「記録済み」が付き、免除がレビュー済みに
+    見える (この PR が防いだ状態を手動経路で再現してしまう)。
+    """
+    monkeypatch.setenv("BEACON_REVIEW_GATE_CI", "1")
+
+    def run(argv, *a, **k):
+        world.append(list(argv))
+        if "rev-parse" in argv:
+            return _R(SHA + "\n")
+        r = _R("")
+        r.returncode = 1
+        r.stderr = "gh: network down"
+        return r
+    monkeypatch.setattr(commands.subprocess, "run", run)
+    _code, _out, err = _skip()
+    hint = [ln for ln in err.splitlines() if "手で押す" in ln]
+    assert hint and "--desc" in hint[0] and "免除" in hint[0], err
