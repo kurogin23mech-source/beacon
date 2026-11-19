@@ -511,7 +511,7 @@ from commands_shared import (  # noqa: F401
     decide_review_done_argument_error,
     resolve_reviewed_sha_for_done,
     write_issued_bundle_sha,
-    issued_bundle_sha,
+    consume_issued_bundle_mark,
     write_reviewed_marker,
     reviewed_marker_sha,
     pr_review_obligations,
@@ -4921,6 +4921,11 @@ def cmd_review_done():
     # fork で打ったときに親からも実施済みとして見えるようにするのが目的。
     _ledger_state = record_review_done_across_worktrees(
         review_type, pr_number, pr_repo, reviewed_sha=_reviewed_sha)
+    # 記録に **使った印 1 件だけ** を片付ける (consume_issued_bundle_mark の
+    # docstring)。残すと後の発行と「食い違い」になり、使っていない印を消すと
+    # 別の作業フォルダで実行中の judge の拠り所を奪う。
+    if _sha_source == "issued-bundle":
+        consume_issued_bundle_mark(_shares.get("mark_path", ""))
     remaining = _pr_open_review_nudge_pending_types(pr_number, pr_repo)
     print(f"レビュー実施を記録: {review_type} / "
           f"{pr_repo + '#' if pr_repo else 'PR #'}{pr_number} (review-due 解消)")
