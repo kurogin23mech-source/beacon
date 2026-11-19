@@ -123,6 +123,16 @@ judge が repo を歩かずに確認するための材料。
       "confidence": "high | medium | low"
     }
   ],
+  "record_only": [
+    {
+      "principle": "§原則 6 パターンの一貫性",
+      "location": "lib/review_collect.py:120",
+      "observed": "この変更が足した型注釈だけが引用符で囲まれており、同じファイルの他の 3 箇所は囲まれていない",
+      "why_no_change_risk": "読んだ次の AI が誤る余地が無い。どちらの書き方でも同じ型として解釈され、分岐・引数・返り値は変わらない",
+      "origin": "introduced",
+      "confidence": "high"
+    }
+  ],
   "faithful_observations": [
     "保守しやすい良い構造、またはガードで既に閉じている性質。無ければ空配列"
   ],
@@ -146,7 +156,22 @@ judge が repo を歩かずに確認するための材料。
   混ざる。この軸があると author に公平で、修正の優先順位も付けやすい (`introduced`
   を優先、`touched` は別途の負債返済 task へ)。
 - `severity`: 原典 §4 に従う (high=安全な変更が実質不可能 / medium=妨げるが注意すれば
-  可 / low=読みにくいが変更は安全)。
+  可 / low=読みにくいが変更は安全)。**`low` の多くは `findings` ではなく
+  `record_only` に行く** —— 「読みにくいが変更は安全」は、原典 §4 の下限の定義
+  そのままで「次の変更を誤らせない」側だから。`low` を付けて直す列に並べない。
+- **どちらの配列に入れるか** は原典 §4 の下限で決める。判断は 1 つの問いだけ、
+  **「次の変更を誤らせるか / 壊させるか」**。誤らせるなら `findings`、誤らせない
+  なら `record_only`。**迷ったら `findings`** (軽い側に倒す方が常に危ない)。
+  説明文 (コメント / docstring) は性質で分ける: **実装と逆のことを書いている**なら
+  `findings` (読んだ次の AI が書かれたとおりに変更して壊す)、**曖昧・古いだけ**なら
+  `record_only`。
+- `record_only` の各要素: `principle` / `location` / `observed` /
+  `why_no_change_risk` (**必須**。次の変更を誤らせないと言い切れる根拠) / `origin` /
+  `confidence`。**`severity` と `structural_fix` は持たせない** —— 直す前提の欄を
+  持たせると、受け取る側が直す対象として読む。
+- `confidence` と「どちらの配列か」は **別の軸**。確信が低いだけで *次の変更を
+  誤らせる* ものは `findings` に残す (`confidence: low` を付けて)。`record_only` へ
+  移す理由になるのは「誤らせない」ことだけで、「自信が無い」ことではない。
 - `confidence` (任意): 確信が持てないが変えにくさの疑いが濃いものは `low` で残す。
 - `faithful_observations`: 良い構造 + ガードで閉じている性質。無ければ空配列。
 - `skill_gaps` は **必須**。空なら空配列。
