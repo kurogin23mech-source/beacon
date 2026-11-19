@@ -7926,7 +7926,7 @@ def _help_registry():
         {"command": "beacon pr add <github-url>", "flags": ["-m <ms-id>", "--intent <text>", "--author <user>", "--json"], "description": "Record a PR entry"},
         {"command": "beacon pr approve <entry-id>", "flags": ["--rationale <text>", "--no-auto-done", "--json"], "description": "Approve a PR (auto-dones bound tasks at HIGH confidence; --no-auto-done to opt out)"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
-        {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
+        {"command": "beacon pr merge <entry-id>", "flags": [], "description": "レビューの関門と AI セッション禁止を確かめたあと、GitHub で PR を取り込み (gh pr merge --merge)、MERGED を確かめてから記録する (ms-119 e-7463)。取り込めない / 確かめられないときは記録を変えずに非 0。GitHub で既に取り込み済みなら記録だけ揃える"},
         {"command": "beacon pr sync", "flags": ["--dry-run", "--json"], "description": "Align beacon PR entries with GitHub state (merged/closed) — ms-61 / e-2005"},
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)。**これは促し (トリガーファイルの有無) の面であって関門ではない** — 空配列は「関門が開いている」を意味しない (実施後にコミットを積むと促しは出ないが関門は閉じる)。PR の独立レビュー義務の確定判定は `beacon review status --pr <n>` を使う (ms-119 e-6859)"},

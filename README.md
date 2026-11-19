@@ -359,7 +359,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon pr approve <entry-id> [--rationale "text"]` | Approve a PR (rationale required) / 承認 |
 | `beacon pr request-changes <entry-id> [--rationale "text"]` | Request changes / 修正依頼 |
 | `beacon pr reject <entry-id> [--rationale "text"]` | Reject a PR / 却下 |
-| `beacon pr merge <entry-id>` | Mark as merged / マージ済みに設定 |
+| `beacon pr merge <entry-id>` | Merge on GitHub (gh pr merge --merge) after the review gate, then record / 関門を確かめて GitHub で取り込み、確認後に記録 |
 | `beacon pr close <entry-id>` | Close without merging / クローズ |
 | `beacon pr sync [--dry-run]` | Sync beacon PR entries with GitHub state (merged/closed) / GitHub状態と整合 (ms-61 / e-2005) |
 

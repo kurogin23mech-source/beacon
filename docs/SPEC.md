@@ -146,7 +146,7 @@ Duplicate detection: `source` + (`url` or `revision_id`). `source=manual` skips 
 | `beacon pr approve <entry-id> [--rationale "text"]` | Approve a PR (rationale required) | Yes |
 | `beacon pr request-changes <entry-id> [--rationale "text"]` | Request changes | Yes |
 | `beacon pr reject <entry-id> [--rationale "text"]` | Reject a PR | Yes |
-| `beacon pr merge <entry-id>` | Mark as merged | Yes |
+| `beacon pr merge <entry-id>` | Merge on GitHub after the review gate, record once MERGED is confirmed | Yes |
 | `beacon pr close <entry-id>` | Close without merging | Yes |
 
 Use `/review` Claude Code Skill (not `beacon pr review`) for AI-assisted code review.

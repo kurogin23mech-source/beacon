@@ -70,6 +70,7 @@ import work_model
 
 from commands_shared import (  # noqa: F401
     _session_kind_is_human,
+    resolve_pr_head,
     _check_ms_status_for_write,
     _clear_pr_open_review_triggers,
     _fire_pr_open_review_triggers,
@@ -1316,18 +1317,78 @@ def cmd_pr_merge():
     # this PR (same gate as approve). BEFORE save_project so a blocked merge
     # persists nothing. The user-override / human-session escape hatches above
     # are orthogonal (they gate the AI-merge-autonomy boundary, not the review).
-    _review_gate_check(_pr_number_from_url(entry.get("meta", {}).get("url", "")),
-                       pr_repo=_recorded_pr_repo(entry),
-                       action="merge")
+    _pr_num = _pr_number_from_url(entry.get("meta", {}).get("url", ""))
+    _pr_repo = _recorded_pr_repo(entry)
+    _review_gate_check(_pr_num, pr_repo=_pr_repo, action="merge")
+    # ms-119 e-7463: **GitHub で実際に取り込んでから** 記録する。以前は動詞名も
+    # 出力も「Merged」と言うのに、実体は beacon の記録を merged にするだけで
+    # GitHub では何も起きなかった (PR #846 で実踏: 記録は merged、GitHub は OPEN /
+    # mergeCommit=null、exit 0)。関門 (レビュー義務 / AI セッション禁止) はこの
+    # コマンドが持っているので、取り込みの口を 1 本に揃え、関門が実際の取り込みの
+    # **前** で効くようにする。取り込みに失敗したら何も記録しない (save の前)。
+    _github_outcome = _merge_on_github(_pr_num, _pr_repo)
     save_project(data)
     # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
-    _clear_pr_open_review_triggers(
-        _pr_number_from_url(entry.get("meta", {}).get("url", "")),
-        pr_repo=_recorded_pr_repo(entry))
+    _clear_pr_open_review_triggers(_pr_num, pr_repo=_pr_repo)
     if json_mode:
-        print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
+        print(json.dumps({"entry_id": entry_id, "pr_status": "merged",
+                          "github": _github_outcome}, ensure_ascii=False))
     else:
+        _how = ("GitHub で取り込みました"
+                if _github_outcome == "merged-now"
+                else "GitHub では既に取り込み済みだったので、記録を揃えました")
         print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
+        print(f"  ({_how}。GitHub 上で MERGED を確認済み)")
+
+
+def _merge_on_github(pr_number: str, pr_repo: str) -> str:
+    """PR を GitHub で取り込み、**取り込まれたことを確かめて** 結果を返す (ms-119 e-7463)。
+
+    返り値: ``"merged-now"`` (この呼び出しで取り込んだ) / ``"already-merged"``
+    (既に取り込み済みだった)。取り込めなかった・確かめられなかったときは
+    **記録せずに** 非 0 で終わる —— 記録と GitHub が食い違ったまま成功を返す経路を
+    残さない。
+
+    取り込みは ``gh pr merge --merge`` (merge commit)。squash / rebase は commit の
+    hash を作り直すので、beacon の記録が指す hash が main から辿れなくなる。
+    ``--auto`` は付けない (必須チェックの無いリポジトリでは CI を待たずに即座に
+    取り込まれ、付けた側は「待ってくれる」と誤解する)。
+    """
+    def _fail(msg: str) -> None:
+        print(f"Error: {msg}\n  beacon の記録は変えていません (merged にしていません)。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if not pr_number:
+        _fail("この記録の URL から PR 番号を読めないため、GitHub で取り込めません。")
+    _head, state, err = resolve_pr_head(pr_number, pr_repo)
+    where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
+    if state == "MERGED":
+        return "already-merged"
+    if state == "CLOSED":
+        _fail(f"{where} は GitHub で取り込まれずに閉じられています。")
+    if state != "OPEN":
+        _fail(f"{where} の状態を GitHub で確かめられませんでした ({err or state or '不明'})。"
+              f"確かめられないまま取り込み・記録はしません。")
+    argv = ["gh", "pr", "merge", str(pr_number), "--merge"]
+    if pr_repo:
+        argv += ["--repo", pr_repo]
+    try:
+        result = gh_port.run(argv)
+    except Exception as exc:
+        _fail(f"{where} を GitHub で取り込めませんでした ({type(exc).__name__}: {exc})。")
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        _fail(f"{where} を GitHub で取り込めませんでした "
+              f"({detail[-1] if detail else f'exit {result.returncode}'})。")
+    # gh が成功を返しても MERGED とは限らない (自動取り込みの予約になった等)。
+    # 記録の前に GitHub の状態を読み直して確かめる。
+    _head2, state2, err2 = resolve_pr_head(pr_number, pr_repo)
+    if state2 != "MERGED":
+        _fail(f"gh pr merge は成功を返しましたが、{where} は GitHub 上でまだ "
+              f"{state2 or '不明'} です ({err2 or '取り込みの予約になった可能性'})。"
+              f"取り込まれたのを確かめてから beacon pr merge を打ち直してください。")
+    return "merged-now"
 
 # 表示側が **意図して出さない** 種別 (ms-166 e-6871 の独立保守性レビュー M-3)。
 #
