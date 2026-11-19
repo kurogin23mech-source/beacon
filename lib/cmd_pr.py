@@ -99,7 +99,7 @@ def _pr_number_from_url(url: str) -> str:
     n = core._extract_pr_number_from_url(url)
     return str(n) if n is not None else ""
 
-def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> None:
+def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> str:
     """Refuse ``action`` (approve / merge) while independent reviews are still
     owed for **the current diff** of this PR, unless BEACON_PR_REVIEW_OVERRIDE=1
     (which proceeds but prints an audit line). Exits 2 on block. ms-119 e-4060.
@@ -127,6 +127,11 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
     review recorded for a DIFFERENT repository's PR#N does not lift this PR's
     gate. Pass it from the entry being gated (``_recorded_pr_repo(entry)``) —
     the gate reads the same identity the record carries.
+
+    Returns the head sha the gate judged (``""`` if it could not resolve one and
+    an override let it through). ``pr merge`` pins the GitHub merge to this sha
+    (``--match-head-commit``) so a push between the gate and the merge cannot
+    land an unreviewed head (ms-119 e-7463, PR #855 独立 AX).
     """
     ob = pr_review_obligations(pr_number, pr_repo)
 
@@ -145,7 +150,7 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
                   file=sys.stderr)
             for line in disclosure:
                 print(line, file=sys.stderr)
-        return
+        return str(ob.get("head_sha") or "")
 
     disclosure = format_pr_review_obligation_disclosure(ob)
     override = os.environ.get("BEACON_PR_REVIEW_OVERRIDE") == "1"
@@ -157,7 +162,7 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
                   f"({ob.get('head_error') or '理由不明'}) — この {action} は "
                   f"override であり監査対象です。現在の差分がレビュー済みである"
                   f"保証はありません。", file=sys.stderr)
-            return
+            return ""
         print(format_review_head_unresolved_error(
             ob, action=action, pr_number=pr_number, pr_repo=pr_repo),
             file=sys.stderr)
@@ -178,7 +183,7 @@ def _review_gate_check(pr_number: str, *, action: str, pr_repo: str = "") -> Non
               f"監査対象です。", file=sys.stderr)
         for line in disclosure:
             print(line, file=sys.stderr)
-        return
+        return str(ob.get("head_sha") or "")
 
     print(format_review_gate_block_error(ob, action=action, pr_number=pr_number),
           file=sys.stderr)
@@ -1319,14 +1324,14 @@ def cmd_pr_merge():
     # are orthogonal (they gate the AI-merge-autonomy boundary, not the review).
     _pr_num = _pr_number_from_url(entry.get("meta", {}).get("url", ""))
     _pr_repo = _recorded_pr_repo(entry)
-    _review_gate_check(_pr_num, pr_repo=_pr_repo, action="merge")
+    _gated_head = _review_gate_check(_pr_num, pr_repo=_pr_repo, action="merge")
     # ms-119 e-7463: **GitHub で実際に取り込んでから** 記録する。以前は動詞名も
     # 出力も「Merged」と言うのに、実体は beacon の記録を merged にするだけで
     # GitHub では何も起きなかった (PR #846 で実踏: 記録は merged、GitHub は OPEN /
     # mergeCommit=null、exit 0)。関門 (レビュー義務 / AI セッション禁止) はこの
     # コマンドが持っているので、取り込みの口を 1 本に揃え、関門が実際の取り込みの
     # **前** で効くようにする。取り込みに失敗したら何も記録しない (save の前)。
-    _github_outcome = _merge_on_github(_pr_num, _pr_repo)
+    _github_outcome = _merge_on_github(_pr_num, _pr_repo, _gated_head)
     save_project(data)
     # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
     _clear_pr_open_review_triggers(_pr_num, pr_repo=_pr_repo)
@@ -1341,7 +1346,7 @@ def cmd_pr_merge():
         print(f"  ({_how}。GitHub 上で MERGED を確認済み)")
 
 
-def _merge_on_github(pr_number: str, pr_repo: str) -> str:
+def _merge_on_github(pr_number: str, pr_repo: str, gated_head: str = "") -> str:
     """PR を GitHub で取り込み、**取り込まれたことを確かめて** 結果を返す (ms-119 e-7463)。
 
     返り値: ``"merged-now"`` (この呼び出しで取り込んだ) / ``"already-merged"``
@@ -1361,6 +1366,15 @@ def _merge_on_github(pr_number: str, pr_repo: str) -> str:
 
     if not pr_number:
         _fail("この記録の URL から PR 番号を読めないため、GitHub で取り込めません。")
+    # **リポジトリを補完しない** (PR #855 独立 AX、実測): リポジトリが空のまま
+    # gh を打つと、gh はいまの作業フォルダのリポジトリの **同じ番号の別の PR** を
+    # 対象にする。関門も状態確認も同じ空の repo で見るので、一度もこの記録の PR を
+    # 確かめないまま、取り消せない取り込みが起きうる。
+    if not pr_repo:
+        _fail(f"この記録 (PR #{pr_number}) がどのリポジトリの PR かを読み取れないため、"
+              f"GitHub で取り込めません (いまの作業フォルダのリポジトリで補うと、"
+              f"同じ番号の別の PR を取り込みかねません)。`beacon pr sync` で記録の"
+              f"URL を揃えるか、gh で取り込んでから記録してください。")
     _head, state, err = resolve_pr_head(pr_number, pr_repo)
     where = f"{pr_repo}#{pr_number}" if pr_repo else f"PR #{pr_number}"
     if state == "MERGED":
@@ -1370,9 +1384,20 @@ def _merge_on_github(pr_number: str, pr_repo: str) -> str:
     if state != "OPEN":
         _fail(f"{where} の状態を GitHub で確かめられませんでした ({err or state or '不明'})。"
               f"確かめられないまま取り込み・記録はしません。")
-    argv = ["gh", "pr", "merge", str(pr_number), "--merge"]
-    if pr_repo:
-        argv += ["--repo", pr_repo]
+    # **関門が判定した版に固定して取り込む** (PR #855 独立 AX、実測)。関門は
+    # 「この sha のレビューが済んでいるか」を見るので、関門の後に push が入ると
+    # レビューしていない版が取り込まれる。--match-head-commit を付けると、head が
+    # 動いていれば gh が拒否する。関門が head を解決できず override で通した
+    # 場合 (gated_head 空) は、いま読んだ head に固定する。
+    pin = gated_head or _head
+    if gated_head and _head and gated_head != _head:
+        _fail(f"{where} の head が関門の判定 ({gated_head[:12]}) の後に "
+              f"{_head[:12]} へ動きました。新しい版はレビューを通っていないので"
+              f"取り込みません。関門からやり直してください。")
+    if not pin:
+        _fail(f"{where} の head を確かめられないため、取り込む版を固定できません。")
+    argv = ["gh", "pr", "merge", str(pr_number), "--merge",
+            "--match-head-commit", pin, "--repo", pr_repo]
     try:
         result = gh_port.run(argv)
     except Exception as exc:

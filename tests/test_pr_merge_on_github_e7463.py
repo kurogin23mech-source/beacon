@@ -91,7 +91,8 @@ def test_an_open_pr_is_merged_on_github_then_recorded(merge):
     """**本体 (受入 1)**: OPEN の PR を gh で取り込み、MERGED を確かめてから記録する。"""
     code, out, err, saved, fake = merge(FakeGh(["OPEN", "MERGED"]))
     assert code == 0, err
-    assert fake.runs == [["gh", "pr", "merge", "7", "--merge", "--repo", "o/r"]], fake.runs
+    assert fake.runs == [["gh", "pr", "merge", "7", "--merge",
+                          "--match-head-commit", SHA, "--repo", "o/r"]], fake.runs
     assert saved, "取り込んだのに記録していない"
     assert "GitHub で取り込みました" in out, out
 
@@ -161,3 +162,120 @@ def test_json_mode_says_what_happened_on_github(monkeypatch):
         _c.cmd_pr_merge()
     payload = json.loads(out.getvalue())
     assert payload["github"] == "merged-now" and payload["pr_status"] == "merged", payload
+
+
+# --- PR #855 独立レビューで足した契約 ------------------------------------------
+
+def _merge_with_gate(monkeypatch, fake, gate):
+    saved = []
+    data = _project()
+    monkeypatch.setattr(gh_port, "_adapter", fake, raising=False)
+    monkeypatch.setattr(cmd_pr, "load_project", lambda: data)
+    monkeypatch.setattr(cmd_pr, "save_project", lambda d: saved.append(d))
+    monkeypatch.setattr(cmd_pr, "_review_gate_check", gate)
+    monkeypatch.setattr(cmd_pr, "_clear_pr_open_review_triggers",
+                        lambda *a, **k: None)
+    monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
+    monkeypatch.setenv("BEACON_SESSION_KIND", "human")
+    monkeypatch.delenv("BEACON_JSON", raising=False)
+    err = io.StringIO()
+    code = 0
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            cmd_pr.cmd_pr_merge()
+    except SystemExit as e:
+        code = e.code or 0
+    return code, err.getvalue(), saved
+
+
+def test_a_head_that_moved_after_the_gate_is_not_merged(monkeypatch):
+    fake = FakeGh(["OPEN"])                          # いまの head は SHA (= "c"*40)
+    code, err, saved = _merge_with_gate(
+        monkeypatch, fake, lambda *a, **k: "a" * 40)  # 関門は別の版を判定した
+    assert code != 0 and not saved and not fake.runs, (fake.runs, err)
+    assert "動きました" in err, err
+
+
+def test_the_gate_runs_before_anything_touches_github(monkeypatch):
+    """関門で止まったら gh を 1 回も打たない (取り込みは取り消せない、保守性)。"""
+    fake = FakeGh(["OPEN", "MERGED"])
+    order = []
+
+    def gate(*a, **k):
+        order.append(("gate", len(fake.runs)))
+        raise SystemExit(2)
+    code, _err, saved = _merge_with_gate(monkeypatch, fake, gate)
+    assert code == 2 and not saved
+    assert fake.runs == [] and order == [("gate", 0)], (order, fake.runs)
+
+
+def test_an_ai_session_never_reaches_github(monkeypatch):
+    fake = FakeGh(["OPEN", "MERGED"])
+    monkeypatch.setattr(gh_port, "_adapter", fake, raising=False)
+    monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+    monkeypatch.delenv("BEACON_PR_MERGE_USER_OVERRIDE", raising=False)
+    with pytest.raises(SystemExit):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            cmd_pr.cmd_pr_merge()
+    assert fake.runs == [], fake.runs
+
+
+def test_an_unknown_repository_is_not_filled_in_from_the_cwd(monkeypatch):
+    """リポジトリを読めない記録は取り込まない (cwd の同番号 PR を取り込まない、AX 実測)。"""
+    fake = FakeGh(["OPEN", "MERGED"])
+    saved = []
+    data = _project()
+    entry = data["milestones"][0]["entries"][0]
+    entry["meta"] = {"url": "https://example.com/x/pull/7", "pr_status": "approved"}
+    monkeypatch.setattr(gh_port, "_adapter", fake, raising=False)
+    monkeypatch.setattr(cmd_pr, "load_project", lambda: data)
+    monkeypatch.setattr(cmd_pr, "save_project", lambda d: saved.append(d))
+    monkeypatch.setattr(cmd_pr, "_review_gate_check", lambda *a, **k: SHA)
+    monkeypatch.setattr(cmd_pr, "_recorded_pr_repo", lambda e: "")
+    monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
+    monkeypatch.setenv("BEACON_SESSION_KIND", "human")
+    err = io.StringIO()
+    with pytest.raises(SystemExit):
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            cmd_pr.cmd_pr_merge()
+    assert fake.runs == [] and not saved, fake.runs
+    assert "リポジトリ" in err.getvalue(), err.getvalue()
+
+
+# --- task done 経路: GitHub で MERGED を確かめたときだけ記録する (保守性) ----
+
+def _task_done(monkeypatch, state):
+    import cmd_task
+
+    class Head:
+        def pr_head(self, ref, repo=""):
+            return {"headRefOid": SHA, "state": state, "url": URL}
+    saved = []
+    data = _project()
+    monkeypatch.setattr(gh_port, "_adapter", Head(), raising=False)
+    monkeypatch.setattr(cmd_task, "load_project", lambda: data)
+    monkeypatch.setattr(cmd_task, "save_project", lambda d: saved.append(d))
+    monkeypatch.setattr(cmd_task, "_check_ms_status_for_write", lambda *a, **k: True)
+    monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
+    monkeypatch.setenv("BEACON_REASON", "取り込み済みの PR を記録する")
+    err = io.StringIO()
+    code = 0
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            cmd_task.cmd_task_done()
+    except SystemExit as e:
+        code = e.code or 0
+    return code, err.getvalue(), saved
+
+
+def test_task_done_on_an_open_pr_records_nothing(monkeypatch):
+    """task done で PR を merged にしない (GitHub が OPEN のまま食い違う経路だった)。"""
+    code, err, saved = _task_done(monkeypatch, "OPEN")
+    assert code != 0 and not saved, err
+    assert "beacon pr merge" in err, err
+
+
+def test_task_done_on_a_merged_pr_records_it(monkeypatch):
+    code, _err, saved = _task_done(monkeypatch, "MERGED")
+    assert code == 0 and saved
