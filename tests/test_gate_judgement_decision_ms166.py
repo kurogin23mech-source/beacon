@@ -156,6 +156,7 @@ def test_decided_by_is_derived_from_actor(monkeypatch, actor, session_kind, expe
     # human 行は人間の端末を表すので端末ありにする (申告だけの場合は
     # test_approval_audit_and_model_wireup が固定する)。
     monkeypatch.setattr("commands_shared._stdin_is_a_terminal", lambda: True)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
     data, oid = _deal()
     gate = se.current_gate(data, oid)
     se.settle_gate(data, gate["id"], outcome=se.GATE_ADVANCE, actor=actor, at="T1")
@@ -202,6 +203,7 @@ def test_gate_and_review_attribution_stay_asymmetric(monkeypatch):
     assert commands_shared.decided_by_for_review() == "autonomous-AI"
     monkeypatch.setenv("BEACON_SESSION_KIND", "human")  # 人間端末
     monkeypatch.setattr("commands_shared._stdin_is_a_terminal", lambda: True)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
     assert commands_shared.decided_by_for_gate() == "human-delegated"
     assert commands_shared.decided_by_for_review() == "human-delegated"
 

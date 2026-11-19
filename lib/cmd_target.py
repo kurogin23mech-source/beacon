@@ -52,7 +52,7 @@ from commands_shared import (  # noqa: F401
     _claim_occupation_for_work,
     _resolve_session_id,
     _session_kind_is_human,
-    human_session_signal,
+    human_claim_provenance,
     _stdin_is_a_terminal,
     _spec_exists_for_ms,
     _spec_exists_for_op,
@@ -2115,19 +2115,21 @@ def _approval_gate_record() -> dict:
     ``independent-judge:fable``) — a recorded claim, not a lock.
     """
     override = os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1"
+    _prov = None
     if override:
         signal = "user-override"
     elif _session_kind_is_human():
         # ms-119 e-7442: 申告だけなら human-session-unverified (人間の承認と
-        # 同形で残さない)。裏付け = 標準入力が端末。
-        signal = human_session_signal()
+        # 同形で残さない)。signal と材料は同じ測定から取る。
+        _prov = human_claim_provenance()
+        signal = _prov["signal"]
     else:
         # Defensive: the approve ban should have refused before we get here.
         signal = "ai-session-unguarded"
     return {
         "signal": signal,
         "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
-        # ms-119 e-7442: 申告以外の材料。端末が無い承認は申告だけの承認として残る。
-        "stdin_tty": _stdin_is_a_terminal(),
+        # ms-119 e-7442: 申告以外の材料 (signal と同じ測定)。
+        **({k: v for k, v in _prov.items() if k != "signal"} if _prov else {}),
         "evidence_source": (os.environ.get("BEACON_EVIDENCE_SOURCE", "") or "").strip(),
     }

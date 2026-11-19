@@ -81,6 +81,9 @@ def test_reject_records_reject_verdict(monkeypatch):
     calls = _capture_recorder(monkeypatch)
     # pin session kind (conftest defaults to human) so decided_by is deterministic
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: False)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: False)
     _run_verb("cmd_pr_reject", rationale="AC 未達")
     # AI session → autonomous-AI, no evidence supplied → []
     assert calls == [("e-400", "reject", "AC 未達", "autonomous-AI", [])]
@@ -89,6 +92,9 @@ def test_reject_records_reject_verdict(monkeypatch):
 def test_request_changes_records_rework_verdict(monkeypatch):
     calls = _capture_recorder(monkeypatch)
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: False)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: False)
     _run_verb("cmd_pr_request_changes", rationale="ここを直して")
     assert calls == [("e-400", "re-work", "ここを直して", "autonomous-AI", [])]
 
@@ -100,6 +106,9 @@ def test_approve_records_approve_verdict(monkeypatch):
     monkeypatch.setattr(cmd_pr, "_review_gate_check", lambda *a, **k: None)
     monkeypatch.setattr(cmd_pr, "_judge_pr_approve_auto_done", lambda *a, **k: [])
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: False)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: False)
     _run_verb("cmd_pr_approve", rationale="良い")
     assert calls == [("e-400", "approve", "良い", "autonomous-AI", [])]
 
@@ -111,8 +120,14 @@ def test_approve_records_approve_verdict(monkeypatch):
 
 def test_decided_by_derived_from_session_kind(monkeypatch):
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: True)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: False)
     assert cmd_pr._decided_by_for_review() == "human-delegated"
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: False)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: False)
     assert cmd_pr._decided_by_for_review() == "autonomous-AI"
 
 
@@ -121,6 +136,9 @@ def test_human_approve_is_not_mislabelled_autonomous(monkeypatch):
     monkeypatch.setattr(cmd_pr, "_review_gate_check", lambda *a, **k: None)
     monkeypatch.setattr(cmd_pr, "_judge_pr_approve_auto_done", lambda *a, **k: [])
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: True)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: False)
     _run_verb("cmd_pr_approve", rationale="人間が承認")
     # the human decided directly — NOT autonomous-AI (the bug this fixes)
     assert calls[0][3] == "human-delegated"

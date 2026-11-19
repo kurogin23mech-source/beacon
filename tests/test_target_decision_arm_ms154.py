@@ -41,6 +41,7 @@ def _cloud(monkeypatch, fake, *, human=False):
     # ms-119 e-7442: 「人間が直接」は申告 + 端末からの操作で名乗る。human=True は
     # 人間の端末を表すので、端末の有無も揃える。
     monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: human)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: not human)
 
 
 # --- completion verdict (target approve) ------------------------------------
