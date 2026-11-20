@@ -58,6 +58,56 @@ def test_skill_schema_has_introduced_vs_touched_axis():
     assert '"origin": "introduced | touched"' in s
 
 
+#: 「直さずに記録して終わる」列の各要素が持つ欄 (ms-119 e-7554)。
+#: この instrument は findings 側のキーを守る試験を持たない (元からの穴で、
+#: e-7554 の変更とは別の話なのでここでは触らない)。足した分だけを守る。
+REQUIRED_RECORD_ONLY_KEYS = (
+    "record_only", "observed", "why_no_change_risk",
+)
+
+
+def test_skill_schema_has_the_record_only_column():
+    """次の変更を誤らせない気づきを、直す列から外して記録する欄が在ること。
+
+    この列が消えると、表記の揺れや命名の好みが findings に混ざって戻り、
+    受け取る側が全部を修正依頼として読む状態になる (2026-11-19 にユーザーが
+    「明らかに過剰な問題検出をしている」と指摘した状態)。散文で足しただけでは
+    消えても誰も気づかないので、ここで員数を守る。
+
+    **この緑が主張しないこと**: 検査は「その語がファイルのどこかに在るか」だけを
+    見る (既存の ``REQUIRED_FINDING_KEYS`` 系と同じ形)。だから **一部だけ消した
+    場合は緑のまま通る** —— JSON の例を残して規約の行だけ消す、等。丸ごと消えたら
+    赤くなることは反転で実測したが、部分的な欠落は守っていない。
+    """
+    s = open(os.path.join(REPO, "skills", "maintainability-review", "SKILL.md"),
+             encoding="utf-8").read()
+    missing = [k for k in REQUIRED_RECORD_ONLY_KEYS
+               if '"%s"' % k not in s and "`%s`" % k not in s]
+    assert not missing, (
+        "SKILL.md から記録のみの列の必須キーが消えています: %s。"
+        "欄を増減するなら、この一覧も同時に直す" % missing)
+
+
+def test_skill_defers_the_split_rule_to_the_origin():
+    """どちらの列に入れるかの規則を、原典 §4 への参照で持っていること。
+
+    規則を SKILL.md と原典の両方に全文で置くと、既定を変える次の AI が両方を
+    揃えて直す必要があるのに、それを強制する仕組みが無い (独立保守性レビュー
+    2026-11-20 medium)。参照の形を保つ。あわせて参照先が宙に浮いていないこと
+    (原典 §4 に下限の規則が実在すること) も見る。
+    """
+    base = os.path.join(REPO, "skills", "maintainability-review")
+    skill = open(os.path.join(base, "SKILL.md"), encoding="utf-8").read()
+    origin = open(os.path.join(base, "principles.md"), encoding="utf-8").read()
+    assert "原典 §4 の下限規則" in skill, (
+        "SKILL.md が振り分け規則を原典 §4 への参照で持っていません。"
+        "全文を書き戻すと、規則が 2 箇所に分かれて片方だけ古くなる")
+    section = origin.split("## 4.")[-1].split("## 5.")[0]
+    assert "報告の下限" in section, (
+        "参照先 (原典 §4) に下限の規則が在りません。参照が宙に浮くと規則が黙って"
+        "消えます")
+
+
 def test_maintainability_bundle_assembles():
     b = review_spine.assemble_review_context(
         "maintainability", origin_id="skills/maintainability-review/principles.md",
