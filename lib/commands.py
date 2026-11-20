@@ -12,6 +12,30 @@ import sys
 import urllib.parse
 from typing import Optional, Tuple
 
+# ---------------------------------------------------------------------------
+# stdout/stderr encoding — force UTF-8 (#19 follow-up, bash-entrypoint path)
+# ---------------------------------------------------------------------------
+#
+# The UTF-8 reconfigure in beacon_cli/main.py (#19) only protects processes
+# that import beacon_cli. The bash entrypoint (bin/beacon) instead runs
+# `python3 lib/commands.py <cmd>` directly — a fresh interpreter where that
+# reconfigure never executes — so on Windows consoles that default to a
+# legacy code page (cp932 on a JP locale, cp1252 on en-US, …) any non-ASCII
+# output (`◑` in status glyphs, em dashes, Japanese titles) dies with
+# `UnicodeEncodeError` before the command can print. dispatch.py forces
+# PYTHONUTF8 for the subprocesses *it* spawns, but a source checkout /
+# Homebrew install that invokes bin/beacon directly gets no such cover.
+# Normalise here at import time, exactly as main.py does — keep the two
+# blocks in lockstep (see beacon_cli/main.py).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        # AttributeError: stream wasn't a TextIOWrapper (rare embedding).
+        # ValueError/OSError: stream already closed or detached.
+        # We silently skip rather than break startup.
+        pass
+
 from store import get_store
 import core
 import transition_approval as _ta  # ms-119 e-3912: 目的達成レビュー primitive
