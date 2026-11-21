@@ -267,13 +267,31 @@ def cmd_task_done():
         ):
             sys.exit(1)
         if entry.get("type") == "pr":
-            pr_status = entry.get("meta", {}).get("pr_status", "")
-            if pr_status not in ("approved", "merged"):
+            # ms-119 e-7463 (PR #855 独立保守性): PR を merged と記録する経路は
+            # `beacon pr merge` だけでなくここにもあった。ここは関門も GitHub の
+            # 確認も通らずに「Merged PR」と出していたので、`pr merge` を直しても
+            # 「記録は merged・GitHub は OPEN」がこの経路で残った。task done は
+            # 取り込みの動詞ではないので **GitHub では何もせず**、GitHub 上で
+            # MERGED を確かめられたときだけ記録する。それ以外は記録を変えずに止め、
+            # 取り込む口 (`beacon pr merge`) を案内する。
+            from commands_shared import resolve_pr_head
+            _num = core._extract_pr_number_from_url(
+                (entry.get("meta") or {}).get("url", ""))
+            _repo = core.recorded_pr_repo(entry)
+            _state = ""
+            if _num is not None and _repo:
+                _head, _state, _err = resolve_pr_head(str(_num), _repo)
+            if _state != "MERGED":
                 print(
-                    f"Warning: PR [{entry_id}] has pr_status='{pr_status}'. "
-                    "Use 'beacon pr merge' to merge explicitly, or 'beacon pr close' to close without merging.",
+                    f"Error: PR [{entry_id}] は GitHub 上で取り込み済み (MERGED) と"
+                    f"確かめられないため、task done では記録しません "
+                    f"(GitHub の状態: {_state or '不明'})。\n"
+                    "  取り込むなら `beacon pr merge` (関門を確かめて GitHub で取り込み、"
+                    "確認してから記録する)、取り込まずに閉じるなら `beacon pr close` を"
+                    "使ってください。",
                     file=sys.stderr,
                 )
+                sys.exit(1)
             ms, entry = core.pr_merge(data, entry_id, date=today)
             core.update_progress(ms, progress)
             # ms-160 e-6688: print AFTER the write lands. save_project exits
@@ -281,6 +299,8 @@ def cmd_task_done():
             # above it is a success line for a write that never happened.
             save_project(data)
             print(f"Merged PR [{entry_id}]: {entry['description']}")
+            print("  (GitHub 上で取り込み済みを確認して記録しました。GitHub は"
+                  "変えていません)")
             if progress:
                 print(f"  Progress: {ms.get('progress', 0)}%")
             return

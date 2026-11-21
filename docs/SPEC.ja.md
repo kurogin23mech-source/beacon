@@ -146,7 +146,7 @@ stdinからコンテンツを渡す場合: `echo 'content' | beacon doc add "タ
 | `beacon pr approve <entry-id> [--rationale "text"]` | PRを承認（rationale必須） | 対応済 |
 | `beacon pr request-changes <entry-id> [--rationale "text"]` | 修正依頼 | 対応済 |
 | `beacon pr reject <entry-id> [--rationale "text"]` | PRを却下 | 対応済 |
-| `beacon pr merge <entry-id>` | マージ済みに設定 | 対応済 |
+| `beacon pr merge <entry-id>` | 関門を確かめて GitHub で取り込み、MERGED を確認してから記録 | 対応済 |
 | `beacon pr close <entry-id>` | マージなしでクローズ | 対応済 |
 
 AIコードレビューには `beacon pr review` ではなく `/review` Claude Code Skill を使う。
