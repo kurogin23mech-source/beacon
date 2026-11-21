@@ -3508,24 +3508,89 @@ def _pr_open_reviewed_marker_path(pr_number: str, pr_repo: str = "") -> str:
         f"{repo.replace('/', _REVIEW_DUE_OWNER_SEP)}")
 
 
+#: 「judge に渡した差分」の印を置く、全 worktree で共有のディレクトリ名
+#: (ms-119 e-7527)。git の共有ディレクトリ直下に置く —— 兄弟の
+#: ``_REVIEW_DONE_DIR`` (実施台帳) と同じ置き場。
+_ISSUED_BUNDLE_DIR = "beacon-review-issued"
+
+
+def _issued_bundle_dir() -> str:
+    """「judge に渡した差分」の印の置き場。共有が取れなければ cwd の triggers。
+
+    **なぜ共有置き場か** (ms-119 e-7527, 2026-11-18 実測): 初版はこの印を
+    ``_get_triggers_dir()`` (= 作業記録ファイルの親 + /triggers) に置いていた。
+    そこはチェックアウトごとに別なので、worktree で ``review context`` を発行して
+    本体で ``review done`` を打つと印が見つからず、既定の sha が 3 段目
+    (gh の「いまの PR head」) に落ちた —— judge が読んでいない版に判子が付く、
+    この印が塞ぐために作られた欠陥そのもの。PR #811 のレビューで実際にそうなり、
+    本体の ``.beacon/triggers/`` に ``.issued-pr-*`` は 0 件だった。
+
+    実施台帳 (``_review_done_dir``) は ms-166 e-6899 で既に共有置き場へ移っており、
+    この印だけが取り残されていた。**入口を 1 つに寄せる** ため、共有置き場の解決は
+    ``_worktree_shared_dir`` をそのまま使う (git に worktree の素性を尋ねる箇所を
+    増やさない)。判定は完全一致のまま —— 置き場を変えるだけで、比べ方は緩めない。
+    """
+    shared = _worktree_shared_dir()
+    if shared:
+        return os.path.join(shared, _ISSUED_BUNDLE_DIR)
+    return _get_triggers_dir()
+
+
+def _issued_bundle_prefix(pr_number: str) -> str:
+    """この PR の印のファイル名の接頭辞。書く側と片付ける側が共有する唯一の形。
+
+    PR #849 独立保守性レビュー: 以前は path 生成と片付けの列挙で同じ接頭辞を
+    別々の f 文字列で書いていた。形を変える AI が片方だけ直すと印が片付かず、
+    置き場が全 worktree 共有になったいま、溜まった印の被害が全作業フォルダに及ぶ。
+    """
+    return f".issued-pr-{str(pr_number).strip()}."
+
+
 def _issued_bundle_sha_path(pr_number: str, pr_repo: str = "",
-                            review_type: str = "") -> str:
+                            review_type: str = "",
+                            directory: Optional[str] = None) -> str:
     """judge に渡した bundle の head_sha を刻む path。
 
     住所の形は再発火抑止マーカー (``_pr_open_reviewed_marker_path``) に揃える
-    —— 同じ ``.beacon/triggers/`` 配下の dot-file で、リポジトリが分かるなら
-    分ける。種別まで分けるのは、束 (batch) で 2 種別を同じ差分で発行したあと
-    片方だけ再発行された場合に、もう片方が新しい sha を拾わないため。
+    —— dot-file で、リポジトリが分かるなら分ける。種別まで分けるのは、束 (batch)
+    で 2 種別を同じ差分で発行したあと片方だけ再発行された場合に、もう片方が
+    新しい sha を拾わないため。
+
+    ``directory`` 省略時は ``_issued_bundle_dir()`` (全 worktree 共有)。旧い置き場
+    (cwd の triggers) を読むときだけ明示で渡す。
     """
+    if directory is None:
+        directory = _issued_bundle_dir()
     repo = str(pr_repo or "").strip()
     rt = str(review_type or "").strip() or "any"
-    base = f".issued-pr-{pr_number}.{rt}"
+    base = f"{_issued_bundle_prefix(pr_number)}{rt}"
     if not repo:
-        return os.path.join(_get_triggers_dir(), base)
+        return os.path.join(directory, base)
     return os.path.join(
-        _get_triggers_dir(),
+        directory,
         f"{base}{_REVIEW_DUE_REPO_SEP}"
         f"{repo.replace('/', _REVIEW_DUE_OWNER_SEP)}")
+
+
+def _issued_bundle_dirs_to_read() -> list:
+    """印を **読む / 片付ける** ときに見るディレクトリ (重複なし、優先順)。
+
+    1. 共有置き場 (今の書き込み先)
+    2. cwd の triggers (e-7527 以前に書かれた印の置き場)
+
+    2 を残すのは、修正前に発行して done 待ちの印を孤児にしないため。旧い置き場は
+    その cwd からしか見えないので、作業フォルダ横断の効果は 1 だけが持つ。
+
+    **撤去条件**: 印は PR の解決 (merge / close) で片付くので、2 が要るのは
+    e-7527 (PR #849) の取り込み前に ``review context --pr`` を発行した PR が
+    開いている間だけ。それらがすべて解決したら 2 を外し、この関数を
+    ``[_issued_bundle_dir()]`` にしてよい (撤去はこの関数 1 か所で済む)。
+    """
+    dirs = [_issued_bundle_dir()]
+    legacy = _get_triggers_dir()
+    if legacy not in dirs:
+        dirs.append(legacy)
+    return dirs
 
 
 def write_issued_bundle_sha(pr_number: str, pr_repo: str,
@@ -3577,13 +3642,15 @@ def issued_bundle_sha_paths(pr_number: str) -> set:
     num = str(pr_number or "").strip()
     if not num:
         return set()
-    prefix = f".issued-pr-{num}."
-    try:
-        tdir = _get_triggers_dir()
-        return {os.path.join(tdir, name) for name in os.listdir(tdir)
-                if name.startswith(prefix)}
-    except OSError:
-        return set()
+    prefix = _issued_bundle_prefix(num)
+    found: set = set()
+    for tdir in _issued_bundle_dirs_to_read():
+        try:
+            found |= {os.path.join(tdir, name) for name in os.listdir(tdir)
+                      if name.startswith(prefix)}
+        except OSError:
+            continue
+    return found
 
 
 def issued_bundle_sha(pr_number: str, pr_repo: str = "",
@@ -3596,8 +3663,10 @@ def issued_bundle_sha(pr_number: str, pr_repo: str = "",
     """
     if not pr_number:
         return None
-    for path in (_issued_bundle_sha_path(pr_number, pr_repo, review_type),
-                 _issued_bundle_sha_path(pr_number, "", review_type)):
+    paths = [_issued_bundle_sha_path(pr_number, repo, review_type, directory=d)
+             for d in _issued_bundle_dirs_to_read()
+             for repo in (pr_repo, "")]
+    for path in paths:
         try:
             with open(path, encoding="utf-8") as f:
                 sha = f.read().strip()
@@ -3717,9 +3786,14 @@ def _worktree_shared_dir() -> Optional[str]:
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"Warning: レビュー実施台帳の共有置き場を解決できませんでした "
-              f"(git rev-parse 失敗: {type(exc).__name__})。この cwd 限りの "
-              f"置き場に落ちます — fork で実施したレビューは親に伝わりません。",
+        # ms-119 e-7527 (PR #849 独立 AX + 保守性レビュー 2 体一致): この関数の
+        # 利用者は実施台帳と「judge に渡した差分の印」の 2 つになった。台帳だけを
+        # 名指すと、印の置き場が解決できなかったときに原因を辿れない。
+        print(f"Warning: レビューの共有置き場 (実施台帳 / judge に渡した差分の印) を"
+              f"解決できませんでした (git rev-parse 失敗: {type(exc).__name__})。"
+              f"この cwd 限りの置き場に落ちます — fork で実施したレビューは親に"
+              f"伝わりません。別の作業フォルダで review done を打つと、judge に"
+              f"渡した差分ではなく「いまの PR head」が記録されます。",
               file=sys.stderr)
         return None
     if out.returncode != 0:
