@@ -141,11 +141,55 @@ def test_harness_requires_the_per_principle_verdict_map():
     """
     src = _harness()
     assert "principles_reviewed" in src
-    for v in ("ok", "finding", "unchecked"):
+    for v in ("ok", "finding", "note-only", "unchecked"):
         assert '"%s"' % v in src or "`%s`" % v in src, v
     assert "basis" in src, (
         "principles_reviewed の裏付け欄 (basis) が消えています。裸の値だけに戻すと、"
         "10 キー全部を無検証で ok と書いた出力と区別できません")
+
+
+# --- harness: 記録のみ (record_only) の必須キー (ms-119 e-7554) ----------------
+
+#: 「直さずに記録して終わる」列の各要素が持つ欄。**findings とは別の列**なので
+#: 別のタプルで守る (同じ列に印を付けて並べる形は採らないのが e-7554 の設計)。
+REQUIRED_RECORD_ONLY_KEYS = (
+    "record_only", "observation", "why_no_behavior_change",
+)
+
+
+def test_harness_requires_the_record_only_column():
+    """軽い気づきを「直す列から外して記録する」仕組みが harness に在ること。
+
+    この列が消えると、動作に影響しない気づき (説明文の誤り・表記の揺れ) が
+    findings に混ざって戻り、受け取る側が全部を修正依頼として読む状態に戻る
+    (2026-11-19 にユーザーが「明らかに過剰な問題検出をしている」と指摘した状態)。
+    散文で足しただけでは消えても誰も気づかないので、ここで員数を守る。
+
+    **この緑が主張しないこと**: 検査は「その語がファイルのどこかに在るか」だけを
+    見る (既存の ``REQUIRED_FINDING_KEYS`` 系と同じ形)。だから **一部だけ消した
+    場合は緑のまま通る** —— JSON の例を残して規約の行だけ消す、等。丸ごと消えたら
+    赤くなることは反転で実測したが、部分的な欠落は守っていない。
+    """
+    src = _harness()
+    missing = [k for k in REQUIRED_RECORD_ONLY_KEYS if '"%s"' % k not in src
+               and "`%s`" % k not in src]
+    assert not missing, (
+        "harness から記録のみの列の必須キーが消えています: %s。欄を増減するなら、"
+        "この一覧も同時に直す" % missing)
+
+
+def test_harness_keeps_the_record_only_column_separate_from_findings():
+    """記録のみを findings と**別の列**として出させていること。
+
+    `severity` の値で軽重を表すだけの形に戻すと、軽いものも重いものも同じ列に
+    同じ形で並び、読み手が混ぜて読む (初版で実際に起きた)。
+    """
+    src = _harness()
+    assert "record_only" in src and '"findings"' in src, (
+        "findings と record_only の 2 列が harness に揃っていません")
+    assert "迷ったら" in src or "原典 §5" in src, (
+        "どちらの列に入れるかの判断規則 (またはその原典への参照) が消えています。"
+        "規則が無いと振り分けは実行ごとに揺れる")
 
 
 def test_harness_names_every_principle_the_origin_declares():

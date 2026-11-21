@@ -44,7 +44,10 @@ def test_skill_declares_drift_findings_schema():
     # pairs, not bare assertions.
     t = _skill_text()
     for key in ("spec_ref", "promised", "implemented", "drift", "severity",
-                "skill_gaps"):
+                "skill_gaps",
+                # 記録のみの列 (ms-119 e-7554): 約束が破られていない気づきを
+                # 直す列から外して記録する。消えると軽い指摘が findings に戻る
+                "record_only", "why_promise_kept"):
         assert key in t, f"missing schema key: {key}"
 
 

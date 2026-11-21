@@ -231,16 +231,56 @@ judge に入れると bundle の外から実装者由来の文脈が再流入し
 
 ### Step 4: findings を集約して提示する
 
-各判定エージェントが返した JSON findings を集める。
+各判定エージェントが返した JSON を集める。**返ってくる列は 2 本ある** ——
+`findings` (直す候補) と `record_only` (記録して終わり)。**この 2 本を混ぜて 1 つの
+一覧にしてはならない。**
+
+#### 4-a. `findings` (直す候補)
 
 - **dedup**: パネル (複数モデル / レンズ) が同じ欠陥を別々に挙げたら 1 件に統合
   し、「N 体中 M 体が指摘」と合意度を添える (多視点の価値は合意度で見える)。
-- **severity 順**に並べて提示する (AX: high / misleading / medium / low、思想:
-  high / medium / low)。
+- **severity 順**に並べて提示する。**語彙は種別ごとに違う** —— AX は
+  `顧客に届く` / `手が失われる・二重になる` / `人の手間が増える` (直交して
+  `detectability` が `silent` / `misleading` / `visible`)、保守性と思想は
+  `high` / `medium` / `low`。種別をまたいで 1 本に並べるときは、種別名を添えて
+  値を言い換えずに出す (言い換えると、どの基準で重いのかが辿れなくなる)。
 - 各 finding は instrument skill のスキーマのまま見せる (AX: principle / defect /
-  why_ai_errs / structural_fix、思想: spec_ref / promised / implemented / drift)。
+  what_goes_wrong / structural_fix、保守性: principle / observed /
+  why_hard_to_change / structural_fix、思想: spec_ref / promised / implemented /
+  drift)。
 - 判定エージェントが返した `skill_gaps` を必ず 1 か所に集約して提示する (=
   レビュー Capability 自身の改善入力)。
+
+#### 4-b. `record_only` (記録して終わり、直さない)
+
+**件数と 1 行ずつの要約だけを、`findings` とは別の見出しの下に出す。** 各要素が持つ
+「なぜ直さなくてよいか」の欄は doc に残ればよく、画面に広げない (広げると、直す候補と
+同じ重みで読まれる)。
+
+**その欄の名前をここに書き写さない。** 名前を決めているのは各 instrument の SKILL.md
+で、ここは受け取った要素を**そのまま doc に転記する**だけにする。写すと、instrument 側
+で改名したときにこちらが黙って古くなる —— 同じ Step の severity について「種別名を
+添えて値を言い換えずに出す」と決めたのと同じ理由 (独立保守性レビュー 2026-11-19
+medium: 初版はここで 3 種別の欄名を列挙しており、その非対称を突かれた)。
+
+```
+記録のみ (直しません) — 3 件
+  - [保守性] lib/review_collect.py:120 型注釈の引用符が 1 箇所だけ違う
+  - [AX] _intra_range_moves の説明文の冒頭が、実装と逆のことを書いている
+  - [思想] エラー文だけ「対象」が「ターゲット」になっている
+  → レポート doc に保存します (作業にはしません)
+```
+
+- **dedup は `findings` と同じ規則で行う** (3 体が同じ表記揺れを挙げたら 1 件)。
+  ただし合意度は添えない —— 直さないものの合意度は、読み手の判断を変えない。
+- **`record_only` が 1 件でもあれば、Step 6 のレポート doc 保存は任意ではなく必須**。
+  保存せずに終わると「記録で済ませる」が嘘になり、黙って捨てたのと同じになる。
+- **`record_only` を `findings` に昇格させない。** 昇格してよいのは、提示を読んだ
+  **ユーザーが**「これは直す」と言ったときだけ。AI の判断で動かさない (判定は中立側に
+  置くのがこの Skill の前提で、実装者が列を動かせるならその前提が崩れる)。
+- 逆に、**`findings` を `record_only` に降格させることは、AI は決してしない。**
+  軽く見えても列は動かさない。却下したいなら Step 5 の「却下」で理由を 1 行添える
+  (却下は記録に残るが、降格は残らない)。
 
 ### Step 5: 助言なので act は作業判断に委ねる (非 blocking)
 
@@ -251,20 +291,61 @@ drift、直すか?」の提示まで。gate 化して作業を止めない。ユ
 - **記録して後で** → Step 6 のポータブル出力へ。
 - **却下** → 却下理由を 1 行添えて終わり (findings は消さず提示済みログに残す)。
 
-### Step 6 (任意, e-3891): ポータブル出力
+**この 3 択は `findings` にだけ掛ける。** `record_only` はユーザーに諮らない ——
+行き先が決まっている (レポート doc) ので、諮れば決定を 1 つ増やすだけになる。
+「過剰な問題検出」の実害は、軽い指摘が **判断を要求してくる** ことだった。
+
+**`findings` の全件を直す義務は無い。** 却下は正当な選択肢で、judge の指摘は額面で
+採らず自分で再現してから決める (judge は存在しない関数名を挙げたり、姉妹の挙動を
+逆に述べたりする)。ただし **却下には理由の 1 行が要る** —— 理由を書けないものは、
+却下ではなく未対応である。
+
+### Step 6 (`findings` のみなら任意 / `record_only` があれば必須, e-3891): ポータブル出力
 
 findings を対象リポ / チームに運べる形に配線する。ユーザーが望む出力先を選ぶ:
 
+> **見出しが条件付きなのは、長い手順書を見出し単位で把握して「任意だから飛ばす」と
+> 判断されるのを防ぐため** (独立 AX レビュー 2026-11-20 silent)。初版は見出しが
+> `(任意)` のまま本文だけに「`record_only` が在れば必須」と書いていたので、見出しを
+> 見た AI が記録のみを保存せずに終える経路が開いていた —— それはこの Skill が
+> 「黙って捨てたのと同じ」と禁じた結果そのもの。
+>
+> **ただし見出しの書き換えは散文の手当てにとどまる。** 「記録のみが在るのに保存
+> されなかった」を機械で検知する仕組みはまだ無く、その穴は別課題として残っている。
+
 - **PR コメント**: `gh pr comment <n> -b "<findings 要約>"` で PR に残す (PR レビュー
   の一部として)。
-- **レポート doc**: `beacon doc add --scope report --title "AX review: <target>"
-  --stdin` で監査可能な記録として保存。
+- **レポート doc**: `beacon doc add "<種別> review: <target>" --scope report --stdin`
+  で監査可能な記録として保存。**`record_only` が 1 件でもあればこれは必須**
+  (Step 4-b)。
+
+  **題名は位置引数**。`--title` という旗は存在せず、渡すと
+  `Error: '--title' is not a valid flag for 'beacon doc'.` で落ちる
+  (`beacon doc add --help` 自身が「title is positional, NOT --title」と明記している)。
+  初版のこの行は `--title` を使っていて、独立 AX レビューが**実際に実行して** exit 1 を
+  確認した (2026-11-19)。保存を「任意」から「`record_only` が在れば必須」に格上げした
+  のと同じ変更の中で壊れたコマンドを必須経路に置いていたので、**この PR が禁じた結果
+  (記録されずに終わる) を自分で起きやすくしていた**。
+
+  同じ誤り (`--title`) は他の Skill にも写っている。直すのはこの Skill の範囲だけで、
+  横断の掃除と機械照合 (Skill 本文のコマンド例と実 CLI の旗を突き合わせるガード) は
+  別の課題に切り出す。doc には `findings` と `record_only` を **別の節に分けて** 書き、
+  `record_only` 側には各要素の「なぜ直さなくてよいか」の根拠も全文入れる (後から
+  「この判断は妥当だったか」を監査できるようにするため)。
 - **Beacon task 化 (optional 増強)**: high / misleading の finding を
   `beacon task add "<structural_fix>" -m <ms-id> --untriaged` で follow-up task にする
   (ms-126: レビュー由来の派生タスクは優先度未判断なので `--untriaged` sentinel で起票 =
   untriaged-backlog トリガーが後で triage を促す)。既定
   では task 化しない (レビューは task queue を勝手に膨らませない — /beacon-log と
   /beacon-task の責務分界)。ユーザーが望んだ finding だけ task 化する。
+  **`record_only` は task 化しない —— ユーザーが望んでも、ここでは起票しない。**
+  行き先はレポート doc だけ。起票すると作業待ち行列に入り、「記録で済ませる」が
+  「後で全部やる」に化ける。実害が出ている: ms-119 (レビューを第一級 Capability に
+  する課題) は、レビュー由来の指摘を `--untriaged` で起票し続けた結果、未消化 48 件
+  のうち 36 件が untriaged で積み上がり、**マイルストーンを閉じられなくなった**
+  (2026-11-19 にユーザーが「レポート doc だけ」を選択)。どうしても作業にしたい
+  ものがあるなら、それは `record_only` ではなく `findings` に属している ——
+  列を動かすのは Step 4-b のとおりユーザーの判断で行う。
 
 ## 目的達成 (attainment) モード — 証拠の独立生成 (ms-119 e-4005)
 
@@ -300,11 +381,24 @@ objective / acceptance)・`artifact` (= 任意の差分)・`judge_contract`・`v
    ```json
    {"criteria": [{"criterion": "...", "verdict": "met|partial|not-met", "evidence": "確認した実コード/テスト/挙動"}],
     "dispositions": [{"task_id": "e-XXXX", "verdict": "done|superseded|blocks-attainment", "reason": "superseded なら必須: なぜ不要か"}],
+    "record_only": [{"criterion": "...", "observation": "受入条件の達成には影響しない気づき", "why_criterion_still_met": "必須: その受入条件が満たされていると言い切れる根拠"}],
     "overall_verdict": "attained|not-attained", "verdict_reason": "..."}
    ```
    `dispositions` は bundle の `backlog` の各タスクに対応 (未着手 highest/high)。judge は
    実コードで「実は done か」を確認し、まだ必要なら `blocks-attainment`、要件変更で不要
    なら `superseded` + 理由、を判定する。**silent に飛ばさない**。
+
+   **`verdict` を下げる理由になるのは、受入条件そのものの未達だけ** (ms-119 e-7554)。
+   体裁 —— 説明文の誤り、表記の揺れ、語の選び方、書き方の好み —— は、それだけを理由に
+   `partial` / `not-met` に落としてはならない。受入条件が実コードで満たされているなら
+   `met` にし、気づきは `record_only` に回す (行き先はレポート doc、作業にはしない)。
+
+   **この緩和は体裁にだけ掛かる。** 受入条件が実際に満たされていないときは、どれほど
+   些細に見えても `partial` / `not-met` を付ける。このレビューは完了を止める関門で
+   あり、**甘くする方向の誤りは、未達のまま完了を通してしまう** —— 「掃除機がある ≠
+   掃除した」の穴はここで開く。迷ったら下げる側に倒す (他の 3 種別とは逆向きなのは、
+   ここだけ verdict が人間所有の関門だから。助言は余分に出す方が安く、関門は余分に
+   止める方が安い)。
 
 judge には **repo の読み取りを許す** (実コード検証が仕事)。だが**実装者セッションの
 会話文脈・コミットの意図説明は渡さない** (文脈ゼロの計器)。**あなた (実装者) は証拠を
@@ -320,6 +414,9 @@ judge が返した証拠 (各 criterion の met/partial/not-met + 根拠 + overa
 - **証拠を添付**: judge の overall verdict を `beacon target attach-review-evidence
   <entry-id> --verdict <attained|partial|not-attained> --summary "<要約>" --source
   "independent-judge:<model>"` で記録する。
+- **`record_only` は添付しない**: 受入条件の達成に影響しない気づきは、承認の判断材料
+  ではないので証拠として添付しない。レポート doc に残して終わり (Step 6)。承認記録に
+  混ぜると、人間が「これも見ないと approve できないのか」と読む。
 - **disposition を添付 (ms-119 e-4579)**: judge が返した `dispositions` の各タスクを
   `beacon target attach-disposition <entry-id> --task <task-id> --verdict
   <done|superseded|blocks-attainment> [--reason <text>] --source "independent-judge:<model>"`
