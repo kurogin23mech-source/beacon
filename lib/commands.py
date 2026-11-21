@@ -260,7 +260,8 @@ from cmd_claim import (  # noqa: F401
 # cmd_operation._X (see the e-4320 monkeypatch-trap note above).
 from commands_shared import (  # noqa: F401
     _get_triggers_dir, _spec_doc_for_target, _spec_exists_for_op,
-    _fire_review_due_trigger, _session_kind_is_human,
+    _fire_review_due_trigger, _session_kind_is_human, human_claim_provenance,
+    _stdin_is_a_terminal,
     _ai_session_direct_completion_ban_active, _gate_target_class,
     # ms-119 e-7439: target 側の記録が何をするかを述べる唯一の文。実行時の print と
     # `beacon review done --help` の両面がこれを参照する (片面だけ直せない形)。
@@ -4164,15 +4165,21 @@ def _review_skip_gate_record() -> dict:
     purpose: skipping a review is a distinct act from forcing a merge past one
     that is still owed (BEACON_PR_REVIEW_OVERRIDE)."""
     override = os.environ.get("BEACON_REVIEW_SKIP_USER_OVERRIDE", "") == "1"
+    _prov = None
     if override:
         signal = "user-override"
     elif _session_kind_is_human():
-        signal = "human-session"
+        # ms-119 e-7442: 申告だけなら human-session-unverified (人間の承認と
+        # 同形で残さない)。signal と材料は同じ測定から取る。
+        _prov = human_claim_provenance()
+        signal = _prov["signal"]
     else:
         signal = "ai-session-unguarded"
     return {
         "signal": signal,
         "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
+        # ms-119 e-7442: 申告以外の材料 (signal と同じ測定)。
+        **({k: v for k, v in _prov.items() if k != "signal"} if _prov else {}),
     }
 
 
@@ -4726,6 +4733,13 @@ def cmd_review_skip():
         print(f"  理由: {reason}")
         print(f"  監査: .beacon/review-skips.jsonl (signal={gate['signal']}, "
               f"actor={record['actor'] or 'unknown'})")
+        if gate["signal"] == "human-session-unverified":
+            # ms-119 e-7442 (PR #856 独立 AX): 承認側と同じく、申告だけで通った
+            # ことを出力でも言う (記録の jsonl を grep しないと見えない形にしない)。
+            print("  ℹ 人間のセッションと申告されましたが、申告以外の材料 (端末から"
+                  "の操作 / AI 実行環境の目印が無いこと) が揃っていないため、"
+                  "**打ったのが人間か、環境変数を立てた AI かは記録から断定できません** "
+                  "(signal=human-session-unverified)。", file=sys.stderr)
         if gate["signal"] == "ai-session-unguarded":
             print("  ⚠ このセッションは human と申告していません "
                   "(BEACON_SESSION_KIND=human も BEACON_REVIEW_SKIP_USER_OVERRIDE=1 も無し)。"

@@ -1336,6 +1336,68 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
         f.write("\n")
 
 
+def _stdin_is_a_terminal() -> bool:
+    """標準入力が端末 (人が打っている) か。読めなければ False。"""
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _ai_runtime_marker_present() -> bool:
+    """AI エージェントの実行環境が立てる目印があるか (Claude Code の ``CLAUDECODE``)。"""
+    return bool((os.environ.get("CLAUDECODE", "") or "").strip())
+
+
+def _human_claim_corroborated() -> bool:
+    """「人間のセッション」という申告に **申告以外の材料** があるか (ms-119 e-7442)。
+
+    ``BEACON_SESSION_KIND=human`` は呼び出したプロセス自身の環境変数で、AI が自分で
+    立てられる。立てて承認すると、記録上は人間の承認と区別が付かなかった
+    (2026-11-11 の独立思想レビュー / 目的達成 judge が実証)。
+
+    申告に加えて 2 つを見る:
+      * 標準入力が端末か (AI のツール実行やパイプには端末が無い)
+      * AI エージェントの実行環境の目印 (``CLAUDECODE``) が **無い** か
+
+    **これは偽造できない裏付けではない** (PR #856 独立 AX が実測)。擬似端末を張り
+    (``script``)、目印の環境変数を消せば満たせる。手元のプロセスが持つ材料だけでは、
+    偽造できない「人間の証明」は原理的に作れない。この判定が保証するのは
+    **「何もしていない AI の申告は、人間の判断と同形では残らない」** ところまでで、
+    人間の判断として残すには擬似端末と目印の消去を **意図して** 行う必要がある
+    (= 偽装が偶然ではなく意図になる)。
+
+    これは **関門ではない** (端末の無い人間の打ち方 —— Claude Code の ``!`` 経由
+    など —— を止めないため、関門は従来どおり申告で開く)。記録の帰属を決める材料。
+    """
+    return (_session_kind_is_human() and _stdin_is_a_terminal()
+            and not _ai_runtime_marker_present())
+
+
+def human_session_signal() -> str:
+    """申告で人間として通ったときの監査記録の signal (ms-119 e-7442)。
+
+    申告以外の材料が揃えば ``human-session``、申告だけなら ``human-session-unverified``。
+    後者は「人間が端末以外から打った」と「AI が環境変数を立てた」のどちらとも
+    区別できない、という事実をそのまま記録に残す (人間の承認と同形にしない)。
+    """
+    return "human-session" if _human_claim_corroborated() else "human-session-unverified"
+
+
+def human_claim_provenance() -> dict:
+    """記録に載せる「人間の申告の材料」(ms-119 e-7442)。**1 回だけ測って** 返す。
+
+    signal と、その判定に使った材料を同じ測定から組む。記録ごとに別々に測ると、
+    signal=human-session なのに stdin_tty=false のような食い違った記録が作れる
+    (PR #856 独立保守性)。
+    """
+    tty = _stdin_is_a_terminal()
+    marker = _ai_runtime_marker_present()
+    corroborated = _session_kind_is_human() and tty and not marker
+    return {"signal": "human-session" if corroborated else "human-session-unverified",
+            "stdin_tty": tty, "ai_runtime_marker": marker}
+
+
 def _session_kind_is_human() -> bool:
     """True when the calling session declares itself human-driven.
 
@@ -5134,7 +5196,10 @@ def decided_by_for_review() -> str:
     (``cmd_pr``)・review-adjudication (``cmd_review_done``)・pr-intent 導出
     (``cmd_decision``) が同じ写像を共有する — leaf module に home したので全員が
     上向きに import でき、cmd_* 兄弟間の横依存を作らない (旧: 3 箇所に別コピー)。"""
-    return "human-delegated" if _session_kind_is_human() else "autonomous-AI"
+    # ms-119 e-7442 (PR #856 独立 AX / 保守性): 申告だけで「人間が直接」と名乗らせない
+    # 規則を gate 側だけに入れると、レビュー採否 (自己採点の穴が開く経路そのもの) が
+    # 同じ偽装で人間の判断として残った。両方が同じ判定を通る。
+    return "human-delegated" if _human_claim_corroborated() else "autonomous-AI"
 
 
 def decided_by_for_gate() -> str:
@@ -5153,4 +5218,9 @@ def decided_by_for_gate() -> str:
     decided_by の意味論を変える者が 3 箇所を手で探す必要があり、1 箇所見落とすと判断の
     帰属が capability ごとに静かに割れる。``decided_by_for_review`` が同じ drift を
     3→1 に畳んだ先例なので、それに倣ってここへ集約した。"""
-    return "human-delegated" if _session_kind_is_human() else "AI-proposed-human-chose"
+    # ms-119 e-7442: 「人間が直接」を名乗るのは申告に裏付けがあるときだけ。申告
+    # だけ (端末が無い) なら AI 補助の側 (人間が選んだ) に倒す —— AI が環境変数を
+    # 立てて完了を書いた記録が、人間の直接の判断と同形で残らないようにする。
+    # 関門 (直接完了の禁止) は申告で開くままなので、使い方は変わらない。
+    return ("human-delegated" if _human_claim_corroborated()
+            else "AI-proposed-human-chose")

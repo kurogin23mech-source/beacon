@@ -38,6 +38,10 @@ def _cloud(monkeypatch, fake, *, human=False):
     # ので、session kind の差し替えも単一真実源側に当てる (姉妹の
     # test_pr_review_decision_arm_ms154 / test_review_adjudication_weld_ms166 と同じ点)。
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: human)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末からの操作で名乗る。human=True は
+    # 人間の端末を表すので、端末の有無も揃える。
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: human)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: not human)
 
 
 # --- completion verdict (target approve) ------------------------------------

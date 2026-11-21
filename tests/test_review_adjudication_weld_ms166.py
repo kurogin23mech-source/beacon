@@ -41,6 +41,9 @@ def _cloud(monkeypatch, fake, *, human=False):
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: human)
 
 
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: human)
+    monkeypatch.setattr(commands_shared, "_ai_runtime_marker_present", lambda: False)
 # --- decision payload -------------------------------------------------------
 
 def test_採否をdecisionに溶接する(monkeypatch):

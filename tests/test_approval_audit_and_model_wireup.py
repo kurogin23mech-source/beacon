@@ -77,13 +77,47 @@ def test_gate_record_flags_ai_session_override():
     assert g["session_kind"] == "unset"  # the smoking gun: override from a non-human session
 
 
-def test_gate_record_human_session():
+def test_gate_record_human_session(monkeypatch):
+    """人間の申告 + 端末からの操作 (裏付けあり) なら human-session。"""
+    import commands_shared
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.delenv("CLAUDECODE", raising=False)   # AI 実行環境の目印なし
     with _Env({"BEACON_TARGET_APPROVE_USER_OVERRIDE": None,
                "BEACON_SESSION_KIND": "human",
                "BEACON_EVIDENCE_SOURCE": "independent-judge:fable"}):
         g = cmd_target._approval_gate_record()
     assert g["signal"] == "human-session"
+    assert g["stdin_tty"] is True
     assert g["evidence_source"] == "independent-judge:fable"
+
+
+def test_gate_record_a_bare_human_claim_is_not_recorded_as_human(monkeypatch):
+    """ms-119 e-7442: 申告だけ (端末が無い) の承認は human-session と同形で残さない。
+
+    AI が BEACON_SESSION_KIND=human を自分で立てて承認すると、以前は記録上
+    人間の承認と区別が付かなかった (独立思想レビュー / 目的達成 judge が実証)。
+    """
+    import commands_shared
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: False)
+    with _Env({"BEACON_TARGET_APPROVE_USER_OVERRIDE": None,
+               "BEACON_SESSION_KIND": "human",
+               "BEACON_EVIDENCE_SOURCE": None}):
+        g = cmd_target._approval_gate_record()
+    assert g["signal"] == "human-session-unverified", g
+    assert g["stdin_tty"] is False
+    notice = cmd_target.format_approval_gate_notice(g)
+    assert notice and "断定できません" in notice[0], notice
+
+
+def test_gate_decided_by_needs_corroboration(monkeypatch):
+    """完了などの人間所有の判断も、申告だけなら「人間が直接」と名乗らない (受入 3)。"""
+    import commands_shared
+    monkeypatch.setenv("BEACON_SESSION_KIND", "human")
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: False)
+    assert commands_shared.decided_by_for_gate() == "AI-proposed-human-chose"
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    assert commands_shared.decided_by_for_gate() == "human-delegated"
 
 
 # --- e-3988 ②: model-independence check runs in the kernel ---
@@ -102,3 +136,28 @@ def test_no_gap_when_models_differ():
 def test_no_gap_when_judge_model_absent():
     with _Env({"BEACON_JUDGE_MODEL": None, "BEACON_IMPLEMENTER_MODEL": "opus"}):
         assert commands._model_independence_gap() is None
+
+
+
+def test_an_ai_runtime_marker_keeps_a_terminal_claim_unverified(monkeypatch):
+    """端末があっても AI 実行環境の目印 (CLAUDECODE) があれば裏付けにしない。
+
+    PR #856 独立 AX: 端末だけを材料にすると、AI が擬似端末を張るだけで
+    human-session と同形に残った。
+    """
+    import commands_shared
+    monkeypatch.setenv("BEACON_SESSION_KIND", "human")
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    prov = commands_shared.human_claim_provenance()
+    assert prov["signal"] == "human-session-unverified", prov
+    assert prov["stdin_tty"] is True and prov["ai_runtime_marker"] is True
+    assert commands_shared.decided_by_for_gate() == "AI-proposed-human-chose"
+
+
+def test_review_attribution_also_needs_corroboration(monkeypatch):
+    """レビュー採否の decided_by も、申告だけでは human-delegated にしない (AX / 保守性)。"""
+    import commands_shared
+    monkeypatch.setenv("BEACON_SESSION_KIND", "human")
+    monkeypatch.setattr(commands_shared, "_stdin_is_a_terminal", lambda: False)
+    assert commands_shared.decided_by_for_review() == "autonomous-AI"

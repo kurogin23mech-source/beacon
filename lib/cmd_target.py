@@ -52,6 +52,8 @@ from commands_shared import (  # noqa: F401
     _claim_occupation_for_work,
     _resolve_session_id,
     _session_kind_is_human,
+    human_claim_provenance,
+    _stdin_is_a_terminal,
     _spec_exists_for_ms,
     _spec_exists_for_op,
     _spec_updated_at_for_target,
@@ -2073,6 +2075,8 @@ def format_approval_gate_notice(gate: dict) -> list:
       注記は出さない (gate 行だけで足りる)。
     * ``user-override`` + 宣言なし —— **事実の記述**。「opt-in 経路で通った / 誰が
       打ったかは記録から断定できない」と言う。AI とも人間とも決めつけない。
+    * ``human-session-unverified`` (ms-119 e-7442) —— 人間と申告されたが端末からの
+      操作ではない。同じく事実だけを言う。
     """
     signal = str((gate or {}).get("signal") or "")
     kind = str((gate or {}).get("session_kind") or "")
@@ -2085,6 +2089,14 @@ def format_approval_gate_notice(gate: dict) -> list:
                 "このセッションは種別を宣言していないため、**打ったのが人間か AI かは"
                 "記録から断定できません** — 記録には signal と session_kind が"
                 "そのまま残ります。"]
+    if signal == "human-session-unverified":
+        # ms-119 e-7442: 人間と申告されたが、申告以外の裏付け (端末からの操作) が
+        # 無い。人間が端末以外から打った場合と、AI が環境変数を立てた場合を記録から
+        # 区別できない —— その事実だけを言う (どちらとも決めつけない)。
+        return ["  ℹ 人間のセッションと申告されて承認されましたが、端末からの操作では"
+                "ないため (stdin_tty=false)、**打ったのが人間か、環境変数を立てた AI "
+                "かは記録から断定できません** — 記録には signal=human-session-"
+                "unverified として残ります。"]
     return []
 
 
@@ -2103,15 +2115,21 @@ def _approval_gate_record() -> dict:
     ``independent-judge:fable``) — a recorded claim, not a lock.
     """
     override = os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1"
+    _prov = None
     if override:
         signal = "user-override"
     elif _session_kind_is_human():
-        signal = "human-session"
+        # ms-119 e-7442: 申告だけなら human-session-unverified (人間の承認と
+        # 同形で残さない)。signal と材料は同じ測定から取る。
+        _prov = human_claim_provenance()
+        signal = _prov["signal"]
     else:
         # Defensive: the approve ban should have refused before we get here.
         signal = "ai-session-unguarded"
     return {
         "signal": signal,
         "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
+        # ms-119 e-7442: 申告以外の材料 (signal と同じ測定)。
+        **({k: v for k, v in _prov.items() if k != "signal"} if _prov else {}),
         "evidence_source": (os.environ.get("BEACON_EVIDENCE_SOURCE", "") or "").strip(),
     }

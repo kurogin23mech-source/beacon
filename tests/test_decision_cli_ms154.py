@@ -81,6 +81,9 @@ def test_record_default_attribution_follows_session_kind(monkeypatch):
         _set_env(monkeypatch, BEACON_DECISION_WHAT="決めた",
                  BEACON_DECISION_EVIDENCE="commit:abc1234")
         monkeypatch.setattr(cs, "_session_kind_is_human", lambda h=human: h)
+        # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+        monkeypatch.setattr(cs, "_stdin_is_a_terminal", lambda h=human: h)
+        monkeypatch.setattr(cs, "_ai_runtime_marker_present", lambda: False)
         monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
         monkeypatch.setattr(cmd_decision, "_get_api_client",
                             lambda: (fake, {"project_id": "p1"}))
@@ -122,6 +125,10 @@ def test_record_posts_to_cloud(monkeypatch):
     import commands_shared as _cs
     monkeypatch.setattr(_cs, "load_project", lambda *a, **k: {
         "milestones": [{"id": "ms-154", "entries": [{"id": "e-5591", "type": "task"}]}]})
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る。
+    # conftest は申告だけを立てるので、人間の端末を表す材料をここで揃える。
+    monkeypatch.setattr(_cs, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(_cs, "_ai_runtime_marker_present", lambda: False)
     cmd_decision.cmd_decision_record()
     assert len(fake.posted) == 1
     pid, rec = fake.posted[0]

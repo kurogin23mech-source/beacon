@@ -144,11 +144,17 @@ def test_attribution_is_derived_from_session_kind_not_hardcoded(monkeypatch):
     captured = {}
     # 人間端末 → human-delegated (旧実装は固定文字列 autonomous-AI で帰属が逆だった)
     monkeypatch.setattr(cs, "_session_kind_is_human", lambda: True)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(cs, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(cs, "_ai_runtime_marker_present", lambda: False)
     _run_record({"BEACON_DECISION_WHAT": "決めた"}, captured)
     assert captured["decided_by"] == "human-delegated"
 
     captured.clear()
     monkeypatch.setattr(cs, "_session_kind_is_human", lambda: False)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(cs, "_stdin_is_a_terminal", lambda: False)
+    monkeypatch.setattr(cs, "_ai_runtime_marker_present", lambda: False)
     _run_record({"BEACON_DECISION_WHAT": "決めた"}, captured)
     assert captured["decided_by"] == "autonomous-AI"
 
@@ -156,6 +162,9 @@ def test_attribution_is_derived_from_session_kind_not_hardcoded(monkeypatch):
 def test_explicit_decided_by_still_wins(monkeypatch):
     import commands_shared as cs
     monkeypatch.setattr(cs, "_session_kind_is_human", lambda: True)
+    # ms-119 e-7442: 「人間が直接」は申告 + 端末 + AI 実行環境の目印なしで名乗る
+    monkeypatch.setattr(cs, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(cs, "_ai_runtime_marker_present", lambda: False)
     captured = {}
     _run_record({"BEACON_DECISION_WHAT": "決めた",
                  "BEACON_DECISION_DECIDED_BY": "AI-proposed-human-chose"}, captured)
