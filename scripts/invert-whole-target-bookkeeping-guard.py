@@ -50,8 +50,35 @@ MUTATIONS = [
      "    _attainment_artifact, gaps = (\n",
      True),
     ("引用符つき path の復号を外す (非 ASCII 名の作業記録が漏れる)",
-     "            ref = unquote_git_path(line[4:].strip())\n",
-     "            ref = line[4:].strip()\n",
+     "            ref = _strip_ab_prefix(unquote_git_path(line[4:].strip()))\n",
+     "            ref = _strip_ab_prefix(line[4:].strip())\n",
+     True),
+    # ms-119 e-7520: ヘッダー無しセクションの path 割り出しを、修正前の
+    # 「最初の " b/" で割る」形に戻す。名前に " b/" を含むファイルから作業記録へ
+    # 移した差分が落ちなくなるので、赤くならなければ検査がその分岐を見ていない。
+    ("ヘッダー無しセクションの割り出しを最短一致に戻す",
+     "    if not paths and section_lines:\n"
+     "        sides = _side_line_paths(section_lines)\n"
+     "        if len(sides) >= 2:\n"
+     "            return sides\n"
+     '        paths.extend(_diff_git_line_paths(section_lines[0].rstrip("\\n")))\n',
+     "    if not paths and section_lines:\n"
+     '        m = _re.match(r"^diff --git a/(.+?) b/(.+)$",\n'
+     '                      section_lines[0].rstrip("\\n"))\n'
+     "        if m:\n"
+     "            paths.extend([m.group(1), m.group(2)])\n",
+     True),
+    # 最初はこれを「緑のままが正しい」と予想して外した。落とす/落とさないの判断は
+    # 候補を全部返す側が受け止めるので、確かに漏れはしない。だが path の **名指し**
+    # が候補 4 つに崩れ、落としたことの開示が嘘の path を名乗る。検査はそこで赤に
+    # なった —— 予想ではなく実測が正しい。
+    ("rename の行を読まない (diff --git 行だけで割る)",
+     "        sides = _side_line_paths(section_lines)\n"
+     "        if len(sides) >= 2:\n"
+     "            return sides\n",
+     "        sides = []\n"
+     "        if len(sides) >= 2:\n"
+     "            return sides\n",
      True),
     ("中身を変えずに局所変数名だけ変える (契約は保たれる)",
      '    diff_text, dropped = _rs.strip_bookkeeping_from_diff(proc.stdout or "")\n'
@@ -127,6 +154,24 @@ def _probe_os_system(ref):
     import os as _os
     return _os.system("git diff -U25 " + ref)
 ''', True),
+    # ms-119 e-7519: 呼び出し先を属性名だけで判定していた時期は、下の 2 つが
+    # どちらも誤っていた —— 別名 import は見落とし (緑のまま)、無関係な .run()
+    # は偽の赤。束縛元を import 文から解決して両方を閉じた。
+    ("新しい収集経路: 別名 import した run で採る", '''
+
+from subprocess import run as _aliased_run
+
+
+def _probe_aliased_run(ref):
+    return _aliased_run(["git", "diff", "-U25", ref],
+                        capture_output=True, text=True).stdout
+''', True),
+    ("新しい収集経路: 関数の中で別名 import した check_output で採る", '''
+
+def _probe_aliased_check_output(ref):
+    from subprocess import check_output as _co
+    return _co(["git", "diff", "-U25", ref], text=True)
+''', True),
     ("落とす処理を 2 箇所目に増やす", '''
 
 def _probe_second_strip(text):
@@ -171,7 +216,78 @@ def _probe_gh_view(pr):
     argv = ["gh", "pr", "view", str(pr), "--json", "title"]
     return subprocess.run(argv, capture_output=True, text=True).stdout
 ''', False),
+    # ms-119 e-7519 の偽の赤。``run`` はありふれたメソッド名なので、差分と無関係な
+    # オブジェクトの ``.run()`` で赤くなると、踏んだ人は述語を緩める方向に直す。
+    ("無関係なオブジェクトの .run() を呼ぶ (差分とは無関係)", '''
+
+class _ProbePipeline:
+    def run(self, payload):
+        return payload
+
+
+def _probe_unrelated_run(pipeline, payload):
+    return pipeline.run(payload)
+''', False),
+    ("実行しない名前を subprocess から import する", '''
+
+def _probe_pipe_constant(cmd):
+    from subprocess import PIPE
+    return (cmd, PIPE)
+''', False),
 ]
+
+# (名前, 差分テキスト, 落ちるべきか) — 採る側を通さず、落とす述語を直接測る。
+# ms-119 e-7520: ヘッダーを持たないセクション (100% 一致の rename / mode のみ) は
+# ``diff --git a/X b/Y`` の 1 行から 2 つの path を割り出すしかない。以前は最初の
+# ``" b/"`` で割っており、X 自身がそれを含むと割り位置を誤った。下の TRICKY は
+# ``weird b/`` というディレクトリを作って git mv した実出力と同じ形。
+_CODE_SECTION = ("diff --git a/engine/run.py b/engine/run.py\n"
+                 "--- a/engine/run.py\n+++ b/engine/run.py\n@@ -1 +1 @@\n-x\n+y\n")
+
+STRIP_CASES = [
+    ("ヘッダー無し rename: 紛らわしい名前から作業記録へ",
+     "diff --git a/weird b/case.txt b/.beacon/thing.txt\n"
+     "similarity index 100%\n"
+     "rename from weird b/case.txt\n"
+     "rename to .beacon/thing.txt\n", True),
+    ("ヘッダー無し rename: 普通の名前から作業記録へ",
+     "diff --git a/old.txt b/.beacon/moved.txt\n"
+     "similarity index 100%\n"
+     "rename from old.txt\n"
+     "rename to .beacon/moved.txt\n", True),
+    ("ヘッダー無し rename: 作業記録から外へ (片側一致でも落ちる)",
+     "diff --git a/.beacon/thing.txt b/weird b/case.txt\n"
+     "similarity index 100%\n"
+     "rename from .beacon/thing.txt\n"
+     "rename to weird b/case.txt\n", True),
+    ("ヘッダー無し mode 変更: 紛らわしい名前 (作業記録ではない)",
+     "diff --git a/weird b/case.txt b/weird b/case.txt\n"
+     "old mode 100644\nnew mode 100755\n", False),
+    ("ヘッダー無し rename: 作業記録と無関係 (偽の drop を出さない)",
+     "diff --git a/weird b/case.txt b/other b/place.txt\n"
+     "similarity index 100%\n"
+     "rename from weird b/case.txt\n"
+     "rename to other b/place.txt\n", False),
+]
+
+
+def check_strip_cases():
+    """落とす述語を直接測る。(不合格の説明, ...) を返す。"""
+    sys.path.insert(0, str(ROOT / "lib"))
+    import review_spine as rs
+    bad = []
+    print("\n--- 落とす述語を直接測る (ヘッダー無しセクション) ---")
+    for name, section, should_drop in STRIP_CASES:
+        out, dropped = rs.strip_bookkeeping_from_diff(_CODE_SECTION + section)
+        got = bool(dropped)
+        ok = got == should_drop and "engine/run.py" in out
+        print(f"  [{'OK' if ok else 'NG'}] {name}: "
+              f"期待={'落とす' if should_drop else '残す'} "
+              f"実測={'落とす' if got else '残す'} ({dropped})")
+        if not ok:
+            bad.append(f"{name}: 期待={'落とす' if should_drop else '残す'} "
+                       f"実測={'落とす' if got else '残す'}")
+    return bad
 
 
 def run_tests():
@@ -240,6 +356,9 @@ def main():
         bad.append(f"復元後も赤い: {summary}")
     else:
         print(f"\n復元後: 緑 ({summary})")
+
+    # 復元後の実装で測る (変異が残っていると結果が濁るので、必ずこの位置)。
+    bad.extend(check_strip_cases())
 
     if bad:
         print("\n不合格:")

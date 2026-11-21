@@ -64,7 +64,7 @@ def test_single_type_path_takes_the_triple_from_one_call():
 
 def test_resolver_returns_three_values_on_every_path():
     """解決関数の全 return が 3 要素。1 つでも欠けると assemble 側で落ちる。"""
-    tree = ast.parse(inspect.getsource(commands._resolve_review_origin))
+    tree = ast.parse(inspect.getsource(commands._origin_for_review_type))
     returns = [n for n in ast.walk(tree) if isinstance(n, ast.Return)]
     assert returns, "原典の解決は値を return する"
     for r in returns:
@@ -86,7 +86,7 @@ def test_doc_origin_resolves_with_no_provenance(monkeypatch):
     monkeypatch.setattr(commands, "get_store",
                         lambda: _FakeStore({"content": "# SPEC\n方針1 ..."}))
     gaps = []
-    origin_id, content, provenance = commands._resolve_review_origin(
+    origin_id, content, provenance = commands._origin_for_review_type(
         "philosophy", {"id": "philosophy", "origin": {"kind": "doc"}},
         "wbx8BegbDZgJ1NfaLcOA", gaps)
     assert origin_id == "wbx8BegbDZgJ1NfaLcOA"
@@ -101,7 +101,7 @@ def test_doc_origin_empty_body_is_a_gap_not_a_crash(monkeypatch):
     monkeypatch.setattr(commands, "get_store",
                         lambda: _FakeStore({"content": "   "}))
     gaps = []
-    _, content, provenance = commands._resolve_review_origin(
+    _, content, provenance = commands._origin_for_review_type(
         "philosophy", {"origin": {"kind": "doc"}}, "d-1", gaps)
     assert content.strip() == ""
     assert provenance is None
@@ -111,19 +111,19 @@ def test_doc_origin_empty_body_is_a_gap_not_a_crash(monkeypatch):
 def test_doc_origin_missing_doc_exits(monkeypatch):
     monkeypatch.setattr(commands, "get_store", lambda: _FakeStore(None))
     with pytest.raises(SystemExit):
-        commands._resolve_review_origin(
+        commands._origin_for_review_type(
             "philosophy", {"origin": {"kind": "doc"}}, "nope", [])
 
 
 def test_doc_origin_without_origin_doc_exits():
     with pytest.raises(SystemExit):
-        commands._resolve_review_origin(
+        commands._origin_for_review_type(
             "philosophy", {"origin": {"kind": "doc"}}, "", [])
 
 
 def test_unknown_origin_kind_exits():
     with pytest.raises(SystemExit):
-        commands._resolve_review_origin("weird", {"origin": {"kind": "???"}}, "", [])
+        commands._origin_for_review_type("weird", {"origin": {"kind": "???"}}, "", [])
 
 
 # --- 3. 解決した 3 つ組が assemble をそのまま通る -----------------------------
@@ -133,7 +133,7 @@ def test_doc_origin_triple_assembles(monkeypatch):
     monkeypatch.setattr(commands, "get_store",
                         lambda: _FakeStore({"content": "# ms-10 SPEC"}))
     gaps = []
-    origin_id, content, provenance = commands._resolve_review_origin(
+    origin_id, content, provenance = commands._origin_for_review_type(
         "philosophy", {"origin": {"kind": "doc"}}, "d-spec", gaps)
     bundle = review_spine.assemble_review_context(
         "philosophy",

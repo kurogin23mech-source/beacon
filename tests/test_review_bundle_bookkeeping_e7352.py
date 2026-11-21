@@ -218,6 +218,92 @@ _SUBPROCESS_APIS = {"run", "check_output", "check_call", "call", "Popen",
                     "system", "posix_spawn", "posix_spawnp",
                     "spawnl", "spawnv", "spawnlp", "spawnvp"}
 
+# 上の API が「本当に外部コマンドを走らせる口」であると言えるのは、呼び出し先が
+# この 2 モジュールのどれかに由来するときだけ。
+_RUNNER_MODULES = {"subprocess", "os"}
+
+
+def _runner_bindings(tree):
+    """``(module_aliases, bare_names, alias_attrs)`` — import 文と代入から「呼び出し先の素性」を引く表。
+
+    **なぜ名前だけで判定してはいけないか** (独立 AX レビュー 2026-11-16 が
+    両方向から実測):
+
+    * 見落とし: ``from subprocess import run as _r`` と束縛してから ``_r([...])``
+      と呼ぶ形は属性アクセスではないので、属性名だけを見る述語の視界に入らない。
+      judge が実際にその形で収集関数を足し、検査が緑のまま通ることを確認した。
+    * 偽の赤: 逆に ``pipeline.run(payload)`` のような、差分と無関係な
+      オブジェクトの ``run()`` 呼び出しが offender になる (argv が List リテラル
+      でないので opaque 扱いになり拒否側へ倒れる)。しかもメッセージは
+      「唯一の口の外で差分を採りうる箇所」と原因を誤って名指しする。``run`` は
+      Python でありふれた名前なので確実に踏まれ、踏んだ人は述語を緩める方向に
+      直してしまう —— 偽の赤はガードを弱める動機になる。
+
+    束縛元を import 文から解決すれば、この 2 つは 1 つの修正で同時に塞がる。
+
+    ``module_aliases``: ``subprocess`` / ``os`` を指す名前 → 由来モジュール名。
+    ``import subprocess as sp`` / ``import os as _os`` の別名も入る。
+    ``bare_names``: ``from subprocess import run as _r`` のように裸の名前へ
+    束縛された **実行 API だけ** → ``(モジュール, 元の名前)``。``PIPE`` のような
+    実行しない名前は入れない。
+
+    ``alias_attrs``: ``self.p = subprocess`` のように **属性へ** モジュールを
+    入れた属性名。受け手を区別せず、``<何か>.p.run(...)`` を実行 API とみなす。
+
+    **閉じていない範囲 (正直に書く)**: 関数の中の import / 代入も同じ 1 つの表に
+    集めるので、別の関数で同じ名前を使うと解決されたことになる (拒否側に倒れるので
+    安全側だが、精度としては粗い)。``from subprocess import *``、関数の引数や戻り値で
+    モジュールを受け渡す形、``getattr(subprocess, "run")`` は解決しない。
+    """
+    module_aliases = {}
+    bare_names = {}
+    alias_attrs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in _RUNNER_MODULES:
+                    module_aliases[a.asname or a.name] = a.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.module not in _RUNNER_MODULES or node.level:
+                continue
+            for a in node.names:
+                if a.name in _SUBPROCESS_APIS:
+                    bare_names[a.asname or a.name] = (node.module, a.name)
+    # **代入で別名を作る形も追う** (PR #850 独立 AX、実測): import だけを見ると
+    # ``sp = subprocess`` / ``self.p = subprocess`` / ``f = subprocess.run`` の後の
+    # 呼び出しが視界から外れ、差分を採る経路が緑のまま足せた (属性名だけで
+    # 判定していた変更前は、前の 2 つは拒否側に倒れていた)。代入の連鎖
+    # (``a = subprocess; b = a``) も追えるよう、増えなくなるまで回す。
+    # 属性への代入は受け手を区別しない (``self.p`` に入れて ``s.p.run`` と呼ぶ形を
+    # 拾うため) —— 拒否側に倒れる粗さで、安全側。
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    changed = True
+    while changed:
+        changed = False
+        for node in assigns:
+            val = node.value
+            for tgt in node.targets:
+                if isinstance(val, ast.Name) and val.id in module_aliases:
+                    if isinstance(tgt, ast.Name) and tgt.id not in module_aliases:
+                        module_aliases[tgt.id] = module_aliases[val.id]
+                        changed = True
+                    elif isinstance(tgt, ast.Attribute) and tgt.attr not in alias_attrs:
+                        alias_attrs.add(tgt.attr)
+                        changed = True
+                elif (isinstance(val, ast.Attribute)
+                      and isinstance(val.value, ast.Name)
+                      and val.value.id in module_aliases
+                      and val.attr in _SUBPROCESS_APIS
+                      and isinstance(tgt, ast.Name)
+                      and tgt.id not in bare_names):
+                    bare_names[tgt.id] = (module_aliases[val.value.id], val.attr)
+                    changed = True
+                elif (isinstance(val, ast.Name) and val.id in bare_names
+                      and isinstance(tgt, ast.Name) and tgt.id not in bare_names):
+                    bare_names[tgt.id] = bare_names[val.id]
+                    changed = True
+    return module_aliases, bare_names, alias_attrs
+
 
 def _argv_tokens(node):
     """``(tokens, opaque)`` — argv の要素列と、「中身が全く見えないか」。
@@ -360,7 +446,12 @@ def _invocation_sites(tree):
     ``subprocess.run(...)`` と、argv を外から受ける汎用ランナー
     (``_git_ok`` 等) の呼び出しの両方を見る。後者を見ないと
     ``_git_ok(["git", "diff", ...])`` で採る形が素通りする。
+
+    呼び出し先が実行 API かどうかは **属性名だけでなく束縛元** で決める
+    (:func:`_runner_bindings` を参照)。名前だけで決めると、別名 import した
+    裸の名前を見落とし、同時に無関係な ``.run()`` で偽の赤を出す。
     """
+    module_aliases, bare_names, alias_attrs = _runner_bindings(tree)
     parents = {}
     for n in ast.walk(tree):
         for c in ast.iter_child_nodes(n):
@@ -373,8 +464,18 @@ def _invocation_sites(tree):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not node.args:
             continue
-        is_run = (isinstance(node.func, ast.Attribute) and
-                  node.func.attr in _SUBPROCESS_APIS)
+        if (isinstance(node.func, ast.Attribute)
+                and node.func.attr in _SUBPROCESS_APIS):
+            # ``subprocess.run`` / ``_os.system``。受け手が subprocess / os を
+            # 指す名前のときだけ実行 API と認める。``pipeline.run`` は対象外。
+            recv = node.func.value
+            is_run = ((isinstance(recv, ast.Name) and recv.id in module_aliases)
+                      or (isinstance(recv, ast.Attribute)
+                          and recv.attr in alias_attrs))
+        elif isinstance(node.func, ast.Name) and node.func.id in bare_names:
+            is_run = True     # ``from subprocess import run as _r`` → ``_r(...)``
+        else:
+            is_run = False
         is_runner = isinstance(node.func, ast.Name) and node.func.id in _GENERIC_RUNNERS
         if not (is_run or is_runner):
             continue
@@ -611,3 +712,249 @@ def test_gh_call_with_diff_as_an_argument_value_is_not_flagged():
     assert _is_provably_non_diff(["gh", "issue", "list", "--label", "diff"], False)
     # 本物の差分口は拒否されたまま
     assert not _is_provably_non_diff(["gh", "pr", "diff", "123"], False)
+
+
+# --- 8. 呼び出し先の素性を見る (名前だけで判定しない) ------------------------
+#
+# 独立 AX レビュー (2026-11-16) が、属性名だけを見る述語の両方向の誤りを実測した。
+# 見落とし (別名 import の裸の名前) と偽の赤 (無関係な .run()) は 1 つの修正で
+# 閉じる: 呼び出し先の束縛元を import 文から解決する (e-7519)。
+
+def _offenders_in(src):
+    """合成ソースを検査 B と同じ述語に通し、offender の関数名を返す。"""
+    sites = _invocation_sites(ast.parse(src))
+    return [fn for fn, toks, opaque, mut in sites
+            if fn != _CHOKEPOINT and not _is_provably_non_diff(toks, opaque, mut)]
+
+
+def test_aliased_bare_import_of_a_runner_is_examined():
+    """``from subprocess import run as _r`` 経由で採る形を見落とさない。"""
+    assert _offenders_in(
+        "from subprocess import run as _r\n"
+        "def collect(ref):\n"
+        "    return _r(['git', 'diff', '-U25', ref]).stdout\n"
+    ) == ["collect"]
+    # 関数の中で import しても同じ (os.system で採る既存の形と揃える)
+    assert _offenders_in(
+        "def collect(ref):\n"
+        "    from subprocess import check_output as _co\n"
+        "    return _co(['git', 'diff', '-U25', ref])\n"
+    ) == ["collect"]
+
+
+def test_run_method_on_an_unrelated_object_is_not_flagged():
+    """差分と無関係なオブジェクトの ``.run()`` で赤くならない。
+
+    ``run`` はありふれた名前なので、偽の赤が出ると踏んだ人が述語を緩める。
+    """
+    assert _offenders_in(
+        "import subprocess\n"
+        "class Pipeline:\n"
+        "    def run(self, payload):\n"
+        "        return payload\n"
+        "def drive(pipeline, payload):\n"
+        "    return pipeline.run(payload)\n"
+    ) == []
+    # subprocess を指す名前への呼び出しは、別名でも拒否されたまま
+    assert _offenders_in(
+        "import subprocess as sp\n"
+        "def collect(ref):\n"
+        "    return sp.run(['git', 'diff', ref]).stdout\n"
+    ) == ["collect"]
+
+
+def test_import_of_a_non_running_name_is_not_treated_as_a_runner():
+    """``from subprocess import PIPE`` は実行の口ではない。"""
+    assert _offenders_in(
+        "from subprocess import PIPE\n"
+        "def shape(x):\n"
+        "    return PIPE(x)\n"
+    ) == []
+
+
+# --- 9. ヘッダーを持たないセクションの path 割り出し (e-7520) -----------------
+#
+# 100% 一致の rename / mode のみの変更では ``---`` / ``+++`` が出ず、
+# ``diff --git a/X b/Y`` の 1 行から 2 つの path を割り出すしかない。以前は
+# 最初の ``" b/"`` で割っており、X 自身がそれを含むと割り位置を誤った
+# (独立保守性レビュー 2026-11-16)。下の 3 本は実際の git 出力と同じ形
+# (``weird b/`` というディレクトリを作って git mv した結果を採取した)。
+
+# 100% 一致の rename。git は ---/+++ を出さず、rename from/to だけを出す。
+TRICKY_RENAME = (
+    "diff --git a/weird b/case.txt b/.beacon/thing.txt\n"
+    "similarity index 100%\n"
+    "rename from weird b/case.txt\n"
+    "rename to .beacon/thing.txt\n"
+)
+PLAIN_RENAME = (
+    "diff --git a/old.txt b/.beacon/moved.txt\n"
+    "similarity index 100%\n"
+    "rename from old.txt\n"
+    "rename to .beacon/moved.txt\n"
+)
+# mode のみの変更。両側が同じ path で、名前に ``" b/"`` を含む。
+TRICKY_MODE_ONLY = (
+    "diff --git a/weird b/case.txt b/weird b/case.txt\n"
+    "old mode 100644\n"
+    "new mode 100755\n"
+)
+
+
+def test_headerless_rename_from_a_confusing_name_is_dropped():
+    """名前に ``" b/"`` を含むファイルから作業記録の配下へ移しても落ちる。"""
+    out, dropped = rs.strip_bookkeeping_from_diff(CODE + TRICKY_RENAME)
+    assert "engine/run.py" in out
+    assert ".beacon/thing.txt" not in out, "作業記録への rename が judge に渡っている"
+    assert [p for p, _ in dropped] == [".beacon/thing.txt"], dropped
+
+
+def test_headerless_rename_paths_are_split_correctly():
+    assert rs._diff_section_paths(TRICKY_RENAME.splitlines(keepends=True)) == [
+        "weird b/case.txt", ".beacon/thing.txt"]
+    # 空白を含まない普通の rename は今までどおり
+    assert rs._diff_section_paths(PLAIN_RENAME.splitlines(keepends=True)) == [
+        "old.txt", ".beacon/moved.txt"]
+
+
+def test_headerless_mode_change_keeps_both_sides_on_the_same_path():
+    """rename でないセクションは両側が同じ path。紛らわしい名前でも割り誤らない。"""
+    assert rs._diff_section_paths(TRICKY_MODE_ONLY.splitlines(keepends=True)) == [
+        "weird b/case.txt", "weird b/case.txt"]
+    # 作業記録ではないので落ちない (偽の drop を出さない)
+    out, dropped = rs.strip_bookkeeping_from_diff(TRICKY_MODE_ONLY)
+    assert out == TRICKY_MODE_ONLY and dropped == []
+
+
+# --- 10. 代入で作った別名も追う (PR #850 独立 AX、実測で 3 形が素通りした) -------
+
+@pytest.mark.parametrize("src", [
+    # モジュールを別の名前へ代入し直す (変更前は拒否側に倒れていた)
+    "import subprocess\n"
+    "sp = subprocess\n"
+    "def collect(ref):\n"
+    "    return sp.run(['git', 'diff', ref]).stdout\n",
+    # 属性に持たせ、別の受け手から呼ぶ
+    "import subprocess\n"
+    "class C:\n"
+    "    def __init__(self):\n"
+    "        self.p = subprocess\n"
+    "def collect(s, ref):\n"
+    "    return s.p.run(['git', 'diff', ref]).stdout\n",
+    # 実行関数そのものを束縛する
+    "import subprocess\n"
+    "f = subprocess.run\n"
+    "def collect(ref):\n"
+    "    return f(['git', 'diff', ref]).stdout\n",
+    # 代入の連鎖
+    "import subprocess\n"
+    "a = subprocess\n"
+    "b = a\n"
+    "def collect(ref):\n"
+    "    return b.check_output(['git', 'diff', ref])\n",
+])
+def test_rebound_runner_names_are_examined(src):
+    assert _offenders_in(src) == ["collect"], src
+
+
+def test_a_relative_import_named_subprocess_is_not_a_runner():
+    """``from .subprocess import run`` は標準の subprocess ではない (node.level ガード)。"""
+    assert _offenders_in(
+        "from .subprocess import run\n"
+        "def drive(payload):\n"
+        "    return run(payload)\n"
+    ) == []
+
+
+# --- 11. ヘッダー無しセクションの残りの枝 (PR #850 独立保守性: 6 変異が生き残った) --
+
+def test_headerless_copy_reads_copy_lines():
+    sec = ("diff --git a/weird b/src.txt b/.beacon/copy.txt\n"
+           "similarity index 100%\n"
+           "copy from weird b/src.txt\n"
+           "copy to .beacon/copy.txt\n")
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == [
+        "weird b/src.txt", ".beacon/copy.txt"]
+
+
+def test_headerless_quoted_rename_is_unquoted_and_unprefixed():
+    sec = ('diff --git "a/caf\\303\\251.txt" "b/.beacon/caf\\303\\251.txt"\n'
+           "similarity index 100%\n"
+           'rename from "caf\\303\\251.txt"\n'
+           'rename to ".beacon/caf\\303\\251.txt"\n')
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == [
+        "café.txt", ".beacon/café.txt"]
+
+
+def test_headerless_plain_mode_change_strips_the_ab_prefix():
+    """空白の無い 2 トークンの枝は a/ b/ を外す (_strip_ab_prefix を外す変異を捕まえる)。"""
+    sec = ("diff --git a/x.py b/x.py\n"
+           "old mode 100644\n"
+           "new mode 100755\n")
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == ["x.py", "x.py"]
+
+
+def test_a_single_side_line_is_not_enough():
+    """rename 行が片方しか無い壊れた形は、diff --git 行の割り出しに回る (>= 2 の境界)。"""
+    sec = ("diff --git a/old.txt b/.beacon/new.txt\n"
+           "rename from old.txt\n")
+    assert rs._diff_section_paths(sec.splitlines(keepends=True)) == [
+        "old.txt", ".beacon/new.txt"]
+
+
+def test_undecidable_split_returns_every_candidate():
+    """両側が違い rename 行も無い形は、割り位置を決めず候補を全部返す (落とす側なので多めが安全)。"""
+    sec = "diff --git a/p b/q b/.beacon/r\n"
+    got = rs._diff_section_paths([sec])
+    assert set(got) == {"p", "q b/.beacon/r", "p b/q", ".beacon/r"}, got
+
+
+def test_a_line_not_starting_with_a_slash_yields_nothing():
+    """``a/`` で始まらない (= git の出力でない) 行からは推測で path を作らない。
+
+    ``" b/"`` を含む入力にしないとガードの有無で結果が変わらない (最初に書いた
+    ``x y z`` はガードを外しても [] のままで、この試験自体が偽の緑だった)。
+    """
+    assert rs._diff_section_paths(["diff --git x b/y b/z\n"]) == []
+
+
+# --- 12. batch の原典解決は repo-file に限る (PR #850 独立保守性) -------------
+
+def test_batch_origin_rejects_non_repo_file_kinds(capsys):
+    import commands
+    with pytest.raises(SystemExit):
+        commands._origin_for_batch_descriptor(
+            {"id": "x", "origin": {"kind": "doc"}}, [])
+    assert "repo-file" in capsys.readouterr().err
+
+
+# --- 13. os 側・名前の連鎖・実行しない名前の代入 (PR #850 独立保守性 2 周目) --
+#
+# 挙動は正しかったが、壊しても試験が赤くならなかった枝 (os の束縛 / from os
+# import / 裸の名前の代入連鎖 / 代入元を実行 API に絞る条件)。
+
+@pytest.mark.parametrize("src", [
+    "import os as _os\n"
+    "def collect(ref):\n"
+    "    return _os.system('git diff ' + ref)\n",
+    "from os import system as s\n"
+    "def collect(ref):\n"
+    "    return s('git diff ' + ref)\n",
+    "import subprocess\n"
+    "f = subprocess.run\n"
+    "g = f\n"
+    "def collect(ref):\n"
+    "    return g(['git', 'diff', ref]).stdout\n",
+])
+def test_os_and_chained_runner_names_are_examined(src):
+    assert _offenders_in(src) == ["collect"], src
+
+
+def test_binding_a_non_running_name_is_not_a_runner():
+    """``f = subprocess.PIPE`` の後の ``f(x)`` は実行の口ではない (偽の赤を出さない)。"""
+    assert _offenders_in(
+        "import subprocess\n"
+        "f = subprocess.PIPE\n"
+        "def shape(x):\n"
+        "    return f(x)\n"
+    ) == []

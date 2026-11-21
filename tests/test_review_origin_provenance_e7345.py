@@ -56,7 +56,7 @@ def test_the_reviewed_repo_wins_and_the_divergence_is_disclosed(monkeypatch, tmp
     _roots(monkeypatch, str(rev), str(cap))
 
     gaps = []
-    content, prov = commands._resolve_repo_file_origin(REF, gaps)
+    content, prov = commands._read_repo_file_origin(REF, gaps)
 
     assert "NEW" in content, "レビュー対象側の原典が配られていません"
     assert prov["resolved_from"] == "reviewed-repo"
@@ -75,7 +75,7 @@ def test_no_gap_when_the_two_trees_agree(monkeypatch, tmp_path):
     _roots(monkeypatch, str(rev), str(cap))
 
     gaps = []
-    content, prov = commands._resolve_repo_file_origin(REF, gaps)
+    content, prov = commands._read_repo_file_origin(REF, gaps)
     assert content == same
     assert prov["resolved_from"] == "reviewed-repo"
     assert gaps == []
@@ -87,7 +87,7 @@ def test_falls_back_to_the_capability_for_a_repo_that_is_not_this_tool(monkeypat
     _roots(monkeypatch, str(tmp_path / "absent"), str(cap))
 
     gaps = []
-    content, prov = commands._resolve_repo_file_origin(REF, gaps)
+    content, prov = commands._read_repo_file_origin(REF, gaps)
     assert content == "CAP 原典\n"
     assert prov["resolved_from"] == "capability"
     assert gaps == [], "落ちるのが正しい経路で警告を出すとノイズになります"
@@ -96,7 +96,7 @@ def test_falls_back_to_the_capability_for_a_repo_that_is_not_this_tool(monkeypat
 def test_falls_back_when_cwd_is_not_a_git_repo(monkeypatch, tmp_path):
     cap = _tree(tmp_path / "capability", "CAP 原典\n")
     _roots(monkeypatch, "", str(cap))
-    content, prov = commands._resolve_repo_file_origin(REF, [])
+    content, prov = commands._read_repo_file_origin(REF, [])
     assert prov["resolved_from"] == "capability"
     assert content == "CAP 原典\n"
 
@@ -105,7 +105,7 @@ def test_missing_in_both_trees_exits_naming_where_it_looked(monkeypatch, tmp_pat
     """見つからないときは、探した場所を両方名乗る (回復経路を示す / P6)。"""
     _roots(monkeypatch, str(tmp_path / "a"), str(tmp_path / "b"))
     try:
-        commands._resolve_repo_file_origin(REF, [])
+        commands._read_repo_file_origin(REF, [])
     except SystemExit as exc:
         assert exc.code == 1
     else:
@@ -145,7 +145,7 @@ def test_both_review_context_paths_share_one_resolution():
     """
     import inspect
     src = inspect.getsource(commands)
-    assert src.count("def _resolve_repo_file_origin(") == 1
+    assert src.count("def _read_repo_file_origin(") == 1
     # 旧式の手書き解決 (install_root を自分で組んでファイルを開く形) が
     # 残っていないこと。
     assert "origin_path = os.path.join(install_root" not in src, (
@@ -170,7 +170,7 @@ def test_both_review_context_paths_share_one_resolution():
 def test_gaps_is_a_required_argument_so_a_caller_cannot_silently_skip_it():
     """渡し忘れたら落ちる。既定値で飲み込む形に戻していないこと。"""
     import inspect
-    sig = inspect.signature(commands._repo_file_origin)
+    sig = inspect.signature(commands._origin_for_batch_descriptor)
     gaps_param = sig.parameters["gaps"]
     assert gaps_param.default is inspect.Parameter.empty, (
         "gaps に既定値が戻っています。既定値があると、渡し忘れた呼び出し元は "
@@ -272,7 +272,7 @@ def test_unreadable_is_disclosed_instead_of_being_called_absent(monkeypatch, tmp
     try:
         _roots(monkeypatch, str(rev), str(cap))
         gaps = []
-        content, prov = commands._resolve_repo_file_origin(REF, gaps)
+        content, prov = commands._read_repo_file_origin(REF, gaps)
         if content == "NEW\n":                      # root で走ると読めてしまう
             import pytest
             pytest.skip("この環境では chmod 0 でも読めます (root 実行)")
@@ -293,7 +293,7 @@ def test_the_final_error_does_not_claim_not_found_when_it_could_not_read(monkeyp
     try:
         _roots(monkeypatch, str(rev), str(cap))
         try:
-            commands._resolve_repo_file_origin(REF, [])
+            commands._read_repo_file_origin(REF, [])
         except SystemExit:
             err = capsys.readouterr().err
             if "読めませんでした" not in err:

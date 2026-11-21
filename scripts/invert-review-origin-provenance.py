@@ -109,9 +109,9 @@ def give_gaps_a_default_again(src: str) -> str:
     **これが独立 2 体の合意指摘そのもの。** 既定値があると、3 番目の呼び出し元が
     渡し忘れても解決だけ成功し、食い違いの開示がその場で消える。
     """
-    anchor = "def _repo_file_origin(desc, gaps):"
+    anchor = "def _origin_for_batch_descriptor(desc, gaps):"
     assert anchor in src, "anchor not found (give_gaps_a_default_again)"
-    return src.replace(anchor, "def _repo_file_origin(desc, gaps=None):", 1)
+    return src.replace(anchor, "def _origin_for_batch_descriptor(desc, gaps=None):", 1)
 
 
 def drop_provenance_in_the_third_caller(src: str) -> str:
